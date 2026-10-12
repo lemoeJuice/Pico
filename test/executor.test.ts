@@ -396,6 +396,93 @@ describe('Executor execution identity and recovery', () => {
     }
   });
 
+  it('starts shared Container Batch tools in parallel after provisioning one Thread container', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.createThread('container');
+    const modelExecution = env.store.createModelExecution('container-batch-model', thread.id, 0);
+    env.store.transitionExecution(modelExecution.id, 'running');
+    const calls = [
+      { id: 'container-read-call', name: 'read_file', arguments: { path: 'a.txt' } },
+      { id: 'container-search-call', name: 'search_files', arguments: { pattern: 'marker' } },
+    ];
+    env.store.commitModelStep({
+      assistantRecordId: 'container-batch-model:assistant',
+      modelExecutionId: modelExecution.id,
+      threadId: thread.id,
+      payload: assistantPayload({ batchId: 'container-batch-model:batch', toolCalls: calls }),
+      toolCalls: [
+        { call: calls[0]!, executionId: 'container-read-execution' },
+        { call: calls[1]!, executionId: 'container-search-execution' },
+      ],
+    });
+
+    let containerCreated = false;
+    let containerStarts = 0;
+    let activeToolCalls = 0;
+    let maxConcurrentToolCalls = 0;
+    const startedToolCalls: string[] = [];
+    let releaseTools!: () => void;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTools = resolve;
+    });
+    const runner = async (args: string[]) => {
+      if (args[0] === 'info') return { stdout: '5.0.0', stderr: '' };
+      if (args[0] === 'inspect') {
+        if (containerCreated) return { stdout: '{}', stderr: '' };
+        throw new Error('no such container');
+      }
+      if (args[0] === 'run') {
+        if (containerCreated) throw new Error('container name is already in use');
+        containerCreated = true;
+        containerStarts += 1;
+        return { stdout: 'container-id', stderr: '' };
+      }
+      if (args[0] === 'start') return { stdout: 'container-id', stderr: '' };
+      if (args[0] === 'exec') {
+        const toolName = args.at(-1) ?? 'unknown';
+        startedToolCalls.push(toolName);
+        activeToolCalls += 1;
+        maxConcurrentToolCalls = Math.max(maxConcurrentToolCalls, activeToolCalls);
+        await toolGate;
+        activeToolCalls -= 1;
+        return { stdout: JSON.stringify({ status: 'completed', result: { toolName } }), stderr: '' };
+      }
+      throw new Error(`Unexpected Podman command: ${args[0] ?? 'empty'}`);
+    };
+    const catalog = new ToolCatalog();
+    for (const name of ['read_file', 'search_files']) {
+      catalog.register({
+        owner: 'test',
+        source: 'executor',
+        definition: { name, description: `test ${name}`, parameters: { type: 'object' } },
+        execute: async () => ({ ok: true }),
+      });
+    }
+    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, runner);
+    const binding = env.store.executorForThread(thread.id)!;
+    let executions: Promise<PromiseSettledResult<Awaited<ReturnType<typeof executor.execute>>>[]> | undefined;
+    try {
+      executions = Promise.allSettled([
+        executor.execute('container-read-execution', binding),
+        executor.execute('container-search-execution', binding),
+      ]);
+      await until(() => startedToolCalls.length === 2);
+      expect(containerStarts).toBe(1);
+      expect(maxConcurrentToolCalls).toBe(2);
+      expect(startedToolCalls.sort()).toEqual(['read_file', 'search_files']);
+      releaseTools();
+      const results = await executions;
+      expect(results.map((result) => (result.status === 'fulfilled' ? result.value.status : 'rejected'))).toEqual([
+        'completed',
+        'completed',
+      ]);
+    } finally {
+      releaseTools();
+      await executions;
+      await env.cleanup();
+    }
+  });
+
   it('retries Btrfs overlay storage with the discovered fuse-overlayfs helper', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.createThread('container');

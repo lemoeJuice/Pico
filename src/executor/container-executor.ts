@@ -269,6 +269,7 @@ export class ContainerExecutor implements ExecutorAdapter {
   readonly kind = 'container' as const;
   private readonly inFlight = new Map<string, { promise: Promise<Execution>; controller: AbortController }>();
   private readonly containerIds = new Map<string, string>();
+  private readonly containerSetupTails = new Map<string, Promise<void>>();
   private podmanStorageArgs: string[] | null = null;
 
   constructor(
@@ -513,6 +514,26 @@ export class ContainerExecutor implements ExecutorAdapter {
   }
 
   private async ensureContainer(binding: ExecutorBinding, signal?: AbortSignal): Promise<void> {
+    const previous = this.containerSetupTails.get(binding.id);
+    let release!: () => void;
+    const turn = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous ? previous.then(() => turn) : turn;
+    this.containerSetupTails.set(binding.id, tail);
+    void tail.then(() => {
+      if (this.containerSetupTails.get(binding.id) === tail) this.containerSetupTails.delete(binding.id);
+    });
+    try {
+      if (previous) await previous;
+      if (signal?.aborted) throw new DOMException('Execution interrupted', 'AbortError');
+      await this.prepareContainer(binding, signal);
+    } finally {
+      release();
+    }
+  }
+
+  private async prepareContainer(binding: ExecutorBinding, signal?: AbortSignal): Promise<void> {
     await this.checkConnection(binding, signal);
     const name = this.containerName(binding.id);
     if (await this.containerExists(name, signal)) {
