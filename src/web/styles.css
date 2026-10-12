@@ -1184,6 +1184,19 @@ button:disabled {
 .projection-error {
   color: #a06f60;
 }
+.model-execution-error {
+  margin: 7px 0;
+  color: #946b5d;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.model-execution-error > summary {
+  cursor: pointer;
+}
+.model-execution-error > p {
+  margin: 5px 0;
+}
 .projection-attempt {
   margin-top: 8px;
   padding-top: 8px;

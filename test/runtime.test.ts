@@ -697,9 +697,11 @@ describe('durable Thread runtime invariants', () => {
       await env.runtime.drain();
       expect(model.signals[0]?.aborted).toBe(true);
       expect(env.store.listRecords(thread.id).filter((record) => record.kind === 'assistant')).toHaveLength(0);
-      expect(env.store.listExecutions(thread.id).find((execution) => execution.kind === 'model')?.status).toBe(
-        'interrupted',
-      );
+      const modelExecution = env.store.listExecutions(thread.id).find((execution) => execution.kind === 'model');
+      expect(modelExecution?.status).toBe('interrupted');
+      expect(env.runtime.getModelInputAttempts(thread.id, modelExecution!.id)).toMatchObject([
+        { status: 'interrupted', prompt: { turns: [{ content: 'Begin' }] } },
+      ]);
       expect(env.runtime.getThread(thread.id)?.state).toBe('paused');
     } finally {
       await env.cleanup();
@@ -717,9 +719,12 @@ describe('durable Thread runtime invariants', () => {
       await env.runtime.submit(thread.id, 'stream-failure-message', 'Write something');
       await env.runtime.drain();
       expect(env.store.listRecords(thread.id).filter((record) => record.kind === 'assistant')).toHaveLength(0);
-      expect(env.store.listExecutions(thread.id).find((execution) => execution.kind === 'model')?.status).toBe(
-        'failed',
-      );
+      const modelExecution = env.store.listExecutions(thread.id).find((execution) => execution.kind === 'model');
+      expect(modelExecution?.status).toBe('failed');
+      expect(env.runtime.getModelInputAttempts(thread.id, modelExecution!.id)).toMatchObject([
+        { status: 'failed', error: 'stream disconnected', prompt: { turns: [{ content: 'Write something' }] } },
+      ]);
+      expect(env.store.listRecords(thread.id).map((record) => record.kind)).toEqual(['message']);
       expect(env.runtime.getThread(thread.id)?.state).toBe('paused');
     } finally {
       await env.cleanup();

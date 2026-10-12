@@ -599,7 +599,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   useEffect(() => {
     const list = listRef.current;
     if (list && followLatest.current) list.scrollTop = list.scrollHeight;
-  }, [threadId, activeSnapshot?.records.length, assistantDraft]);
+  }, [threadId, activeSnapshot?.records.length, activeSnapshot?.executions.length, assistantDraft]);
 
   const sendMessage = async (content = draft): Promise<void> => {
     const clean = content.trim();
@@ -787,6 +787,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const records = activeSnapshot?.records ?? [];
   const executions = activeSnapshot?.executions ?? [];
   const approvals = activeSnapshot?.approvals ?? [];
+  const committedModelExecutionIds = new Set(
+    records.filter((record) => record.kind === 'assistant').map((record) => record.id.replace(/:assistant$/, '')),
+  );
+  const uncommittedModelExecutions = executions.filter(
+    (execution) =>
+      execution.kind === 'model' && execution.status !== 'completed' && !committedModelExecutionIds.has(execution.id),
+  );
   const childrenByParent = new Map<string, Thread[]>();
   for (const thread of threads) {
     if (!thread.parentThreadId) continue;
@@ -806,6 +813,17 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     </div>
   );
   const renderedRecords = records.filter((record) => record.kind === 'message' || record.kind === 'assistant');
+  const timeline = [
+    ...renderedRecords.map((record) => ({ type: 'record' as const, at: record.createdAt, record })),
+    ...uncommittedModelExecutions.map((execution) => ({
+      type: 'model-execution' as const,
+      at: execution.updatedAt,
+      execution,
+    })),
+  ].sort(
+    (left, right) =>
+      left.at.localeCompare(right.at) || Number(left.type !== 'record') - Number(right.type !== 'record'),
+  );
   const currentState = selectedThread?.state ?? 'idle';
   const pauseReason = visiblePauseReason(currentState, selectedThread?.pauseReason ?? null, [error, notice]);
 
@@ -1100,13 +1118,19 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               }}
             >
               <div className="timeline">
-                {renderedRecords.map((record) =>
-                  record.kind === 'message' ? (
-                    <MessageBubble key={record.id} record={record} onOpenThread={chooseThread} />
+                {timeline.map((item) =>
+                  item.type === 'model-execution' ? (
+                    <ModelExecutionNotice
+                      key={item.execution.id}
+                      execution={item.execution}
+                      threadId={selectedThread.id}
+                    />
+                  ) : item.record.kind === 'message' ? (
+                    <MessageBubble key={item.record.id} record={item.record} onOpenThread={chooseThread} />
                   ) : (
                     <AssistantBubble
-                      key={record.id}
-                      record={record}
+                      key={item.record.id}
+                      record={item.record}
                       executions={executions}
                       approvals={approvals}
                       records={records}
@@ -1390,6 +1414,68 @@ function MessageBubble({ record, onOpenThread }: { record: CanonicalRecord; onOp
   );
 }
 
+function ModelInputDisclosure({ threadId, executionId }: { threadId: string; executionId: string }) {
+  const [modelInputs, setModelInputs] = useState<ModelInputAttempt[] | null>(null);
+  const [modelInputsLoading, setModelInputsLoading] = useState(false);
+  const [modelInputsError, setModelInputsError] = useState('');
+  return (
+    <details
+      className="projection-card"
+      onToggle={(event) => {
+        if (!event.currentTarget.open || modelInputs !== null || modelInputsLoading) return;
+        setModelInputsLoading(true);
+        setModelInputsError('');
+        void api<{ attempts: ModelInputAttempt[] }>(
+          `/api/threads/${encodeURIComponent(threadId)}/executions/${encodeURIComponent(executionId)}/model-input`,
+        )
+          .then((result) => setModelInputs(result.attempts))
+          .catch((caught: unknown) => setModelInputsError(caught instanceof Error ? caught.message : String(caught)))
+          .finally(() => setModelInputsLoading(false));
+      }}
+    >
+      <summary>Model input</summary>
+      <p className="projection-note">The exact prompt passed to the model adapter. API credentials are not included.</p>
+      {modelInputsLoading ? <p className="projection-state">Loading model input…</p> : null}
+      {modelInputsError ? <p className="projection-error">{modelInputsError}</p> : null}
+      {modelInputs?.length === 0 ? (
+        <p className="projection-state">The model pipeline completed this step without calling the adapter.</p>
+      ) : null}
+      {modelInputs?.map((attempt, index) => (
+        <details className="projection-attempt" key={attempt.id}>
+          <summary>
+            Attempt {index + 1} · {attempt.status}
+          </summary>
+          {attempt.error ? <p className="projection-error">{attempt.error}</p> : null}
+          <pre className="projection-view">{toJson(attempt.prompt)}</pre>
+        </details>
+      ))}
+    </details>
+  );
+}
+
+function ModelExecutionNotice({ execution, threadId }: { execution: Execution; threadId: string }) {
+  return (
+    <div className="assistant-message model-execution-notice">
+      <div className="assistant-avatar">p</div>
+      <div className="message-body">
+        <div className="message-author">
+          Model step <span className={`tool-status status-${execution.status}`}>{execution.status}</span>
+          <span className="subtle-inline">· {new Date(execution.updatedAt).toLocaleTimeString()}</span>
+        </div>
+        {execution.error ? (
+          <details className="model-execution-error">
+            <summary>Failure details</summary>
+            <p>{execution.error}</p>
+          </details>
+        ) : (
+          <p className="projection-state">This Model Step has not committed an assistant message.</p>
+        )}
+        <ModelInputDisclosure threadId={threadId} executionId={execution.id} />
+      </div>
+    </div>
+  );
+}
+
 function AssistantBubble({
   record,
   executions,
@@ -1405,9 +1491,6 @@ function AssistantBubble({
   threadId: string;
   onApproval(id: string, allow: boolean, rememberForThread?: boolean): void;
 }) {
-  const [modelInputs, setModelInputs] = useState<ModelInputAttempt[] | null>(null);
-  const [modelInputsLoading, setModelInputsLoading] = useState(false);
-  const [modelInputsError, setModelInputsError] = useState('');
   const assistant = recordPayload<AssistantPayload>(record);
   const calls = assistant.toolCalls ?? [];
   const executionId = record.id.replace(/:assistant$/, '');
@@ -1461,41 +1544,7 @@ function AssistantBubble({
             })}
           </div>
         ) : null}
-        <details
-          className="projection-card"
-          onToggle={(event) => {
-            if (!event.currentTarget.open || modelInputs !== null || modelInputsLoading) return;
-            setModelInputsLoading(true);
-            setModelInputsError('');
-            void api<{ attempts: ModelInputAttempt[] }>(
-              `/api/threads/${encodeURIComponent(threadId)}/executions/${encodeURIComponent(executionId)}/model-input`,
-            )
-              .then((result) => setModelInputs(result.attempts))
-              .catch((caught: unknown) =>
-                setModelInputsError(caught instanceof Error ? caught.message : String(caught)),
-              )
-              .finally(() => setModelInputsLoading(false));
-          }}
-        >
-          <summary>Model input</summary>
-          <p className="projection-note">
-            The exact prompt passed to the model adapter. API credentials are not included.
-          </p>
-          {modelInputsLoading ? <p className="projection-state">Loading model input…</p> : null}
-          {modelInputsError ? <p className="projection-error">{modelInputsError}</p> : null}
-          {modelInputs?.length === 0 ? (
-            <p className="projection-state">The model pipeline completed this step without calling the adapter.</p>
-          ) : null}
-          {modelInputs?.map((attempt, index) => (
-            <details className="projection-attempt" key={attempt.id}>
-              <summary>
-                Attempt {index + 1} · {attempt.status}
-              </summary>
-              {attempt.error ? <p className="projection-error">{attempt.error}</p> : null}
-              <pre className="projection-view">{toJson(attempt.prompt)}</pre>
-            </details>
-          ))}
-        </details>
+        <ModelInputDisclosure threadId={threadId} executionId={executionId} />
       </div>
     </div>
   );
