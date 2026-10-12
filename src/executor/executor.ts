@@ -15,6 +15,7 @@ export type ExecutionListener = (execution: Execution) => void;
 export class HostExecutor implements ExecutorAdapter {
   readonly kind = 'host' as const;
   private readonly inFlight = new Map<string, { promise: Promise<Execution>; controller: AbortController }>();
+  private shuttingDown = false;
 
   constructor(
     private readonly store: PicoStore,
@@ -33,6 +34,7 @@ export class HostExecutor implements ExecutorAdapter {
       return current;
     const active = this.inFlight.get(executionId);
     if (active) return active.promise;
+    if (this.shuttingDown) return current;
     if (current.status === 'running') return this.confirmLost(executionId);
 
     const controller = new AbortController();
@@ -46,6 +48,13 @@ export class HostExecutor implements ExecutorAdapter {
     });
     this.inFlight.set(executionId, { promise, controller });
     return promise;
+  }
+
+  async shutdown(): Promise<void> {
+    this.shuttingDown = true;
+    const active = [...this.inFlight.values()];
+    for (const execution of active) execution.controller.abort();
+    await Promise.allSettled(active.map((execution) => execution.promise));
   }
 
   async status(executionId: string, _binding: ExecutorBinding): Promise<Execution | null> {

@@ -268,6 +268,7 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
       for (const socket of sockets) socket.close();
       websocketServer.close();
       await new Promise<void>((resolvePromise) => httpServer.close(() => resolvePromise()));
+      await runtime.shutdownHostExecutor();
       await vite?.close();
       runtime.store.close();
     },

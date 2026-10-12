@@ -63,6 +63,70 @@ describe('Executor execution identity and recovery', () => {
     }
   });
 
+  it('waits for active Host tool invocations to settle during shutdown', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.createThread('host');
+    let markStarted!: () => void;
+    let markAborted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const aborted = new Promise<void>((resolve) => {
+      markAborted = resolve;
+    });
+    const catalog = new ToolCatalog();
+    catalog.register({
+      owner: 'test',
+      source: 'executor',
+      definition: { name: 'wait_for_abort', description: 'wait for shutdown', parameters: { type: 'object' } },
+      execute: async (_args, context) => {
+        markStarted();
+        return new Promise((_, reject) => {
+          context.signal.addEventListener(
+            'abort',
+            () => {
+              markAborted();
+              setTimeout(() => reject(new DOMException('Execution interrupted', 'AbortError')), 30);
+            },
+            { once: true },
+          );
+        });
+      },
+    });
+    const modelExecution = env.store.createModelExecution('shutdown-model', thread.id, 0);
+    env.store.transitionExecution(modelExecution.id, 'running');
+    env.store.commitModelStep({
+      assistantRecordId: 'shutdown-model:assistant',
+      modelExecutionId: modelExecution.id,
+      threadId: thread.id,
+      payload: assistantPayload({
+        batchId: 'shutdown-model:batch',
+        toolCalls: [{ id: 'shutdown-call', name: 'wait_for_abort', arguments: {} }],
+      }),
+      toolCalls: [
+        { call: { id: 'shutdown-call', name: 'wait_for_abort', arguments: {} }, executionId: 'shutdown-execution' },
+      ],
+    });
+    const executor = new HostExecutor(env.store, catalog);
+    const binding = env.store.executorForThread(thread.id)!;
+    try {
+      const execution = executor.execute('shutdown-execution', binding);
+      await started;
+      let shutdownSettled = false;
+      const shutdown = executor.shutdown().then(() => {
+        shutdownSettled = true;
+      });
+      await aborted;
+      expect(shutdownSettled).toBe(false);
+      await shutdown;
+      expect((await execution).status).toBe('interrupted');
+      expect(shutdownSettled).toBe(true);
+    } finally {
+      await executor.shutdown();
+      await env.cleanup();
+    }
+  });
+
   it('recovers durable work and interrupts a Host tool only after the Executor confirms it was lost', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pico-recovery-'));
     const workspace = join(directory, 'workspace');
