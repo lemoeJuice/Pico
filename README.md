@@ -4,7 +4,7 @@ Pico is a local-first agent harness built around durable Projects, Threads, Mess
 
 ## Run Pico
 
-Requirements: Node.js 26 or newer and npm. Podman is needed for the default Container Executor. A Host Thread can run without Podman.
+Requirements: Node.js 26 or newer and npm. Podman is needed for the default Container Executor. On Btrfs-backed Podman storage, install `fuse-overlayfs`; Pico retries with it when Podman reports that kernel overlay storage is unsupported. Set `PICO_PODMAN_OVERLAY_MOUNT_PROGRAM` if the helper is outside `PATH` or has a nonstandard path. A Host Thread can run without Podman.
 
 ```sh
 npm install

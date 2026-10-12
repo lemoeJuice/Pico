@@ -70,9 +70,17 @@ function StatePill({ state }: { state: Thread['state'] }) {
   );
 }
 
-function ExecutorPill({ thread, connected }: { thread: Thread; connected: boolean | null }) {
+function ExecutorPill({
+  thread,
+  connected,
+  error,
+}: {
+  thread: Thread;
+  connected: boolean | null;
+  error: string | null;
+}) {
   return (
-    <span className={`executor-pill ${connected === false ? 'executor-offline' : ''}`}>
+    <span className={`executor-pill ${connected === false ? 'executor-offline' : ''}`} title={error ?? undefined}>
       <span className="executor-glyph">{thread.executorKind === 'container' ? '▧' : '⌂'}</span>
       <span>{thread.executorKind === 'container' ? 'Container' : 'Host'} Executor</span>
       {connected === null ? (
@@ -233,6 +241,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [commands, setCommands] = useState<Array<{ name: string; description: string }>>([]);
   const [permissions, setPermissions] = useState<ToolPermission[]>([]);
   const [executorConnected, setExecutorConnected] = useState<boolean | null>(null);
+  const [executorError, setExecutorError] = useState<string | null>(null);
   const [socketConnected, setSocketConnected] = useState(false);
   const [draft, setDraft] = useState('');
   const [assistantDraft, setAssistantDraft] = useState('');
@@ -349,25 +358,35 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   useEffect(() => {
     if (!threadId) {
       setExecutorConnected(null);
+      setExecutorError(null);
       setPermissions([]);
       return;
     }
+    setExecutorConnected(null);
+    setExecutorError(null);
     let alive = true;
     const refresh = async (): Promise<void> => {
       const [executor, nextPermissions] = await Promise.all([
-        api<{ connected: boolean }>(`/api/threads/${threadId}/executor`),
+        api<{ connected: boolean; error?: string }>(`/api/threads/${threadId}/executor`),
         api<ToolPermission[]>(`/api/threads/${threadId}/permissions`),
       ]);
       if (!alive) return;
       setExecutorConnected(executor.connected);
+      setExecutorError(executor.connected ? null : (executor.error ?? 'Executor connection failed.'));
       setPermissions(nextPermissions);
     };
-    void refresh().catch(() => {
-      if (alive) setExecutorConnected(false);
+    void refresh().catch((caught: unknown) => {
+      if (alive) {
+        setExecutorConnected(false);
+        setExecutorError(caught instanceof Error ? caught.message : String(caught));
+      }
     });
     const timer = window.setInterval(() => {
-      void refresh().catch(() => {
-        if (alive) setExecutorConnected(false);
+      void refresh().catch((caught: unknown) => {
+        if (alive) {
+          setExecutorConnected(false);
+          setExecutorError(caught instanceof Error ? caught.message : String(caught));
+        }
       });
     }, 15_000);
     return () => {
@@ -787,7 +806,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           </div>
           {selectedThread ? (
             <div className="topbar-status">
-              <ExecutorPill thread={selectedThread} connected={executorConnected} />
+              <ExecutorPill thread={selectedThread} connected={executorConnected} error={executorError} />
               <StatePill state={currentState} />
               {authRequired ? (
                 <button className="session-logout" onClick={() => void onSignOut?.()} type="button">
@@ -810,6 +829,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           )}
         </header>
 
+        {selectedThread && executorConnected === false && executorError ? (
+          <div className="banner banner-error executor-error" role="status">
+            <span>
+              <strong>
+                {selectedThread.executorKind === 'container' ? 'Container' : 'Host'} Executor unavailable.
+              </strong>{' '}
+              {executorError}
+            </span>
+          </div>
+        ) : null}
         {error ? (
           <div className="banner banner-error">
             <span>{error}</span>

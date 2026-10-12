@@ -625,6 +625,10 @@ button:disabled {
   background: #f1f6f0;
   border-color: #e0ebe0;
 }
+.executor-error span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 
 .conversation-header {
   z-index: 1;

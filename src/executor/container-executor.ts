@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { accessSync, constants } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import type { Execution, ExecutorBinding } from '../core/types.js';
 import { PicoStore } from '../core/store.js';
 import { ToolCatalog } from './tools.js';
@@ -185,6 +187,32 @@ interface ToolRunnerResponse {
 
 type PodmanRunner = typeof podman;
 
+function findOverlayMountProgram(): string | undefined {
+  const configured = process.env.PICO_PODMAN_OVERLAY_MOUNT_PROGRAM?.trim();
+  if (configured) return configured;
+  for (const directory of (process.env.PATH ?? '').split(delimiter)) {
+    if (!directory) continue;
+    const candidate = join(directory, 'fuse-overlayfs');
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Continue through PATH until the standard overlay mount helper is found.
+    }
+  }
+  return undefined;
+}
+
+function isUnsupportedBtrfsOverlay(error: unknown): boolean {
+  return /overlay[^\n]*not supported[^\n]*btrfs|overlay[^\n]*unsupported[^\n]*btrfs/i.test(
+    error instanceof Error ? error.message : String(error),
+  );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function podman(args: string[], input?: string, signal?: AbortSignal): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolvePromise, reject) => {
     if (signal?.aborted) return reject(new DOMException('Execution interrupted', 'AbortError'));
@@ -223,17 +251,52 @@ export class ContainerExecutor implements ExecutorAdapter {
   readonly kind = 'container' as const;
   private readonly inFlight = new Map<string, { promise: Promise<Execution>; controller: AbortController }>();
   private readonly containerIds = new Map<string, string>();
+  private podmanStorageArgs: string[] | null = null;
 
   constructor(
     private readonly store: PicoStore,
     private readonly tools: ToolCatalog,
     private readonly onExecution: ExecutionListener = () => undefined,
     private readonly image = 'docker.io/library/node:22-bookworm-slim',
-    private readonly runPodman: PodmanRunner = podman,
+    private readonly runPodmanCommand: PodmanRunner = podman,
+    private readonly overlayMountProgram = findOverlayMountProgram(),
   ) {}
 
   async checkConnection(_binding: ExecutorBinding): Promise<void> {
-    await this.runPodman(['info', '--format', '{{.Version.Version}}']);
+    await this.callPodman(['info', '--format', '{{.Version.Version}}']);
+  }
+
+  private async callPodman(
+    args: string[],
+    input?: string,
+    signal?: AbortSignal,
+  ): Promise<{ stdout: string; stderr: string }> {
+    if (this.podmanStorageArgs) {
+      return this.runPodmanCommand([...this.podmanStorageArgs, ...args], input, signal);
+    }
+    try {
+      return await this.runPodmanCommand(args, input, signal);
+    } catch (error) {
+      if (!isUnsupportedBtrfsOverlay(error)) throw error;
+      const original = errorMessage(error);
+      if (!this.overlayMountProgram) {
+        throw new Error(
+          `${original}\nPodman needs fuse-overlayfs for overlay storage on Btrfs. Install it or set PICO_PODMAN_OVERLAY_MOUNT_PROGRAM to its executable path.`,
+          { cause: error },
+        );
+      }
+      const storageArgs = ['--storage-opt', `overlay.mount_program=${this.overlayMountProgram}`];
+      try {
+        const result = await this.runPodmanCommand([...storageArgs, ...args], input, signal);
+        this.podmanStorageArgs = storageArgs;
+        return result;
+      } catch (fallbackError) {
+        throw new Error(
+          `Podman could not use overlay mount helper ${this.overlayMountProgram}: ${errorMessage(fallbackError)}\nOriginal error: ${original}`,
+          { cause: fallbackError },
+        );
+      }
+    }
   }
 
   async execute(executionId: string, binding: ExecutorBinding, externalSignal?: AbortSignal): Promise<Execution> {
@@ -409,7 +472,7 @@ export class ContainerExecutor implements ExecutorAdapter {
     signal?: AbortSignal,
   ): Promise<ToolRunnerResponse> {
     const command = ['exec', '-i', name, 'node', '-e', RUNNER, mode, key, ...(toolName ? [toolName] : [])];
-    const { stdout } = await this.runPodman(command, args ? JSON.stringify(args) : undefined, signal);
+    const { stdout } = await this.callPodman(command, args ? JSON.stringify(args) : undefined, signal);
     try {
       return JSON.parse(stdout) as ToolRunnerResponse;
     } catch {
@@ -425,7 +488,7 @@ export class ContainerExecutor implements ExecutorAdapter {
       return;
     }
     const volume = `${binding.workspacePath}:/workspace:rw`;
-    await this.runPodman([
+    await this.callPodman([
       'run',
       '-d',
       '--name',
@@ -445,7 +508,7 @@ export class ContainerExecutor implements ExecutorAdapter {
 
   private async containerExists(name: string): Promise<boolean> {
     try {
-      await this.runPodman(['inspect', '--type', 'container', name]);
+      await this.callPodman(['inspect', '--type', 'container', name]);
       return true;
     } catch (error) {
       if (
@@ -460,7 +523,7 @@ export class ContainerExecutor implements ExecutorAdapter {
   }
 
   private async startContainer(name: string): Promise<void> {
-    await this.runPodman(['start', name]).catch((error: unknown) => {
+    await this.callPodman(['start', name]).catch((error: unknown) => {
       if (error instanceof Error && /already running/i.test(error.message)) return;
       throw error;
     });

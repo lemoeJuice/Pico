@@ -281,6 +281,58 @@ describe('Executor execution identity and recovery', () => {
     }
   });
 
+  it('retries Btrfs overlay storage with the discovered fuse-overlayfs helper', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.createThread('container');
+    const calls: string[][] = [];
+    const runner = async (args: string[]) => {
+      calls.push(args);
+      if (!args.includes('--storage-opt')) {
+        throw new Error(
+          'kernel does not support overlay fs: \'overlay\' is not supported over btrfs at "/storage/overlay"',
+        );
+      }
+      return { stdout: '5.0.0', stderr: '' };
+    };
+    const executor = new ContainerExecutor(
+      env.store,
+      new ToolCatalog(),
+      undefined,
+      undefined,
+      runner,
+      '/usr/bin/fuse-overlayfs',
+    );
+    try {
+      const binding = env.store.executorForThread(thread.id)!;
+      await executor.checkConnection(binding);
+      await executor.checkConnection(binding);
+      expect(calls).toEqual([
+        ['info', '--format', '{{.Version.Version}}'],
+        ['--storage-opt', 'overlay.mount_program=/usr/bin/fuse-overlayfs', 'info', '--format', '{{.Version.Version}}'],
+        ['--storage-opt', 'overlay.mount_program=/usr/bin/fuse-overlayfs', 'info', '--format', '{{.Version.Version}}'],
+      ]);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('explains the required helper when Podman cannot use Btrfs overlay storage', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.createThread('container');
+    const runner = async () => {
+      throw new Error("'overlay' is not supported over btrfs");
+    };
+    const executor = new ContainerExecutor(env.store, new ToolCatalog(), undefined, undefined, runner, '');
+    try {
+      const binding = env.store.executorForThread(thread.id)!;
+      await expect(executor.checkConnection(binding)).rejects.toThrow(
+        /fuse-overlayfs[\s\S]*PICO_PODMAN_OVERLAY_MOUNT_PROGRAM/,
+      );
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it.skipIf(process.platform === 'win32')(
     'Pause leaves a Host shell running; Interrupt waits for the process group to stop',
     async () => {
