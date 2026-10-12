@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import type { AssistantPayload } from '../src/core/types.js';
+import type { AssistantPayload, Execution } from '../src/core/types.js';
 import type { PicoPlugin } from '../src/plugins/host.js';
 import type { ModelResponse } from '../src/runtime/model.js';
-import type { ModelStageInput } from '../src/runtime/stages.js';
+import type { ModelStageInput, ToolBatchInput } from '../src/runtime/stages.js';
 import { deferred, FakeModel, response, setupRuntime } from './helpers.js';
 
 describe('durable Thread runtime invariants', () => {
@@ -63,18 +63,32 @@ describe('durable Thread runtime invariants', () => {
     const releaseAlpha = deferred<string>();
     const releaseBeta = deferred<string>();
     let starts = 0;
+    const startOrder: string[] = [];
+    const scheduledOrder: string[] = [];
     const batchPlugin: PicoPlugin = {
       id: 'test.parallel-tools',
       name: 'Parallel tools',
       version: '1',
-      activate({ tools }) {
+      activate({ tools, pipelines }) {
         for (const name of ['batch_alpha', 'batch_beta']) {
           tools.register({ name, description: name, parameters: { type: 'object', properties: {} } }, async () => {
             starts += 1;
+            startOrder.push(name);
             if (starts === 2) started.resolve();
             return name === 'batch_alpha' ? releaseAlpha.promise : releaseBeta.promise;
           });
         }
+        pipelines.use<ToolBatchInput, Execution[]>('toolBatch', async (input, next) => {
+          const execute = input.execute;
+          return next({
+            ...input,
+            calls: [...input.calls].reverse(),
+            execute: (call) => {
+              scheduledOrder.push(call.name);
+              return execute(call);
+            },
+          });
+        });
       },
     };
     const model = new FakeModel((_prompt, callNumber) =>
@@ -91,6 +105,8 @@ describe('durable Thread runtime invariants', () => {
       await env.runtime.submit(thread.id, 'parallel-message', 'Run both tools');
       await started.promise;
       expect(starts).toBe(2);
+      expect(startOrder).toEqual(['batch_beta', 'batch_alpha']);
+      expect(scheduledOrder).toEqual(['batch_beta', 'batch_alpha']);
       expect(model.calls).toBe(1);
 
       releaseAlpha.resolve('alpha done');
@@ -120,6 +136,65 @@ describe('durable Thread runtime invariants', () => {
     } finally {
       releaseAlpha.resolve('cleanup');
       releaseBeta.resolve('cleanup');
+      await env.cleanup();
+    }
+  });
+
+  it('persists a replacement Tool Batch result before entering the next Model Step', async () => {
+    let toolStarted = false;
+    const batchPlugin: PicoPlugin = {
+      id: 'test.replacement-batch',
+      name: 'Replacement Tool Batch',
+      version: '1',
+      activate({ tools, pipelines }) {
+        tools.register(
+          { name: 'batch_replaced', description: 'Replaced by the batch stage', parameters: { type: 'object' } },
+          async () => {
+            toolStarted = true;
+            return 'unexpected';
+          },
+        );
+        pipelines.use<ToolBatchInput, Execution[]>('toolBatch', async (input) => {
+          const now = new Date().toISOString();
+          return input.calls.map((call) => ({
+            id: `${input.thread.id}:${input.batchId.replace(/:batch$/, '')}:${call.id}`,
+            threadId: input.thread.id,
+            batchId: input.batchId,
+            kind: 'tool',
+            toolName: call.name,
+            arguments: call.arguments,
+            status: 'completed',
+            result: { handledBy: 'replacement batch' },
+            error: null,
+            createdAt: now,
+            updatedAt: now,
+          }));
+        });
+      },
+    };
+    const model = new FakeModel((_prompt, callNumber) =>
+      callNumber === 1
+        ? response('', [{ id: 'replaced-call', name: 'batch_replaced', arguments: {} }])
+        : response('The replacement result is durable.'),
+    );
+    const env = await setupRuntime(model, { plugins: [batchPlugin] });
+    const thread = env.createThread();
+    try {
+      await env.runtime.submit(thread.id, 'replacement-batch-message', 'Run the replacement batch');
+      await env.runtime.drain();
+
+      const execution = env.store.listExecutions(thread.id).find((item) => item.toolName === 'batch_replaced');
+      expect(toolStarted).toBe(false);
+      expect(execution?.status).toBe('completed');
+      expect(execution?.result).toEqual({ handledBy: 'replacement batch' });
+      expect(env.store.listRecords(thread.id).filter((record) => record.kind === 'tool_result')).toHaveLength(1);
+      expect(model.calls).toBe(2);
+      expect(
+        model.prompts[1]?.turns.some(
+          (turn) => turn.kind === 'tool_result' && turn.content.includes('replacement batch'),
+        ),
+      ).toBe(true);
+    } finally {
       await env.cleanup();
     }
   });

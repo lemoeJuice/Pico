@@ -26,8 +26,8 @@ export interface ModelStageInput {
 export interface ToolBatchInput {
   thread: Thread;
   batchId: string;
-  calls: ToolCall[];
-  perform(): Promise<Execution[]>;
+  calls: readonly ToolCall[];
+  execute(call: ToolCall): Promise<Execution>;
 }
 
 export type PermissionPolicy = 'allow' | 'deny' | 'ask';

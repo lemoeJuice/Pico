@@ -32,7 +32,13 @@ import {
   type ModelResponse,
   type PromptTurn,
 } from './model.js';
-import type { ModelStageInput, PermissionPolicy, ProjectionInput, ToolInvocationInput } from './stages.js';
+import type {
+  ModelStageInput,
+  PermissionPolicy,
+  ProjectionInput,
+  ToolBatchInput,
+  ToolInvocationInput,
+} from './stages.js';
 import type { PicoPlugin } from '../plugins/host.js';
 
 export interface RuntimeEvent {
@@ -373,31 +379,50 @@ export class PicoRuntime {
       if (!thread) return;
       const activeBatch = this.latestActiveBatch(threadId);
       if (activeBatch) {
-        const settled = await this.pipelines.run(
-          'toolBatch',
-          {
-            thread,
-            batchId: activeBatch.batchId,
-            calls: activeBatch.calls,
-            perform: () => Promise.all(activeBatch.calls.map((call) => this.executeToolCall(thread, call))),
+        // The Model Step already committed these calls. Batch plugins may reschedule them,
+        // but must not silently change a canonical call's identity or arguments.
+        const canonicalCalls = deepFreeze(structuredClone(activeBatch.calls));
+        const callsById = new Map(canonicalCalls.map((call) => [call.id, call]));
+        const batchInput: ToolBatchInput = {
+          thread,
+          batchId: activeBatch.batchId,
+          calls: canonicalCalls,
+          execute: (call) => {
+            const canonical = callsById.get(call.id);
+            if (
+              !canonical ||
+              canonical.name !== call.name ||
+              JSON.stringify(canonical.arguments) !== JSON.stringify(call.arguments)
+            ) {
+              throw new Error(
+                'Tool Batch plugins may reschedule calls but must preserve each call ID, name, and arguments.',
+              );
+            }
+            return this.executeToolCall(thread, canonical);
           },
-          (input) => input.perform(),
+        };
+        const batchResult = await this.pipelines.run<ToolBatchInput, Execution[]>('toolBatch', batchInput, (input) =>
+          Promise.all(input.calls.map((call) => input.execute(call))),
         );
-        const stillActive = settled.some(
+        const batchExecutions = this.persistToolBatchResult(threadId, activeBatch.batchId, batchResult);
+        if (batchExecutions.length !== activeBatch.calls.length) {
+          throw new Error(`Tool Batch ${activeBatch.batchId} does not have one durable Execution per Tool Call.`);
+        }
+        const activeExecutions = batchExecutions.filter(
           (execution) => execution.status === 'pending' || execution.status === 'running',
         );
-        if (stillActive) {
+        if (activeExecutions.length > 0) {
           if (!this.store.getThread(threadId)?.pauseRequested) {
             this.store.setPause(
               threadId,
               true,
-              `Executor ${thread.executorLabel} is unreachable or still needs attention. Execution state is preserved.`,
+              `Tool Batch returned with ${activeExecutions.length} execution(s) still pending or running. Execution state is preserved.`,
             );
           }
           this.publishThreadUpdate(threadId);
           return;
         }
-        for (const execution of settled) this.ensureToolResult(threadId, execution);
+        for (const execution of batchExecutions) this.ensureToolResult(threadId, execution);
         if (this.store.getThread(threadId)?.pauseRequested) return;
         iteration += 1;
         continue;
@@ -407,6 +432,47 @@ export class PicoRuntime {
       await this.pipelines.run('step', input, (value) => value.perform());
       iteration += 1;
     }
+  }
+
+  private persistToolBatchResult(threadId: string, batchId: string, reported: Execution[]): Execution[] {
+    if (!Array.isArray(reported)) throw new Error(`Tool Batch ${batchId} must return an array of Execution results.`);
+    const executions = this.store.listExecutionsByBatch(batchId);
+    const byId = new Map(executions.map((execution) => [execution.id, execution]));
+    const reportedIds = new Set<string>();
+    for (const result of reported) {
+      if (!result || typeof result.id !== 'string' || reportedIds.has(result.id)) {
+        throw new Error(`Tool Batch ${batchId} returned an invalid or duplicate Execution result.`);
+      }
+      reportedIds.add(result.id);
+      const current = byId.get(result.id);
+      if (
+        !current ||
+        current.threadId !== threadId ||
+        current.batchId !== batchId ||
+        current.kind !== 'tool' ||
+        result.threadId !== threadId ||
+        result.batchId !== batchId ||
+        result.kind !== 'tool' ||
+        result.toolName !== current.toolName ||
+        JSON.stringify(result.arguments) !== JSON.stringify(current.arguments)
+      ) {
+        throw new Error(`Tool Batch ${batchId} returned an Execution outside its durable batch.`);
+      }
+      if (!['pending', 'running', 'completed', 'failed', 'interrupted'].includes(result.status)) {
+        throw new Error(`Tool Batch ${batchId} returned an invalid Execution status.`);
+      }
+      if (terminalStatus(current.status) || result.status === 'pending' || current.status === result.status) continue;
+      const updated = this.store.transitionExecution(current.id, result.status, {
+        result: result.result ?? null,
+        ...(result.error ? { error: result.error } : {}),
+        detail: { source: 'tool-batch-pipeline' },
+      });
+      byId.set(updated.id, updated);
+      this.executionChanged(updated);
+    }
+    const persisted = this.store.listExecutionsByBatch(batchId);
+    for (const execution of persisted) this.ensureToolResult(threadId, execution);
+    return persisted;
   }
 
   private latestActiveBatch(threadId: string): { batchId: string; calls: ToolCall[] } | null {
