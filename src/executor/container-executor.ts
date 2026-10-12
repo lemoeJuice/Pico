@@ -228,6 +228,7 @@ function podman(args: string[], input?: string, signal?: AbortSignal): Promise<{
     const child = spawn('podman', args, { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
+    let killTimer: NodeJS.Timeout | undefined;
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
       stdout = `${stdout}${chunk}`.slice(-100_000);
     });
@@ -236,16 +237,19 @@ function podman(args: string[], input?: string, signal?: AbortSignal): Promise<{
     });
     const stop = (): void => {
       child.kill('SIGTERM');
+      killTimer ??= setTimeout(() => child.kill('SIGKILL'), 1_500);
     };
     const onAbort = (): void => {
       stop();
     };
     signal?.addEventListener('abort', onAbort, { once: true });
     child.once('error', (error) => {
+      if (killTimer) clearTimeout(killTimer);
       signal?.removeEventListener('abort', onAbort);
       reject(error);
     });
     child.once('close', (code) => {
+      if (killTimer) clearTimeout(killTimer);
       signal?.removeEventListener('abort', onAbort);
       if (signal?.aborted) return reject(new DOMException('Execution interrupted', 'AbortError'));
       if (code !== 0) return reject(new Error(stderr.trim() || `podman exited with code ${code ?? 1}`));
@@ -272,8 +276,8 @@ export class ContainerExecutor implements ExecutorAdapter {
     private readonly vfsStorageRoot = defaultVfsStorageRoot(),
   ) {}
 
-  async checkConnection(_binding: ExecutorBinding): Promise<void> {
-    await this.callPodman(['info', '--format', '{{.Version.Version}}']);
+  async checkConnection(_binding: ExecutorBinding, signal?: AbortSignal): Promise<void> {
+    await this.callPodman(['info', '--format', '{{.Version.Version}}'], undefined, signal);
   }
 
   private async callPodman(
@@ -334,8 +338,9 @@ export class ContainerExecutor implements ExecutorAdapter {
     const controller = new AbortController();
     const relayAbort = (): void => controller.abort();
     externalSignal?.addEventListener('abort', relayAbort, { once: true });
+    if (externalSignal?.aborted) controller.abort();
     const promise = (async () => {
-      await this.ensureContainer(binding);
+      await this.ensureContainer(binding, controller.signal);
       const running = this.store.transitionExecution(executionId, 'running');
       this.onExecution(running);
       return this.runRemote(executionId, current.toolName!, current.arguments ?? {}, binding, controller.signal);
@@ -399,6 +404,10 @@ export class ContainerExecutor implements ExecutorAdapter {
   async interrupt(executionId: string, binding: ExecutorBinding): Promise<Execution | null> {
     const active = this.inFlight.get(executionId);
     if (active) {
+      if (this.store.getExecution(executionId)?.status === 'pending') {
+        active.controller.abort();
+        return active.promise;
+      }
       const response = await this.callRunner(
         this.containerName(binding.id),
         'interrupt',
@@ -498,35 +507,44 @@ export class ContainerExecutor implements ExecutorAdapter {
     }
   }
 
-  private async ensureContainer(binding: ExecutorBinding): Promise<void> {
-    await this.checkConnection(binding);
+  private async ensureContainer(binding: ExecutorBinding, signal?: AbortSignal): Promise<void> {
+    await this.checkConnection(binding, signal);
     const name = this.containerName(binding.id);
-    if (await this.containerExists(name)) {
-      await this.startContainer(name);
+    if (await this.containerExists(name, signal)) {
+      await this.startContainer(name, signal);
       return;
     }
     const volume = `${binding.workspacePath}:/workspace:rw`;
-    await this.callPodman([
-      'run',
-      '-d',
-      '--name',
-      name,
-      '--label',
-      'io.pico.executor=true',
-      '--volume',
-      volume,
-      '--workdir',
-      '/workspace',
-      this.image,
-      'sleep',
-      'infinity',
-    ]);
+    try {
+      await this.callPodman(
+        [
+          'run',
+          '-d',
+          '--name',
+          name,
+          '--label',
+          'io.pico.executor=true',
+          '--volume',
+          volume,
+          '--workdir',
+          '/workspace',
+          this.image,
+          'sleep',
+          'infinity',
+        ],
+        undefined,
+        signal,
+      );
+    } catch (error) {
+      if (signal?.aborted) await this.callPodman(['rm', '--force', name]).catch(() => undefined);
+      throw error;
+    }
     this.containerIds.set(binding.id, name);
   }
 
-  private async containerExists(name: string): Promise<boolean> {
+  private async containerExists(name: string, signal?: AbortSignal): Promise<boolean> {
     try {
-      await this.callPodman(['inspect', '--type', 'container', name]);
+      await this.callPodman(['inspect', '--type', 'container', name], undefined, signal);
       return true;
     } catch (error) {
       if (
@@ -540,8 +558,8 @@ export class ContainerExecutor implements ExecutorAdapter {
     }
   }
 
-  private async startContainer(name: string): Promise<void> {
-    await this.callPodman(['start', name]).catch((error: unknown) => {
+  private async startContainer(name: string, signal?: AbortSignal): Promise<void> {
+    await this.callPodman(['start', name], undefined, signal).catch((error: unknown) => {
       if (error instanceof Error && /already running/i.test(error.message)) return;
       throw error;
     });

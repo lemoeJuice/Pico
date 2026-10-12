@@ -281,6 +281,69 @@ describe('Executor execution identity and recovery', () => {
     }
   });
 
+  it('Interrupt cancels Container Executor preparation before the tool starts', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.createThread('container');
+    const modelExecution = env.store.createModelExecution('preparing-model', thread.id, 0);
+    env.store.transitionExecution(modelExecution.id, 'running');
+    const call = { id: 'preparing-call', name: 'shell', arguments: { command: 'true' } };
+    env.store.commitModelStep({
+      assistantRecordId: 'preparing-model:assistant',
+      modelExecutionId: modelExecution.id,
+      threadId: thread.id,
+      payload: assistantPayload({ batchId: 'preparing-model:batch', toolCalls: [call] }),
+      toolCalls: [{ call, executionId: 'preparing-tool' }],
+    });
+
+    let markRunStarted!: () => void;
+    let observedAbort = false;
+    const runStarted = new Promise<void>((resolve) => {
+      markRunStarted = resolve;
+    });
+    const calls: string[][] = [];
+    const runner = async (args: string[], _input?: string, signal?: AbortSignal) => {
+      calls.push(args);
+      if (args[0] === 'info') return { stdout: '5.0.0', stderr: '' };
+      if (args[0] === 'inspect') throw new Error('no such container');
+      if (args[0] === 'run') {
+        markRunStarted();
+        return new Promise<{ stdout: string; stderr: string }>((_resolve, reject) => {
+          signal?.addEventListener(
+            'abort',
+            () => {
+              observedAbort = true;
+              setTimeout(() => reject(new DOMException('Execution interrupted', 'AbortError')), 5);
+            },
+            { once: true },
+          );
+        });
+      }
+      if (args[0] === 'rm') return { stdout: '', stderr: '' };
+      throw new Error(`Unexpected Podman command: ${args[0] ?? 'empty'}`);
+    };
+    const catalog = new ToolCatalog();
+    catalog.register({
+      owner: 'test',
+      source: 'executor',
+      definition: { name: 'shell', description: 'test shell', parameters: { type: 'object' } },
+      execute: async () => ({ exitCode: 0 }),
+    });
+    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, runner);
+    try {
+      const binding = env.store.executorForThread(thread.id)!;
+      const execution = executor.execute('preparing-tool', binding);
+      await runStarted;
+      const interrupted = await executor.interrupt('preparing-tool', binding);
+      expect(observedAbort).toBe(true);
+      expect(interrupted?.status).toBe('interrupted');
+      expect((await execution).status).toBe('interrupted');
+      expect(env.store.getExecution('preparing-tool')?.status).toBe('interrupted');
+      expect(calls.some((args) => args[0] === 'exec')).toBe(false);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it('retries Btrfs overlay storage with the discovered fuse-overlayfs helper', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.createThread('container');
