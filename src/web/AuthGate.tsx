@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from
 type AuthStatus = { authRequired: boolean; authenticated: boolean };
 
 async function fetchStatus(): Promise<AuthStatus> {
-  const response = await fetch('/api/auth/status');
+  const response = await fetch('/api/auth/status', { signal: AbortSignal.timeout(10_000) });
   if (!response.ok) throw new Error(`Could not reach Pico (${response.status})`);
   return (await response.json()) as AuthStatus;
 }
@@ -18,23 +18,52 @@ export function AuthGate({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<boolean> => {
     try {
       setStatus(await fetchStatus());
       setError('');
+      return true;
     } catch (cause) {
       setStatus(null);
       setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
     }
   }, []);
 
   useEffect(() => {
-    void refresh();
-    const expire = (): void => {
-      void refresh();
+    let alive = true;
+    let timer: number | undefined;
+    let retryDelay = 750;
+    let checking = false;
+    const connect = async (): Promise<void> => {
+      if (!alive || checking) return;
+      checking = true;
+      const connected = await refresh();
+      checking = false;
+      if (!alive) return;
+      if (connected) {
+        retryDelay = 750;
+        return;
+      }
+      timer = window.setTimeout(() => {
+        timer = undefined;
+        retryDelay = Math.min(retryDelay * 1.7, 12_000);
+        void connect();
+      }, retryDelay);
     };
+    const expire = (): void => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = undefined;
+      retryDelay = 750;
+      void connect();
+    };
+    void connect();
     window.addEventListener('pico:auth-expired', expire);
-    return () => window.removeEventListener('pico:auth-expired', expire);
+    return () => {
+      alive = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+      window.removeEventListener('pico:auth-expired', expire);
+    };
   }, [refresh]);
 
   const login = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
@@ -53,7 +82,7 @@ export function AuthGate({
         throw new Error(result?.error ?? `Sign in failed (${response.status})`);
       }
       setToken('');
-      await refresh();
+      if (!(await refresh())) window.dispatchEvent(new Event('pico:auth-expired'));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -62,8 +91,17 @@ export function AuthGate({
   };
 
   const logout = useCallback(async () => {
-    await fetch('/api/auth/session', { method: 'DELETE' });
-    await refresh();
+    try {
+      const response = await fetch('/api/auth/session', {
+        method: 'DELETE',
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) throw new Error(`Sign out failed (${response.status})`);
+      if (!(await refresh())) window.dispatchEvent(new Event('pico:auth-expired'));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      window.dispatchEvent(new Event('pico:auth-expired'));
+    }
   }, [refresh]);
 
   if (status?.authenticated) return <>{children({ authRequired: status.authRequired, onSignOut: logout })}</>;
@@ -102,7 +140,9 @@ export function AuthGate({
           </>
         ) : (
           <>
-            <p className="auth-copy">{error || 'Checking the local Runtime connection.'}</p>
+            <p className="auth-copy">
+              {error ? `${error} Retrying automatically…` : 'Checking the local Runtime connection.'}
+            </p>
             {error ? (
               <button className="button button-soft" onClick={() => void refresh()}>
                 Retry
