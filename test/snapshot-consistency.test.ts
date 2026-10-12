@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   fetchStableSnapshot,
   snapshotForSelection,
   snapshotThreadIsSelected,
+  updateSnapshotForThread,
 } from '../src/web/snapshot-consistency.js';
 
 describe('snapshot refresh consistency', () => {
@@ -57,5 +58,17 @@ describe('snapshot refresh consistency', () => {
   it('does not start a background refresh for a Thread that is no longer selected', () => {
     expect(snapshotThreadIsSelected('thread-a', 'thread-b')).toBe(false);
     expect(snapshotThreadIsSelected('thread-b', 'thread-b')).toBe(true);
+  });
+
+  it('does not apply a late approval response to the selected Thread snapshot', () => {
+    const current = { thread: { id: 'thread-b' }, approvals: [{ executionId: 'approval-b' }] };
+    const update = vi.fn((snapshot: typeof current) => ({ ...snapshot, approvals: [] }));
+
+    const unchanged = updateSnapshotForThread(current, 'thread-a', update);
+    const changed = updateSnapshotForThread(current, 'thread-b', update);
+
+    expect(unchanged).toBe(current);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(changed).toEqual({ thread: { id: 'thread-b' }, approvals: [] });
   });
 });

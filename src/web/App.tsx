@@ -21,7 +21,12 @@ import { isSessionExpired } from './session.js';
 import { visiblePauseReason } from './pause-reason.js';
 import { shouldSubmitOnEnter } from './composer-keys.js';
 import { upsertProjectThread } from './project-threads.js';
-import { fetchStableSnapshot, snapshotForSelection, snapshotThreadIsSelected } from './snapshot-consistency.js';
+import {
+  fetchStableSnapshot,
+  snapshotForSelection,
+  snapshotThreadIsSelected,
+  updateSnapshotForThread,
+} from './snapshot-consistency.js';
 import { isNearScrollEnd } from './scroll-follow.js';
 import { threadCanBeInterrupted } from './thread-controls.js';
 import {
@@ -298,6 +303,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [pluginInfo, setPluginInfo] = useState<PluginInfo | null>(null);
   const [commands, setCommands] = useState<Array<{ name: string; description: string }>>([]);
   const [permissions, setPermissions] = useState<ToolPermission[]>([]);
+  const [permissionsThreadId, setPermissionsThreadId] = useState<string | null>(null);
   const [executorConnected, setExecutorConnected] = useState<boolean | null>(null);
   const [executorError, setExecutorError] = useState<string | null>(null);
   const [socketConnected, setSocketConnected] = useState(false);
@@ -400,6 +406,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     threads.find((thread) => thread.id === threadId && thread.projectId === projectId) ??
     null;
   const selectedThreadSending = selectedThread ? sendingThreadIds.has(selectedThread.id) : false;
+  const displayedPermissions = permissionsThreadId === threadId ? permissions : [];
   const activeNotice = noticeForThread(threadId, threadNotices, notice);
   const assistantDraft = assistantDraftForThread(assistantDrafts, threadId);
   const filteredCommands = useMemo(() => {
@@ -548,10 +555,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       setExecutorConnected(null);
       setExecutorError(null);
       setPermissions([]);
+      setPermissionsThreadId(null);
       return;
     }
     setExecutorConnected(null);
     setExecutorError(null);
+    setPermissions([]);
+    setPermissionsThreadId(threadId);
     let alive = true;
     const refresh = async (): Promise<void> => {
       const [executor, nextPermissions] = await Promise.all([
@@ -562,6 +572,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       setExecutorConnected(executor.connected);
       setExecutorError(executor.connected ? null : (executor.error ?? 'Executor connection failed.'));
       setPermissions(nextPermissions);
+      setPermissionsThreadId(threadId);
     };
     void refresh().catch((caught: unknown) => {
       if (alive) {
@@ -746,8 +757,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           setThreadNotices((current) =>
             withThreadNotice(current, event.threadId as string, String(event.message ?? 'Runtime notice')),
           );
-        } else if (event.type === 'permissions.updated' && event.threadId === activeThreadId.current) {
+        } else if (
+          event.type === 'permissions.updated' &&
+          typeof event.threadId === 'string' &&
+          event.threadId === activeThreadId.current
+        ) {
           setPermissions(event.permissions as ToolPermission[]);
+          setPermissionsThreadId(event.threadId);
         } else if (event.type === 'settings.updated') {
           const value = event.settings as PublicSettings;
           setSettings(value);
@@ -964,34 +980,44 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   };
 
   const resolveApproval = async (executionId: string, allow: boolean, rememberForThread = false): Promise<void> => {
+    const targetThreadId = threadId;
+    if (!targetThreadId) return;
     try {
       const approval = await api<PermissionRequest>(`/api/approvals/${executionId}`, {
         method: 'POST',
         body: JSON.stringify({ allow, ...(rememberForThread ? { rememberForThread: true } : {}) }),
       });
       setSnapshot((current) =>
-        current
-          ? {
-              ...current,
-              approvals: [approval, ...current.approvals.filter((item) => item.executionId !== executionId)],
-            }
-          : current,
+        updateSnapshotForThread(current, targetThreadId, (snapshot) => ({
+          ...snapshot,
+          approvals: [approval, ...snapshot.approvals.filter((item) => item.executionId !== executionId)],
+        })),
       );
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      if (snapshotThreadIsSelected(targetThreadId, activeThreadId.current)) {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      }
     }
   };
 
   const updatePermission = async (toolName: string, policy: PermissionPolicy): Promise<void> => {
-    if (!threadId) return;
+    const targetThreadId = threadId;
+    if (!targetThreadId) return;
     try {
-      const next = await api<ToolPermission[]>(`/api/threads/${threadId}/permissions/${encodeURIComponent(toolName)}`, {
-        method: 'PUT',
-        body: JSON.stringify({ policy }),
-      });
+      const next = await api<ToolPermission[]>(
+        `/api/threads/${targetThreadId}/permissions/${encodeURIComponent(toolName)}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({ policy }),
+        },
+      );
+      if (!snapshotThreadIsSelected(targetThreadId, activeThreadId.current)) return;
       setPermissions(next);
+      setPermissionsThreadId(targetThreadId);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      if (snapshotThreadIsSelected(targetThreadId, activeThreadId.current)) {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      }
     }
   };
 
@@ -1341,14 +1367,14 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 ))}
                 <details className="permission-menu">
                   <summary className="button button-quiet">
-                    Tools <span className="permission-count">{permissions.length}</span>
+                    Tools <span className="permission-count">{displayedPermissions.length}</span>
                   </summary>
                   <div className="permission-popover">
                     <div className="popover-heading">
                       <strong>Tool permissions</strong>
                       <span>Saved for this Thread</span>
                     </div>
-                    {permissions.map((permission) => (
+                    {displayedPermissions.map((permission) => (
                       <label className="permission-row" key={permission.name}>
                         <span>
                           <strong>{permission.name}</strong>

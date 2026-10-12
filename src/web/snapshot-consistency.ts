@@ -16,6 +16,15 @@ export function snapshotThreadIsSelected(threadId: string, selectedThreadId: str
   return threadId === selectedThreadId;
 }
 
+export function updateSnapshotForThread<T extends { thread: { id: string } }>(
+  snapshot: T | null,
+  threadId: string,
+  update: (current: T) => T,
+): T | null {
+  if (!snapshot || !snapshotThreadIsSelected(snapshot.thread.id, threadId)) return snapshot;
+  return update(snapshot);
+}
+
 export function snapshotForSelection<T extends { thread: { id: string; projectId: string } }>(
   snapshot: T | null,
   threadId: string | null,
