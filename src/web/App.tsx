@@ -18,6 +18,7 @@ import type { PermissionPolicy } from '../runtime/stages.js';
 import type { ThreadSnapshot } from '../runtime/runtime.js';
 import { isSessionExpired } from './session.js';
 import { fetchStableSnapshot, snapshotForSelection } from './snapshot-consistency.js';
+import { isNearScrollEnd } from './scroll-follow.js';
 
 type PluginInfo = {
   plugins: Array<{ id: string; name: string; version: string; source: string }>;
@@ -262,6 +263,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     hasApiKey: false,
   });
   const listRef = useRef<HTMLDivElement>(null);
+  const followLatest = useRef(true);
   const snapshotRequest = useRef(0);
   const threadUpdateVersions = useRef(new Map<string, number>());
   const snapshotVersions = useRef(new Map<string, number>());
@@ -540,12 +542,18 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   }, [noteSnapshotChange, refreshSelected, threadId]);
 
   useEffect(() => {
-    if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
-  }, [snapshot?.records.length, assistantDraft]);
+    followLatest.current = true;
+  }, [threadId]);
+
+  useEffect(() => {
+    const list = listRef.current;
+    if (list && followLatest.current) list.scrollTop = list.scrollHeight;
+  }, [threadId, activeSnapshot?.records.length, assistantDraft]);
 
   const sendMessage = async (content = draft): Promise<void> => {
     const clean = content.trim();
     if (!threadId || !clean || busy) return;
+    followLatest.current = true;
     setBusy(true);
     setError('');
     const id = retryMessage.current?.content === clean ? retryMessage.current.id : crypto.randomUUID();
@@ -1000,7 +1008,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               </div>
             </div>
 
-            <div className="conversation-scroll" ref={listRef}>
+            <div
+              className="conversation-scroll"
+              ref={listRef}
+              onScroll={(event) => {
+                followLatest.current = isNearScrollEnd(event.currentTarget);
+              }}
+            >
               <div className="timeline">
                 {renderedRecords.map((record) =>
                   record.kind === 'message' ? (
