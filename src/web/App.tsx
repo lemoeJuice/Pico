@@ -275,6 +275,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const snapshotVersions = useRef(new Map<string, number>());
   const retryMessage = useRef<{ id: string; content: string } | null>(null);
   activeProjectId.current = projectId;
+  const activeThreadId = useRef(threadId);
+  activeThreadId.current = threadId;
 
   const selectedProject = projects.find((project) => project.id === projectId) ?? null;
   const activeSnapshot = snapshotForSelection(snapshot, threadId, projectId);
@@ -329,6 +331,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         setError(caught instanceof Error ? caught.message : String(caught)),
       );
   }, [loadProjectThreads, loadSnapshot, projectId, threadId]);
+  const refreshSelectedRef = useRef(refreshSelected);
+  refreshSelectedRef.current = refreshSelected;
 
   useEffect(() => {
     let alive = true;
@@ -453,11 +457,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
       socket = new WebSocket(`${protocol}//${location.host}/api/events`);
       socket.onopen = () => {
+        if (closed) {
+          socket?.close();
+          return;
+        }
         retry = 750;
         setSocketConnected(true);
-        refreshSelected();
+        refreshSelectedRef.current();
       };
       socket.onmessage = (message) => {
+        if (closed) return;
         let event: RuntimeEvent;
         try {
           event = JSON.parse(String(message.data)) as RuntimeEvent;
@@ -495,7 +504,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           }
         } else if (event.type === 'record') {
           const record = event.record as CanonicalRecord | undefined;
-          if (record?.threadId === threadId) {
+          if (record?.threadId === activeThreadId.current) {
             noteSnapshotChange(record.threadId);
             setSnapshot((current) => {
               if (
@@ -510,7 +519,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           }
         } else if (event.type === 'execution.updated') {
           const execution = event.execution as Execution | undefined;
-          if (execution?.threadId === threadId) {
+          if (execution?.threadId === activeThreadId.current) {
             noteSnapshotChange(execution.threadId);
             setSnapshot((current) =>
               current
@@ -523,7 +532,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           }
         } else if (event.type === 'approval.updated') {
           const approval = event.approval as PermissionRequest | undefined;
-          if (approval?.threadId === threadId) {
+          if (approval?.threadId === activeThreadId.current) {
             noteSnapshotChange(approval.threadId);
             setSnapshot((current) =>
               current
@@ -537,16 +546,20 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 : current,
             );
           }
-        } else if (event.type === 'model.delta' && event.threadId === threadId && typeof event.delta === 'string') {
+        } else if (
+          event.type === 'model.delta' &&
+          event.threadId === activeThreadId.current &&
+          typeof event.delta === 'string'
+        ) {
           setAssistantDraft((text) => text + event.delta);
-        } else if (event.type === 'model.draft-ended' && event.threadId === threadId) {
+        } else if (event.type === 'model.draft-ended' && event.threadId === activeThreadId.current) {
           setAssistantDraft('');
-        } else if (event.type === 'runtime.error' && event.threadId === threadId) {
+        } else if (event.type === 'runtime.error' && event.threadId === activeThreadId.current) {
           setError(String(event.message ?? 'Runtime error'));
           setAssistantDraft('');
-        } else if (event.type === 'runtime.notice' && event.threadId === threadId) {
+        } else if (event.type === 'runtime.notice' && event.threadId === activeThreadId.current) {
           setNotice(String(event.message ?? 'Runtime notice'));
-        } else if (event.type === 'permissions.updated' && event.threadId === threadId) {
+        } else if (event.type === 'permissions.updated' && event.threadId === activeThreadId.current) {
           setPermissions(event.permissions as ToolPermission[]);
         } else if (event.type === 'settings.updated') {
           const value = event.settings as PublicSettings;
@@ -555,6 +568,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         }
       };
       socket.onclose = () => {
+        if (closed) return;
         setSocketConnected(false);
         void isSessionExpired().then((expired) => {
           if (expired) window.dispatchEvent(new Event('pico:auth-expired'));
@@ -566,7 +580,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           retry = Math.min(retry * 1.7, 12_000);
         }
       };
-      socket.onerror = () => socket?.close();
+      socket.onerror = () => {
+        if (!closed) socket?.close();
+      };
     };
     connect();
     return () => {
@@ -574,7 +590,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       if (timer) window.clearTimeout(timer);
       socket?.close();
     };
-  }, [noteSnapshotChange, refreshSelected, threadId]);
+  }, [noteSnapshotChange]);
 
   useEffect(() => {
     followLatest.current = true;
