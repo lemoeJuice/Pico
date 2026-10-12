@@ -17,7 +17,7 @@ import type {
 import type { PermissionPolicy } from '../runtime/stages.js';
 import type { ThreadSnapshot } from '../runtime/runtime.js';
 import { isSessionExpired } from './session.js';
-import { fetchStableSnapshot } from './snapshot-consistency.js';
+import { fetchStableSnapshot, snapshotForSelection } from './snapshot-consistency.js';
 
 type PluginInfo = {
   plugins: Array<{ id: string; name: string; version: string; source: string }>;
@@ -268,21 +268,17 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const retryMessage = useRef<{ id: string; content: string } | null>(null);
 
   const selectedProject = projects.find((project) => project.id === projectId) ?? null;
-  const selectedThread = snapshot?.thread ?? threads.find((thread) => thread.id === threadId) ?? null;
+  const activeSnapshot = snapshotForSelection(snapshot, threadId, projectId);
+  const selectedThread =
+    activeSnapshot?.thread ??
+    threads.find((thread) => thread.id === threadId && thread.projectId === projectId) ??
+    null;
   const filteredCommands = useMemo(() => {
     if (!draft.startsWith('/')) return [];
     const token = draft.slice(1).split(/\s/)[0]?.toLowerCase() ?? '';
     return commands.filter((command) => command.name.startsWith(token)).slice(0, 7);
   }, [commands, draft]);
   const uiContributions = (pluginInfo?.ui ?? []).filter((item) => item.slot === 'thread.toolbar');
-
-  const loadThreads = useCallback(async (forProject: string) => {
-    const values = await api<Thread[]>(`/api/projects/${encodeURIComponent(forProject)}/threads`);
-    setThreads(values);
-    const remembered = localStorage.getItem(`pico.thread.${forProject}`);
-    const nextId = values.some((item) => item.id === remembered) ? remembered : (values[0]?.id ?? null);
-    setThreadId(nextId);
-  }, []);
 
   const loadSnapshot = useCallback(async (id: string) => {
     const requestNumber = ++snapshotRequest.current;
@@ -339,17 +335,31 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   }, []);
 
   useEffect(() => {
+    let current = true;
+    setThreads([]);
+    setThreadId(null);
+    setSnapshot(null);
     if (!projectId) {
-      setThreads([]);
-      setThreadId(null);
-      setSnapshot(null);
-      return;
+      return () => {
+        current = false;
+      };
     }
     localStorage.setItem('pico.project', projectId);
-    void loadThreads(projectId).catch((caught: unknown) =>
-      setError(caught instanceof Error ? caught.message : String(caught)),
-    );
-  }, [projectId, loadThreads]);
+    void api<Thread[]>(`/api/projects/${encodeURIComponent(projectId)}/threads`)
+      .then((values) => {
+        if (!current) return;
+        setThreads(values);
+        const remembered = localStorage.getItem(`pico.thread.${projectId}`);
+        const nextId = values.some((item) => item.id === remembered) ? remembered : (values[0]?.id ?? null);
+        setThreadId(nextId);
+      })
+      .catch((caught: unknown) => {
+        if (current) setError(caught instanceof Error ? caught.message : String(caught));
+      });
+    return () => {
+      current = false;
+    };
+  }, [projectId]);
 
   useEffect(() => {
     if (!threadId) {
@@ -575,6 +585,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       setNewProjectPath('');
       setThreads([]);
       setThreadId(null);
+      setSnapshot(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -704,16 +715,19 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   };
 
   const chooseThread = (id: string): void => {
-    setThreadId(id);
+    if (id !== threadId) {
+      setThreadId(id);
+      setSnapshot(null);
+    }
     localStorage.setItem(`pico.thread.${projectId ?? 'none'}`, id);
     setMobileSidebarOpen(false);
     setNotice('');
     setError('');
   };
 
-  const records = snapshot?.records ?? [];
-  const executions = snapshot?.executions ?? [];
-  const approvals = snapshot?.approvals ?? [];
+  const records = activeSnapshot?.records ?? [];
+  const executions = activeSnapshot?.executions ?? [];
+  const approvals = activeSnapshot?.approvals ?? [];
   const childrenByParent = new Map<string, Thread[]>();
   for (const thread of threads) {
     if (!thread.parentThreadId) continue;
@@ -765,7 +779,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             <select
               id="project-select"
               value={projectId ?? ''}
-              onChange={(event) => setProjectId(event.target.value || null)}
+              onChange={(event) => {
+                setProjectId(event.target.value || null);
+                setThreads([]);
+                setThreadId(null);
+                setSnapshot(null);
+              }}
             >
               <option value="">Choose a Project…</option>
               {projects.map((project) => (

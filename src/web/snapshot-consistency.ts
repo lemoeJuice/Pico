@@ -11,3 +11,12 @@ export async function fetchStableSnapshot<T>(
   }
   return null;
 }
+
+export function snapshotForSelection<T extends { thread: { id: string; projectId: string } }>(
+  snapshot: T | null,
+  threadId: string | null,
+  projectId: string | null,
+): T | null {
+  if (!snapshot || !threadId || !projectId) return null;
+  return snapshot.thread.id === threadId && snapshot.thread.projectId === projectId ? snapshot : null;
+}

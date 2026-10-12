@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fetchStableSnapshot } from '../src/web/snapshot-consistency.js';
+import { fetchStableSnapshot, snapshotForSelection } from '../src/web/snapshot-consistency.js';
 
 describe('snapshot refresh consistency', () => {
   it('fetches again when live thread events arrive during a snapshot request', async () => {
@@ -34,5 +34,13 @@ describe('snapshot refresh consistency', () => {
     );
 
     expect(snapshot).toBeNull();
+  });
+
+  it('never exposes a snapshot from a different Thread or Project selection', () => {
+    const snapshot = { thread: { id: 'thread-a', projectId: 'project-a' }, records: ['old conversation'] };
+
+    expect(snapshotForSelection(snapshot, 'thread-b', 'project-a')).toBeNull();
+    expect(snapshotForSelection(snapshot, 'thread-a', 'project-b')).toBeNull();
+    expect(snapshotForSelection(snapshot, 'thread-a', 'project-a')).toBe(snapshot);
   });
 });
