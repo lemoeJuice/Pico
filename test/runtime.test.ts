@@ -160,6 +160,39 @@ describe('durable Thread runtime invariants', () => {
     }
   });
 
+  it('Interrupt stops a pathological Host search while the Runtime remains responsive', async () => {
+    const model = new FakeModel((_prompt, callNumber) =>
+      callNumber === 1
+        ? response('', [{ id: 'regex-search', name: 'search_files', arguments: { pattern: '^(a+)+$' } }])
+        : response('The search was interrupted.'),
+    );
+    const env = await setupRuntime(model);
+    const thread = env.createThread('host');
+    await writeFile(`${env.workspace}/pathological.txt`, `${'a'.repeat(28)}!`, 'utf8');
+    env.runtime.setToolPermission(thread.id, 'search_files', 'allow');
+    try {
+      await env.runtime.submit(thread.id, 'regex-search-message', 'Search this workspace.');
+      await until(() =>
+        env.store
+          .listExecutions(thread.id)
+          .some((execution) => execution.toolName === 'search_files' && execution.status === 'running'),
+      );
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+
+      await env.runtime.interrupt(thread.id);
+      await env.runtime.drain();
+
+      const execution = env.store.listExecutions(thread.id).find((item) => item.toolName === 'search_files');
+      const result = env.store.listRecords(thread.id).find((record) => record.kind === 'tool_result');
+      expect(execution?.status).toBe('interrupted');
+      expect((result?.payload as { status?: string }).status).toBe('interrupted');
+      expect(model.calls).toBe(1);
+      expect(env.runtime.getThread(thread.id)?.state).toBe('paused');
+    } finally {
+      await env.cleanup();
+    }
+  }, 5000);
+
   it('Interrupt cancels a pending approval without recording a denial or starting the Tool', async () => {
     const model = new FakeModel((_prompt, callNumber) =>
       callNumber === 1

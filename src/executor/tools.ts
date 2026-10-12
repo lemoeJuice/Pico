@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
-import { lstat, readFile, readdir, realpath, stat, writeFile, unlink, mkdir } from 'node:fs/promises';
+import { lstat, readFile, realpath, writeFile, unlink, mkdir } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { Worker } from 'node:worker_threads';
 import type { ToolDefinition } from '../core/types.js';
 import type { Thread } from '../core/types.js';
 
@@ -191,36 +192,36 @@ function shellCommand(command: string): { executable: string; args: string[] } {
   return { executable: '/bin/sh', args: ['-lc', command] };
 }
 
-async function searchFiles(
-  pattern: string,
-  rootPath: string,
-  signal: AbortSignal,
-): Promise<{ matches: string[]; truncated: boolean }> {
-  const expression = new RegExp(pattern);
-  const results: string[] = [];
+const searchWorkerSource = String.raw`
+const { parentPort, workerData } = require('node:worker_threads');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+
+async function search() {
+  const expression = new RegExp(workerData.pattern);
+  const results = [];
   const ignore = new Set(['.git', 'node_modules', 'dist', 'target', '.next', '.pico']);
   let truncated = false;
-  const visit = async (directory: string, depth: number): Promise<void> => {
-    if (signal.aborted) throw new DOMException('Execution interrupted', 'AbortError');
+  const visit = async (directory, depth) => {
     if (depth > 18 || results.length >= 200) {
       truncated = true;
       return;
     }
-    const entries = await readdir(directory, { withFileTypes: true });
+    const entries = await fs.readdir(directory, { withFileTypes: true });
     for (const entry of entries) {
       if (ignore.has(entry.name)) continue;
-      const full = resolve(directory, entry.name);
+      const full = path.resolve(directory, entry.name);
       if (entry.isDirectory()) {
         await visit(full, depth + 1);
       } else if (entry.isFile()) {
-        const info = await stat(full);
-        if (info.size > 1_000_000) continue;
-        const content = await readFile(full, 'utf8').catch(() => null);
+        const info = await fs.stat(full);
+        if (info.size > 1000000) continue;
+        const content = await fs.readFile(full, 'utf8').catch(() => null);
         if (content === null || content.includes('\0')) continue;
         const lines = content.split(/\r?\n/);
         lines.forEach((line, index) => {
           if (results.length < 200 && expression.test(line)) {
-            results.push(`${relative(rootPath, full)}:${index + 1}:${line}`);
+            results.push(path.relative(workerData.rootPath, full) + ':' + (index + 1) + ':' + line);
             expression.lastIndex = 0;
           }
         });
@@ -231,8 +232,59 @@ async function searchFiles(
       }
     }
   };
-  await visit(rootPath, 0);
+  await visit(workerData.rootPath, 0);
   return { matches: results, truncated };
+}
+
+search().then(
+  result => parentPort.postMessage({ result }),
+  error => parentPort.postMessage({ error: error instanceof Error ? error.message : String(error) }),
+);
+`;
+
+const searchTimeoutMs = 120_000;
+
+async function searchFiles(
+  pattern: string,
+  rootPath: string,
+  signal: AbortSignal,
+): Promise<{ matches: string[]; truncated: boolean }> {
+  if (signal.aborted) throw new DOMException('Execution interrupted', 'AbortError');
+  return new Promise((resolvePromise, reject) => {
+    const worker = new Worker(searchWorkerSource, {
+      eval: true,
+      workerData: { pattern, rootPath },
+    });
+    let settled = false;
+    const finish = (complete: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      complete();
+    };
+    const onAbort = (): void => {
+      void worker.terminate();
+      finish(() => reject(new DOMException('Execution interrupted', 'AbortError')));
+    };
+    const timer = setTimeout(() => {
+      void worker.terminate();
+      finish(() => reject(new Error(`Search timed out after ${searchTimeoutMs}ms`)));
+    }, searchTimeoutMs);
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    worker.on('message', (message: { result?: { matches: string[]; truncated: boolean }; error?: string }) => {
+      if (message.error !== undefined) {
+        finish(() => reject(new Error(message.error)));
+      } else if (message.result) {
+        finish(() => resolvePromise(message.result!));
+      }
+    });
+    worker.once('error', (error) => finish(() => reject(error)));
+    worker.once('exit', (code) => {
+      if (!settled) finish(() => reject(new Error(`Search worker exited with code ${code}`)));
+    });
+  });
 }
 
 function applyHunks(source: string, hunks: string[]): string {

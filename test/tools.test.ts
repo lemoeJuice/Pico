@@ -83,4 +83,22 @@ describe('workspace tools', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it('keeps a pathological regular expression interruptible without blocking the Runtime', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-search-cancel-'));
+    const workspacePath = join(directory, 'workspace');
+    await mkdir(workspacePath);
+    await writeFile(join(workspacePath, 'input.txt'), `${'a'.repeat(28)}!`, 'utf8');
+    const controller = new AbortController();
+    const context = { workspacePath, executionId: 'test', signal: controller.signal };
+    const search = toolMap.get('search_files')!.execute({ pattern: '^(a+)+$' }, context);
+    const interrupt = setTimeout(() => controller.abort(), 200);
+    try {
+      await expect(search).rejects.toMatchObject({ name: 'AbortError' });
+    } finally {
+      clearTimeout(interrupt);
+      controller.abort();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 5000);
 });
