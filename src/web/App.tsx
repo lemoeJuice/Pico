@@ -18,6 +18,7 @@ import type { PermissionPolicy } from '../runtime/stages.js';
 import type { ThreadSnapshot } from '../runtime/runtime.js';
 import { isSessionExpired } from './session.js';
 import { visiblePauseReason } from './pause-reason.js';
+import { upsertProjectThread } from './project-threads.js';
 import { fetchStableSnapshot, snapshotForSelection } from './snapshot-consistency.js';
 import { isNearScrollEnd } from './scroll-follow.js';
 
@@ -266,9 +267,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const listRef = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
   const snapshotRequest = useRef(0);
+  const projectThreadVersions = useRef(new Map<string, number>());
+  const activeProjectId = useRef(projectId);
   const threadUpdateVersions = useRef(new Map<string, number>());
   const snapshotVersions = useRef(new Map<string, number>());
   const retryMessage = useRef<{ id: string; content: string } | null>(null);
+  activeProjectId.current = projectId;
 
   const selectedProject = projects.find((project) => project.id === projectId) ?? null;
   const activeSnapshot = snapshotForSelection(snapshot, threadId, projectId);
@@ -298,12 +302,28 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     snapshotVersions.current.set(threadId, (snapshotVersions.current.get(threadId) ?? 0) + 1);
   }, []);
 
+  const loadProjectThreads = useCallback(async (id: string): Promise<Thread[] | null> => {
+    const version = projectThreadVersions.current.get(id) ?? 0;
+    projectThreadVersions.current.set(id, version + 1);
+    const values = await fetchStableSnapshot(
+      () => api<Thread[]>(`/api/projects/${encodeURIComponent(id)}/threads`),
+      () => projectThreadVersions.current.get(id) ?? 0,
+      () => activeProjectId.current === id,
+    );
+    if (values) setThreads(values);
+    return values;
+  }, []);
+
   const refreshSelected = useCallback(() => {
+    if (projectId)
+      void loadProjectThreads(projectId).catch((caught: unknown) =>
+        setError(caught instanceof Error ? caught.message : String(caught)),
+      );
     if (threadId)
       void loadSnapshot(threadId).catch((caught: unknown) =>
         setError(caught instanceof Error ? caught.message : String(caught)),
       );
-  }, [loadSnapshot, threadId]);
+  }, [loadProjectThreads, loadSnapshot, projectId, threadId]);
 
   useEffect(() => {
     let alive = true;
@@ -348,10 +368,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       };
     }
     localStorage.setItem('pico.project', projectId);
-    void api<Thread[]>(`/api/projects/${encodeURIComponent(projectId)}/threads`)
+    void loadProjectThreads(projectId)
       .then((values) => {
-        if (!current) return;
-        setThreads(values);
+        if (!current || !values) return;
         const remembered = localStorage.getItem(`pico.thread.${projectId}`);
         const nextId = values.some((item) => item.id === remembered) ? remembered : (values[0]?.id ?? null);
         setThreadId(nextId);
@@ -362,7 +381,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     return () => {
       current = false;
     };
-  }, [projectId]);
+  }, [loadProjectThreads, projectId]);
 
   useEffect(() => {
     if (!threadId) {
@@ -443,9 +462,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         if (event.type === 'thread.created') {
           const created = event.thread as Thread | undefined;
           if (created) {
+            projectThreadVersions.current.set(
+              created.projectId,
+              (projectThreadVersions.current.get(created.projectId) ?? 0) + 1,
+            );
             noteSnapshotChange(created.id);
             noteSnapshotChange(created.parentThreadId);
-            setThreads((items) => [created, ...items.filter((item) => item.id !== created.id)]);
+            setThreads((items) => upsertProjectThread(items, created, activeProjectId.current));
             setSnapshot((current) =>
               current && created.parentThreadId === current.thread.id
                 ? { ...current, children: [created, ...current.children.filter((item) => item.id !== created.id)] }
@@ -455,10 +478,14 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         } else if (event.type === 'thread.updated') {
           const updated = event.thread as Thread | undefined;
           if (updated) {
+            projectThreadVersions.current.set(
+              updated.projectId,
+              (projectThreadVersions.current.get(updated.projectId) ?? 0) + 1,
+            );
             threadUpdateVersions.current.set(updated.id, (threadUpdateVersions.current.get(updated.id) ?? 0) + 1);
             noteSnapshotChange(updated.id);
             noteSnapshotChange(updated.parentThreadId);
-            setThreads((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+            setThreads((items) => upsertProjectThread(items, updated, activeProjectId.current));
             setSnapshot((current) => (current?.thread.id === updated.id ? { ...current, thread: updated } : current));
           }
         } else if (event.type === 'record') {

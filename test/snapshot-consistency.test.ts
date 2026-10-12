@@ -2,24 +2,30 @@ import { describe, expect, it } from 'vitest';
 import { fetchStableSnapshot, snapshotForSelection } from '../src/web/snapshot-consistency.js';
 
 describe('snapshot refresh consistency', () => {
-  it('fetches again when live thread events arrive during a snapshot request', async () => {
+  it('refreshes a Project thread list when creation races the request', async () => {
     let version = 0;
     let requests = 0;
-    const snapshot = await fetchStableSnapshot(
+    const threads = await fetchStableSnapshot(
       async () => {
         requests += 1;
         if (requests === 1) {
           version += 1;
-          return { assistantMessages: [] };
+          return [{ id: 'main', projectId: 'project-a' }];
         }
-        return { assistantMessages: ['latest reply'] };
+        return [
+          { id: 'new-thread', projectId: 'project-a' },
+          { id: 'main', projectId: 'project-a' },
+        ];
       },
       () => version,
       () => true,
     );
 
     expect(requests).toBe(2);
-    expect(snapshot).toEqual({ assistantMessages: ['latest reply'] });
+    expect(threads).toEqual([
+      { id: 'new-thread', projectId: 'project-a' },
+      { id: 'main', projectId: 'project-a' },
+    ]);
   });
 
   it('discards a snapshot when its Thread is no longer selected', async () => {
