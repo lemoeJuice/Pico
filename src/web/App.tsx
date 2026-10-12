@@ -18,6 +18,7 @@ import type { PermissionPolicy } from '../runtime/stages.js';
 import type { ModelInputAttempt, ThreadSnapshot } from '../runtime/runtime.js';
 import { isSessionExpired } from './session.js';
 import { visiblePauseReason } from './pause-reason.js';
+import { shouldSubmitOnEnter } from './composer-keys.js';
 import { upsertProjectThread } from './project-threads.js';
 import { fetchStableSnapshot, snapshotForSelection, snapshotThreadIsSelected } from './snapshot-consistency.js';
 import { isNearScrollEnd } from './scroll-follow.js';
@@ -1370,7 +1371,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   value={draft}
                   onChange={(event) => updateDraft(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === 'Enter' && !event.shiftKey) {
+                    if (shouldSubmitOnEnter(event.nativeEvent)) {
                       event.preventDefault();
                       if (filteredCommands.length > 0 && draft.trim() === '/')
                         updateDraft(`/${filteredCommands[0]!.name} `);
