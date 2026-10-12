@@ -123,7 +123,7 @@ function runProcess(
     });
     let stdout = '';
     let stderr = '';
-    let timedOut = false;
+    let terminationReason: 'interrupted' | 'timeout' | null = null;
     let killTimer: NodeJS.Timeout | undefined;
     const limit = 40_000;
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
@@ -152,16 +152,19 @@ function runProcess(
       }, 1_500);
     };
     const onAbort = (): void => {
+      if (terminationReason) return;
+      terminationReason = 'interrupted';
       stop();
       forceStopSoon();
-      reject(new DOMException('Execution interrupted', 'AbortError'));
     };
     const timer = setTimeout(() => {
-      timedOut = true;
+      if (terminationReason) return;
+      terminationReason = 'timeout';
       stop();
       forceStopSoon();
     }, timeoutMs);
     signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
     child.once('error', (error) => {
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
@@ -172,8 +175,8 @@ function runProcess(
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
       signal.removeEventListener('abort', onAbort);
-      if (signal.aborted) return reject(new DOMException('Execution interrupted', 'AbortError'));
-      if (timedOut) return reject(new Error(`Command timed out after ${timeoutMs}ms`));
+      if (terminationReason === 'interrupted') return reject(new DOMException('Execution interrupted', 'AbortError'));
+      if (terminationReason === 'timeout') return reject(new Error(`Command timed out after ${timeoutMs}ms`));
       resolvePromise({ exitCode: code ?? 1, stdout, stderr });
     });
   });

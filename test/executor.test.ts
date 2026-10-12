@@ -217,36 +217,53 @@ describe('Executor execution identity and recovery', () => {
     }
   });
 
-  it('Pause leaves a Host shell running; explicit Interrupt settles it as interrupted', async () => {
-    const model = new FakeModel((_prompt, callNumber) =>
-      callNumber === 1
-        ? response('', [{ id: 'shell-call', name: 'shell', arguments: { command: 'sleep 10', timeout_ms: 20_000 } }])
-        : response('Stopped safely.'),
-    );
-    const env = await setupRuntime(model);
-    const thread = env.createThread('host');
-    env.runtime.setToolPermission(thread.id, 'shell', 'allow');
-    try {
-      await env.runtime.submit(thread.id, 'shell-control-message', 'Run a long task');
-      await until(() =>
-        env.store
-          .listExecutions(thread.id)
-          .some((execution) => execution.toolName === 'shell' && execution.status === 'running'),
+  it.skipIf(process.platform === 'win32')(
+    'Pause leaves a Host shell running; Interrupt waits for the process group to stop',
+    async () => {
+      const model = new FakeModel((_prompt, callNumber) =>
+        callNumber === 1
+          ? response('', [
+              {
+                id: 'shell-call',
+                name: 'shell',
+                arguments: { command: "trap '' TERM; while :; do sleep 0.05; done", timeout_ms: 20_000 },
+              },
+            ])
+          : response('Stopped safely.'),
       );
-      const shell = env.store.listExecutions(thread.id).find((execution) => execution.toolName === 'shell')!;
-      env.runtime.pause(thread.id);
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-      expect(env.store.getExecution(shell.id)?.status).toBe('running');
+      const env = await setupRuntime(model);
+      const thread = env.createThread('host');
+      env.runtime.setToolPermission(thread.id, 'shell', 'allow');
+      try {
+        await env.runtime.submit(thread.id, 'shell-control-message', 'Run a long task');
+        await until(() =>
+          env.store
+            .listExecutions(thread.id)
+            .some((execution) => execution.toolName === 'shell' && execution.status === 'running'),
+        );
+        const shell = env.store.listExecutions(thread.id).find((execution) => execution.toolName === 'shell')!;
+        env.runtime.pause(thread.id);
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+        expect(env.store.getExecution(shell.id)?.status).toBe('running');
 
-      await env.runtime.interrupt(thread.id);
-      await env.runtime.drain();
-      expect(env.store.getExecution(shell.id)?.status).toBe('interrupted');
-      expect(env.store.hasToolResult(shell.id)).toBe(true);
-      expect(model.calls).toBe(1);
-    } finally {
-      await env.cleanup();
-    }
-  });
+        let interruptSettled = false;
+        const interrupt = env.runtime.interrupt(thread.id).then(() => {
+          interruptSettled = true;
+        });
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+        expect(interruptSettled).toBe(false);
+        expect(env.store.getExecution(shell.id)?.status).toBe('running');
+
+        await interrupt;
+        await env.runtime.drain();
+        expect(env.store.getExecution(shell.id)?.status).toBe('interrupted');
+        expect(env.store.hasToolResult(shell.id)).toBe(true);
+        expect(model.calls).toBe(1);
+      } finally {
+        await env.cleanup();
+      }
+    },
+  );
 });
 
 async function until(predicate: () => boolean, timeoutMs = 3_000): Promise<void> {
