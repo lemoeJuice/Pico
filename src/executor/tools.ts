@@ -270,7 +270,7 @@ function applyHunks(source: string, hunks: string[]): string {
 }
 
 async function applyPatch(patchText: string, workspacePath: string): Promise<string[]> {
-  const patch = patchText.replace(/^\*\*\* Begin Patch\n/, '').replace(/\n\*\*\* End Patch\s*$/, '');
+  const patch = patchText.replace(/^\*\*\* Begin Patch\n/, '').replace(/\n\*\*\* End Patch\s*$/, '\n');
   const blocks = patch.split(/(?=^diff --git |^\*\*\* (?:Update|Add|Delete) File: )/m).filter(Boolean);
   if (!blocks.length) throw new Error('Patch is empty or unsupported');
   const changed: string[] = [];
@@ -294,13 +294,13 @@ async function applyPatch(patchText: string, workspacePath: string): Promise<str
     }
     const hunks = block.split(/(?=^@@ )/m).filter((part) => part.startsWith('@@ '));
     const before = newFile || oldHeader === '/dev/null' ? '' : await readFile(target, 'utf8');
+    const additions = block
+      .split('\n')
+      .filter((line) => line.startsWith('+'))
+      .map((line) => line.slice(1));
     const after =
       newFile && hunks.length === 0
-        ? block
-            .split('\n')
-            .filter((line) => line.startsWith('+'))
-            .map((line) => line.slice(1))
-            .join('\n')
+        ? `${additions.join('\n')}${additions.length > 0 && block.endsWith('\n') ? '\n' : ''}`
         : applyHunks(before, hunks);
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, after, 'utf8');

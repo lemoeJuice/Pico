@@ -31,6 +31,15 @@ describe('workspace tools', () => {
       ].join('\n');
       await toolMap.get('apply_patch')!.execute({ patch }, context);
       expect(await readFile(join(workspacePath, 'note.txt'), 'utf8')).toBe('keep\nnew\n');
+
+      const addPatch = [
+        '*** Begin Patch',
+        '*** Add File: created.txt',
+        '+created with a final newline',
+        '*** End Patch',
+      ].join('\n');
+      await toolMap.get('apply_patch')!.execute({ patch: addPatch }, context);
+      expect(await readFile(join(workspacePath, 'created.txt'), 'utf8')).toBe('created with a final newline\n');
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

@@ -88,7 +88,7 @@ function pathInside(value) {
   return target;
 }
 async function patch(patchText) {
-  const text = patchText.replace(/^\*\*\* Begin Patch\n/, '').replace(/\n\*\*\* End Patch\s*$/, '');
+  const text = patchText.replace(/^\*\*\* Begin Patch\n/, '').replace(/\n\*\*\* End Patch\s*$/, '\n');
   const blocks = text.split(/(?=^diff --git |^\*\*\* (?:Update|Add|Delete) File: )/m).filter(Boolean);
   const changed = [];
   for (const block of blocks) {
@@ -103,8 +103,9 @@ async function patch(patchText) {
     if (deleted || newName === '/dev/null') { await fsp.unlink(target); changed.push(filename); continue; }
     const hunks = block.split(/(?=^@@ )/m).filter(part => part.startsWith('@@ '));
     const before = added || oldName === '/dev/null' ? '' : await fsp.readFile(target, 'utf8');
+    const additions = block.split('\n').filter(line => line.startsWith('+')).map(line => line.slice(1));
     const after = added && hunks.length === 0
-      ? block.split('\n').filter(line => line.startsWith('+')).map(line => line.slice(1)).join('\n')
+      ? additions.join('\n') + (additions.length > 0 && block.endsWith('\n') ? '\n' : '')
       : applyHunks(before, hunks);
     await fsp.mkdir(path.dirname(target), { recursive: true });
     await fsp.writeFile(target, after, 'utf8');
