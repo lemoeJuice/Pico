@@ -1742,7 +1742,7 @@ button:disabled {
   }
   .composer-box textarea {
     min-height: 38px;
-    font-size: 12px;
+    font-size: 16px;
   }
   .composer-footer {
     font-size: 8px;
@@ -1783,6 +1783,11 @@ button:disabled {
   .permission-popover {
     right: auto;
     left: 0;
+  }
+  .project-select-wrap select,
+  .permission-row select,
+  .form-stack input:not([type='range']) {
+    font-size: 16px;
   }
 }
 
