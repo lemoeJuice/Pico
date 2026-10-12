@@ -248,6 +248,82 @@ describe('Remote Host Executor', () => {
     }
   });
 
+  it('keeps a Remote execution running through a dropped status connection and resumes the same ID', async () => {
+    const directory = await import('node:fs/promises').then(({ mkdtemp }) =>
+      mkdtemp(join(tmpdir(), 'pico-remote-reconnect-')),
+    );
+    const workspaceRoot = join(directory, 'remote-root');
+    const remoteWorkspace = join(workspaceRoot, 'repo');
+    await mkdir(remoteWorkspace, { recursive: true });
+    const remote = await startRemoteExecutorServer({
+      token,
+      workspaceRoot,
+      databasePath: join(directory, 'executor.sqlite'),
+      port: 0,
+    });
+    const endpoint = `http://127.0.0.1:${remote.port}`;
+    const executionCommand = "node -e \"setTimeout(() => require('node:fs').appendFileSync('runs.log', 'x'), 1500)\"";
+    const model = new FakeModel((_prompt, callNumber) =>
+      callNumber === 1
+        ? response('', [{ id: 'long-remote-call', name: 'shell', arguments: { command: executionCommand } }])
+        : response('Recovered the remote result.'),
+    );
+    const env = await setupRuntime(model);
+    const originalFetch = globalThis.fetch;
+    try {
+      const connection = await env.runtime.addRemoteExecutorConnection('Build host', endpoint, token);
+      const thread = await env.runtime.createRemoteThread(env.project.id, connection.id, remoteWorkspace);
+      env.runtime.setToolPermission(thread.id, 'shell', 'allow');
+
+      let acceptedRemoteSubmission = false;
+      globalThis.fetch = async (input, init) => {
+        const requestUrl = input instanceof URL ? input : new URL(typeof input === 'string' ? input : input.url);
+        if (
+          requestUrl.origin === endpoint &&
+          requestUrl.pathname.startsWith('/api/executions/') &&
+          init?.method === 'POST' &&
+          !requestUrl.pathname.endsWith('/interrupt')
+        ) {
+          const result = await originalFetch(input, init);
+          acceptedRemoteSubmission = true;
+          return result;
+        }
+        if (
+          acceptedRemoteSubmission &&
+          requestUrl.origin === endpoint &&
+          requestUrl.pathname.startsWith('/api/executions/')
+        ) {
+          throw new TypeError('Simulated temporary Remote Executor connection loss.');
+        }
+        return originalFetch(input, init);
+      };
+
+      await env.runtime.submit(thread.id, 'remote-reconnect-message', 'Run and recover the remote command.');
+      await env.runtime.drain();
+      await until(() => {
+        const execution = env.store.listExecutions(thread.id).find((item) => item.kind === 'tool');
+        return env.runtime.getThread(thread.id)?.state === 'paused' && execution?.status === 'running';
+      });
+      const toolExecution = env.store.listExecutions(thread.id).find((item) => item.kind === 'tool');
+      expect(toolExecution?.status).toBe('running');
+      expect(env.runtime.getThread(thread.id)?.pauseReason).toContain('Tool Batch returned');
+
+      globalThis.fetch = originalFetch;
+      env.runtime.continue(thread.id);
+      await env.runtime.drain();
+
+      expect(env.store.getExecution(toolExecution!.id)?.status).toBe('completed');
+      expect(await readFile(join(remoteWorkspace, 'runs.log'), 'utf8')).toBe('x');
+      expect(model.calls).toBe(2);
+      expect(env.store.listRecords(thread.id).filter((record) => record.kind === 'message')).toHaveLength(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await env.cleanup();
+      await remote.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('sends explicit Interrupt to the connected Executor and records the settled result', async () => {
     const directory = await import('node:fs/promises').then(({ mkdtemp }) =>
       mkdtemp(join(tmpdir(), 'pico-remote-interrupt-')),
