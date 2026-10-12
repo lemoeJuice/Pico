@@ -22,6 +22,7 @@ import { upsertProjectThread } from './project-threads.js';
 import { fetchStableSnapshot, snapshotForSelection } from './snapshot-consistency.js';
 import { isNearScrollEnd } from './scroll-follow.js';
 import { threadCanBeInterrupted } from './thread-controls.js';
+import { uiContributionsAt } from './ui-contributions.js';
 
 type PluginInfo = {
   plugins: Array<{ id: string; name: string; version: string; source: string }>;
@@ -286,7 +287,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     const token = draft.slice(1).split(/\s/)[0]?.toLowerCase() ?? '';
     return commands.filter((command) => command.name.startsWith(token)).slice(0, 7);
   }, [commands, draft]);
-  const uiContributions = (pluginInfo?.ui ?? []).filter((item) => item.slot === 'thread.toolbar');
+  const uiContributions = pluginInfo?.ui ?? [];
+  const toolbarContributions = uiContributionsAt(uiContributions, 'thread.toolbar');
+  const composerActions = uiContributionsAt(uiContributions, 'composer.action');
+  const sidebarPanels = uiContributionsAt(uiContributions, 'sidebar.panel');
 
   const loadSnapshot = useCallback(async (id: string) => {
     const requestNumber = ++snapshotRequest.current;
@@ -853,6 +857,32 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         <div className="thread-list">
           {!selectedProject ? <div className="sidebar-empty">Create a Project to get started.</div> : null}
           {threads.filter((thread) => !thread.parentThreadId).map((thread) => renderThreadTree(thread))}
+          {sidebarPanels.length > 0 ? (
+            <section className="plugin-sidebar-panels" aria-label="Plugin panels">
+              <span className="eyebrow">PLUGIN PANELS</span>
+              {sidebarPanels.map((item) => (
+                <div className="plugin-sidebar-panel" key={item.id}>
+                  <div className="plugin-sidebar-copy">
+                    <strong>{item.label}</strong>
+                    {item.description ? <p>{item.description}</p> : null}
+                  </div>
+                  {item.command ? (
+                    <button
+                      className="plugin-sidebar-action"
+                      disabled={!threadId || busy}
+                      title={item.description ?? item.label}
+                      onClick={() => {
+                        executeContribution(item);
+                        setMobileSidebarOpen(false);
+                      }}
+                    >
+                      Open
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+            </section>
+          ) : null}
         </div>
         <div className="sidebar-bottom">
           <button className="settings-link" onClick={() => setSettingsOpen(true)}>
@@ -979,10 +1009,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 </div>
               </div>
               <div className="conversation-actions">
-                {uiContributions.map((item) => (
+                {toolbarContributions.map((item) => (
                   <button
                     key={item.id}
                     className="button button-quiet plugin-action"
+                    disabled={!item.command || busy}
                     title={item.description}
                     onClick={() => executeContribution(item)}
                   >
@@ -1128,14 +1159,27 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       ? 'Messages are saved while paused.'
                       : 'Enter to send · Shift + Enter for a new line'}
                   </span>
-                  <button
-                    className="send-button"
-                    aria-label="Send message"
-                    disabled={!draft.trim() || busy}
-                    onClick={() => void sendMessage()}
-                  >
-                    {busy ? <i className="tiny-spinner" /> : '↑'}
-                  </button>
+                  <div className="composer-footer-actions">
+                    {composerActions.map((item) => (
+                      <button
+                        key={item.id}
+                        className="composer-plugin-action"
+                        disabled={!item.command || busy}
+                        title={item.description ?? item.label}
+                        onClick={() => executeContribution(item)}
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                    <button
+                      className="send-button"
+                      aria-label="Send message"
+                      disabled={!draft.trim() || busy}
+                      onClick={() => void sendMessage()}
+                    >
+                      {busy ? <i className="tiny-spinner" /> : '↑'}
+                    </button>
+                  </div>
                 </div>
               </div>
               {settings?.model ? (
