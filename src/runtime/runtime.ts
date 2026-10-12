@@ -377,61 +377,85 @@ export class PicoRuntime {
     while (true) {
       const thread = this.store.getThread(threadId);
       if (!thread) return;
-      const activeBatch = this.latestActiveBatch(threadId);
-      if (activeBatch) {
-        // The Model Step already committed these calls. Batch plugins may reschedule them,
-        // but must not silently change a canonical call's identity or arguments.
-        const canonicalCalls = deepFreeze(structuredClone(activeBatch.calls));
-        const callsById = new Map(canonicalCalls.map((call) => [call.id, call]));
-        const batchInput: ToolBatchInput = {
-          thread,
-          batchId: activeBatch.batchId,
-          calls: canonicalCalls,
-          execute: (call) => {
-            const canonical = callsById.get(call.id);
-            if (
-              !canonical ||
-              canonical.name !== call.name ||
-              JSON.stringify(canonical.arguments) !== JSON.stringify(call.arguments)
-            ) {
-              throw new Error(
-                'Tool Batch plugins may reschedule calls but must preserve each call ID, name, and arguments.',
-              );
-            }
-            return this.executeToolCall(thread, canonical);
-          },
-        };
-        const batchResult = await this.pipelines.run<ToolBatchInput, Execution[]>('toolBatch', batchInput, (input) =>
-          Promise.all(input.calls.map((call) => input.execute(call))),
-        );
-        const batchExecutions = this.persistToolBatchResult(threadId, activeBatch.batchId, batchResult);
-        if (batchExecutions.length !== activeBatch.calls.length) {
-          throw new Error(`Tool Batch ${activeBatch.batchId} does not have one durable Execution per Tool Call.`);
-        }
-        const activeExecutions = batchExecutions.filter(
-          (execution) => execution.status === 'pending' || execution.status === 'running',
-        );
-        if (activeExecutions.length > 0) {
-          if (!this.store.getThread(threadId)?.pauseRequested) {
-            this.store.setPause(
-              threadId,
-              true,
-              `Tool Batch returned with ${activeExecutions.length} execution(s) still pending or running. Execution state is preserved.`,
-            );
-          }
-          this.publishThreadUpdate(threadId);
-          return;
-        }
-        for (const execution of batchExecutions) this.ensureToolResult(threadId, execution);
-        if (this.store.getThread(threadId)?.pauseRequested) return;
-        iteration += 1;
-        continue;
+      if (!this.latestActiveBatch(threadId) && (thread.pauseRequested || !this.needsModelStep(threadId))) return;
+      let defaultStepRan = false;
+      await this.pipelines.run('step', { thread, iteration }, async (input) => {
+        if (input.thread.id !== threadId) throw new Error('Step plugins must preserve the active Thread identity.');
+        defaultStepRan = true;
+        await this.performStep(input.thread);
+      });
+      const afterStep = this.store.getThread(threadId);
+      if (!defaultStepRan && afterStep && !afterStep.pauseRequested && this.hasUnprocessedWork(threadId)) {
+        this.store.setPause(threadId, true, 'The step pipeline stopped before durable work reached a safe boundary.');
+        this.publishThreadUpdate(threadId);
+        return;
       }
-      if (thread.pauseRequested || !this.needsModelStep(threadId)) return;
-      const input = { thread, iteration, perform: () => this.runModelStep(thread) };
-      await this.pipelines.run('step', input, (value) => value.perform());
       iteration += 1;
     }
+  }
+
+  private async performStep(thread: Thread): Promise<void> {
+    const currentThread = this.store.getThread(thread.id);
+    if (!currentThread) return;
+    const activeBatch = this.latestActiveBatch(thread.id);
+    if (activeBatch) {
+      await this.runToolBatch(currentThread, activeBatch);
+      return;
+    }
+    if (currentThread.pauseRequested || !this.needsModelStep(thread.id)) return;
+
+    await this.runModelStep(thread);
+    const afterModel = this.store.getThread(thread.id);
+    const modelBatch = afterModel ? this.latestActiveBatch(thread.id) : null;
+    if (afterModel && modelBatch) await this.runToolBatch(afterModel, modelBatch);
+  }
+
+  private async runToolBatch(thread: Thread, activeBatch: { batchId: string; calls: ToolCall[] }): Promise<void> {
+    const threadId = thread.id;
+    // The Model Step already committed these calls. Batch plugins may reschedule them,
+    // but must not silently change a canonical call's identity or arguments.
+    const canonicalCalls = deepFreeze(structuredClone(activeBatch.calls));
+    const callsById = new Map(canonicalCalls.map((call) => [call.id, call]));
+    const batchInput: ToolBatchInput = {
+      thread,
+      batchId: activeBatch.batchId,
+      calls: canonicalCalls,
+      execute: (call) => {
+        const canonical = callsById.get(call.id);
+        if (
+          !canonical ||
+          canonical.name !== call.name ||
+          JSON.stringify(canonical.arguments) !== JSON.stringify(call.arguments)
+        ) {
+          throw new Error(
+            'Tool Batch plugins may reschedule calls but must preserve each call ID, name, and arguments.',
+          );
+        }
+        return this.executeToolCall(thread, canonical);
+      },
+    };
+    const batchResult = await this.pipelines.run<ToolBatchInput, Execution[]>('toolBatch', batchInput, (input) =>
+      Promise.all(input.calls.map((call) => input.execute(call))),
+    );
+    const batchExecutions = this.persistToolBatchResult(threadId, activeBatch.batchId, batchResult);
+    if (batchExecutions.length !== activeBatch.calls.length) {
+      throw new Error(`Tool Batch ${activeBatch.batchId} does not have one durable Execution per Tool Call.`);
+    }
+    const activeExecutions = batchExecutions.filter(
+      (execution) => execution.status === 'pending' || execution.status === 'running',
+    );
+    if (activeExecutions.length > 0) {
+      if (!this.store.getThread(threadId)?.pauseRequested) {
+        this.store.setPause(
+          threadId,
+          true,
+          `Tool Batch returned with ${activeExecutions.length} execution(s) still pending or running. Execution state is preserved.`,
+        );
+      }
+      this.publishThreadUpdate(threadId);
+      return;
+    }
+    for (const execution of batchExecutions) this.ensureToolResult(threadId, execution);
   }
 
   private persistToolBatchResult(threadId: string, batchId: string, reported: Execution[]): Execution[] {

@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import type { AssistantPayload, Execution } from '../src/core/types.js';
 import type { PicoPlugin } from '../src/plugins/host.js';
 import type { ModelResponse } from '../src/runtime/model.js';
-import type { ModelStageInput, ToolBatchInput } from '../src/runtime/stages.js';
+import type { ModelStageInput, StepInput, ToolBatchInput } from '../src/runtime/stages.js';
 import { deferred, FakeModel, response, setupRuntime } from './helpers.js';
 
 describe('durable Thread runtime invariants', () => {
@@ -136,6 +136,121 @@ describe('durable Thread runtime invariants', () => {
     } finally {
       releaseAlpha.resolve('cleanup');
       releaseBeta.resolve('cleanup');
+      await env.cleanup();
+    }
+  });
+
+  it('keeps a Model Step and its Tool Batch inside one step pipeline iteration', async () => {
+    const events: string[] = [];
+    let nextStepId = 0;
+    let activeStepId: number | null = null;
+    const pipelinePlugin: PicoPlugin = {
+      id: 'test.step-boundary',
+      name: 'Step boundary',
+      version: '1',
+      activate({ tools, pipelines }) {
+        tools.register(
+          { name: 'step_boundary_tool', description: 'Step boundary test', parameters: { type: 'object' } },
+          async () => 'tool finished',
+        );
+        pipelines.use<StepInput, void>('step', async (input, next) => {
+          const stepId = ++nextStepId;
+          activeStepId = stepId;
+          events.push(`step:${stepId}:start`);
+          try {
+            return await next(input);
+          } finally {
+            events.push(`step:${stepId}:end`);
+            activeStepId = null;
+          }
+        });
+        pipelines.use<ToolBatchInput, Execution[]>('toolBatch', async (input, next) => {
+          events.push(`batch:${activeStepId ?? 'outside'}`);
+          return next(input);
+        });
+      },
+    };
+    const model = new FakeModel((_prompt, callNumber) =>
+      callNumber === 1
+        ? response('', [{ id: 'step-tool', name: 'step_boundary_tool', arguments: {} }])
+        : response('The iteration finished.'),
+    );
+    const env = await setupRuntime(model, { plugins: [pipelinePlugin] });
+    const thread = env.createThread();
+    try {
+      await env.runtime.submit(thread.id, 'step-boundary-message', 'Use the tool');
+      await env.runtime.drain();
+
+      expect(events).toEqual(['step:1:start', 'batch:1', 'step:1:end', 'step:2:start', 'step:2:end']);
+      expect(model.calls).toBe(2);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('settles the current Model Step Tool Batch before honoring Pause', async () => {
+    const firstResponse = deferred<ReturnType<typeof response>>();
+    const plugin: PicoPlugin = {
+      id: 'test.pause-current-batch',
+      name: 'Pause current Tool Batch',
+      version: '1',
+      activate({ tools }) {
+        tools.register(
+          { name: 'pause_batch_tool', description: 'Pause batch test', parameters: { type: 'object' } },
+          async () => 'current batch finished',
+        );
+      },
+    };
+    const model = new FakeModel((_prompt, callNumber) =>
+      callNumber === 1 ? firstResponse.promise : response('Continued after the pause.'),
+    );
+    const env = await setupRuntime(model, { plugins: [plugin] });
+    const thread = env.createThread();
+    try {
+      await env.runtime.submit(thread.id, 'pause-batch-message', 'Start the current iteration');
+      await until(() => model.calls === 1);
+      const signal = model.signals[0]!;
+      env.runtime.pause(thread.id);
+      expect(signal.aborted).toBe(false);
+
+      firstResponse.resolve(response('', [{ id: 'pause-call', name: 'pause_batch_tool', arguments: {} }]));
+      await env.runtime.drain();
+
+      expect(env.runtime.getThread(thread.id)?.state).toBe('paused');
+      expect(model.calls).toBe(1);
+      expect(env.store.listExecutions(thread.id).find((execution) => execution.kind === 'tool')?.status).toBe(
+        'completed',
+      );
+      env.runtime.continue(thread.id);
+      await env.runtime.drain();
+      expect(model.calls).toBe(2);
+      expect(env.runtime.getThread(thread.id)?.state).toBe('idle');
+    } finally {
+      firstResponse.resolve(response('cleanup'));
+      await env.cleanup();
+    }
+  });
+
+  it('pauses when a short-circuited step leaves durable work unprocessed', async () => {
+    const plugin: PicoPlugin = {
+      id: 'test.skip-step',
+      name: 'Skip step',
+      version: '1',
+      activate({ pipelines }) {
+        pipelines.use<StepInput, void>('step', async () => undefined);
+      },
+    };
+    const model = new FakeModel(() => response('Should not run.'));
+    const env = await setupRuntime(model, { plugins: [plugin] });
+    const thread = env.createThread();
+    try {
+      await env.runtime.submit(thread.id, 'skipped-step-message', 'Wait for the plugin');
+      await env.runtime.drain();
+
+      expect(model.calls).toBe(0);
+      expect(env.runtime.getThread(thread.id)?.state).toBe('paused');
+      expect(env.runtime.getThread(thread.id)?.pauseReason).toContain('safe boundary');
+    } finally {
       await env.cleanup();
     }
   });

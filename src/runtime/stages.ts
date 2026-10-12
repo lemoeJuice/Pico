@@ -4,7 +4,6 @@ import type { ModelPrompt } from './model.js';
 export interface StepInput {
   thread: Thread;
   iteration: number;
-  perform(): Promise<void>;
 }
 
 export interface ProjectionInput {
