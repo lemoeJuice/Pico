@@ -231,7 +231,7 @@ function ToolCard({
 
 export function App({ authRequired = false, onSignOut }: { authRequired?: boolean; onSignOut?(): Promise<void> }) {
   const [projects, setProjects] = useState<Project[]>([]);
-  const [projectId, setProjectId] = useState<string | null>(localStorage.getItem('pico.project'));
+  const [projectId, setProjectId] = useState<string | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<ThreadSnapshot | null>(null);
