@@ -1,9 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { lstat, readFile, realpath, writeFile, unlink, mkdir } from 'node:fs/promises';
+import { lstat, open, readFile, realpath, writeFile, unlink, mkdir } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import type { ToolDefinition } from '../core/types.js';
 import type { Thread } from '../core/types.js';
+import { READ_FILE_LIMITS, SEARCH_FILE_LIMITS } from './tool-limits.js';
 
 export interface ToolContext {
   workspacePath: string;
@@ -227,34 +228,65 @@ async function search() {
   const expression = new RegExp(workerData.pattern);
   const results = [];
   const ignore = new Set(['.git', 'node_modules', 'dist', 'target', '.next', '.pico']);
+  const limits = workerData.limits;
   let truncated = false;
+  let outputCharacters = 0;
+  let stop = false;
+  const appendMatch = (fullPath, lineNumber, line) => {
+    const prefix = path.relative(workerData.rootPath, fullPath) + ':' + lineNumber + ':';
+    const separatorCharacters = results.length > 0 ? 1 : 0;
+    const remaining = limits.maxOutputCharacters - outputCharacters - separatorCharacters;
+    if (remaining <= prefix.length) {
+      truncated = true;
+      stop = true;
+      return;
+    }
+    const lineLimit = Math.min(limits.maxLineCharacters, remaining - prefix.length);
+    let excerpt = line;
+    if (line.length > lineLimit) {
+      const marker = '… [line truncated]';
+      excerpt = lineLimit > marker.length ? line.slice(0, lineLimit - marker.length) + marker : line.slice(0, lineLimit);
+      truncated = true;
+    }
+    const match = prefix + excerpt;
+    results.push(match);
+    outputCharacters += separatorCharacters + match.length;
+    if (results.length >= limits.maxMatches || outputCharacters >= limits.maxOutputCharacters) {
+      truncated = true;
+      stop = true;
+    }
+  };
   const visit = async (directory, depth) => {
-    if (depth > 18 || results.length >= 200) {
+    if (stop) return;
+    if (depth > limits.maxDepth) {
       truncated = true;
       return;
     }
     const entries = await fs.readdir(directory, { withFileTypes: true });
     for (const entry of entries) {
+      if (stop) return;
       if (ignore.has(entry.name)) continue;
       const full = path.resolve(directory, entry.name);
       if (entry.isDirectory()) {
         await visit(full, depth + 1);
       } else if (entry.isFile()) {
         const info = await fs.stat(full);
-        if (info.size > 1000000) continue;
+        if (info.size > limits.maxFileBytes) {
+          truncated = true;
+          continue;
+        }
         const content = await fs.readFile(full, 'utf8').catch(() => null);
         if (content === null || content.includes('\0')) continue;
         const lines = content.split(/\r?\n/);
-        lines.forEach((line, index) => {
-          if (results.length < 200 && expression.test(line)) {
-            results.push(path.relative(workerData.rootPath, full) + ':' + (index + 1) + ':' + line);
-            expression.lastIndex = 0;
+        for (let index = 0; index < lines.length; index += 1) {
+          if (stop) break;
+          const line = lines[index];
+          expression.lastIndex = 0;
+          if (line !== undefined && expression.test(line)) {
+            appendMatch(full, index + 1, line);
           }
-        });
-        if (results.length >= 200) {
-          truncated = true;
-          return;
         }
+        if (stop) return;
       }
     }
   };
@@ -279,7 +311,7 @@ async function searchFiles(
   return new Promise((resolvePromise, reject) => {
     const worker = new Worker(searchWorkerSource, {
       eval: true,
-      workerData: { pattern, rootPath },
+      workerData: { pattern, rootPath, limits: SEARCH_FILE_LIMITS },
     });
     let settled = false;
     const finish = (complete: () => void): void => {
@@ -394,7 +426,8 @@ export function builtinExecutorTools(): ToolImplementation[] {
     {
       definition: {
         name: 'read_file',
-        description: 'Read a UTF-8 text file inside the selected workspace. Paths are relative to the workspace.',
+        description:
+          'Read a UTF-8 text file inside the selected workspace. Paths are relative to the workspace; output is capped at 60,000 characters and returns truncated when more remains.',
         parameters: {
           type: 'object',
           properties: { path: schemas.string },
@@ -404,11 +437,28 @@ export function builtinExecutorTools(): ToolImplementation[] {
       },
       async execute(args, context) {
         const target = await safePath(context.workspacePath, requiredString(args, 'path'));
-        const contents = await readFile(target, 'utf8');
+        const handle = await open(target, 'r');
+        let size: number;
+        let buffer: Buffer;
+        let bytesRead = 0;
+        try {
+          size = (await handle.stat()).size;
+          buffer = Buffer.alloc(Math.min(size, READ_FILE_LIMITS.maxBytes));
+          while (bytesRead < buffer.length) {
+            const read = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+            if (read.bytesRead === 0) break;
+            bytesRead += read.bytesRead;
+          }
+        } finally {
+          await handle.close();
+        }
+        const decoded = buffer.subarray(0, bytesRead).toString('utf8');
+        if (decoded.includes('\0')) throw new Error('File contains binary data; read_file supports UTF-8 text files.');
+        const contents = decoded.slice(0, READ_FILE_LIMITS.maxCharacters);
         return {
           path: relative(context.workspacePath, target),
-          contents: contents.slice(0, 60_000),
-          truncated: contents.length > 60_000,
+          contents,
+          truncated: size > bytesRead || decoded.length > READ_FILE_LIMITS.maxCharacters,
         };
       },
     },
@@ -416,7 +466,7 @@ export function builtinExecutorTools(): ToolImplementation[] {
       definition: {
         name: 'search_files',
         description:
-          'Search text files under the workspace using a regular expression. Skips dependency and build folders.',
+          'Search text files under the workspace using a regular expression. Skips dependency and build folders; output is capped at 200 matches and 30,000 characters, and truncated indicates incomplete coverage.',
         parameters: {
           type: 'object',
           properties: { pattern: schemas.string },

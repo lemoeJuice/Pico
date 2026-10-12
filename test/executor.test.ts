@@ -11,10 +11,55 @@ import { assistantPayload } from './helpers.js';
 import { ToolCatalog } from '../src/executor/tools.js';
 import { HostExecutor } from '../src/executor/executor.js';
 import { ContainerExecutor } from '../src/executor/container-executor.js';
+import { READ_FILE_LIMITS, SEARCH_FILE_LIMITS } from '../src/executor/tool-limits.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
 import { FakeModel, response, setupRuntime } from './helpers.js';
 
 describe('Executor execution identity and recovery', () => {
+  it('applies the same bounded file and search output in the Container Runner', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-container-tool-limits-'));
+    const executionDirectory = join(directory, 'executions');
+    const workspace = join(directory, 'workspace');
+    await mkdir(executionDirectory);
+    await mkdir(workspace);
+    const longLines = Array.from({ length: 30 }, () => `needle ${'x'.repeat(2_500)}`).join('\n');
+    await writeFile(join(workspace, 'long-lines.txt'), longLines, 'utf8');
+    await writeFile(join(workspace, 'oversized.txt'), `needle ${'z'.repeat(SEARCH_FILE_LIMITS.maxFileBytes)}`, 'utf8');
+    try {
+      const read = await executeRunner(
+        'run',
+        randomUUID().replaceAll('-', ''),
+        'read_file',
+        executionDirectory,
+        workspace,
+        JSON.stringify({ path: 'long-lines.txt' }),
+      );
+      expect(read.status).toBe('completed');
+      expect(read.result).toMatchObject({
+        contents: expect.stringMatching(/^needle /),
+        truncated: true,
+      });
+      expect((read.result as { contents: string }).contents).toHaveLength(READ_FILE_LIMITS.maxCharacters);
+
+      const search = await executeRunner(
+        'run',
+        randomUUID().replaceAll('-', ''),
+        'search_files',
+        executionDirectory,
+        workspace,
+        JSON.stringify({ pattern: 'needle' }),
+      );
+      expect(search.status).toBe('completed');
+      const result = search.result as { matches: string[]; truncated: boolean };
+      expect(result.matches.join('\n').length).toBeLessThanOrEqual(SEARCH_FILE_LIMITS.maxOutputCharacters);
+      expect(result.matches.length).toBeLessThan(30);
+      expect(result.matches[0]).toContain('[line truncated]');
+      expect(result.truncated).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it.skipIf(process.platform === 'win32')(
     'keeps Container file tools inside the selected workspace through symlinks',
     async () => {

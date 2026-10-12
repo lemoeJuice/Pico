@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { builtinExecutorTools } from '../src/executor/tools.js';
+import { READ_FILE_LIMITS, SEARCH_FILE_LIMITS } from '../src/executor/tool-limits.js';
 
 const toolMap = new Map(builtinExecutorTools().map((tool) => [tool.definition.name, tool]));
 
@@ -56,6 +57,64 @@ describe('workspace tools', () => {
       ].join('\n');
       await toolMap.get('apply_patch')!.execute({ patch: addPatch }, context);
       expect(await readFile(join(workspacePath, 'created.txt'), 'utf8')).toBe('created with a final newline\n');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('bounds large file reads and aggregate search output while reporting truncation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-tool-output-limits-'));
+    const workspacePath = join(directory, 'workspace');
+    await mkdir(workspacePath);
+    const longLines = Array.from({ length: 30 }, () => `needle ${'x'.repeat(2_500)}`).join('\n');
+    await writeFile(join(workspacePath, 'long-lines.txt'), longLines, 'utf8');
+    await writeFile(
+      join(workspacePath, 'oversized.txt'),
+      `needle ${'z'.repeat(SEARCH_FILE_LIMITS.maxFileBytes)}`,
+      'utf8',
+    );
+    await writeFile(join(workspacePath, 'binary.dat'), Buffer.from([0x61, 0, 0x62]));
+    const context = { workspacePath, executionId: 'bounded-tools', signal: new AbortController().signal };
+    try {
+      const read = (await toolMap.get('read_file')!.execute({ path: 'long-lines.txt' }, context)) as {
+        contents: string;
+        truncated: boolean;
+      };
+      expect(read.contents).toHaveLength(READ_FILE_LIMITS.maxCharacters);
+      expect(read.truncated).toBe(true);
+
+      const search = (await toolMap.get('search_files')!.execute({ pattern: 'needle' }, context)) as {
+        matches: string[];
+        truncated: boolean;
+      };
+      expect(search.matches.join('\n').length).toBeLessThanOrEqual(SEARCH_FILE_LIMITS.maxOutputCharacters);
+      expect(search.matches.length).toBeLessThan(30);
+      expect(search.matches[0]).toContain('[line truncated]');
+      expect(search.truncated).toBe(true);
+
+      await expect(toolMap.get('read_file')!.execute({ path: 'binary.dat' }, context)).rejects.toThrow(/binary data/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('marks search results incomplete when it skips an oversized file', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-search-skipped-file-'));
+    const workspacePath = join(directory, 'workspace');
+    await mkdir(workspacePath);
+    await writeFile(
+      join(workspacePath, 'oversized.txt'),
+      `needle ${'z'.repeat(SEARCH_FILE_LIMITS.maxFileBytes)}`,
+      'utf8',
+    );
+    const context = { workspacePath, executionId: 'oversized-search', signal: new AbortController().signal };
+    try {
+      const search = (await toolMap.get('search_files')!.execute({ pattern: 'needle' }, context)) as {
+        matches: string[];
+        truncated: boolean;
+      };
+      expect(search.matches).toEqual([]);
+      expect(search.truncated).toBe(true);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

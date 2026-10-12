@@ -1,4 +1,8 @@
+import { READ_FILE_LIMITS, SEARCH_FILE_LIMITS } from './tool-limits.js';
+
 export const CONTAINER_RUNNER = String.raw`
+const readFileLimits = ${JSON.stringify(READ_FILE_LIMITS)};
+const searchFileLimits = ${JSON.stringify(SEARCH_FILE_LIMITS)};
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
@@ -96,26 +100,64 @@ async function search(root, pattern) {
   const regex = new RegExp(pattern);
   const matches = [];
   const ignored = new Set(['.git', 'node_modules', 'dist', 'target', '.next', '.pico']);
+  let truncated = false;
+  let outputCharacters = 0;
+  let stop = false;
+  function appendMatch(file, lineNumber, line) {
+    const prefix = path.relative(root, file) + ':' + lineNumber + ':';
+    const separatorCharacters = matches.length > 0 ? 1 : 0;
+    const remaining = searchFileLimits.maxOutputCharacters - outputCharacters - separatorCharacters;
+    if (remaining <= prefix.length) {
+      truncated = true;
+      stop = true;
+      return;
+    }
+    const lineLimit = Math.min(searchFileLimits.maxLineCharacters, remaining - prefix.length);
+    let excerpt = line;
+    if (line.length > lineLimit) {
+      const marker = '… [line truncated]';
+      excerpt = lineLimit > marker.length ? line.slice(0, lineLimit - marker.length) + marker : line.slice(0, lineLimit);
+      truncated = true;
+    }
+    const match = prefix + excerpt;
+    matches.push(match);
+    outputCharacters += separatorCharacters + match.length;
+    if (matches.length >= searchFileLimits.maxMatches || outputCharacters >= searchFileLimits.maxOutputCharacters) {
+      truncated = true;
+      stop = true;
+    }
+  }
   async function walk(dir, depth) {
-    if (depth > 18 || matches.length >= 200) return;
+    if (stop) return;
+    if (depth > searchFileLimits.maxDepth) {
+      truncated = true;
+      return;
+    }
     for (const entry of await fsp.readdir(dir, { withFileTypes: true })) {
+      if (stop) return;
       if (ignored.has(entry.name)) continue;
       const file = path.join(dir, entry.name);
       if (entry.isDirectory()) await walk(file, depth + 1);
       else if (entry.isFile()) {
         const info = await fsp.stat(file);
-        if (info.size > 1000000) continue;
+        if (info.size > searchFileLimits.maxFileBytes) {
+          truncated = true;
+          continue;
+        }
         const text = await fsp.readFile(file, 'utf8').catch(() => null);
         if (text === null || text.includes('\0')) continue;
-        text.split(/\r?\n/).forEach((line, index) => {
+        const lines = text.split(/\r?\n/);
+        for (let index = 0; index < lines.length; index += 1) {
+          if (stop) break;
+          const line = lines[index];
           regex.lastIndex = 0;
-          if (matches.length < 200 && regex.test(line)) matches.push(path.relative(root, file) + ':' + (index + 1) + ':' + line);
-        });
+          if (line !== undefined && regex.test(line)) appendMatch(file, index + 1, line);
+        }
       }
     }
   }
   await walk(root, 0);
-  return { matches, truncated: matches.length >= 200 };
+  return { matches, truncated };
 }
 function applyHunks(source, hunks) {
   const finalNewline = source.endsWith('\n');
@@ -250,8 +292,28 @@ async function run() {
     let result;
     if (toolName === 'read_file') {
       const file = await pathInside(args.path);
-      const contents = await fsp.readFile(file, 'utf8');
-      result = { path: path.relative(workspace, file), contents: contents.slice(0, 60000), truncated: contents.length > 60000 };
+      const handle = await fsp.open(file, 'r');
+      let size = 0;
+      let bytesRead = 0;
+      let buffer;
+      try {
+        size = (await handle.stat()).size;
+        buffer = Buffer.alloc(Math.min(size, readFileLimits.maxBytes));
+        while (bytesRead < buffer.length) {
+          const read = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+          if (read.bytesRead === 0) break;
+          bytesRead += read.bytesRead;
+        }
+      } finally {
+        await handle.close();
+      }
+      const decoded = buffer.subarray(0, bytesRead).toString('utf8');
+      if (decoded.includes('\0')) throw new Error('File contains binary data; read_file supports UTF-8 text files.');
+      result = {
+        path: path.relative(workspace, file),
+        contents: decoded.slice(0, readFileLimits.maxCharacters),
+        truncated: size > bytesRead || decoded.length > readFileLimits.maxCharacters,
+      };
     } else if (toolName === 'search_files') result = await search(workspace, args.pattern);
     else if (toolName === 'apply_patch') result = { changed: await patch(args.patch) };
     else if (toolName === 'shell') {
