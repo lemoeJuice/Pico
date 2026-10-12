@@ -23,6 +23,13 @@ import { fetchStableSnapshot, snapshotForSelection } from './snapshot-consistenc
 import { isNearScrollEnd } from './scroll-follow.js';
 import { threadCanBeInterrupted } from './thread-controls.js';
 import { uiContributionsAt } from './ui-contributions.js';
+import {
+  clearAcceptedMessageDraft,
+  hasPendingMessageSubmission,
+  messageSubmissionId,
+  settleMessageSubmission,
+  type PendingMessageIds,
+} from './message-retries.js';
 
 type PluginInfo = {
   plugins: Array<{ id: string; name: string; version: string; source: string }>;
@@ -249,7 +256,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [executorConnected, setExecutorConnected] = useState<boolean | null>(null);
   const [executorError, setExecutorError] = useState<string | null>(null);
   const [socketConnected, setSocketConnected] = useState(false);
-  const [draft, setDraft] = useState('');
+  const [draftsByThread, setDraftsByThread] = useState<Record<string, string>>({});
   const [assistantDraft, setAssistantDraft] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
@@ -273,10 +280,27 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const activeProjectId = useRef(projectId);
   const threadUpdateVersions = useRef(new Map<string, number>());
   const snapshotVersions = useRef(new Map<string, number>());
-  const retryMessage = useRef<{ id: string; content: string } | null>(null);
+  const pendingMessageIds = useRef<PendingMessageIds>(new Map());
+  const draft = threadId ? (draftsByThread[threadId] ?? '') : '';
+  const draftRef = useRef({ threadId, value: draft });
   activeProjectId.current = projectId;
   const activeThreadId = useRef(threadId);
   activeThreadId.current = threadId;
+  draftRef.current = { threadId, value: draft };
+
+  const updateDraft = (value: string): void => {
+    const targetThreadId = activeThreadId.current;
+    if (!targetThreadId) return;
+    draftRef.current = { threadId: targetThreadId, value };
+    setDraftsByThread((current) => ({ ...current, [targetThreadId]: value }));
+  };
+
+  const clearAcceptedDraft = (targetThreadId: string, content: string): void => {
+    if (draftRef.current.threadId === targetThreadId && draftRef.current.value.trim() === content) {
+      draftRef.current = { threadId: targetThreadId, value: '' };
+    }
+    setDraftsByThread((current) => clearAcceptedMessageDraft(current, targetThreadId, content));
+  };
 
   const selectedProject = projects.find((project) => project.id === projectId) ?? null;
   const activeSnapshot = snapshotForSelection(snapshot, threadId, projectId);
@@ -301,7 +325,19 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       () => snapshotVersions.current.get(id) ?? 0,
       () => requestNumber === snapshotRequest.current,
     );
-    if (value && requestNumber === snapshotRequest.current) setSnapshot(value);
+    if (value && requestNumber === snapshotRequest.current) {
+      for (const record of value.records) {
+        if (
+          record.kind === 'message' &&
+          settleMessageSubmission(pendingMessageIds.current, id, record.id) &&
+          record.payload.source === 'user' &&
+          typeof record.payload.content === 'string'
+        ) {
+          clearAcceptedDraft(id, record.payload.content);
+        }
+      }
+      setSnapshot(value);
+    }
   }, []);
 
   const noteSnapshotChange = useCallback((threadId: string | null | undefined): void => {
@@ -504,6 +540,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           }
         } else if (event.type === 'record') {
           const record = event.record as CanonicalRecord | undefined;
+          if (record?.kind === 'message' && record.threadId) {
+            if (
+              settleMessageSubmission(pendingMessageIds.current, record.threadId, record.id) &&
+              record.payload.source === 'user' &&
+              typeof record.payload.content === 'string'
+            ) {
+              clearAcceptedDraft(record.threadId, record.payload.content);
+            }
+          }
           if (record?.threadId === activeThreadId.current) {
             noteSnapshotChange(record.threadId);
             setSnapshot((current) => {
@@ -603,25 +648,32 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
   const sendMessage = async (content = draft): Promise<void> => {
     const clean = content.trim();
-    if (!threadId || !clean || busy) return;
+    const sentThreadId = threadId;
+    if (!sentThreadId || !clean || busy) return;
     followLatest.current = true;
     setBusy(true);
     setError('');
-    const id = retryMessage.current?.content === clean ? retryMessage.current.id : crypto.randomUUID();
-    retryMessage.current = { id, content: clean };
+    const id = messageSubmissionId(pendingMessageIds.current, sentThreadId, clean, () => crypto.randomUUID());
     try {
       const result = await api<{
         accepted: boolean;
         duplicate?: boolean;
         command?: { text?: string; openThreadId?: string };
-      }>(`/api/threads/${threadId}/messages`, { method: 'POST', body: JSON.stringify({ id, content: clean }) });
-      retryMessage.current = null;
-      setDraft('');
-      if (result.command?.text) setNotice(result.command.text);
-      if (result.command?.openThreadId) setThreadId(result.command.openThreadId);
-      void loadSnapshot(threadId);
+      }>(`/api/threads/${sentThreadId}/messages`, { method: 'POST', body: JSON.stringify({ id, content: clean }) });
+      settleMessageSubmission(pendingMessageIds.current, sentThreadId, id);
+      clearAcceptedDraft(sentThreadId, clean);
+      if (activeThreadId.current === sentThreadId) {
+        if (result.command?.text) setNotice(result.command.text);
+        if (result.command?.openThreadId) setThreadId(result.command.openThreadId);
+      }
+      void loadSnapshot(sentThreadId);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      if (
+        activeThreadId.current === sentThreadId &&
+        hasPendingMessageSubmission(pendingMessageIds.current, sentThreadId, id)
+      ) {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      }
     } finally {
       setBusy(false);
     }
@@ -1189,7 +1241,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               {filteredCommands.length > 0 ? (
                 <div className="command-menu">
                   {filteredCommands.map((command) => (
-                    <button key={command.name} onClick={() => setDraft(`/${command.name} `)}>
+                    <button key={command.name} onClick={() => updateDraft(`/${command.name} `)}>
                       <strong>/{command.name}</strong>
                       <span>{command.description}</span>
                     </button>
@@ -1199,12 +1251,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               <div className="composer-box">
                 <textarea
                   value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
+                  onChange={(event) => updateDraft(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter' && !event.shiftKey) {
                       event.preventDefault();
                       if (filteredCommands.length > 0 && draft.trim() === '/')
-                        setDraft(`/${filteredCommands[0]!.name} `);
+                        updateDraft(`/${filteredCommands[0]!.name} `);
                       else void sendMessage();
                     }
                   }}
