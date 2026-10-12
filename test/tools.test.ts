@@ -63,4 +63,24 @@ describe('workspace tools', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it('rejects a patch through a dangling symlink to a missing external directory', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-dangling-path-guard-'));
+    const workspacePath = join(directory, 'workspace');
+    const outside = join(directory, 'outside');
+    const missingOutside = join(outside, 'not-created');
+    await mkdir(workspacePath);
+    await mkdir(outside);
+    await symlink(missingOutside, join(workspacePath, 'dangling'));
+    const context = { workspacePath, executionId: 'test', signal: new AbortController().signal };
+    const patch = ['*** Begin Patch', '*** Add File: dangling/new.txt', '+must not escape', '*** End Patch'].join('\n');
+    try {
+      await expect(toolMap.get('apply_patch')!.execute({ patch }, context)).rejects.toThrow(
+        /outside the selected workspace/,
+      );
+      await expect(readFile(join(missingOutside, 'new.txt'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });

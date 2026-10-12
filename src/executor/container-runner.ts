@@ -146,12 +146,39 @@ function applyHunks(source, hunks) {
   const result = output.join('\n');
   return result === '' ? '' : result + (finalNewline ? '\n' : '');
 }
-function pathInside(value) {
+async function pathInside(value, allowMissing = false) {
   if (path.isAbsolute(value) || value.split(/[\\/]/).includes('..')) throw new Error('Tool paths must stay inside the selected workspace');
-  const target = path.resolve(workspace, value || '.');
-  const relative = path.relative(workspace, target);
+  const root = await fsp.realpath(workspace);
+  const target = path.resolve(root, value || '.');
+  const relative = path.relative(root, target);
   if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) throw new Error('Tool path is outside the workspace');
-  return target;
+  const components = relative ? relative.split(path.sep) : [];
+  let current = root;
+  for (let index = 0; index < components.length; index++) {
+    current = path.resolve(current, components[index]);
+    try {
+      const resolved = await fsp.realpath(current);
+      const resolvedRelative = path.relative(root, resolved);
+      if (resolvedRelative === '..' || resolvedRelative.startsWith('..' + path.sep) || path.isAbsolute(resolvedRelative)) {
+        throw new Error('Tool path resolves outside the workspace');
+      }
+      current = resolved;
+    } catch (error) {
+      if (!allowMissing || error.code !== 'ENOENT') throw error;
+      // A missing suffix is safe only after resolving every existing path component.
+      // Reject entries that exist but cannot be realpathed, such as dangling symlinks.
+      let exists = false;
+      try {
+        await fsp.lstat(current);
+        exists = true;
+      } catch (statError) {
+        if (statError.code !== 'ENOENT') throw statError;
+      }
+      if (exists) throw new Error('Tool path resolves outside the workspace');
+      return path.resolve(current, ...components.slice(index + 1));
+    }
+  }
+  return current;
 }
 async function patch(patchText) {
   const text = patchText.replace(/^\*\*\* Begin Patch\n/, '').replace(/\n\*\*\* End Patch\s*$/, '\n');
@@ -165,7 +192,7 @@ async function patch(patchText) {
     const newName = block.match(/^\+\+\+ (?:b\/)?(.+)$/m)?.[1];
     const filename = added || deleted || updated || (newName && newName !== '/dev/null' ? newName : oldName);
     if (!filename || filename === '/dev/null') throw new Error('Patch needs a relative path');
-    const target = pathInside(filename);
+    const target = await pathInside(filename, true);
     if (deleted || newName === '/dev/null') { await fsp.unlink(target); changed.push(filename); continue; }
     const hunks = block.split(/(?=^@@ )/m).filter(part => part.startsWith('@@ '));
     const before = added || oldName === '/dev/null' ? '' : await fsp.readFile(target, 'utf8');
@@ -222,7 +249,7 @@ async function run() {
     const args = await readInput();
     let result;
     if (toolName === 'read_file') {
-      const file = pathInside(args.path);
+      const file = await pathInside(args.path);
       const contents = await fsp.readFile(file, 'utf8');
       result = { path: path.relative(workspace, file), contents: contents.slice(0, 60000), truncated: contents.length > 60000 };
     } else if (toolName === 'search_files') result = await search(workspace, args.pattern);

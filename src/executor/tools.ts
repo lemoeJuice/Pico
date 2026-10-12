@@ -90,13 +90,15 @@ async function safePath(workspacePath: string, requestedPath: string, allowMissi
     } catch (error) {
       if (!allowMissing || !isNodeError(error, 'ENOENT')) throw error;
       // A missing suffix is safe only after resolving every existing path component.
-      // In particular, do not follow an existing symlink to a missing external target.
+      // Reject entries that exist but cannot be realpathed, such as dangling symlinks.
+      let exists = false;
       try {
         await lstat(current);
-        throw error;
+        exists = true;
       } catch (statError) {
         if (!isNodeError(statError, 'ENOENT')) throw statError;
       }
+      if (exists) throw new Error('Tool path resolves outside the selected workspace', { cause: error });
       return resolve(current, ...components.slice(index + 1));
     }
   }

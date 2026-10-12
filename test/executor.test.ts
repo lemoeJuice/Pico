@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -15,6 +15,84 @@ import { PicoRuntime } from '../src/runtime/runtime.js';
 import { FakeModel, response, setupRuntime } from './helpers.js';
 
 describe('Executor execution identity and recovery', () => {
+  it.skipIf(process.platform === 'win32')(
+    'keeps Container file tools inside the selected workspace through symlinks',
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'pico-container-path-guard-'));
+      const executionDirectory = join(directory, 'executions');
+      const workspace = join(directory, 'workspace');
+      const outside = join(directory, 'outside');
+      await mkdir(executionDirectory);
+      await mkdir(workspace);
+      await mkdir(outside);
+      await writeFile(join(outside, 'secret.txt'), 'outside secret', 'utf8');
+      await symlink(join(outside, 'secret.txt'), join(workspace, 'escape.txt'));
+      await symlink(outside, join(workspace, 'escape-dir'));
+      const missingOutside = join(outside, 'not-created');
+      await symlink(missingOutside, join(workspace, 'dangling-dir'));
+      await writeFile(join(workspace, 'inside.txt'), 'inside workspace', 'utf8');
+      await symlink(join(workspace, 'inside.txt'), join(workspace, 'inside-link.txt'));
+
+      try {
+        const blockedRead = await executeRunner(
+          'run',
+          randomUUID().replaceAll('-', ''),
+          'read_file',
+          executionDirectory,
+          workspace,
+          JSON.stringify({ path: 'escape.txt' }),
+        );
+        expect(blockedRead.status).toBe('failed');
+        expect(blockedRead.error).toMatch(/outside the workspace/);
+
+        const patch = ['*** Begin Patch', '*** Add File: escape-dir/new.txt', '+must not escape', '*** End Patch'].join(
+          '\n',
+        );
+        const blockedPatch = await executeRunner(
+          'run',
+          randomUUID().replaceAll('-', ''),
+          'apply_patch',
+          executionDirectory,
+          workspace,
+          JSON.stringify({ patch }),
+        );
+        expect(blockedPatch.status).toBe('failed');
+        expect(blockedPatch.error).toMatch(/outside the workspace/);
+        await expect(readFile(join(outside, 'new.txt'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+
+        const danglingPatch = [
+          '*** Begin Patch',
+          '*** Add File: dangling-dir/new.txt',
+          '+must not escape',
+          '*** End Patch',
+        ].join('\n');
+        const blockedDanglingPatch = await executeRunner(
+          'run',
+          randomUUID().replaceAll('-', ''),
+          'apply_patch',
+          executionDirectory,
+          workspace,
+          JSON.stringify({ patch: danglingPatch }),
+        );
+        expect(blockedDanglingPatch.status).toBe('failed');
+        expect(blockedDanglingPatch.error).toMatch(/outside the workspace/);
+        await expect(readFile(join(missingOutside, 'new.txt'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+
+        const allowedRead = await executeRunner(
+          'run',
+          randomUUID().replaceAll('-', ''),
+          'read_file',
+          executionDirectory,
+          workspace,
+          JSON.stringify({ path: 'inside-link.txt' }),
+        );
+        expect(allowedRead).toMatchObject({ status: 'completed', result: { contents: 'inside workspace' } });
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(process.platform === 'win32')(
     'deduplicates container runner submissions and returns a completed result to a racing Interrupt',
     async () => {
