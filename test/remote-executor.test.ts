@@ -192,6 +192,100 @@ describe('Remote Host Executor', () => {
     }
   });
 
+  it('rotates a remote Executor token without changing an existing Thread binding', async () => {
+    const directory = await import('node:fs/promises').then(({ mkdtemp }) =>
+      mkdtemp(join(tmpdir(), 'pico-remote-token-rotation-')),
+    );
+    const workspaceRoot = join(directory, 'remote-root');
+    const remoteWorkspace = join(workspaceRoot, 'repo');
+    const databasePath = join(directory, 'executor.sqlite');
+    const rotatedToken = 'pico-test-remote-executor-token-rotated-abcdef1234567890';
+    await mkdir(remoteWorkspace, { recursive: true });
+    await writeFile(join(remoteWorkspace, 'before.txt'), 'The original credential works.');
+    await writeFile(join(remoteWorkspace, 'after.txt'), 'The replacement credential works.');
+    let remote = await startRemoteExecutorServer({ token, workspaceRoot, databasePath, port: 0 });
+    const port = remote.port;
+    const endpoint = `http://127.0.0.1:${port}`;
+    const model = new FakeModel((_prompt, callNumber) => {
+      if (callNumber === 1) {
+        return response('', [{ id: 'before-rotation', name: 'read_file', arguments: { path: 'before.txt' } }]);
+      }
+      if (callNumber === 3) {
+        return response('', [{ id: 'after-rotation', name: 'read_file', arguments: { path: 'after.txt' } }]);
+      }
+      return response('The remote workspace is still available.');
+    });
+    const env = await setupRuntime(model);
+    try {
+      const connection = await env.runtime.addRemoteExecutorConnection('Build host', endpoint, token);
+      const thread = await env.runtime.createRemoteThread(
+        env.project.id,
+        connection.id,
+        remoteWorkspace,
+        'Existing work',
+      );
+      const originalBinding = env.store.executorForThread(thread.id)!;
+      env.runtime.setToolPermission(thread.id, 'read_file', 'allow');
+
+      await env.runtime.submit(thread.id, 'before-rotation-message', 'Read the file before rotation.');
+      await env.runtime.drain();
+      expect(
+        model.prompts[1]?.turns.some((turn) => turn.kind === 'tool_result' && turn.content.includes('original')),
+      ).toBe(true);
+
+      await remote.close();
+      remote = await startRemoteExecutorServer({ token: rotatedToken, workspaceRoot, databasePath, port });
+      expect(
+        (
+          await fetch(`${endpoint}/api/info`, {
+            headers: { authorization: `Bearer ${token}` },
+          })
+        ).status,
+      ).toBe(401);
+      expect(
+        (
+          await fetch(`${endpoint}/api/info`, {
+            headers: { authorization: `Bearer ${rotatedToken}` },
+          })
+        ).status,
+      ).toBe(200);
+
+      const updated = await env.runtime.updateRemoteExecutorConnection(
+        connection.id,
+        connection.name,
+        connection.endpointUrl,
+        rotatedToken,
+      );
+      expect(updated).toMatchObject({ id: connection.id, endpointUrl: endpoint });
+      expect(env.store.executorForThread(thread.id)).toMatchObject({
+        id: originalBinding.id,
+        remoteConnectionId: connection.id,
+        remoteEndpointUrl: endpoint,
+        workspacePath: remoteWorkspace,
+      });
+      expect(JSON.stringify(updated)).not.toContain(rotatedToken);
+
+      await env.runtime.submit(thread.id, 'after-rotation-message', 'Read the file after rotation.');
+      await env.runtime.drain();
+
+      expect(
+        model.prompts[3]?.turns.some((turn) => turn.kind === 'tool_result' && turn.content.includes('replacement')),
+      ).toBe(true);
+      expect(env.store.executorForThread(thread.id)).toMatchObject({
+        id: originalBinding.id,
+        remoteConnectionId: connection.id,
+        remoteEndpointUrl: endpoint,
+        workspacePath: remoteWorkspace,
+      });
+      const toolExecutions = env.store.listExecutions(thread.id).filter((execution) => execution.kind === 'tool');
+      expect(toolExecutions.map((execution) => execution.status)).toEqual(['completed', 'completed']);
+    } finally {
+      await env.cleanup();
+      await remote.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('does not start a fresh execution when a running ID is absent from the remote ledger', async () => {
     const directory = await import('node:fs/promises').then(({ mkdtemp }) =>
       mkdtemp(join(tmpdir(), 'pico-remote-lost-')),

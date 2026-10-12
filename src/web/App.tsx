@@ -129,7 +129,19 @@ function ExecutorPill({
   );
 }
 
-function Modal({ title, onClose, children }: { title: string; onClose(): void; children: ReactNode }) {
+function Modal({
+  title,
+  onClose,
+  children,
+  error,
+  onDismissError,
+}: {
+  title: string;
+  onClose(): void;
+  children: ReactNode;
+  error: string;
+  onDismissError(): void;
+}) {
   return (
     <div
       className="modal-backdrop"
@@ -148,6 +160,14 @@ function Modal({ title, onClose, children }: { title: string; onClose(): void; c
             ×
           </button>
         </div>
+        {error ? (
+          <div className="banner banner-error modal-error" role="alert">
+            <span>{error}</span>
+            <button type="button" onClick={onDismissError}>
+              Dismiss
+            </button>
+          </div>
+        ) : null}
         {children}
       </section>
     </div>
@@ -291,6 +311,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [busy, setBusy] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [remoteConnectionSaving, setRemoteConnectionSaving] = useState(false);
+  const [remoteTokenEdits, setRemoteTokenEdits] = useState<Record<string, string>>({});
+  const [remoteConnectionNotice, setRemoteConnectionNotice] = useState('');
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectPath, setNewProjectPath] = useState('');
   const [newThreadTitle, setNewThreadTitle] = useState('');
@@ -884,7 +906,35 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       });
       setRemoteConnections((items) => [connection, ...items]);
       setRemoteForm({ name: '', endpointUrl: '', accessToken: '' });
+      setRemoteConnectionNotice(`Connected to ${connection.name}.`);
       setNotice(`Connected to ${connection.name}. Choose it when starting a new Thread.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setRemoteConnectionSaving(false);
+    }
+  };
+
+  const updateRemoteExecutorToken = async (event: FormEvent, connectionId: string): Promise<void> => {
+    event.preventDefault();
+    const connection = remoteConnections.find((item) => item.id === connectionId);
+    const accessToken = remoteTokenEdits[connectionId]?.trim();
+    if (!connection || !accessToken) return;
+    setRemoteConnectionSaving(true);
+    setError('');
+    setRemoteConnectionNotice('');
+    try {
+      const updated = await api<RemoteExecutorConnectionView>(`/api/executor-connections/${connectionId}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          name: connection.name,
+          endpointUrl: connection.endpointUrl,
+          accessToken,
+        }),
+      });
+      setRemoteConnections((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+      setRemoteTokenEdits((items) => ({ ...items, [connectionId]: '' }));
+      setRemoteConnectionNotice(`Connection verified. The access token for ${updated.name} was replaced.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -1473,7 +1523,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       </main>
 
       {settingsOpen ? (
-        <Modal title="Model and Executor connections" onClose={() => setSettingsOpen(false)}>
+        <Modal
+          title="Model and Executor connections"
+          onClose={() => setSettingsOpen(false)}
+          error={error}
+          onDismissError={() => setError('')}
+        >
           <form className="form-stack" onSubmit={(event) => void saveModelSettings(event)}>
             <p className="form-intro">Connect any OpenAI-compatible provider. Settings stay in this Pico Runtime.</p>
             <label>
@@ -1541,11 +1596,43 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 Pico’s local data file and are never returned by the API.
               </p>
             </div>
+            {remoteConnectionNotice ? (
+              <p className="remote-connection-notice" role="status">
+                {remoteConnectionNotice}
+              </p>
+            ) : null}
             {remoteConnections.map((connection) => (
               <div className="remote-connection-item" key={connection.id}>
                 <strong>{connection.name}</strong>
                 <span>{connection.endpointUrl}</span>
                 <code>{connection.workspaceRoot}</code>
+                <form
+                  className="remote-token-form"
+                  onSubmit={(event) => void updateRemoteExecutorToken(event, connection.id)}
+                >
+                  <label>
+                    Replace access token
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      placeholder="New access token"
+                      value={remoteTokenEdits[connection.id] ?? ''}
+                      onChange={(event) => {
+                        setRemoteTokenEdits((items) => ({ ...items, [connection.id]: event.target.value }));
+                        setRemoteConnectionNotice('');
+                      }}
+                    />
+                  </label>
+                  <button
+                    className="button button-soft"
+                    disabled={remoteConnectionSaving || !remoteTokenEdits[connection.id]?.trim()}
+                  >
+                    {remoteConnectionSaving ? 'Checking…' : 'Replace token'}
+                  </button>
+                  <p className="field-note">
+                    Pico checks the token before saving it. Existing Threads keep this Executor binding.
+                  </p>
+                </form>
               </div>
             ))}
             <form className="form-stack" onSubmit={(event) => void addRemoteExecutorConnection(event)}>
@@ -1587,7 +1674,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       ) : null}
 
       {newProjectOpen ? (
-        <Modal title="Create a Project" onClose={() => setNewProjectOpen(false)}>
+        <Modal
+          title="Create a Project"
+          onClose={() => setNewProjectOpen(false)}
+          error={error}
+          onDismissError={() => setError('')}
+        >
           <form className="form-stack" onSubmit={(event) => void createProject(event)}>
             <p className="form-intro">A Project groups Threads that share the same workspace and long-term context.</p>
             <label>
@@ -1622,7 +1714,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       ) : null}
 
       {newThreadOpen ? (
-        <Modal title="Start a Thread" onClose={() => setNewThreadOpen(false)}>
+        <Modal
+          title="Start a Thread"
+          onClose={() => setNewThreadOpen(false)}
+          error={error}
+          onDismissError={() => setError('')}
+        >
           <form className="form-stack" onSubmit={(event) => void createThread(event)}>
             <p className="form-intro">Choose the execution environment now. A Thread stays bound to this Executor.</p>
             <label>
