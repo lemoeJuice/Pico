@@ -60,6 +60,14 @@ export interface SubmitResult {
   command?: CommandResult;
 }
 
+export interface ModelInputAttempt {
+  id: string;
+  prompt: ModelPrompt;
+  status: 'running' | 'completed' | 'failed' | 'interrupted';
+  error?: string;
+  createdAt: string;
+}
+
 const defaultModelSettings: ModelSettings = {
   baseUrl: process.env.PICO_MODEL_BASE_URL ?? 'https://api.openai.com/v1',
   apiKey: process.env.PICO_MODEL_API_KEY ?? '',
@@ -227,6 +235,54 @@ export class PicoRuntime {
       approvals: this.store.listApprovals(threadId),
       children: this.listThreads(thread.projectId).filter((candidate) => candidate.parentThreadId === threadId),
     };
+  }
+
+  getModelInputAttempts(threadId: string, executionId: string): ModelInputAttempt[] | null {
+    const execution = this.store.getExecution(executionId);
+    if (!execution || execution.threadId !== threadId || execution.kind !== 'model') return null;
+    const outcomes = new Map<string, { status: ModelInputAttempt['status']; error?: string }>();
+    for (const entry of this.store.listExecutionLog(executionId, 'model-input-settled')) {
+      const requestId = entry.detail.requestId;
+      const status = entry.detail.status;
+      if (
+        typeof requestId === 'string' &&
+        (status === 'completed' || status === 'failed' || status === 'interrupted')
+      ) {
+        outcomes.set(requestId, {
+          status,
+          ...(typeof entry.detail.error === 'string' ? { error: entry.detail.error } : {}),
+        });
+      }
+    }
+    return this.store.listExecutionLog(executionId, 'model-input-requested').flatMap((entry): ModelInputAttempt[] => {
+      const requestId = entry.detail.requestId;
+      const prompt = entry.detail.prompt;
+      if (
+        typeof requestId !== 'string' ||
+        !prompt ||
+        typeof prompt !== 'object' ||
+        typeof (prompt as ModelPrompt).system !== 'string' ||
+        !Array.isArray((prompt as ModelPrompt).turns) ||
+        !Array.isArray((prompt as ModelPrompt).tools)
+      ) {
+        return [];
+      }
+      const outcome = outcomes.get(requestId);
+      const status =
+        outcome?.status ??
+        (execution.status === 'interrupted' || execution.status === 'failed' || execution.status === 'completed'
+          ? execution.status
+          : 'running');
+      return [
+        {
+          id: requestId,
+          prompt: prompt as ModelPrompt,
+          status,
+          ...(outcome?.error ? { error: outcome.error } : {}),
+          createdAt: entry.createdAt,
+        },
+      ];
+    });
   }
 
   async submit(threadId: string, id: string, content: string): Promise<SubmitResult> {
@@ -590,9 +646,26 @@ export class PicoRuntime {
           this.publish({ type: 'model.delta', threadId: thread.id, executionId: modelExecutionId, delta });
         },
       };
-      const response = await this.pipelines.run<ModelStageInput, ModelResponse>('model', modelInput, (input) =>
-        this.model.complete(input.prompt, modelSettings, input.signal, input.onText),
-      );
+      const response = await this.pipelines.run<ModelStageInput, ModelResponse>('model', modelInput, async (input) => {
+        const requestId = randomUUID();
+        const prompt = structuredClone(input.prompt);
+        this.store.appendExecutionLog(modelExecutionId, 'model-input-requested', { requestId, prompt });
+        try {
+          const result = await this.model.complete(prompt, modelSettings, input.signal, input.onText);
+          this.store.appendExecutionLog(modelExecutionId, 'model-input-settled', { requestId, status: 'completed' });
+          return result;
+        } catch (error) {
+          this.store.appendExecutionLog(modelExecutionId, 'model-input-settled', {
+            requestId,
+            status:
+              input.signal.aborted || (error instanceof Error && error.name === 'AbortError')
+                ? 'interrupted'
+                : 'failed',
+            error: error instanceof Error ? error.message : String(error),
+          });
+          throw error;
+        }
+      });
       const hitOutputLimit = response.finishReason === 'length';
       const seenCallIds = new Set<string>();
       const calls = (hitOutputLimit ? [] : response.toolCalls).map((call, index) => {

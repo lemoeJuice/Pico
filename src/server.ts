@@ -118,6 +118,11 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     if (!snapshot) return notFound(response, 'Thread not found');
     response.json(snapshot);
   });
+  app.get('/api/threads/:threadId/executions/:executionId/model-input', (request, response) => {
+    const attempts = runtime.getModelInputAttempts(request.params.threadId!, request.params.executionId!);
+    if (!attempts) return notFound(response, 'Model Execution not found in this Thread');
+    response.json({ attempts });
+  });
   app.post('/api/threads/:threadId/messages', async (request, response) => {
     const body = bodyObject(request);
     const id = requiredText(body, 'id');

@@ -7,7 +7,7 @@ import { PicoStore } from '../src/core/store.js';
 import type { PicoPlugin } from '../src/plugins/host.js';
 import type { ModelResponse } from '../src/runtime/model.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
-import type { ModelStageInput, StepInput, ToolBatchInput } from '../src/runtime/stages.js';
+import type { ModelStageInput, ProjectionInput, StepInput, ToolBatchInput } from '../src/runtime/stages.js';
 import { threadCanBeInterrupted } from '../src/web/thread-controls.js';
 import { deferred, FakeModel, response, setupRuntime } from './helpers.js';
 
@@ -110,6 +110,9 @@ describe('durable Thread runtime invariants', () => {
       name: 'Model prompt modifier',
       version: '1',
       activate({ pipelines }) {
+        pipelines.use<ProjectionInput, ProjectionInput>('projection', async (input, next) =>
+          next({ ...input, systemPrompt: `${input.systemPrompt}\nProject context: stable architecture.` }),
+        );
         pipelines.use<ModelStageInput, ModelResponse>('model', async (input, next) =>
           next({
             ...input,
@@ -129,7 +132,22 @@ describe('durable Thread runtime invariants', () => {
       expect(env.store.listRecords(thread.id).find((record) => record.kind === 'message')?.payload).toMatchObject({
         content: 'Hello',
       });
-      expect(env.store.listRecords(thread.id).filter((record) => record.kind === 'assistant')).toHaveLength(1);
+      const records = env.store.listRecords(thread.id);
+      const assistant = records.find((record) => record.kind === 'assistant');
+      expect(records.filter((record) => record.kind === 'assistant')).toHaveLength(1);
+      expect(records).toHaveLength(2);
+      expect(assistant).toBeDefined();
+      const modelExecutionId = assistant!.id.replace(/:assistant$/, '');
+      const attempts = env.runtime.getModelInputAttempts(thread.id, modelExecutionId);
+      expect(attempts).toHaveLength(1);
+      expect(attempts?.[0]).toMatchObject({
+        prompt: model.prompts[0],
+        status: 'completed',
+      });
+      expect(attempts?.[0]?.prompt.system).toContain('Project context: stable architecture.');
+      expect(attempts?.[0]?.prompt.system).toContain('Use concise answers.');
+      expect(env.runtime.getModelInputAttempts(env.createThread().id, modelExecutionId)).toBeNull();
+      expect(env.store.listRecords(thread.id)).toEqual(records);
     } finally {
       await env.cleanup();
     }

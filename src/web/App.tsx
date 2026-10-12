@@ -15,7 +15,7 @@ import type {
   UiContribution,
 } from '../core/types.js';
 import type { PermissionPolicy } from '../runtime/stages.js';
-import type { ThreadSnapshot } from '../runtime/runtime.js';
+import type { ModelInputAttempt, ThreadSnapshot } from '../runtime/runtime.js';
 import { isSessionExpired } from './session.js';
 import { visiblePauseReason } from './pause-reason.js';
 import { upsertProjectThread } from './project-threads.js';
@@ -1405,8 +1405,12 @@ function AssistantBubble({
   threadId: string;
   onApproval(id: string, allow: boolean, rememberForThread?: boolean): void;
 }) {
+  const [modelInputs, setModelInputs] = useState<ModelInputAttempt[] | null>(null);
+  const [modelInputsLoading, setModelInputsLoading] = useState(false);
+  const [modelInputsError, setModelInputsError] = useState('');
   const assistant = recordPayload<AssistantPayload>(record);
   const calls = assistant.toolCalls ?? [];
+  const executionId = record.id.replace(/:assistant$/, '');
   const completionNote = assistant.finishReason === 'length' ? '· output limit reached' : null;
   const usage = assistant.usage;
   const usageLabel =
@@ -1457,6 +1461,41 @@ function AssistantBubble({
             })}
           </div>
         ) : null}
+        <details
+          className="projection-card"
+          onToggle={(event) => {
+            if (!event.currentTarget.open || modelInputs !== null || modelInputsLoading) return;
+            setModelInputsLoading(true);
+            setModelInputsError('');
+            void api<{ attempts: ModelInputAttempt[] }>(
+              `/api/threads/${encodeURIComponent(threadId)}/executions/${encodeURIComponent(executionId)}/model-input`,
+            )
+              .then((result) => setModelInputs(result.attempts))
+              .catch((caught: unknown) =>
+                setModelInputsError(caught instanceof Error ? caught.message : String(caught)),
+              )
+              .finally(() => setModelInputsLoading(false));
+          }}
+        >
+          <summary>Model input</summary>
+          <p className="projection-note">
+            The exact prompt passed to the model adapter. API credentials are not included.
+          </p>
+          {modelInputsLoading ? <p className="projection-state">Loading model input…</p> : null}
+          {modelInputsError ? <p className="projection-error">{modelInputsError}</p> : null}
+          {modelInputs?.length === 0 ? (
+            <p className="projection-state">The model pipeline completed this step without calling the adapter.</p>
+          ) : null}
+          {modelInputs?.map((attempt, index) => (
+            <details className="projection-attempt" key={attempt.id}>
+              <summary>
+                Attempt {index + 1} · {attempt.status}
+              </summary>
+              {attempt.error ? <p className="projection-error">{attempt.error}</p> : null}
+              <pre className="projection-view">{toJson(attempt.prompt)}</pre>
+            </details>
+          ))}
+        </details>
       </div>
     </div>
   );

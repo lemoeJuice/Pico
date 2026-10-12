@@ -39,6 +39,14 @@ export interface AppendResult<T extends object> {
   inserted: boolean;
 }
 
+export interface ExecutionLogEntry {
+  id: string;
+  executionId: string;
+  kind: string;
+  detail: Record<string, unknown>;
+  createdAt: string;
+}
+
 export interface CommitStepInput {
   assistantRecordId: string;
   modelExecutionId: string;
@@ -546,6 +554,25 @@ export class PicoStore {
     `,
       )
       .run(randomUUID(), id, kind, JSON.stringify(detail), createdAt);
+  }
+
+  appendExecutionLog(executionId: string, kind: string, detail: Record<string, unknown>): void {
+    if (!this.getExecution(executionId)) throw new Error(`Execution ${executionId} not found`);
+    this.logExecution(executionId, kind, detail);
+  }
+
+  listExecutionLog(executionId: string, kind: string): ExecutionLogEntry[] {
+    return (
+      this.db
+        .prepare('SELECT * FROM execution_log WHERE execution_id = ? AND kind = ? ORDER BY created_at, id')
+        .all(executionId, kind) as SqlRow[]
+    ).map((row) => ({
+      id: String(row.id),
+      executionId: String(row.execution_id),
+      kind: String(row.kind),
+      detail: json<Record<string, unknown>>(row.detail_json, {}),
+      createdAt: String(row.created_at),
+    }));
   }
 
   getExecution(id: string): Execution | null {

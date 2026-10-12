@@ -1143,6 +1143,66 @@ button:disabled {
 .tool-detail .tool-output {
   max-height: 260px;
 }
+.projection-card {
+  margin-top: 10px;
+  padding: 9px 11px;
+  color: #78857b;
+  background: rgba(248, 250, 247, 0.82);
+  border: 1px solid #e9eee7;
+  border-radius: 10px;
+}
+.projection-card > summary,
+.projection-attempt > summary {
+  color: #819084;
+  font-size: 10px;
+  font-weight: 600;
+  list-style: none;
+  cursor: pointer;
+}
+.projection-card > summary::-webkit-details-marker,
+.projection-attempt > summary::-webkit-details-marker {
+  display: none;
+}
+.projection-card > summary::before,
+.projection-attempt > summary::before {
+  display: inline-block;
+  width: 14px;
+  color: #9eac9f;
+  content: '›';
+}
+.projection-card[open] > summary::before,
+.projection-attempt[open] > summary::before {
+  content: '⌄';
+}
+.projection-note,
+.projection-state,
+.projection-error {
+  margin: 8px 0;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.projection-error {
+  color: #a06f60;
+}
+.projection-attempt {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #edf0eb;
+}
+.projection-view {
+  max-height: 340px;
+  overflow: auto;
+  margin: 7px 0 0;
+  padding: 10px;
+  color: #68746a;
+  background: #f2f5f1;
+  border-radius: 7px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .subtle-inline {
   color: #b3bbb4;
   font-size: 9px;

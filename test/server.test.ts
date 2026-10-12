@@ -151,6 +151,33 @@ describe('Pico server access boundary', () => {
         payload: assistantPayload({ batchId: 'approval-step:batch', toolCalls: [call] }),
         toolCalls: [{ call, executionId: toolExecutionId }],
       });
+      server.runtime.store.appendExecutionLog(modelExecution.id, 'model-input-requested', {
+        requestId: 'approval-step-request',
+        prompt: {
+          system: 'Pico test system prompt',
+          turns: [{ kind: 'message', role: 'user', content: 'Hello' }],
+          tools: [],
+          model: 'test-model',
+          temperature: 0.2,
+        },
+      });
+      server.runtime.store.appendExecutionLog(modelExecution.id, 'model-input-settled', {
+        requestId: 'approval-step-request',
+        status: 'completed',
+      });
+      const modelInputUrl = `${base}/api/threads/${thread.id}/executions/${encodeURIComponent(modelExecution.id)}/model-input`;
+      const modelInputResponse = await fetch(modelInputUrl, { headers: cookieHeaders });
+      expect(modelInputResponse.status).toBe(200);
+      expect(await modelInputResponse.json()).toMatchObject({
+        attempts: [{ id: 'approval-step-request', status: 'completed', prompt: { model: 'test-model' } }],
+      });
+      const otherThread = server.runtime.createThread(project.id, 'host');
+      expect(
+        await fetch(
+          `${base}/api/threads/${otherThread.id}/executions/${encodeURIComponent(modelExecution.id)}/model-input`,
+          { headers: cookieHeaders },
+        ).then((response) => response.status),
+      ).toBe(404);
       server.runtime.store.createApproval(toolExecutionId);
       const rememberResponse = await fetch(`${base}/api/approvals/${encodeURIComponent(toolExecutionId)}`, {
         method: 'POST',
