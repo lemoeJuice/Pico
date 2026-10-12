@@ -252,6 +252,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   });
   const listRef = useRef<HTMLDivElement>(null);
   const snapshotRequest = useRef(0);
+  const threadUpdateVersions = useRef(new Map<string, number>());
   const retryMessage = useRef<{ id: string; content: string } | null>(null);
 
   const selectedProject = projects.find((project) => project.id === projectId) ?? null;
@@ -408,6 +409,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         } else if (event.type === 'thread.updated') {
           const updated = event.thread as Thread | undefined;
           if (updated) {
+            threadUpdateVersions.current.set(updated.id, (threadUpdateVersions.current.get(updated.id) ?? 0) + 1);
             setThreads((items) => items.map((item) => (item.id === updated.id ? updated : item)));
             setSnapshot((current) => (current?.thread.id === updated.id ? { ...current, thread: updated } : current));
           }
@@ -565,10 +567,20 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
   const controlThread = async (action: 'pause' | 'continue' | 'interrupt'): Promise<void> => {
     if (!threadId) return;
+    if (action === 'continue') setError('');
+    const updateVersion = threadUpdateVersions.current.get(threadId) ?? 0;
     try {
       const updated = await api<Thread>(`/api/threads/${threadId}/${action}`, { method: 'POST', body: '{}' });
-      setSnapshot((current) => (current ? { ...current, thread: updated } : current));
-      setThreads((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+      setSnapshot((current) => {
+        if (current?.thread.id !== updated.id || (threadUpdateVersions.current.get(threadId) ?? 0) !== updateVersion)
+          return current;
+        return { ...current, thread: updated };
+      });
+      setThreads((items) =>
+        (threadUpdateVersions.current.get(threadId) ?? 0) === updateVersion
+          ? items.map((item) => (item.id === updated.id ? updated : item))
+          : items,
+      );
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
