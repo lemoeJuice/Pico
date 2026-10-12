@@ -316,17 +316,51 @@ describe('Executor execution identity and recovery', () => {
     }
   });
 
-  it('explains the required helper when Podman cannot use Btrfs overlay storage', async () => {
+  it('uses an isolated persistent VFS store when no fuse-overlayfs helper is available', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.createThread('container');
-    const runner = async () => {
+    const calls: string[][] = [];
+    const runner = async (args: string[]) => {
+      calls.push(args);
+      if (!args.includes('--storage-driver')) throw new Error("'overlay' is not supported over btrfs");
+      return { stdout: '5.0.0', stderr: '' };
+    };
+    const vfsRoot = '/tmp/pico-test-vfs-root';
+    const executor = new ContainerExecutor(env.store, new ToolCatalog(), undefined, undefined, runner, '', vfsRoot);
+    try {
+      const binding = env.store.executorForThread(thread.id)!;
+      await executor.checkConnection(binding);
+      await executor.checkConnection(binding);
+      expect(calls).toEqual([
+        ['info', '--format', '{{.Version.Version}}'],
+        ['--root', vfsRoot, '--storage-driver', 'vfs', 'info', '--format', '{{.Version.Version}}'],
+        ['--root', vfsRoot, '--storage-driver', 'vfs', 'info', '--format', '{{.Version.Version}}'],
+      ]);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('preserves the Btrfs error when isolated VFS storage also fails', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.createThread('container');
+    const runner = async (args: string[]) => {
+      if (args.includes('--storage-driver')) throw new Error('permission denied creating VFS storage');
       throw new Error("'overlay' is not supported over btrfs");
     };
-    const executor = new ContainerExecutor(env.store, new ToolCatalog(), undefined, undefined, runner, '');
+    const executor = new ContainerExecutor(
+      env.store,
+      new ToolCatalog(),
+      undefined,
+      undefined,
+      runner,
+      '',
+      '/tmp/pico-test-vfs-root',
+    );
     try {
       const binding = env.store.executorForThread(thread.id)!;
       await expect(executor.checkConnection(binding)).rejects.toThrow(
-        /fuse-overlayfs[\s\S]*PICO_PODMAN_OVERLAY_MOUNT_PROGRAM/,
+        /overlay.*not supported over btrfs[\s\S]*permission denied creating VFS storage/,
       );
     } finally {
       await env.cleanup();

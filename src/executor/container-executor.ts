@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { accessSync, constants } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import type { Execution, ExecutorBinding } from '../core/types.js';
 import { PicoStore } from '../core/store.js';
 import { ToolCatalog } from './tools.js';
@@ -203,6 +203,15 @@ function findOverlayMountProgram(): string | undefined {
   return undefined;
 }
 
+function defaultVfsStorageRoot(): string {
+  const configured = process.env.PICO_PODMAN_VFS_ROOT?.trim();
+  if (configured) return resolve(configured);
+  const databasePath = process.env.PICO_DB_PATH;
+  const dataDirectory =
+    databasePath && databasePath !== ':memory:' ? dirname(resolve(databasePath)) : join(process.cwd(), 'data');
+  return join(dataDirectory, 'podman-vfs');
+}
+
 function isUnsupportedBtrfsOverlay(error: unknown): boolean {
   return /overlay[^\n]*not supported[^\n]*btrfs|overlay[^\n]*unsupported[^\n]*btrfs/i.test(
     error instanceof Error ? error.message : String(error),
@@ -260,6 +269,7 @@ export class ContainerExecutor implements ExecutorAdapter {
     private readonly image = 'docker.io/library/node:22-bookworm-slim',
     private readonly runPodmanCommand: PodmanRunner = podman,
     private readonly overlayMountProgram = findOverlayMountProgram(),
+    private readonly vfsStorageRoot = defaultVfsStorageRoot(),
   ) {}
 
   async checkConnection(_binding: ExecutorBinding): Promise<void> {
@@ -279,20 +289,28 @@ export class ContainerExecutor implements ExecutorAdapter {
     } catch (error) {
       if (!isUnsupportedBtrfsOverlay(error)) throw error;
       const original = errorMessage(error);
-      if (!this.overlayMountProgram) {
-        throw new Error(
-          `${original}\nPodman needs fuse-overlayfs for overlay storage on Btrfs. Install it or set PICO_PODMAN_OVERLAY_MOUNT_PROGRAM to its executable path.`,
-          { cause: error },
-        );
+      let fallbackReason = original;
+      if (this.overlayMountProgram) {
+        const storageArgs = ['--storage-opt', `overlay.mount_program=${this.overlayMountProgram}`];
+        try {
+          const result = await this.runPodmanCommand([...storageArgs, ...args], input, signal);
+          this.podmanStorageArgs = storageArgs;
+          return result;
+        } catch (fallbackError) {
+          fallbackReason += `\nPodman could not use fuse-overlayfs helper ${this.overlayMountProgram}: ${errorMessage(fallbackError)}`;
+        }
+      } else {
+        fallbackReason +=
+          '\nNo fuse-overlayfs helper was found; Pico is retrying with an isolated VFS store. Set PICO_PODMAN_OVERLAY_MOUNT_PROGRAM to use a compatible overlay helper.';
       }
-      const storageArgs = ['--storage-opt', `overlay.mount_program=${this.overlayMountProgram}`];
+      const storageArgs = ['--root', this.vfsStorageRoot, '--storage-driver', 'vfs'];
       try {
         const result = await this.runPodmanCommand([...storageArgs, ...args], input, signal);
         this.podmanStorageArgs = storageArgs;
         return result;
       } catch (fallbackError) {
         throw new Error(
-          `Podman could not use overlay mount helper ${this.overlayMountProgram}: ${errorMessage(fallbackError)}\nOriginal error: ${original}`,
+          `${fallbackReason}\nPodman could not initialize isolated VFS storage at ${this.vfsStorageRoot}: ${errorMessage(fallbackError)}`,
           { cause: fallbackError },
         );
       }
