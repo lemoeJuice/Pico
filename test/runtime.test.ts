@@ -160,6 +160,54 @@ describe('durable Thread runtime invariants', () => {
     }
   });
 
+  it('Interrupt cancels a pending approval without recording a denial or starting the Tool', async () => {
+    const model = new FakeModel((_prompt, callNumber) =>
+      callNumber === 1
+        ? response('', [{ id: 'cancel-read', name: 'read_file', arguments: { path: 'facts.txt' } }])
+        : response('The interrupted approval was not executed.'),
+    );
+    const env = await setupRuntime(model);
+    const thread = env.createThread('host');
+    let invocations = 0;
+    const readFileTool = env.runtime.tools.get('read_file')!;
+    env.runtime.tools.replace({
+      ...readFileTool,
+      execute: async () => {
+        invocations += 1;
+        return { contents: 'should not be read' };
+      },
+    });
+    try {
+      await env.runtime.submit(thread.id, 'cancel-approval-message', 'Read facts.txt');
+      await until(() => env.store.listApprovals(thread.id).some((approval) => approval.status === 'pending'));
+      const approval = env.store.listApprovals(thread.id)[0]!;
+
+      await env.runtime.interrupt(thread.id);
+      await env.runtime.drain();
+
+      expect(env.store.getApproval(approval.executionId)?.status).toBe('cancelled');
+      expect(env.store.getExecution(approval.executionId)?.status).toBe('interrupted');
+      expect(() => env.runtime.resolveApproval(approval.executionId, true, true)).toThrow(/cancelled/i);
+      expect(env.runtime.toolPermissions(thread.id).find((tool) => tool.name === 'read_file')?.policy).toBe('ask');
+      expect(invocations).toBe(0);
+      expect(model.calls).toBe(1);
+      const permissionRecords = env.store
+        .listRecords(thread.id)
+        .filter((record) => record.kind === 'plugin' && record.payload.pluginId === 'pico.permissions');
+      expect(permissionRecords.some((record) => record.payload.action === 'cancel')).toBe(true);
+      expect(
+        permissionRecords.some((record) => record.payload.action === 'decision' && record.payload.decision === 'deny'),
+      ).toBe(false);
+      expect(
+        env.store
+          .listRecords(thread.id)
+          .some((record) => record.kind === 'tool_result' && record.payload.status === 'interrupted'),
+      ).toBe(true);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it('can persist an approval for one Tool in the Thread to avoid repeated prompts', async () => {
     const model = new FakeModel((_prompt, callNumber) =>
       callNumber === 1

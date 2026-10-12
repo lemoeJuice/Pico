@@ -278,7 +278,18 @@ export class PicoRuntime {
       if (execution.kind === 'model') continue;
       const approval = this.store.getApproval(execution.id);
       if (approval?.status === 'pending') {
-        this.resolveApproval(execution.id, false);
+        const cancelled = this.store.interruptPendingApproval(execution.id);
+        const record = this.store.appendPluginRecord(threadId, 'pico.permissions', {
+          action: 'cancel',
+          executionId: execution.id,
+          toolName: cancelled.approval.toolName,
+          reason: 'user_interrupt',
+        });
+        this.publishRecord(record);
+        this.publish({ type: 'approval.updated', approval: cancelled.approval });
+        this.executionChanged(cancelled.execution);
+        this.ensureToolResult(threadId, cancelled.execution);
+        this.resolveApprovalWaiters(execution.id, false);
         continue;
       }
       const tool = execution.toolName ? this.tools.get(execution.toolName) : undefined;
@@ -628,16 +639,14 @@ export class PicoRuntime {
             error: reason,
             result: { denied: true },
           });
-          if (this.store.getApproval(executionId)?.status !== 'denied') {
-            const record = this.store.appendPluginRecord(thread.id, 'pico.permissions', {
-              action: 'decision',
-              executionId,
-              toolName: call.name,
-              decision: 'deny',
-              reason,
-            });
-            this.publishRecord(record);
-          }
+          const record = this.store.appendPluginRecord(thread.id, 'pico.permissions', {
+            action: 'decision',
+            executionId,
+            toolName: call.name,
+            decision: 'deny',
+            reason,
+          });
+          this.publishRecord(record);
           this.executionChanged(execution);
         }
         return this.store.getExecution(executionId)!;
@@ -667,7 +676,7 @@ export class PicoRuntime {
     const approval = this.store.createApproval(executionId);
     this.publish({ type: 'approval.updated', approval });
     if (approval.status === 'allowed') return true;
-    if (approval.status === 'denied') return false;
+    if (approval.status === 'denied' || approval.status === 'cancelled') return false;
     return new Promise<boolean>((resolvePromise) => {
       const waiters = this.approvalWaiters.get(executionId) ?? new Set<(allow: boolean) => void>();
       waiters.add(resolvePromise);
@@ -683,6 +692,7 @@ export class PicoRuntime {
       if (!allow) throw new Error('A denied approval cannot create an allow rule');
       if (!before) throw new Error('Approval request not found');
       if (before.status === 'denied') throw new Error('Approval was already resolved');
+      if (before.status === 'cancelled') throw new Error('Approval was cancelled');
       this.setToolPermission(before.threadId, before.toolName, 'allow');
     }
     const approval = this.store.resolveApproval(executionId, allow);

@@ -141,7 +141,7 @@ export class PicoStore {
       END;
       CREATE TABLE IF NOT EXISTS approvals (
         execution_id TEXT PRIMARY KEY REFERENCES executions(id),
-        status TEXT NOT NULL CHECK (status IN ('pending', 'allowed', 'denied')),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'allowed', 'denied', 'cancelled')),
         created_at TEXT NOT NULL,
         decided_at TEXT
       );
@@ -158,6 +158,28 @@ export class PicoStore {
         PRIMARY KEY(plugin_id, key)
       );
     `);
+    this.migrateApprovalStatus();
+  }
+
+  private migrateApprovalStatus(): void {
+    const schema = this.db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'approvals'")
+      .get() as SqlRow | undefined;
+    if (typeof schema?.sql !== 'string' || schema.sql.includes("'cancelled'")) return;
+    this.transaction(() => {
+      this.db.exec('ALTER TABLE approvals RENAME TO approvals_legacy;');
+      this.db.exec(`
+        CREATE TABLE approvals (
+          execution_id TEXT PRIMARY KEY REFERENCES executions(id),
+          status TEXT NOT NULL CHECK (status IN ('pending', 'allowed', 'denied', 'cancelled')),
+          created_at TEXT NOT NULL,
+          decided_at TEXT
+        );
+        INSERT INTO approvals (execution_id, status, created_at, decided_at)
+          SELECT execution_id, status, created_at, decided_at FROM approvals_legacy;
+        DROP TABLE approvals_legacy;
+      `);
+    });
   }
 
   close(): void {
@@ -662,6 +684,28 @@ export class PicoStore {
       .prepare('UPDATE approvals SET status = ?, decided_at = ? WHERE execution_id = ?')
       .run(status, isoNow(), executionId);
     return { ...current, status };
+  }
+
+  interruptPendingApproval(executionId: string): { approval: PermissionRequest; execution: Execution } {
+    return this.transaction(() => {
+      const approval = this.getApproval(executionId);
+      if (!approval) throw new Error('Approval request not found');
+      if (approval.status !== 'pending') throw new Error('Approval was already resolved');
+      const execution = this.getExecution(executionId);
+      if (!execution || (execution.status !== 'pending' && execution.status !== 'running')) {
+        throw new Error('Tool execution is already settled');
+      }
+      this.db
+        .prepare(
+          "UPDATE approvals SET status = 'cancelled', decided_at = ? WHERE execution_id = ? AND status = 'pending'",
+        )
+        .run(isoNow(), executionId);
+      const interrupted = this.transitionExecution(executionId, 'interrupted', {
+        error: 'Interrupted while waiting for tool approval.',
+        detail: { userInterrupted: true, beforeApproval: true },
+      });
+      return { approval: this.getApproval(executionId)!, execution: interrupted };
+    });
   }
 
   getSetting<T>(key: string, fallback: T): T {

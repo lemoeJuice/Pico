@@ -117,7 +117,7 @@ export interface PermissionRequest {
   threadId: string;
   toolName: string;
   arguments: Record<string, unknown>;
-  status: 'pending' | 'allowed' | 'denied';
+  status: 'pending' | 'allowed' | 'denied' | 'cancelled';
   createdAt: string;
 }
 
