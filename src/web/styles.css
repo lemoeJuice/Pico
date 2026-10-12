@@ -1649,6 +1649,17 @@ button:disabled {
   font-size: 11px;
   font-weight: 400;
 }
+.form-stack select {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 11px;
+  color: #46564b;
+  background: white;
+  border: 1px solid #e4eae2;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 400;
+}
 .form-stack input::placeholder {
   color: #b3bcb4;
 }
@@ -1707,6 +1718,32 @@ button:disabled {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 9px;
+}
+.remote-connections-section {
+  border-top: 1px solid var(--line);
+  margin-top: 1.5rem;
+  padding-top: 1.35rem;
+}
+.remote-connection-item {
+  display: grid;
+  gap: 0.25rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #f8faf7;
+  padding: 0.75rem 0.9rem;
+}
+.remote-connection-item strong {
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+.remote-connection-item span,
+.remote-connection-item code {
+  color: var(--muted);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+.remote-connection-item code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .executor-choice {
   position: relative;

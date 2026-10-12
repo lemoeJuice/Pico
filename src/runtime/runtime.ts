@@ -12,6 +12,7 @@ import type {
   PermissionRequest,
   Project,
   PublicSettings,
+  RemoteExecutorConnectionView,
   Thread,
   ThreadState,
   ToolCall,
@@ -21,7 +22,9 @@ import type {
 import { PicoStore } from '../core/store.js';
 import { ExecutionPipelines } from '../core/pipeline.js';
 import { ContainerExecutor } from '../executor/container-executor.js';
-import { HostExecutor } from '../executor/executor.js';
+import { HostExecutor, type ExecutorAdapter } from '../executor/executor.js';
+import { RemoteHostExecutor, inspectRemoteExecutor, validateRemoteWorkspace } from '../executor/remote-executor.js';
+import { normalizeRemoteExecutorUrl } from '../executor/remote-protocol.js';
 import { createToolCatalog, type ToolContext } from '../executor/tools.js';
 import { builtinPlugins } from '../plugins/builtin.js';
 import { CommandRegistry, PluginHost, type CommandResult } from '../plugins/host.js';
@@ -116,6 +119,7 @@ export class PicoRuntime {
   private readonly additionalPlugins: PicoPlugin[];
   private readonly hostExecutor: HostExecutor;
   private readonly containerExecutor: ContainerExecutor;
+  private readonly remoteHostExecutor: RemoteHostExecutor;
   private readonly listeners = new Set<(event: RuntimeEvent) => void>();
   private readonly loops = new Map<string, Promise<void>>();
   private readonly modelSignals = new Map<string, AbortController>();
@@ -129,6 +133,7 @@ export class PicoRuntime {
     this.additionalPlugins = options.plugins ?? [];
     this.hostExecutor = new HostExecutor(store, this.tools, (execution) => this.executionChanged(execution));
     this.containerExecutor = new ContainerExecutor(store, this.tools, (execution) => this.executionChanged(execution));
+    this.remoteHostExecutor = new RemoteHostExecutor(store, (execution) => this.executionChanged(execution));
     this.plugins = new PluginHost(store, this.tools, this.pipelines, this.commands, options.pluginDirectory);
     this.registerControlTools();
   }
@@ -157,7 +162,7 @@ export class PicoRuntime {
   }
 
   async shutdownHostExecutor(): Promise<void> {
-    await this.hostExecutor.shutdown();
+    await Promise.all([this.hostExecutor.shutdown(), this.remoteHostExecutor.shutdown()]);
   }
 
   subscribe(listener: (event: RuntimeEvent) => void): () => void {
@@ -202,6 +207,60 @@ export class PicoRuntime {
 
   createThread(projectId: string, executorKind: Thread['executorKind'], title = 'New thread'): Thread {
     const thread = this.store.createThread(projectId, executorKind, title.trim() || 'New thread');
+    this.publish({ type: 'thread.created', thread });
+    return thread;
+  }
+
+  async addRemoteExecutorConnection(
+    name: string,
+    endpointUrl: string,
+    accessToken: string,
+  ): Promise<RemoteExecutorConnectionView> {
+    const cleanedName = name.trim();
+    if (!cleanedName) throw new Error('Remote Executor name is required.');
+    const normalizedUrl = normalizeRemoteExecutorUrl(endpointUrl);
+    const info = await inspectRemoteExecutor(normalizedUrl, accessToken);
+    return this.store.createRemoteExecutorConnection(cleanedName, normalizedUrl, accessToken, info.workspaceRoot);
+  }
+
+  async updateRemoteExecutorConnection(
+    id: string,
+    name: string,
+    endpointUrl: string,
+    accessToken?: string,
+  ): Promise<RemoteExecutorConnectionView> {
+    const current = this.store.getRemoteExecutorConnection(id);
+    if (!current) throw new Error('Remote Executor connection not found.');
+    const cleanedName = name.trim();
+    if (!cleanedName) throw new Error('Remote Executor name is required.');
+    const normalizedUrl = normalizeRemoteExecutorUrl(endpointUrl);
+    const token = accessToken?.trim() || current.accessToken;
+    const info = await inspectRemoteExecutor(normalizedUrl, token);
+    return this.store.updateRemoteExecutorConnection(id, cleanedName, normalizedUrl, token, info.workspaceRoot);
+  }
+
+  remoteExecutorConnections(): RemoteExecutorConnectionView[] {
+    return this.store.listRemoteExecutorConnections();
+  }
+
+  async createRemoteThread(
+    projectId: string,
+    connectionId: string,
+    remoteWorkspacePath: string,
+    title = 'New thread',
+  ): Promise<Thread> {
+    if (!this.store.getProject(projectId)) throw new Error('Project not found.');
+    const connection = this.store.getRemoteExecutorConnection(connectionId);
+    if (!connection) throw new Error('Remote Executor connection not found.');
+    const workspacePath = await validateRemoteWorkspace(
+      connection.endpointUrl,
+      connection.accessToken,
+      remoteWorkspacePath,
+    );
+    const thread = this.store.createThread(projectId, 'host', title.trim() || 'New thread', {
+      remoteConnectionId: connection.id,
+      workspacePath,
+    });
     this.publish({ type: 'thread.created', thread });
     return thread;
   }
@@ -998,7 +1057,8 @@ export class PicoRuntime {
     this.publishRecord(appended);
   }
 
-  private adapterFor(binding: ExecutorBinding): HostExecutor | ContainerExecutor {
+  private adapterFor(binding: ExecutorBinding): ExecutorAdapter {
+    if (binding.remoteConnectionId) return this.remoteHostExecutor;
     return binding.kind === 'container' ? this.containerExecutor : this.hostExecutor;
   }
 
@@ -1069,9 +1129,12 @@ export class PicoRuntime {
     requestedTitle?: string,
   ): { threadId: string; title: string; executor: string } {
     const title = requestedTitle?.trim() || prompt.slice(0, 72) || 'Child Thread';
+    const parentBinding = this.store.executorForThread(parent.id);
     const child = this.store.createThread(parent.projectId, parent.executorKind, title, {
       parentThreadId: parent.id,
       createdByAgent: true,
+      ...(parentBinding?.remoteConnectionId ? { remoteConnectionId: parentBinding.remoteConnectionId } : {}),
+      ...(parent.executorRemote ? { workspacePath: parent.workspacePath } : {}),
     });
     this.publish({ type: 'thread.created', thread: child });
     this.postMessage(child, randomUUID(), {
@@ -1140,11 +1203,15 @@ export class PicoRuntime {
     if (!binding) throw new Error('Executor binding is missing');
     try {
       await this.adapterFor(binding).checkConnection(binding);
-      return { connected: true, kind: binding.kind, label: binding.label };
+      return {
+        connected: true,
+        kind: binding.remoteConnectionId ? 'remote-host' : binding.kind,
+        label: binding.label,
+      };
     } catch (error) {
       return {
         connected: false,
-        kind: binding.kind,
+        kind: binding.remoteConnectionId ? 'remote-host' : binding.kind,
         label: binding.label,
         error: error instanceof Error ? error.message : String(error),
       };

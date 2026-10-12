@@ -18,6 +18,9 @@ export interface ExecutorBinding {
   kind: ExecutorKind;
   label: string;
   workspacePath: string;
+  remoteConnectionId?: string | null;
+  remoteEndpointUrl?: string | null;
+  remoteAccessToken?: string | null;
   createdAt: string;
 }
 
@@ -26,6 +29,7 @@ export interface Thread {
   projectId: string;
   executorId: string;
   executorKind: ExecutorKind;
+  executorRemote: boolean;
   executorLabel: string;
   workspacePath: string;
   title: string;
@@ -36,6 +40,19 @@ export interface Thread {
   createdAt: string;
   state: ThreadState;
 }
+
+export interface RemoteExecutorConnection {
+  id: string;
+  name: string;
+  endpointUrl: string;
+  accessToken: string;
+  workspaceRoot: string;
+  createdAt: string;
+}
+
+export type RemoteExecutorConnectionView = Omit<RemoteExecutorConnection, 'accessToken'> & {
+  hasAccessToken: boolean;
+};
 
 export interface CanonicalRecord<T = Record<string, unknown>> {
   id: string;

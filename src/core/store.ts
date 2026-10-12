@@ -14,6 +14,8 @@ import type {
   MessagePayload,
   PermissionRequest,
   Project,
+  RemoteExecutorConnection,
+  RemoteExecutorConnectionView,
   Thread,
   ToolCall,
   ToolResultPayload,
@@ -74,6 +76,14 @@ export class PicoStore {
     this.db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     if (filename !== ':memory:') this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS remote_executor_connections (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        endpoint_url TEXT NOT NULL,
+        access_token TEXT NOT NULL,
+        workspace_root TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS projects (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -85,6 +95,7 @@ export class PicoStore {
         kind TEXT NOT NULL CHECK (kind IN ('container', 'host')),
         label TEXT NOT NULL,
         workspace_path TEXT NOT NULL,
+        remote_connection_id TEXT REFERENCES remote_executor_connections(id),
         created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS threads (
@@ -166,7 +177,16 @@ export class PicoStore {
         PRIMARY KEY(plugin_id, key)
       );
     `);
+    this.migrateRemoteExecutorBindings();
     this.migrateApprovalStatus();
+  }
+
+  private migrateRemoteExecutorBindings(): void {
+    const columns = this.db.prepare('PRAGMA table_info(executors)').all() as Array<{ name: string }>;
+    if (columns.some((column) => column.name === 'remote_connection_id')) return;
+    this.db.exec(
+      'ALTER TABLE executors ADD COLUMN remote_connection_id TEXT REFERENCES remote_executor_connections(id);',
+    );
   }
 
   private migrateApprovalStatus(): void {
@@ -238,19 +258,37 @@ export class PicoStore {
     projectId: string,
     executorKind: ExecutorKind,
     title = 'New thread',
-    options: { parentThreadId?: string | null; createdByAgent?: boolean } = {},
+    options: {
+      parentThreadId?: string | null;
+      createdByAgent?: boolean;
+      remoteConnectionId?: string | null;
+      workspacePath?: string;
+    } = {},
   ): Thread {
     const project = this.getProject(projectId);
     if (!project) throw new Error('Project not found');
+    const remoteConnection = options.remoteConnectionId
+      ? this.getRemoteExecutorConnection(options.remoteConnectionId)
+      : null;
+    if (options.remoteConnectionId && !remoteConnection) throw new Error('Remote Executor connection not found');
+    if (remoteConnection && executorKind !== 'host')
+      throw new Error('Remote Host Executor must use Host execution kind');
     const id = randomUUID();
     const executorId = randomUUID();
     const createdAt = isoNow();
-    const kindLabel = executorKind === 'container' ? 'Container' : 'Host';
+    const workspacePath = options.workspacePath ?? project.workspacePath;
+    const kindLabel = remoteConnection
+      ? `Remote Host · ${remoteConnection.name}`
+      : executorKind === 'container'
+        ? 'Container'
+        : 'Host';
     const label = `${kindLabel} · ${project.name}`;
     this.transaction(() => {
       this.db
-        .prepare('INSERT INTO executors (id, kind, label, workspace_path, created_at) VALUES (?, ?, ?, ?, ?)')
-        .run(executorId, executorKind, label, project.workspacePath, createdAt);
+        .prepare(
+          'INSERT INTO executors (id, kind, label, workspace_path, remote_connection_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        )
+        .run(executorId, executorKind, label, workspacePath, remoteConnection?.id ?? null, createdAt);
       this.db
         .prepare(
           `
@@ -275,8 +313,9 @@ export class PicoStore {
       projectId,
       executorId,
       executorKind,
+      executorRemote: Boolean(remoteConnection),
       executorLabel: label,
-      workspacePath: project.workspacePath,
+      workspacePath,
       title,
       parentThreadId: options.parentThreadId ?? null,
       createdByAgent: options.createdByAgent ?? false,
@@ -292,7 +331,7 @@ export class PicoStore {
       .prepare(
         `
       SELECT t.*, e.kind AS executor_kind, e.label AS executor_label,
-             e.workspace_path AS workspace_path
+             e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote
       FROM threads t JOIN executors e ON e.id = t.executor_id WHERE t.id = ?
     `,
       )
@@ -307,7 +346,7 @@ export class PicoStore {
             .prepare(
               `
           SELECT t.*, e.kind AS executor_kind, e.label AS executor_label,
-                 e.workspace_path AS workspace_path
+                 e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote
           FROM threads t JOIN executors e ON e.id = t.executor_id
           WHERE t.project_id = ? ORDER BY t.created_at DESC
         `,
@@ -317,7 +356,7 @@ export class PicoStore {
             .prepare(
               `
           SELECT t.*, e.kind AS executor_kind, e.label AS executor_label,
-                 e.workspace_path AS workspace_path
+                 e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote
           FROM threads t JOIN executors e ON e.id = t.executor_id
           ORDER BY t.created_at DESC
         `,
@@ -333,6 +372,7 @@ export class PicoStore {
       projectId: String(row.project_id),
       executorId: String(row.executor_id),
       executorKind: row.executor_kind as ExecutorKind,
+      executorRemote: typeof row.executor_remote === 'string' && row.executor_remote.length > 0,
       executorLabel: String(row.executor_label),
       workspacePath: String(row.workspace_path),
       title: String(row.title),
@@ -803,7 +843,10 @@ export class PicoStore {
     const row = this.db
       .prepare(
         `
-      SELECT e.* FROM executors e JOIN threads t ON t.executor_id = e.id WHERE t.id = ?
+      SELECT e.*, r.endpoint_url AS remote_endpoint_url, r.access_token AS remote_access_token
+      FROM executors e JOIN threads t ON t.executor_id = e.id
+      LEFT JOIN remote_executor_connections r ON r.id = e.remote_connection_id
+      WHERE t.id = ?
     `,
       )
       .get(threadId) as SqlRow | undefined;
@@ -813,8 +856,100 @@ export class PicoStore {
           kind: row.kind as ExecutorKind,
           label: String(row.label),
           workspacePath: String(row.workspace_path),
+          remoteConnectionId: typeof row.remote_connection_id === 'string' ? row.remote_connection_id : null,
+          remoteEndpointUrl: typeof row.remote_endpoint_url === 'string' ? row.remote_endpoint_url : null,
+          remoteAccessToken: typeof row.remote_access_token === 'string' ? row.remote_access_token : null,
           createdAt: String(row.created_at),
         }
       : null;
+  }
+
+  createRemoteExecutorConnection(
+    name: string,
+    endpointUrl: string,
+    accessToken: string,
+    workspaceRoot: string,
+  ): RemoteExecutorConnectionView {
+    const connection: RemoteExecutorConnection = {
+      id: randomUUID(),
+      name,
+      endpointUrl,
+      accessToken,
+      workspaceRoot,
+      createdAt: isoNow(),
+    };
+    this.db
+      .prepare(
+        `INSERT INTO remote_executor_connections
+          (id, name, endpoint_url, access_token, workspace_root, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        connection.id,
+        connection.name,
+        connection.endpointUrl,
+        connection.accessToken,
+        connection.workspaceRoot,
+        connection.createdAt,
+      );
+    return this.remoteExecutorConnectionView(connection);
+  }
+
+  updateRemoteExecutorConnection(
+    id: string,
+    name: string,
+    endpointUrl: string,
+    accessToken: string,
+    workspaceRoot: string,
+  ): RemoteExecutorConnectionView {
+    const result = this.db
+      .prepare(
+        `UPDATE remote_executor_connections
+         SET name = ?, endpoint_url = ?, access_token = ?, workspace_root = ? WHERE id = ?`,
+      )
+      .run(name, endpointUrl, accessToken, workspaceRoot, id);
+    if (result.changes === 0) throw new Error('Remote Executor connection not found');
+    return this.listRemoteExecutorConnections().find((connection) => connection.id === id)!;
+  }
+
+  listRemoteExecutorConnections(): RemoteExecutorConnectionView[] {
+    const rows = this.db
+      .prepare('SELECT * FROM remote_executor_connections ORDER BY created_at DESC')
+      .all() as SqlRow[];
+    return rows.map((row) =>
+      this.remoteExecutorConnectionView({
+        id: String(row.id),
+        name: String(row.name),
+        endpointUrl: String(row.endpoint_url),
+        accessToken: String(row.access_token),
+        workspaceRoot: String(row.workspace_root),
+        createdAt: String(row.created_at),
+      }),
+    );
+  }
+
+  getRemoteExecutorConnection(id: string): RemoteExecutorConnection | null {
+    const row = this.db.prepare('SELECT * FROM remote_executor_connections WHERE id = ?').get(id) as SqlRow | undefined;
+    return row
+      ? {
+          id: String(row.id),
+          name: String(row.name),
+          endpointUrl: String(row.endpoint_url),
+          accessToken: String(row.access_token),
+          workspaceRoot: String(row.workspace_root),
+          createdAt: String(row.created_at),
+        }
+      : null;
+  }
+
+  private remoteExecutorConnectionView(connection: RemoteExecutorConnection): RemoteExecutorConnectionView {
+    return {
+      id: connection.id,
+      name: connection.name,
+      endpointUrl: connection.endpointUrl,
+      workspaceRoot: connection.workspaceRoot,
+      createdAt: connection.createdAt,
+      hasAccessToken: connection.accessToken.length > 0,
+    };
   }
 }

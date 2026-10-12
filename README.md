@@ -24,6 +24,21 @@ NODE_ENV=production npm start
 
 The build compiles the Runtime server separately from the static web client, so production startup does not need the development TypeScript or Vite server.
 
+### Connect a Remote Host Executor
+
+The Runtime can connect to an Executor on another machine over an HTTP(S) endpoint. On the machine that owns the workspace, create a long token and start the Executor service:
+
+```sh
+export PICO_EXECUTOR_TOKEN="$(openssl rand -hex 32)"
+PICO_EXECUTOR_HOST=0.0.0.0 \
+PICO_EXECUTOR_WORKSPACE_ROOT="$HOME/Projects" \
+npm run dev:executor
+```
+
+Keep the token for the Runtime connection. The service defaults to `127.0.0.1:4174`; set `PICO_EXECUTOR_PORT` to change the port. It accepts requests only for folders under `PICO_EXECUTOR_WORKSPACE_ROOT` and keeps execution receipts in `data/executor.sqlite`. For production, run `npm run build` and then `npm run start:executor` with the same environment. Use HTTPS when the connection crosses a network you do not fully trust.
+
+In Pico, open **Model and Executor connections**, add the service URL and token, then choose **Remote Host** when starting a Thread. Set the workspace path as seen by that machine. Remote Host tool calls use the same approval policy as local Host calls. A Thread remains bound to its selected connection; create a new Thread to use another Executor.
+
 Pico listens on `127.0.0.1:4173` by default. Configure `PICO_HOST` and `PICO_PORT` to change the listener, `PICO_DB_PATH` to change the SQLite file, and `PICO_PLUGIN_DIR` to load `.mjs` plugins from another directory. Model defaults can also be set with `PICO_MODEL_BASE_URL`, `PICO_MODEL_API_KEY`, and `PICO_MODEL`; the Settings page can override them.
 
 ### Access from another device
@@ -41,6 +56,7 @@ The browser asks for the token once and receives a revocable, `HttpOnly`, `SameS
 
 - Each Thread stays bound to the Executor selected at creation. Create another Thread in the same Project to use a different Executor.
 - Container Executor uses Podman and `node:22-bookworm-slim`. It mounts only the selected workspace at `/workspace`, runs as root inside the container, and does not mount the host home directory, SSH keys, or Podman socket. Each Thread gets its own persistent container.
+- Remote Host Executor runs the same basic tools on a separately started Pico Executor service. The Runtime stores its token locally and does not return it through the API. Remote execution IDs are durably deduplicated on the Executor so retrying after a lost response does not start a second command.
 - Host Executor runs shell commands with the host environment. File tools stay within the selected workspace. Host tool calls ask for approval by default; each approval can allow once or save an allow rule for that Tool in the current Thread. Container tool calls are allowed by default because they run in the isolated container. Permission can be changed per Thread.
 - `read_file`, `search_files`, `apply_patch`, and `shell` are available to the model. Tool output and execution status are visible in the Thread.
 - Expand **Model input** below a committed assistant step or an uncommitted Model Step to inspect each prompt passed to the model adapter after projection and model plugins run. It is loaded on demand from the execution log; API credentials are not included and the view is not part of canonical conversation history.

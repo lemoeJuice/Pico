@@ -9,6 +9,7 @@ import type {
   PermissionRequest,
   Project,
   PublicSettings,
+  RemoteExecutorConnectionView,
   Thread,
   ToolCall,
   ToolResultPayload,
@@ -55,6 +56,12 @@ type PluginInfo = {
 
 type RuntimeEvent = Record<string, unknown> & { type: string };
 type ToolPermission = { name: string; description: string; policy: PermissionPolicy };
+type ThreadExecutorChoice = ExecutorKind | 'remote';
+
+function executorLabel(thread: Thread): string {
+  if (thread.executorRemote) return `Remote Host · ${thread.executorLabel.split(' · ')[1] ?? 'Executor'}`;
+  return thread.executorKind === 'container' ? 'Container' : 'Host';
+}
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -109,8 +116,10 @@ function ExecutorPill({
 }) {
   return (
     <span className={`executor-pill ${connected === false ? 'executor-offline' : ''}`} title={error ?? undefined}>
-      <span className="executor-glyph">{thread.executorKind === 'container' ? '▧' : '⌂'}</span>
-      <span>{thread.executorKind === 'container' ? 'Container' : 'Host'} Executor</span>
+      <span className="executor-glyph">
+        {thread.executorKind === 'container' ? '▧' : thread.executorRemote ? '⇄' : '⌂'}
+      </span>
+      <span>{executorLabel(thread)} Executor</span>
       {connected === null ? (
         <i className="tiny-spinner" />
       ) : (
@@ -165,7 +174,7 @@ function ThreadListItem({
       <span className="thread-item-copy">
         <span className="thread-item-title">{thread.title}</span>
         <span className="thread-item-meta">
-          {thread.executorKind === 'container' ? 'Container' : 'Host'} · {thread.state}
+          {executorLabel(thread)} · {thread.state}
         </span>
       </span>
       {thread.state === 'running' || thread.state === 'pausing' ? <span className="mini-active-dot" /> : null}
@@ -260,6 +269,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [threadId, setThreadId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<ThreadSnapshot | null>(null);
   const [settings, setSettings] = useState<PublicSettings | null>(null);
+  const [remoteConnections, setRemoteConnections] = useState<RemoteExecutorConnectionView[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newThreadOpen, setNewThreadOpen] = useState(false);
@@ -280,10 +290,14 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
+  const [remoteConnectionSaving, setRemoteConnectionSaving] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectPath, setNewProjectPath] = useState('');
   const [newThreadTitle, setNewThreadTitle] = useState('');
-  const [newThreadExecutor, setNewThreadExecutor] = useState<ExecutorKind>('container');
+  const [newThreadExecutor, setNewThreadExecutor] = useState<ThreadExecutorChoice>('container');
+  const [newThreadRemoteConnectionId, setNewThreadRemoteConnectionId] = useState('');
+  const [newThreadRemoteWorkspacePath, setNewThreadRemoteWorkspacePath] = useState('');
+  const [remoteForm, setRemoteForm] = useState({ name: '', endpointUrl: '', accessToken: '' });
   const [modelForm, setModelForm] = useState({
     baseUrl: '',
     model: '',
@@ -355,6 +369,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   };
 
   const selectedProject = projects.find((project) => project.id === projectId) ?? null;
+  const selectedRemoteConnection = remoteConnections.find(
+    (connection) => connection.id === newThreadRemoteConnectionId,
+  );
   const activeSnapshot = snapshotForSelection(snapshot, threadId, projectId);
   const selectedThread =
     activeSnapshot?.thread ??
@@ -438,8 +455,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       api<Array<{ name: string; description: string }>>('/api/commands'),
       api<PluginInfo>('/api/plugins'),
       api<{ defaultWorkspace: string }>('/api/info'),
+      api<RemoteExecutorConnectionView[]>('/api/executor-connections'),
     ])
-      .then(([projectList, modelSettings, commandList, pluginResult, info]) => {
+      .then(([projectList, modelSettings, commandList, pluginResult, info, connections]) => {
         if (!alive) return;
         setProjects(projectList);
         setSettings(modelSettings);
@@ -447,6 +465,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         setCommands(commandList);
         setPluginInfo(pluginResult);
         setDefaultWorkspace(info.defaultWorkspace);
+        setRemoteConnections(connections);
         const remembered = localStorage.getItem('pico.project');
         const initial = projectList.find((project) => project.id === remembered)?.id ?? projectList[0]?.id ?? null;
         setProjectId(initial);
@@ -821,7 +840,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     try {
       const thread = await api<Thread>(`/api/projects/${projectId}/threads`, {
         method: 'POST',
-        body: JSON.stringify({ title: newThreadTitle, executorKind: newThreadExecutor }),
+        body: JSON.stringify({
+          title: newThreadTitle,
+          executorKind: newThreadExecutor === 'remote' ? 'host' : newThreadExecutor,
+          ...(newThreadExecutor === 'remote'
+            ? {
+                remoteConnectionId: newThreadRemoteConnectionId,
+                remoteWorkspacePath: newThreadRemoteWorkspacePath,
+              }
+            : {}),
+        }),
       });
       setThreads((items) => [thread, ...items.filter((item) => item.id !== thread.id)]);
       setThreadId(thread.id);
@@ -840,7 +868,28 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     if (!selectedThread) return;
     setNewThreadTitle('');
     setNewThreadExecutor(selectedThread.executorKind === 'container' ? 'host' : 'container');
+    setNewThreadRemoteConnectionId('');
+    setNewThreadRemoteWorkspacePath('');
     setNewThreadOpen(true);
+  };
+
+  const addRemoteExecutorConnection = async (event: FormEvent): Promise<void> => {
+    event.preventDefault();
+    setRemoteConnectionSaving(true);
+    setError('');
+    try {
+      const connection = await api<RemoteExecutorConnectionView>('/api/executor-connections', {
+        method: 'POST',
+        body: JSON.stringify(remoteForm),
+      });
+      setRemoteConnections((items) => [connection, ...items]);
+      setRemoteForm({ name: '', endpointUrl: '', accessToken: '' });
+      setNotice(`Connected to ${connection.name}. Choose it when starting a new Thread.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setRemoteConnectionSaving(false);
+    }
   };
 
   const controlThread = async (action: 'pause' | 'continue' | 'interrupt'): Promise<void> => {
@@ -1097,7 +1146,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         <div className="sidebar-bottom">
           <button className="settings-link" onClick={() => setSettingsOpen(true)}>
             <span className="settings-icon">⚙</span>
-            <span>Model settings</span>
+            <span>Settings</span>
             {!settings?.model ? <span className="settings-needs-config">Set up</span> : null}
           </button>
           <div className="runtime-foot">
@@ -1149,9 +1198,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         {selectedThread && executorConnected === false && executorError ? (
           <div className="banner banner-error executor-error" role="status">
             <div className="executor-error-copy">
-              <strong>
-                {selectedThread.executorKind === 'container' ? 'Container' : 'Host'} Executor unavailable.
-              </strong>{' '}
+              <strong>{executorLabel(selectedThread)} Executor unavailable.</strong>{' '}
               <span>
                 Continue in a new {selectedThread.executorKind === 'container' ? 'Host' : 'Container'} Thread in this
                 Project.
@@ -1347,7 +1394,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     <div className="empty-orbit">✳</div>
                     <h2>A fresh Thread</h2>
                     <p>
-                      Send a message to begin. This Thread will stay bound to its {selectedThread.executorKind}{' '}
+                      Send a message to begin. This Thread will stay bound to its {executorLabel(selectedThread)}{' '}
                       Executor.
                     </p>
                   </div>
@@ -1426,7 +1473,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       </main>
 
       {settingsOpen ? (
-        <Modal title="Model connection" onClose={() => setSettingsOpen(false)}>
+        <Modal title="Model and Executor connections" onClose={() => setSettingsOpen(false)}>
           <form className="form-stack" onSubmit={(event) => void saveModelSettings(event)}>
             <p className="form-intro">Connect any OpenAI-compatible provider. Settings stay in this Pico Runtime.</p>
             <label>
@@ -1486,6 +1533,56 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               </button>
             </div>
           </form>
+          <section className="form-stack remote-connections-section">
+            <div>
+              <p className="eyebrow">REMOTE HOST EXECUTORS</p>
+              <p className="form-intro">
+                Start a Pico Executor on the machine that owns the workspace, then connect it here. Tokens stay in
+                Pico’s local data file and are never returned by the API.
+              </p>
+            </div>
+            {remoteConnections.map((connection) => (
+              <div className="remote-connection-item" key={connection.id}>
+                <strong>{connection.name}</strong>
+                <span>{connection.endpointUrl}</span>
+                <code>{connection.workspaceRoot}</code>
+              </div>
+            ))}
+            <form className="form-stack" onSubmit={(event) => void addRemoteExecutorConnection(event)}>
+              <label>
+                Connection name
+                <input
+                  value={remoteForm.name}
+                  onChange={(event) => setRemoteForm((form) => ({ ...form, name: event.target.value }))}
+                  placeholder="Build machine"
+                />
+              </label>
+              <label>
+                Executor URL
+                <input
+                  value={remoteForm.endpointUrl}
+                  onChange={(event) => setRemoteForm((form) => ({ ...form, endpointUrl: event.target.value }))}
+                  placeholder="https://build.example.test:4174"
+                  autoComplete="url"
+                />
+              </label>
+              <label>
+                Access token <span className="field-note">Generated on the Executor machine</span>
+                <input
+                  value={remoteForm.accessToken}
+                  onChange={(event) => setRemoteForm((form) => ({ ...form, accessToken: event.target.value }))}
+                  type="password"
+                  autoComplete="new-password"
+                />
+              </label>
+              <div className="form-actions">
+                <span className="field-note">Remote workspaces are limited to the Executor’s configured root.</span>
+                <button className="button button-primary" disabled={remoteConnectionSaving}>
+                  {remoteConnectionSaving ? 'Connecting…' : 'Connect Executor'}
+                </button>
+              </div>
+            </form>
+          </section>
         </Modal>
       ) : null}
 
@@ -1557,10 +1654,73 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 <small>Use tools and software already on this machine</small>
                 <i>{newThreadExecutor === 'host' ? 'Selected' : 'Choose'}</i>
               </button>
+              <button
+                type="button"
+                className={`executor-choice ${newThreadExecutor === 'remote' ? 'chosen' : ''}`}
+                onClick={() => {
+                  setNewThreadExecutor('remote');
+                  const connection =
+                    remoteConnections.find((item) => item.id === newThreadRemoteConnectionId) ?? remoteConnections[0];
+                  if (connection) {
+                    setNewThreadRemoteConnectionId(connection.id);
+                    setNewThreadRemoteWorkspacePath(connection.workspaceRoot);
+                  }
+                }}
+                disabled={remoteConnections.length === 0}
+              >
+                <span className="choice-icon">⇄</span>
+                <strong>Remote Host</strong>
+                <small>Run tools on a connected machine</small>
+                <i>{newThreadExecutor === 'remote' ? 'Selected' : 'Choose'}</i>
+              </button>
             </div>
+            {newThreadExecutor === 'remote' ? (
+              remoteConnections.length > 0 ? (
+                <>
+                  <label>
+                    Remote Executor
+                    <select
+                      value={newThreadRemoteConnectionId}
+                      onChange={(event) => {
+                        const connection = remoteConnections.find((item) => item.id === event.target.value);
+                        setNewThreadRemoteConnectionId(event.target.value);
+                        setNewThreadRemoteWorkspacePath(connection?.workspaceRoot ?? '');
+                      }}
+                    >
+                      {remoteConnections.map((connection) => (
+                        <option value={connection.id} key={connection.id}>
+                          {connection.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Workspace on Remote Executor
+                    <input
+                      value={newThreadRemoteWorkspacePath}
+                      onChange={(event) => setNewThreadRemoteWorkspacePath(event.target.value)}
+                      placeholder={selectedRemoteConnection?.workspaceRoot ?? '/workspace/project'}
+                    />
+                  </label>
+                </>
+              ) : (
+                <p className="form-intro">Add a Remote Host in Settings before creating a Thread.</p>
+              )
+            ) : null}
             <div className="form-actions">
-              <span className="field-note">Container is the default. Host tools ask before running.</span>
-              <button className="button button-primary" disabled={busy}>
+              <span className="field-note">
+                {newThreadExecutor === 'container'
+                  ? 'Container is the default and runs tools inside the selected workspace.'
+                  : 'Host Executor tools ask before running.'}
+              </span>
+              <button
+                className="button button-primary"
+                disabled={
+                  busy ||
+                  (newThreadExecutor === 'remote' &&
+                    (!newThreadRemoteConnectionId || !newThreadRemoteWorkspacePath.trim()))
+                }
+              >
                 {busy ? 'Creating…' : 'Create Thread'}
               </button>
             </div>

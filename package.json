@@ -5,7 +5,9 @@
   "private": true,
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "dev:executor": "tsx watch src/executor/agent.ts",
     "start": "node dist/server/server.js",
+    "start:executor": "node dist/server/executor/agent.js",
     "build": "tsc --noEmit && tsc --project tsconfig.build.json && vite build",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",

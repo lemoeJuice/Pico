@@ -97,16 +97,47 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     if (!project) return notFound(response, 'Project not found');
     response.json(runtime.listThreads(project.id));
   });
-  app.post('/api/projects/:projectId/threads', (request, response) => {
+  app.post('/api/projects/:projectId/threads', async (request, response) => {
     const body = bodyObject(request);
     const kind = body.executorKind;
     if (kind !== 'container' && kind !== 'host') throw new Error('executorKind must be container or host');
-    const thread = runtime.createThread(
-      request.params.projectId!,
-      kind as ExecutorKind,
-      typeof body.title === 'string' ? body.title : 'New thread',
-    );
+    if (body.remoteConnectionId !== undefined && (typeof body.remoteConnectionId !== 'string' || kind !== 'host')) {
+      throw new Error('Remote Executor Threads must use Host execution kind.');
+    }
+    const title = typeof body.title === 'string' ? body.title : 'New thread';
+    const thread =
+      typeof body.remoteConnectionId === 'string'
+        ? await runtime.createRemoteThread(
+            request.params.projectId!,
+            body.remoteConnectionId,
+            requiredText(body, 'remoteWorkspacePath'),
+            title,
+          )
+        : runtime.createThread(request.params.projectId!, kind as ExecutorKind, title);
     response.status(201).json(thread);
+  });
+
+  app.get('/api/executor-connections', (_request, response) => {
+    response.json(runtime.remoteExecutorConnections());
+  });
+  app.post('/api/executor-connections', async (request, response) => {
+    const body = bodyObject(request);
+    const connection = await runtime.addRemoteExecutorConnection(
+      requiredText(body, 'name'),
+      requiredText(body, 'endpointUrl'),
+      requiredText(body, 'accessToken'),
+    );
+    response.status(201).json(connection);
+  });
+  app.put('/api/executor-connections/:id', async (request, response) => {
+    const body = bodyObject(request);
+    const connection = await runtime.updateRemoteExecutorConnection(
+      request.params.id!,
+      requiredText(body, 'name'),
+      requiredText(body, 'endpointUrl'),
+      typeof body.accessToken === 'string' ? body.accessToken : undefined,
+    );
+    response.json(connection);
   });
 
   app.get('/api/threads', (request, response) => {
