@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -101,4 +102,91 @@ describe('workspace tools', () => {
       await rm(directory, { recursive: true, force: true });
     }
   }, 5000);
+
+  it.skipIf(process.platform !== 'linux')(
+    'stops an active Host shell when its Runtime process exits',
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'pico-host-exit-'));
+      const workspacePath = join(directory, 'workspace');
+      const pidFile = join(directory, 'shell.pid');
+      await mkdir(workspacePath);
+      const toolsModule = new URL('../src/executor/tools.ts', import.meta.url).href;
+      const childSource = `
+      import { builtinExecutorTools } from ${JSON.stringify(toolsModule)};
+      import { readFile } from 'node:fs/promises';
+      const [workspacePath, pidFile] = process.argv.slice(1);
+      const shell = builtinExecutorTools().find((tool) => tool.definition.name === 'shell');
+      if (!shell) process.exit(4);
+      void shell.execute(
+        { command: \`printf '%s' "$$" > "\${pidFile}"; trap '' TERM; while :; do sleep 0.05; done\`, timeout_ms: 600000 },
+        { workspacePath, executionId: 'runtime-exit-test', signal: new AbortController().signal },
+      );
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        try {
+          await readFile(pidFile, 'utf8');
+          process.exit(0);
+        } catch {}
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      process.exit(5);
+    `;
+      const runtimeProcess = spawn(
+        process.execPath,
+        ['--import', 'tsx', '--input-type=module', '-e', childSource, workspacePath, pidFile],
+        { stdio: ['ignore', 'ignore', 'pipe'] },
+      );
+      let stderr = '';
+      runtimeProcess.stderr.setEncoding('utf8').on('data', (chunk: string) => {
+        stderr += chunk;
+      });
+      const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+        runtimeProcess.once('close', (code, signal) => resolve({ code, signal }));
+      });
+      const timeout = setTimeout(() => runtimeProcess.kill('SIGKILL'), 5000);
+      let shellPid: number | null = null;
+      let shellStopped = false;
+      try {
+        const result = await exit;
+        expect(result, stderr).toMatchObject({ code: 0 });
+        shellPid = Number(await readFile(pidFile, 'utf8'));
+        expect(Number.isSafeInteger(shellPid)).toBe(true);
+        expect(shellPid).toBeGreaterThan(0);
+
+        const deadline = Date.now() + 2000;
+        let state: string | null = 'unknown';
+        while (Date.now() < deadline) {
+          try {
+            const stat = await readFile(`/proc/${shellPid}/stat`, 'utf8');
+            state = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0] ?? null;
+          } catch {
+            state = null;
+          }
+          if (state === null || state === 'Z' || state === 'X') {
+            shellStopped = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        expect(state === null || state === 'Z' || state === 'X').toBe(true);
+      } finally {
+        clearTimeout(timeout);
+        if (shellPid === null) {
+          try {
+            shellPid = Number(await readFile(pidFile, 'utf8'));
+          } catch {
+            shellPid = null;
+          }
+        }
+        if (shellPid !== null && Number.isSafeInteger(shellPid) && shellPid > 0 && !shellStopped) {
+          try {
+            process.kill(-shellPid, 'SIGKILL');
+          } catch {
+            /* The Host shell group may already be gone. */
+          }
+        }
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
 });

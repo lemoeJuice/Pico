@@ -28,6 +28,11 @@ const schemas = {
   string: { type: 'string' },
 };
 
+const activeShellExitCleanups = new Set<() => void>();
+process.once('exit', () => {
+  for (const cleanup of activeShellExitCleanups) cleanup();
+});
+
 export class ToolCatalog {
   private readonly items = new Map<string, RegisteredTool>();
 
@@ -128,6 +133,16 @@ function runProcess(
     let stderr = '';
     let terminationReason: 'interrupted' | 'timeout' | null = null;
     let killTimer: NodeJS.Timeout | undefined;
+    const killProcessTree = (signalName: NodeJS.Signals): void => {
+      try {
+        if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, signalName);
+        else child.kill(signalName);
+      } catch {
+        /* The process may have exited between the request and signal. */
+      }
+    };
+    const killOnRuntimeExit = (): void => killProcessTree('SIGKILL');
+    activeShellExitCleanups.add(killOnRuntimeExit);
     const limit = 40_000;
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
       stdout = `${stdout}${chunk}`.slice(-limit);
@@ -136,22 +151,12 @@ function runProcess(
       stderr = `${stderr}${chunk}`.slice(-limit);
     });
     const stop = (): void => {
-      try {
-        if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGTERM');
-        else child.kill('SIGTERM');
-      } catch {
-        /* The process may have exited between the request and signal. */
-      }
+      killProcessTree('SIGTERM');
     };
     const forceStopSoon = (): void => {
       if (killTimer) return;
       killTimer = setTimeout(() => {
-        try {
-          if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGKILL');
-          else child.kill('SIGKILL');
-        } catch {
-          /* The process may have exited before escalation. */
-        }
+        killProcessTree('SIGKILL');
       }, 1_500);
     };
     const onAbort = (): void => {
@@ -171,12 +176,14 @@ function runProcess(
     child.once('error', (error) => {
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
+      activeShellExitCleanups.delete(killOnRuntimeExit);
       signal.removeEventListener('abort', onAbort);
       reject(error);
     });
     child.once('close', (code) => {
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
+      activeShellExitCleanups.delete(killOnRuntimeExit);
       signal.removeEventListener('abort', onAbort);
       if (terminationReason === 'interrupted') return reject(new DOMException('Execution interrupted', 'AbortError'));
       if (terminationReason === 'timeout') return reject(new Error(`Command timed out after ${timeoutMs}ms`));
