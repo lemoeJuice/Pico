@@ -24,9 +24,13 @@ import { isNearScrollEnd } from './scroll-follow.js';
 import { threadCanBeInterrupted } from './thread-controls.js';
 import {
   appendAssistantDraft,
+  assistantStreamsAfterDisconnect,
   assistantDraftForThread,
+  canAppendAssistantDelta,
   clearAssistantDraft,
+  observeAssistantExecutions,
   type AssistantDrafts,
+  type AssistantStreamExecutions,
 } from './assistant-drafts.js';
 import { noticeForThread, withThreadNotice, withoutThreadNotice, type ThreadNotices } from './thread-notices.js';
 import { uiContributionsAt } from './ui-contributions.js';
@@ -267,6 +271,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [sendingThreadIds, setSendingThreadIds] = useState<Set<string>>(new Set());
   const [draftsByThread, setDraftsByThread] = useState<Record<string, string>>({});
   const [assistantDrafts, setAssistantDrafts] = useState<AssistantDrafts>({});
+  const [unavailableModelExecutionIds, setUnavailableModelExecutionIds] = useState<Set<string>>(new Set());
   const [notice, setNotice] = useState('');
   const [threadNotices, setThreadNotices] = useState<ThreadNotices>({});
   const [error, setError] = useState('');
@@ -292,11 +297,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const snapshotVersions = useRef(new Map<string, number>());
   const pendingMessageIds = useRef<PendingMessageIds>(new Map());
   const pendingSubmissionThreads = useRef(new Set<string>());
+  const assistantDraftsRef = useRef(assistantDrafts);
+  const activeModelExecutions = useRef<AssistantStreamExecutions>(new Map());
+  const unavailableModelExecutions = useRef<AssistantStreamExecutions>(new Map());
+  const observedModelExecutions = useRef(new Set<string>());
   const draft = threadId ? (draftsByThread[threadId] ?? '') : '';
   const draftRef = useRef({ threadId, value: draft });
   activeProjectId.current = projectId;
   const activeThreadId = useRef(threadId);
   activeThreadId.current = threadId;
+  assistantDraftsRef.current = assistantDrafts;
   draftRef.current = { threadId, value: draft };
 
   const updateDraft = (value: string): void => {
@@ -312,6 +322,25 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     }
     setDraftsByThread((current) => clearAcceptedMessageDraft(current, targetThreadId, content));
   };
+
+  const observeModelExecutions = useCallback((executions: readonly Execution[]): void => {
+    const next = observeAssistantExecutions(
+      activeModelExecutions.current,
+      unavailableModelExecutions.current,
+      executions,
+      observedModelExecutions.current,
+    );
+    activeModelExecutions.current = next.active;
+    unavailableModelExecutions.current = next.unavailable;
+    setUnavailableModelExecutionIds(new Set(next.unavailable.keys()));
+  }, []);
+
+  const settleModelExecution = useCallback((executionId: string): void => {
+    activeModelExecutions.current.delete(executionId);
+    observedModelExecutions.current.delete(executionId);
+    if (!unavailableModelExecutions.current.delete(executionId)) return;
+    setUnavailableModelExecutionIds(new Set(unavailableModelExecutions.current.keys()));
+  }, []);
 
   const markThreadSending = (targetThreadId: string, isSending: boolean): void => {
     pendingSubmissionThreads.current = withPendingThreadSubmission(
@@ -341,27 +370,31 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const composerActions = uiContributionsAt(uiContributions, 'composer.action');
   const sidebarPanels = uiContributionsAt(uiContributions, 'sidebar.panel');
 
-  const loadSnapshot = useCallback(async (id: string) => {
-    const requestNumber = ++snapshotRequest.current;
-    const value = await fetchStableSnapshot(
-      () => api<ThreadSnapshot>(`/api/threads/${encodeURIComponent(id)}`),
-      () => snapshotVersions.current.get(id) ?? 0,
-      () => requestNumber === snapshotRequest.current,
-    );
-    if (value && requestNumber === snapshotRequest.current) {
-      for (const record of value.records) {
-        if (
-          record.kind === 'message' &&
-          settleMessageSubmission(pendingMessageIds.current, id, record.id) &&
-          record.payload.source === 'user' &&
-          typeof record.payload.content === 'string'
-        ) {
-          clearAcceptedDraft(id, record.payload.content);
+  const loadSnapshot = useCallback(
+    async (id: string) => {
+      const requestNumber = ++snapshotRequest.current;
+      const value = await fetchStableSnapshot(
+        () => api<ThreadSnapshot>(`/api/threads/${encodeURIComponent(id)}`),
+        () => snapshotVersions.current.get(id) ?? 0,
+        () => requestNumber === snapshotRequest.current,
+      );
+      if (value && requestNumber === snapshotRequest.current) {
+        observeModelExecutions(value.executions);
+        for (const record of value.records) {
+          if (
+            record.kind === 'message' &&
+            settleMessageSubmission(pendingMessageIds.current, id, record.id) &&
+            record.payload.source === 'user' &&
+            typeof record.payload.content === 'string'
+          ) {
+            clearAcceptedDraft(id, record.payload.content);
+          }
         }
+        setSnapshot(value);
       }
-      setSnapshot(value);
-    }
-  }, []);
+    },
+    [observeModelExecutions],
+  );
 
   const noteSnapshotChange = useCallback((threadId: string | null | undefined): void => {
     if (!threadId) return;
@@ -520,6 +553,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           return;
         }
         retry = 750;
+        observedModelExecutions.current = new Set();
         setSocketConnected(true);
         refreshSelectedRef.current();
       };
@@ -586,10 +620,19 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           const recordThreadId = record?.threadId;
           if (recordThreadId && record?.kind === 'assistant' && record.id.endsWith(':assistant')) {
             const executionId = record.id.slice(0, -':assistant'.length);
+            settleModelExecution(executionId);
             setAssistantDrafts((current) => clearAssistantDraft(current, recordThreadId, executionId));
           }
         } else if (event.type === 'execution.updated') {
           const execution = event.execution as Execution | undefined;
+          if (execution?.kind === 'model') {
+            if (execution.status === 'pending' || execution.status === 'running') {
+              observedModelExecutions.current.add(execution.id);
+            } else {
+              observedModelExecutions.current.delete(execution.id);
+            }
+            observeModelExecutions([execution]);
+          }
           if (execution?.threadId === activeThreadId.current) {
             noteSnapshotChange(execution.threadId);
             setSnapshot((current) =>
@@ -626,6 +669,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           const draftThreadId = event.threadId;
           const executionId = event.executionId;
           const delta = event.delta;
+          if (
+            !canAppendAssistantDelta(
+              activeModelExecutions.current,
+              unavailableModelExecutions.current,
+              draftThreadId,
+              executionId,
+            )
+          ) {
+            return;
+          }
           setAssistantDrafts((current) => appendAssistantDraft(current, draftThreadId, executionId, delta));
         } else if (
           event.type === 'model.draft-ended' &&
@@ -634,6 +687,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         ) {
           const draftThreadId = event.threadId;
           const executionId = event.executionId;
+          settleModelExecution(executionId);
           setAssistantDrafts((current) => clearAssistantDraft(current, draftThreadId, executionId));
         } else if (event.type === 'runtime.error') {
           const failedThreadId = typeof event.threadId === 'string' ? event.threadId : null;
@@ -663,6 +717,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         });
         if (!closed) {
           // WebSocket deltas are transient and cannot be replayed after reconnect.
+          const unavailable = assistantStreamsAfterDisconnect(
+            activeModelExecutions.current,
+            assistantDraftsRef.current,
+            unavailableModelExecutions.current,
+          );
+          unavailableModelExecutions.current = unavailable;
+          setUnavailableModelExecutionIds(new Set(unavailable.keys()));
           setAssistantDrafts({});
           timer = window.setTimeout(connect, retry);
           retry = Math.min(retry * 1.7, 12_000);
@@ -678,7 +739,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       if (timer) window.clearTimeout(timer);
       socket?.close();
     };
-  }, [noteSnapshotChange]);
+  }, [noteSnapshotChange, observeModelExecutions, settleModelExecution]);
 
   useEffect(() => {
     followLatest.current = true;
@@ -1247,6 +1308,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       key={item.execution.id}
                       execution={item.execution}
                       threadId={selectedThread.id}
+                      outputUnavailable={unavailableModelExecutionIds.has(item.execution.id)}
                     />
                   ) : item.record.kind === 'message' ? (
                     <MessageBubble key={item.record.id} record={item.record} onOpenThread={chooseThread} />
@@ -1576,7 +1638,15 @@ function ModelInputDisclosure({ threadId, executionId }: { threadId: string; exe
   );
 }
 
-function ModelExecutionNotice({ execution, threadId }: { execution: Execution; threadId: string }) {
+function ModelExecutionNotice({
+  execution,
+  threadId,
+  outputUnavailable = false,
+}: {
+  execution: Execution;
+  threadId: string;
+  outputUnavailable?: boolean;
+}) {
   return (
     <div className="assistant-message model-execution-notice">
       <div className="assistant-avatar">p</div>
@@ -1590,6 +1660,11 @@ function ModelExecutionNotice({ execution, threadId }: { execution: Execution; t
             <summary>Failure details</summary>
             <p>{execution.error}</p>
           </details>
+        ) : outputUnavailable ? (
+          <p className="projection-state">
+            The connection dropped during this Model Step. Partial text is unavailable; the final reply will appear when
+            the step commits.
+          </p>
         ) : (
           <p className="projection-state">This Model Step has not committed an assistant message.</p>
         )}
