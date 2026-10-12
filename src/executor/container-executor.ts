@@ -359,13 +359,14 @@ export class ContainerExecutor implements ExecutorAdapter {
         if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
           return this.store.transitionExecution(executionId, 'interrupted', { error: 'Execution was interrupted.' });
         }
-        // An unreachable Podman service is not evidence that a running execution stopped.
+        // Once submitted, a lost Podman response cannot prove whether the tool started or finished.
+        if (latest.status === 'running') return latest;
+        // Before submission, transient setup failures leave the durable execution available for retry.
         if (
-          (latest.status === 'pending' || latest.status === 'running') &&
+          latest.status === 'pending' &&
           /connection|refused|permission denied|read-only/i.test(error instanceof Error ? error.message : String(error))
-        ) {
+        )
           return latest;
-        }
         return this.store.transitionExecution(executionId, latest.status === 'pending' ? 'failed' : 'interrupted', {
           error: error instanceof Error ? error.message : String(error),
         });

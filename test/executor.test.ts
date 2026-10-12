@@ -281,6 +281,61 @@ describe('Executor execution identity and recovery', () => {
     }
   });
 
+  it('keeps a Container tool running after a lost submission response until missing state is confirmed', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.createThread('container');
+    const modelExecution = env.store.createModelExecution('lost-ack-model', thread.id, 0);
+    env.store.transitionExecution(modelExecution.id, 'running');
+    const call = { id: 'lost-ack-call', name: 'read_file', arguments: { path: 'input.txt' } };
+    env.store.commitModelStep({
+      assistantRecordId: 'lost-ack-model:assistant',
+      modelExecutionId: modelExecution.id,
+      threadId: thread.id,
+      payload: assistantPayload({ batchId: 'lost-ack-model:batch', toolCalls: [call] }),
+      toolCalls: [{ call, executionId: 'lost-ack-tool' }],
+    });
+
+    let containerPresent = false;
+    const runner = async (args: string[]) => {
+      if (args[0] === 'info') return { stdout: '5.0.0', stderr: '' };
+      if (args[0] === 'inspect') {
+        if (containerPresent) return { stdout: '{}', stderr: '' };
+        throw new Error('no such container');
+      }
+      if (args[0] === 'run') {
+        containerPresent = true;
+        return { stdout: 'container-id', stderr: '' };
+      }
+      if (args[0] === 'start') return { stdout: 'container-id', stderr: '' };
+      if (args[0] === 'exec') {
+        const mode = args[args.indexOf('-e') + 2];
+        if (mode === 'run') throw new Error('unexpected EOF while reading Podman response');
+        if (mode === 'status') return { stdout: JSON.stringify({ status: 'running' }), stderr: '' };
+      }
+      throw new Error(`Unexpected Podman command: ${args[0] ?? 'empty'}`);
+    };
+    const catalog = new ToolCatalog();
+    catalog.register({
+      owner: 'test',
+      source: 'executor',
+      definition: { name: 'read_file', description: 'test read', parameters: { type: 'object' } },
+      execute: async () => ({ contents: 'unused' }),
+    });
+    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, runner);
+    try {
+      const binding = env.store.executorForThread(thread.id)!;
+      expect((await executor.execute('lost-ack-tool', binding)).status).toBe('running');
+      expect((await executor.status('lost-ack-tool', binding))?.status).toBe('running');
+
+      containerPresent = false;
+      const confirmedLost = await executor.status('lost-ack-tool', binding);
+      expect(confirmedLost?.status).toBe('interrupted');
+      expect(confirmedLost?.error).toMatch(/confirmed.*no longer exists/i);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it('Interrupt cancels Container Executor preparation before the tool starts', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.createThread('container');
