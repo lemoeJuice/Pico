@@ -147,7 +147,7 @@ function ToolCard({
   execution: Execution | undefined;
   result: ToolResultPayload | undefined;
   approval: PermissionRequest | undefined;
-  onApproval(executionId: string, allow: boolean): void;
+  onApproval(executionId: string, allow: boolean, rememberForThread?: boolean): void;
 }) {
   const status = approval?.status === 'pending' ? 'needs approval' : (execution?.status ?? 'pending');
   const resultText =
@@ -176,7 +176,7 @@ function ToolCard({
           <div className="approval-box">
             <div>
               <strong>Permission needed</strong>
-              <p>Allow this tool invocation to run in the bound Executor?</p>
+              <p>Allow once, or remember this Tool choice for the Thread.</p>
             </div>
             <div className="approval-actions">
               <button className="button button-soft" onClick={() => onApproval(execution.id, false)}>
@@ -184,6 +184,13 @@ function ToolCard({
               </button>
               <button className="button button-primary compact" onClick={() => onApproval(execution.id, true)}>
                 Allow once
+              </button>
+              <button
+                className="button button-soft compact"
+                onClick={() => onApproval(execution.id, true, true)}
+                title={`Allow ${call.name} in this Thread from now on`}
+              >
+                Allow in Thread
               </button>
             </div>
           </div>
@@ -567,11 +574,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     }
   };
 
-  const resolveApproval = async (executionId: string, allow: boolean): Promise<void> => {
+  const resolveApproval = async (executionId: string, allow: boolean, rememberForThread = false): Promise<void> => {
     try {
       const approval = await api<PermissionRequest>(`/api/approvals/${executionId}`, {
         method: 'POST',
-        body: JSON.stringify({ allow }),
+        body: JSON.stringify({ allow, ...(rememberForThread ? { rememberForThread: true } : {}) }),
       });
       setSnapshot((current) =>
         current
@@ -925,7 +932,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       approvals={approvals}
                       records={records}
                       threadId={selectedThread.id}
-                      onApproval={(id, allow) => void resolveApproval(id, allow)}
+                      onApproval={(id, allow, rememberForThread) => void resolveApproval(id, allow, rememberForThread)}
                     />
                   ),
                 )}
@@ -1204,7 +1211,7 @@ function AssistantBubble({
   approvals: PermissionRequest[];
   records: CanonicalRecord[];
   threadId: string;
-  onApproval(id: string, allow: boolean): void;
+  onApproval(id: string, allow: boolean, rememberForThread?: boolean): void;
 }) {
   const assistant = recordPayload<AssistantPayload>(record);
   const calls = assistant.toolCalls ?? [];

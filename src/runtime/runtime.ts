@@ -677,8 +677,14 @@ export class PicoRuntime {
     });
   }
 
-  resolveApproval(executionId: string, allow: boolean): PermissionRequest {
+  resolveApproval(executionId: string, allow: boolean, rememberForThread = false): PermissionRequest {
     const before = this.store.getApproval(executionId);
+    if (rememberForThread) {
+      if (!allow) throw new Error('A denied approval cannot create an allow rule');
+      if (!before) throw new Error('Approval request not found');
+      if (before.status === 'denied') throw new Error('Approval was already resolved');
+      this.setToolPermission(before.threadId, before.toolName, 'allow');
+    }
     const approval = this.store.resolveApproval(executionId, allow);
     if (before?.status === 'pending') {
       const record = this.store.appendPluginRecord(approval.threadId, 'pico.permissions', {
@@ -686,6 +692,7 @@ export class PicoRuntime {
         executionId,
         toolName: approval.toolName,
         decision: allow ? 'allow' : 'deny',
+        scope: rememberForThread ? 'thread' : 'once',
       });
       this.publishRecord(record);
     }

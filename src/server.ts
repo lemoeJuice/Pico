@@ -153,7 +153,10 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   app.post('/api/approvals/:executionId', (request, response) => {
     const body = bodyObject(request);
     if (typeof body.allow !== 'boolean') throw new Error('allow must be a boolean');
-    response.json(runtime.resolveApproval(request.params.executionId!, body.allow));
+    if (body.rememberForThread !== undefined && typeof body.rememberForThread !== 'boolean') {
+      throw new Error('rememberForThread must be a boolean');
+    }
+    response.json(runtime.resolveApproval(request.params.executionId!, body.allow, body.rememberForThread === true));
   });
 
   app.get('/api/settings/model', (_request, response) => response.json(runtime.publicModelSettings()));

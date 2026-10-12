@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startServer } from '../src/server.js';
+import { assistantPayload } from './helpers.js';
 
 const envKeys = ['PICO_HOST', 'PICO_PORT', 'PICO_DB_PATH', 'PICO_ACCESS_TOKEN'] as const;
 const originalEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
@@ -132,6 +133,34 @@ describe('Pico server access boundary', () => {
       expect(await upgradeStatus(wsUrl, { cookie })).toBe(101);
       expect(await upgradeStatus(wsUrl, { cookie, origin: 'https://attacker.example' })).toBe(403);
       await waitForConnected(wsUrl, cookieHeaders);
+
+      const project = await fetch(`${base}/api/projects`, {
+        method: 'POST',
+        headers: { ...cookieHeaders, 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Permission API', workspacePath: directory }),
+      }).then((response) => response.json());
+      const thread = server.runtime.createThread(project.id, 'host');
+      const toolExecutionId = `${thread.id}:approval-step:read-call`;
+      const call = { id: 'read-call', name: 'read_file', arguments: { path: 'facts.txt' } };
+      const modelExecution = server.runtime.store.createModelExecution('approval-step', thread.id, 0);
+      server.runtime.store.transitionExecution(modelExecution.id, 'running');
+      server.runtime.store.commitModelStep({
+        assistantRecordId: 'approval-step:assistant',
+        modelExecutionId: modelExecution.id,
+        threadId: thread.id,
+        payload: assistantPayload({ batchId: 'approval-step:batch', toolCalls: [call] }),
+        toolCalls: [{ call, executionId: toolExecutionId }],
+      });
+      server.runtime.store.createApproval(toolExecutionId);
+      const rememberResponse = await fetch(`${base}/api/approvals/${encodeURIComponent(toolExecutionId)}`, {
+        method: 'POST',
+        headers: { ...cookieHeaders, 'content-type': 'application/json' },
+        body: JSON.stringify({ allow: true, rememberForThread: true }),
+      });
+      expect(rememberResponse.status).toBe(200);
+      expect(
+        await server.runtime.store.getSetting<Record<string, string>>(`permissions:${thread.id}`, {}),
+      ).toMatchObject({ read_file: 'allow' });
 
       const logout = await fetch(`${base}/api/auth/session`, { method: 'DELETE', headers: { cookie } });
       expect(logout.status).toBe(200);

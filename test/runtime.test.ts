@@ -143,6 +143,7 @@ describe('durable Thread runtime invariants', () => {
       env.runtime.resolveApproval(approval.executionId, true);
       await env.runtime.drain();
       expect(env.store.getApproval(approval.executionId)?.status).toBe('allowed');
+      expect(env.runtime.toolPermissions(thread.id).find((tool) => tool.name === 'read_file')?.policy).toBe('ask');
       expect(env.store.getExecution(approval.executionId)?.status).toBe('completed');
       expect(
         env.store
@@ -151,6 +152,55 @@ describe('durable Thread runtime invariants', () => {
       ).toBe(true);
       expect(
         model.prompts[1]?.turns.some(
+          (turn) => turn.kind === 'tool_result' && turn.content.includes('The durable fact.'),
+        ),
+      ).toBe(true);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('can persist an approval for one Tool in the Thread to avoid repeated prompts', async () => {
+    const model = new FakeModel((_prompt, callNumber) =>
+      callNumber === 1
+        ? response('', [{ id: 'read-once', name: 'read_file', arguments: { path: 'facts.txt' } }])
+        : callNumber === 2
+          ? response('', [{ id: 'read-again', name: 'read_file', arguments: { path: 'facts.txt' } }])
+          : response('The file was read twice.'),
+    );
+    const env = await setupRuntime(model);
+    const thread = env.createThread('host');
+    await writeFile(`${env.workspace}/facts.txt`, 'The durable fact.\n', 'utf8');
+    try {
+      await env.runtime.submit(thread.id, 'thread-approval-message', 'Read the file twice');
+      await until(() => env.store.listApprovals(thread.id).some((approval) => approval.status === 'pending'));
+      const approval = env.store.listApprovals(thread.id)[0]!;
+
+      env.runtime.resolveApproval(approval.executionId, true, true);
+      await env.runtime.drain();
+
+      expect(env.runtime.toolPermissions(thread.id).find((tool) => tool.name === 'read_file')?.policy).toBe('allow');
+      expect(env.store.listApprovals(thread.id)).toHaveLength(1);
+      expect(env.store.getApproval(approval.executionId)?.status).toBe('allowed');
+      expect(
+        env.store
+          .listRecords(thread.id)
+          .some(
+            (record) =>
+              record.kind === 'plugin' &&
+              record.payload.pluginId === 'pico.permissions' &&
+              record.payload.scope === 'thread',
+          ),
+      ).toBe(true);
+      expect(
+        env.store
+          .listExecutions(thread.id)
+          .filter((execution) => execution.kind === 'tool')
+          .every((execution) => execution.status === 'completed'),
+      ).toBe(true);
+      expect(model.calls).toBe(3);
+      expect(
+        model.prompts[2]?.turns.some(
           (turn) => turn.kind === 'tool_result' && turn.content.includes('The durable fact.'),
         ),
       ).toBe(true);
