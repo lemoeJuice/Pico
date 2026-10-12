@@ -21,6 +21,7 @@ import { visiblePauseReason } from './pause-reason.js';
 import { upsertProjectThread } from './project-threads.js';
 import { fetchStableSnapshot, snapshotForSelection } from './snapshot-consistency.js';
 import { isNearScrollEnd } from './scroll-follow.js';
+import { threadCanBeInterrupted } from './thread-controls.js';
 
 type PluginInfo = {
   plugins: Array<{ id: string; name: string; version: string; source: string }>;
@@ -1032,7 +1033,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     Continue
                   </button>
                 ) : null}
-                {currentState === 'running' || currentState === 'pausing' ? (
+                {threadCanBeInterrupted(currentState, executions) ? (
                   <button
                     className="interrupt-button"
                     onClick={() => void controlThread('interrupt')}

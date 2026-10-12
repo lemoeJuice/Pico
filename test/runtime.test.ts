@@ -8,6 +8,7 @@ import type { PicoPlugin } from '../src/plugins/host.js';
 import type { ModelResponse } from '../src/runtime/model.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
 import type { ModelStageInput, StepInput, ToolBatchInput } from '../src/runtime/stages.js';
+import { threadCanBeInterrupted } from '../src/web/thread-controls.js';
 import { deferred, FakeModel, response, setupRuntime } from './helpers.js';
 
 describe('durable Thread runtime invariants', () => {
@@ -419,6 +420,77 @@ describe('durable Thread runtime invariants', () => {
       expect(env.runtime.getThread(thread.id)?.state).toBe('idle');
     } finally {
       firstResponse.resolve(response('cleanup'));
+      await env.cleanup();
+    }
+  });
+
+  it('keeps Interrupt available for a Tool Execution that outlives a paused Thread', async () => {
+    const toolStarted = deferred<void>();
+    const toolAborted = deferred<void>();
+    let store: PicoStore | null = null;
+    const plugin: PicoPlugin = {
+      id: 'test.paused-active-tool',
+      name: 'Paused active Tool',
+      version: '1',
+      activate({ tools, pipelines }) {
+        tools.register(
+          { name: 'wait_for_interrupt', description: 'Wait for Interrupt', parameters: { type: 'object' } },
+          async (_args, context) => {
+            toolStarted.resolve(undefined);
+            return new Promise((_, reject) => {
+              context.signal.addEventListener(
+                'abort',
+                () => {
+                  toolAborted.resolve(undefined);
+                  reject(new DOMException('Execution interrupted', 'AbortError'));
+                },
+                { once: true },
+              );
+            });
+          },
+        );
+        pipelines.use<ToolBatchInput, Execution[]>('toolBatch', async (input) => {
+          void input.execute(input.calls[0]!);
+          await toolStarted.promise;
+          const execution = store!
+            .listExecutions(input.thread.id)
+            .find((item) => item.batchId === input.batchId && item.kind === 'tool');
+          if (!execution) throw new Error('Tool Execution was not durably started');
+          return [execution];
+        });
+      },
+    };
+    const model = new FakeModel((_prompt, callNumber) =>
+      callNumber === 1
+        ? response('', [{ id: 'long-tool', name: 'wait_for_interrupt', arguments: {} }])
+        : response('The tool was interrupted.'),
+    );
+    const env = await setupRuntime(model, { plugins: [plugin] });
+    store = env.store;
+    const thread = env.createThread();
+    try {
+      await env.runtime.submit(thread.id, 'paused-active-tool-message', 'Start a long tool');
+      await toolStarted.promise;
+      await env.runtime.drain();
+
+      const paused = env.runtime.getThread(thread.id)!;
+      const activeExecutions = env.store.listExecutions(thread.id);
+      expect(paused.state).toBe('paused');
+      expect(activeExecutions.some((execution) => execution.status === 'running')).toBe(true);
+      expect(model.calls).toBe(1);
+      expect(threadCanBeInterrupted(paused.state, activeExecutions)).toBe(true);
+
+      await env.runtime.interrupt(thread.id);
+      await toolAborted.promise;
+      await until(() => env.store.listExecutions(thread.id).every((execution) => execution.status !== 'running'));
+      expect(env.store.listExecutions(thread.id).find((execution) => execution.kind === 'tool')?.status).toBe(
+        'interrupted',
+      );
+      expect(threadCanBeInterrupted(env.runtime.getThread(thread.id)!.state, env.store.listExecutions(thread.id))).toBe(
+        false,
+      );
+    } finally {
+      await env.runtime.interrupt(thread.id);
       await env.cleanup();
     }
   });

@@ -404,6 +404,7 @@ export class PicoRuntime {
         await this.performStep(input.thread);
       });
       const afterStep = this.store.getThread(threadId);
+      if (afterStep?.pauseRequested && this.latestActiveBatch(threadId)) return;
       if (!defaultStepRan && afterStep && !afterStep.pauseRequested && this.hasUnprocessedWork(threadId)) {
         this.store.setPause(threadId, true, 'The step pipeline stopped before durable work reached a safe boundary.');
         this.publishThreadUpdate(threadId);
