@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -131,6 +132,54 @@ describe('Executor execution identity and recovery', () => {
           command.stdin!.end(JSON.stringify({ command: 'sleep 10', timeout_ms: 20_000 }));
         }
         await commandResult.catch(() => undefined);
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'keeps a detached shell running and interruptible after its Container Runner exits',
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'pico-container-orphan-'));
+      const executionDirectory = join(directory, 'executions');
+      const workspace = join(directory, 'workspace');
+      await mkdir(executionDirectory);
+      await mkdir(workspace);
+      const key = randomUUID().replaceAll('-', '');
+      const childPidFile = join(executionDirectory, `${key}.child.pid`);
+      const command = spawn(
+        process.execPath,
+        ['-e', CONTAINER_RUNNER, 'run', key, 'shell', executionDirectory, workspace],
+        { stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      const commandResult = captureRunner(command);
+      command.stdin!.end(JSON.stringify({ command: 'sleep 20; printf completed > completed.txt', timeout_ms: 30_000 }));
+      let childPid = 0;
+      let childStartTime: string | undefined;
+      try {
+        await waitForFile(childPidFile);
+        const identity = JSON.parse(await readFile(childPidFile, 'utf8')) as { pid: number; startTime?: string };
+        childPid = identity.pid;
+        childStartTime = identity.startTime;
+        command.kill('SIGKILL');
+        await commandResult.catch(() => undefined);
+
+        expect((await executeRunner('status', key, undefined, executionDirectory, workspace)).status).toBe('running');
+        await executeRunner('interrupt', key, undefined, executionDirectory, workspace);
+        await waitForRunnerStatus(key, executionDirectory, workspace, 'interrupted');
+        await expect(readFile(join(workspace, 'completed.txt'), 'utf8')).rejects.toThrow();
+      } finally {
+        if (command.exitCode === null) {
+          command.kill('SIGKILL');
+          await commandResult.catch(() => undefined);
+        }
+        if (childPid > 0 && processGroupMatches(childPid, childStartTime)) {
+          try {
+            process.kill(-childPid, 'SIGKILL');
+          } catch {
+            /* The detached shell process group already exited. */
+          }
+        }
         await rm(directory, { recursive: true, force: true });
       }
     },
@@ -878,5 +927,35 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+async function waitForRunnerStatus(
+  key: string,
+  executionDirectory: string,
+  workspace: string,
+  target: RunnerResponse['status'],
+  timeoutMs = 3_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const current = await executeRunner('status', key, undefined, executionDirectory, workspace);
+    if (current.status === target) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  throw new Error(`Container Runner did not report ${target} before timeout`);
+}
+
+function processGroupMatches(pid: number, startTime?: string): boolean {
+  if (!startTime) return false;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const fields = stat
+      .slice(stat.lastIndexOf(')') + 2)
+      .trim()
+      .split(/\s+/);
+    return Number(fields[2]) === pid && fields[19] === startTime;
+  } catch {
+    return false;
   }
 }

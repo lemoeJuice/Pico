@@ -16,25 +16,61 @@ function readPid(file) {
     return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
   } catch { return null; }
 }
-function alive() {
-  const pid = readPid(pidFile);
-  if (!pid) return false;
+function processInfo(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
   try {
     process.kill(pid, 0);
-    if (!fs.existsSync('/proc/self/cmdline')) return true;
-    return fs.readFileSync('/proc/' + pid + '/cmdline', 'utf8').split('\0').includes(key);
-  }
-  catch { return false; }
+    if (!fs.existsSync('/proc/self/stat')) return { procAvailable: false };
+    const stat = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+    if (fields[0] === 'Z' || fields[0] === 'X') return null;
+    return {
+      procAvailable: true,
+      state: fields[0],
+      parentPid: Number(fields[1]),
+      groupId: Number(fields[2]),
+      startTime: fields[19],
+    };
+  } catch { return null; }
 }
-function childOf(childPid, parentPid) {
-  if (!childPid || !parentPid) return false;
+
+function runnerAlive() {
+  const pid = readPid(pidFile);
+  const info = processInfo(pid);
+  if (!info) return false;
+  if (!info.procAvailable) return true;
   try {
-    process.kill(childPid, 0);
-    if (!fs.existsSync('/proc/self/stat')) return true;
-    const stat = fs.readFileSync('/proc/' + childPid + '/stat', 'utf8');
-    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-    return Number(fields[1]) === parentPid;
+    return fs.readFileSync('/proc/' + pid + '/cmdline', 'utf8').split('\0').includes(key);
   } catch { return false; }
+}
+
+function readChildIdentity() {
+  try {
+    const raw = fs.readFileSync(childPidFile, 'utf8');
+    try {
+      const value = JSON.parse(raw);
+      if (value && typeof value === 'object' && Number.isSafeInteger(value.pid) && value.pid > 0) {
+        return { pid: value.pid, startTime: typeof value.startTime === 'string' ? value.startTime : null };
+      }
+    } catch {}
+    const pid = Number(raw);
+    return Number.isSafeInteger(pid) && pid > 0 ? { pid, startTime: null } : null;
+  } catch { return null; }
+}
+
+function childAlive(identity, runnerPid) {
+  if (!identity) return false;
+  const info = processInfo(identity.pid);
+  if (!info) return false;
+  if (!info.procAvailable) return true;
+  if (info.groupId !== identity.pid) return false;
+  if (identity.startTime) return info.startTime === identity.startTime;
+  return Boolean(runnerPid && info.parentPid === runnerPid);
+}
+
+function alive() {
+  const runnerPid = readPid(pidFile);
+  return runnerAlive() || childAlive(readChildIdentity(), runnerPid);
 }
 function claim() {
   const temporary = pidFile + '.' + process.pid + '.' + Math.random().toString(16).slice(2) + '.tmp';
@@ -159,15 +195,14 @@ async function run() {
   }
   if (mode === 'interrupt') {
     if (fs.existsSync(resultFile)) return send(await readStoredResult());
-    if (alive()) {
-      const runnerPid = readPid(pidFile);
-      const candidateChildPid = readPid(childPidFile);
-      const childPid = childOf(candidateChildPid, runnerPid) ? candidateChildPid : null;
-      const pid = childPid ?? readPid(pidFile);
-      if (pid) {
-        try { process.kill(-(childPid ?? pid), 'SIGTERM'); }
-        catch { try { process.kill(pid, 'SIGTERM'); } catch {} }
-      }
+    const runnerPid = readPid(pidFile);
+    const hasRunner = runnerAlive();
+    const childIdentity = readChildIdentity();
+    const hasChild = childAlive(childIdentity, runnerPid);
+    const targetPid = hasChild ? childIdentity.pid : hasRunner && !childIdentity ? runnerPid : null;
+    if (targetPid) {
+      try { process.kill(-targetPid, 'SIGTERM'); }
+      catch { try { process.kill(targetPid, 'SIGTERM'); } catch {} }
     }
     if (fs.existsSync(resultFile)) return send(await readStoredResult());
     return send({ status: alive() ? 'running' : 'interrupted' });
@@ -195,7 +230,8 @@ async function run() {
     else if (toolName === 'shell') {
       const command = spawn('/bin/sh', ['-lc', args.command], { cwd: workspace, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
       toolChild.pid = command.pid;
-      fs.writeFileSync(childPidFile, String(command.pid));
+      const identity = processInfo(command.pid);
+      fs.writeFileSync(childPidFile, JSON.stringify({ pid: command.pid, startTime: identity?.startTime ?? null }));
       let stdout = ''; let stderr = '';
       command.stdout.setEncoding('utf8').on('data', chunk => { stdout = (stdout + chunk).slice(-40000); });
       command.stderr.setEncoding('utf8').on('data', chunk => { stderr = (stderr + chunk).slice(-40000); });
