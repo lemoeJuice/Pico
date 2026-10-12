@@ -464,7 +464,11 @@ export class PicoStore {
         `,
           )
           .run(
-            JSON.stringify({ model: input.payload.model, usage: input.payload.usage }),
+            JSON.stringify({
+              model: input.payload.model,
+              usage: input.payload.usage,
+              finishReason: input.payload.finishReason ?? null,
+            }),
             createdAt,
             input.modelExecutionId,
           );
@@ -474,6 +478,7 @@ export class PicoStore {
           {
             model: input.payload.model,
             usage: input.payload.usage,
+            finishReason: input.payload.finishReason ?? null,
           },
           createdAt,
         );

@@ -67,6 +67,7 @@ export interface AssistantPayload {
   projectionThrough: number;
   usage: TokenUsage | null;
   model: string;
+  finishReason?: string | null;
 }
 
 export interface ToolResultPayload {

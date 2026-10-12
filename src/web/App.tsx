@@ -1391,6 +1391,7 @@ function AssistantBubble({
 }) {
   const assistant = recordPayload<AssistantPayload>(record);
   const calls = assistant.toolCalls ?? [];
+  const completionNote = assistant.finishReason === 'length' ? '· output limit reached' : null;
   const usage = assistant.usage;
   const usageLabel =
     usage && Object.keys(usage).length > 0
@@ -1409,6 +1410,7 @@ function AssistantBubble({
         <div className="message-author">
           Pico {assistant.model ? <span className="model-label">· {assistant.model}</span> : null}
           {usageLabel ? <span className="usage-label">· {usageLabel} tokens</span> : null}
+          {completionNote ? <span className="completion-label">{completionNote}</span> : null}
         </div>
         {assistant.content ? <div className="markdown-like">{assistant.content}</div> : null}
         {calls.length > 0 ? (

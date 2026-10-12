@@ -708,6 +708,42 @@ describe('durable Thread runtime invariants', () => {
     }
   });
 
+  it('pauses on a model output limit and does not execute calls from the truncated response', async () => {
+    const model = new FakeModel(() => ({
+      ...response('The answer stops here'),
+      finishReason: 'length',
+      usage: { inputTokens: 80, outputTokens: 20, totalTokens: 100 },
+      toolCalls: [{ id: 'truncated-call', name: 'read_file', arguments: { path: 'facts.txt' } }],
+    }));
+    const env = await setupRuntime(model);
+    const thread = env.createThread();
+    try {
+      await env.runtime.submit(thread.id, 'output-limit-message', 'Answer and inspect facts.txt.');
+      await env.runtime.drain();
+
+      const assistant = env.store.listRecords(thread.id).find((record) => record.kind === 'assistant');
+      expect(assistant?.payload).toMatchObject({
+        content: 'The answer stops here',
+        toolCalls: [],
+        usage: { inputTokens: 80, outputTokens: 20, totalTokens: 100 },
+        finishReason: 'length',
+      });
+      expect(env.store.listExecutions(thread.id).filter((execution) => execution.kind === 'tool')).toHaveLength(0);
+      expect(env.store.listExecutions(thread.id).find((execution) => execution.kind === 'model')?.result).toMatchObject(
+        {
+          finishReason: 'length',
+        },
+      );
+      expect(env.runtime.getThread(thread.id)).toMatchObject({
+        state: 'paused',
+        pauseReason: expect.stringContaining('output token limit'),
+      });
+      expect(model.calls).toBe(1);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it('lets a child Thread and parent exchange ordinary Messages without blocking spawn', async () => {
     let parentId = '';
     let childId = '';

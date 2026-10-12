@@ -593,8 +593,9 @@ export class PicoRuntime {
       const response = await this.pipelines.run<ModelStageInput, ModelResponse>('model', modelInput, (input) =>
         this.model.complete(input.prompt, modelSettings, input.signal, input.onText),
       );
+      const hitOutputLimit = response.finishReason === 'length';
       const seenCallIds = new Set<string>();
-      const calls = response.toolCalls.map((call, index) => {
+      const calls = (hitOutputLimit ? [] : response.toolCalls).map((call, index) => {
         const proposed = call.id.trim();
         const id = proposed && !seenCallIds.has(proposed) ? proposed : `${modelExecutionId}:tool:${index}`;
         seenCallIds.add(id);
@@ -608,6 +609,7 @@ export class PicoRuntime {
         projectionThrough: through,
         usage: response.usage,
         model: response.model,
+        finishReason: response.finishReason,
       };
       const toolExecutions = calls.map((call) => ({
         call,
@@ -620,6 +622,13 @@ export class PicoRuntime {
         payload,
         toolCalls: toolExecutions,
       });
+      if (hitOutputLimit && !this.store.getThread(thread.id)?.pauseRequested) {
+        this.store.setPause(
+          thread.id,
+          true,
+          'The model reached its output token limit. Review the response, adjust the model or context, then Continue.',
+        );
+      }
       this.publishRecord(record);
       const committedModelExecution = this.store.getExecution(modelExecutionId);
       if (committedModelExecution) this.executionChanged(committedModelExecution);
