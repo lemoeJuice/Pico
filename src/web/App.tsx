@@ -29,6 +29,7 @@ import {
   messageSubmissionId,
   settleMessageSubmission,
   type PendingMessageIds,
+  withPendingThreadSubmission,
 } from './message-retries.js';
 
 type PluginInfo = {
@@ -256,6 +257,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [executorConnected, setExecutorConnected] = useState<boolean | null>(null);
   const [executorError, setExecutorError] = useState<string | null>(null);
   const [socketConnected, setSocketConnected] = useState(false);
+  const [sendingThreadIds, setSendingThreadIds] = useState<Set<string>>(new Set());
   const [draftsByThread, setDraftsByThread] = useState<Record<string, string>>({});
   const [assistantDraft, setAssistantDraft] = useState('');
   const [notice, setNotice] = useState('');
@@ -281,6 +283,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const threadUpdateVersions = useRef(new Map<string, number>());
   const snapshotVersions = useRef(new Map<string, number>());
   const pendingMessageIds = useRef<PendingMessageIds>(new Map());
+  const pendingSubmissionThreads = useRef(new Set<string>());
   const draft = threadId ? (draftsByThread[threadId] ?? '') : '';
   const draftRef = useRef({ threadId, value: draft });
   activeProjectId.current = projectId;
@@ -302,12 +305,22 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     setDraftsByThread((current) => clearAcceptedMessageDraft(current, targetThreadId, content));
   };
 
+  const markThreadSending = (targetThreadId: string, isSending: boolean): void => {
+    pendingSubmissionThreads.current = withPendingThreadSubmission(
+      pendingSubmissionThreads.current,
+      targetThreadId,
+      isSending,
+    );
+    setSendingThreadIds(pendingSubmissionThreads.current);
+  };
+
   const selectedProject = projects.find((project) => project.id === projectId) ?? null;
   const activeSnapshot = snapshotForSelection(snapshot, threadId, projectId);
   const selectedThread =
     activeSnapshot?.thread ??
     threads.find((thread) => thread.id === threadId && thread.projectId === projectId) ??
     null;
+  const selectedThreadSending = selectedThread ? sendingThreadIds.has(selectedThread.id) : false;
   const filteredCommands = useMemo(() => {
     if (!draft.startsWith('/')) return [];
     const token = draft.slice(1).split(/\s/)[0]?.toLowerCase() ?? '';
@@ -649,9 +662,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const sendMessage = async (content = draft): Promise<void> => {
     const clean = content.trim();
     const sentThreadId = threadId;
-    if (!sentThreadId || !clean || busy) return;
+    if (!sentThreadId || !clean || busy || pendingSubmissionThreads.current.has(sentThreadId)) return;
     followLatest.current = true;
-    setBusy(true);
+    markThreadSending(sentThreadId, true);
     setError('');
     const id = messageSubmissionId(pendingMessageIds.current, sentThreadId, clean, () => crypto.randomUUID());
     try {
@@ -675,7 +688,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         setError(caught instanceof Error ? caught.message : String(caught));
       }
     } finally {
-      setBusy(false);
+      markThreadSending(sentThreadId, false);
     }
   };
 
@@ -962,7 +975,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   {item.command ? (
                     <button
                       className="plugin-sidebar-action"
-                      disabled={!threadId || busy}
+                      disabled={!threadId || busy || selectedThreadSending}
                       title={item.description ?? item.label}
                       onClick={() => {
                         executeContribution(item);
@@ -1118,7 +1131,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   <button
                     key={item.id}
                     className="button button-quiet plugin-action"
-                    disabled={!item.command || busy}
+                    disabled={!item.command || busy || selectedThreadSending}
                     title={item.description}
                     onClick={() => executeContribution(item)}
                   >
@@ -1275,7 +1288,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       <button
                         key={item.id}
                         className="composer-plugin-action"
-                        disabled={!item.command || busy}
+                        disabled={!item.command || busy || selectedThreadSending}
                         title={item.description ?? item.label}
                         onClick={() => executeContribution(item)}
                       >
@@ -1285,10 +1298,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     <button
                       className="send-button"
                       aria-label="Send message"
-                      disabled={!draft.trim() || busy}
+                      disabled={!draft.trim() || busy || selectedThreadSending}
                       onClick={() => void sendMessage()}
                     >
-                      {busy ? <i className="tiny-spinner" /> : '↑'}
+                      {selectedThreadSending ? <i className="tiny-spinner" /> : '↑'}
                     </button>
                   </div>
                 </div>

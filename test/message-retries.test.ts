@@ -5,6 +5,7 @@ import {
   messageSubmissionId,
   settleMessageSubmission,
   type PendingMessageIds,
+  withPendingThreadSubmission,
 } from '../src/web/message-retries.js';
 
 describe('Thread-scoped message retries', () => {
@@ -46,5 +47,17 @@ describe('Thread-scoped message retries', () => {
       'thread-b': 'Other Thread draft',
     });
     expect(clearAcceptedMessageDraft(drafts, 'thread-a', 'Different text')).toBe(drafts);
+  });
+
+  it('tracks pending submissions independently so one Thread can continue while another is sending', () => {
+    const empty = new Set<string>();
+    const threadA = withPendingThreadSubmission(empty, 'thread-a', true);
+    const both = withPendingThreadSubmission(threadA, 'thread-b', true);
+    const threadB = withPendingThreadSubmission(both, 'thread-a', false);
+
+    expect(empty.size).toBe(0);
+    expect(threadA).toEqual(new Set(['thread-a']));
+    expect(both).toEqual(new Set(['thread-a', 'thread-b']));
+    expect(threadB).toEqual(new Set(['thread-b']));
   });
 });

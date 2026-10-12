@@ -1,5 +1,16 @@
 export type PendingMessageIds = Map<string, Map<string, string>>;
 
+export function withPendingThreadSubmission(
+  pending: ReadonlySet<string>,
+  threadId: string,
+  isPending: boolean,
+): Set<string> {
+  const next = new Set(pending);
+  if (isPending) next.add(threadId);
+  else next.delete(threadId);
+  return next;
+}
+
 /** Reuse an uncertain submission ID only for the same content in the same Thread. */
 export function messageSubmissionId(
   pending: PendingMessageIds,
