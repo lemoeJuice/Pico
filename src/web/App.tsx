@@ -19,7 +19,7 @@ import type { ModelInputAttempt, ThreadSnapshot } from '../runtime/runtime.js';
 import { isSessionExpired } from './session.js';
 import { visiblePauseReason } from './pause-reason.js';
 import { upsertProjectThread } from './project-threads.js';
-import { fetchStableSnapshot, snapshotForSelection } from './snapshot-consistency.js';
+import { fetchStableSnapshot, snapshotForSelection, snapshotThreadIsSelected } from './snapshot-consistency.js';
 import { isNearScrollEnd } from './scroll-follow.js';
 import { threadCanBeInterrupted } from './thread-controls.js';
 import {
@@ -372,13 +372,14 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
   const loadSnapshot = useCallback(
     async (id: string) => {
+      if (!snapshotThreadIsSelected(id, activeThreadId.current)) return;
       const requestNumber = ++snapshotRequest.current;
       const value = await fetchStableSnapshot(
         () => api<ThreadSnapshot>(`/api/threads/${encodeURIComponent(id)}`),
         () => snapshotVersions.current.get(id) ?? 0,
-        () => requestNumber === snapshotRequest.current,
+        () => requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current),
       );
-      if (value && requestNumber === snapshotRequest.current) {
+      if (value && requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current)) {
         observeModelExecutions(value.executions);
         for (const record of value.records) {
           if (

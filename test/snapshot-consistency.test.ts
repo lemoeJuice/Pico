@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { fetchStableSnapshot, snapshotForSelection } from '../src/web/snapshot-consistency.js';
+import {
+  fetchStableSnapshot,
+  snapshotForSelection,
+  snapshotThreadIsSelected,
+} from '../src/web/snapshot-consistency.js';
 
 describe('snapshot refresh consistency', () => {
   it('refreshes a Project thread list when creation races the request', async () => {
@@ -48,5 +52,10 @@ describe('snapshot refresh consistency', () => {
     expect(snapshotForSelection(snapshot, 'thread-b', 'project-a')).toBeNull();
     expect(snapshotForSelection(snapshot, 'thread-a', 'project-b')).toBeNull();
     expect(snapshotForSelection(snapshot, 'thread-a', 'project-a')).toBe(snapshot);
+  });
+
+  it('does not start a background refresh for a Thread that is no longer selected', () => {
+    expect(snapshotThreadIsSelected('thread-a', 'thread-b')).toBe(false);
+    expect(snapshotThreadIsSelected('thread-b', 'thread-b')).toBe(true);
   });
 });
