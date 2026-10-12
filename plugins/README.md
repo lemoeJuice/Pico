@@ -9,3 +9,5 @@ Stable contribution surfaces are `tools`, the `step` / `projection` / `model` / 
 The `toolBatch` stage exposes the committed calls and an `execute(call)` function. A scheduler can wrap `execute` or reorder calls while delegating each unchanged call; the default stage runs them concurrently. Preserve each call's ID, name, and arguments. Pico checks the durable Execution records after the stage and will not start the next Model Step until the whole batch is settled.
 
 The `step` stage wraps one full agent-loop iteration: its Model Step and any Tool Batch produced by that Model Step run before the interceptor returns at the next safe boundary. A short-circuit that leaves durable work unprocessed pauses the Thread so the Runtime does not spin without progress.
+
+Slash commands stay explicit actions and do not become user Messages. Pico records an append-only receipt before running a command handler; retrying the same request ID will not invoke the handler again. If a handler throws or its outcome is uncertain, inspect the Thread or plugin state before submitting it again with a new ID.

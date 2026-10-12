@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import type { AssistantPayload, Execution } from '../src/core/types.js';
+import { PicoStore } from '../src/core/store.js';
 import type { PicoPlugin } from '../src/plugins/host.js';
 import type { ModelResponse } from '../src/runtime/model.js';
+import { PicoRuntime } from '../src/runtime/runtime.js';
 import type { ModelStageInput, StepInput, ToolBatchInput } from '../src/runtime/stages.js';
 import { deferred, FakeModel, response, setupRuntime } from './helpers.js';
 
@@ -24,6 +27,79 @@ describe('durable Thread runtime invariants', () => {
       expect(env.runtime.getThread(thread.id)?.state).toBe('idle');
     } finally {
       await env.cleanup();
+    }
+  });
+
+  it('does not rerun a slash command when its request is retried after Runtime restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-command-retry-'));
+    const workspace = join(directory, 'workspace');
+    await mkdir(workspace);
+    const databasePath = join(directory, 'runtime.sqlite');
+    let invocations = 0;
+    const commandStarted = deferred<void>();
+    const releaseCommand = deferred<{ text: string }>();
+    const plugin: PicoPlugin = {
+      id: 'test.command-retry',
+      name: 'Command retry',
+      version: '1',
+      activate({ commands }) {
+        commands.register({
+          name: 'count',
+          description: 'Increment the test counter',
+          async execute() {
+            invocations += 1;
+            commandStarted.resolve(undefined);
+            return releaseCommand.promise;
+          },
+        });
+      },
+    };
+    let store = new PicoStore(databasePath);
+    let runtime = new PicoRuntime(store, {
+      model: new FakeModel(() => response('unused')),
+      plugins: [plugin],
+      pluginDirectory: join(directory, 'empty-plugins'),
+    });
+    await runtime.initialize();
+    const project = await runtime.createProject('Command retries', workspace);
+    const thread = runtime.createThread(project.id, 'host');
+    try {
+      const firstPromise = runtime.submit(thread.id, 'stable-command-id', '/count');
+      await commandStarted.promise;
+      const racingRetry = await runtime.submit(thread.id, 'stable-command-id', '/count');
+      expect(racingRetry.duplicate).toBe(true);
+      releaseCommand.resolve({ text: `Invocation ${invocations}` });
+      const first = await firstPromise;
+      expect(first.duplicate).toBe(false);
+      expect(first.command?.text).toBe('Invocation 1');
+      expect(invocations).toBe(1);
+
+      store.close();
+      store = new PicoStore(databasePath);
+      runtime = new PicoRuntime(store, {
+        model: new FakeModel(() => response('unused')),
+        plugins: [plugin],
+        pluginDirectory: join(directory, 'empty-plugins'),
+      });
+      await runtime.initialize();
+      const retry = await runtime.submit(thread.id, 'stable-command-id', '/count');
+
+      expect(retry.duplicate).toBe(true);
+      expect(retry.command?.text).toContain('already accepted');
+      expect(invocations).toBe(1);
+      expect(store.listRecords(thread.id).filter((record) => record.kind === 'message')).toHaveLength(0);
+      expect(
+        store
+          .listRecords(thread.id)
+          .filter((record) => record.kind === 'plugin' && record.payload.action === 'invocation-accepted'),
+      ).toHaveLength(1);
+      await expect(runtime.submit(thread.id, 'stable-command-id', '/other')).rejects.toThrow(
+        /reused with different content/i,
+      );
+    } finally {
+      releaseCommand.resolve({ text: 'cleanup' });
+      store.close();
+      await rm(directory, { recursive: true, force: true });
     }
   });
 

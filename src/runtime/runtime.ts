@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { realpath, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type {
@@ -233,11 +233,30 @@ export class PicoRuntime {
     const thread = this.store.getThread(threadId);
     if (!thread) throw new Error('Thread not found');
     if (content.trimStart().startsWith('/')) {
-      const command = await this.commands.execute(content.trim(), {
+      const commandText = content.trim();
+      const requestHash = createHash('sha256').update(`${threadId}\0${id}`).digest('hex');
+      const commandHash = createHash('sha256').update(commandText).digest('hex');
+      const receipt = this.store.appendCanonical(threadId, `pico:command:${requestHash}`, 'plugin', {
+        pluginId: 'pico.commands',
+        action: 'invocation-accepted',
+        requestHash,
+        commandHash,
+      });
+      if (!receipt.inserted) {
+        return {
+          accepted: true,
+          duplicate: true,
+          command: {
+            text: 'This command ID was already accepted. Its original handler may still be running or may have finished; it was not started again.',
+          },
+        };
+      }
+      this.publishRecord(receipt.record);
+      const command = await this.commands.execute(commandText, {
         thread: this.getThread(threadId),
         projectId: thread.projectId,
       });
-      if (command) return { accepted: true, command };
+      if (command) return { accepted: true, duplicate: false, command };
     }
     const result = this.postMessage(thread, id, {
       role: 'user',
