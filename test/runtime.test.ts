@@ -3,6 +3,8 @@ import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { AssistantPayload } from '../src/core/types.js';
 import type { PicoPlugin } from '../src/plugins/host.js';
+import type { ModelResponse } from '../src/runtime/model.js';
+import type { ModelStageInput } from '../src/runtime/stages.js';
 import { deferred, FakeModel, response, setupRuntime } from './helpers.js';
 
 describe('durable Thread runtime invariants', () => {
@@ -20,6 +22,37 @@ describe('durable Thread runtime invariants', () => {
       expect(model.calls).toBe(1);
       expect(env.store.listRecords(thread.id).filter((record) => record.kind === 'message')).toHaveLength(1);
       expect(env.runtime.getThread(thread.id)?.state).toBe('idle');
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('passes Model stage input replacements to the default model adapter', async () => {
+    const plugin: PicoPlugin = {
+      id: 'test.model-prompt',
+      name: 'Model prompt modifier',
+      version: '1',
+      activate({ pipelines }) {
+        pipelines.use<ModelStageInput, ModelResponse>('model', async (input, next) =>
+          next({
+            ...input,
+            prompt: { ...input.prompt, system: `${input.prompt.system}\nUse concise answers.` },
+          }),
+        );
+      },
+    };
+    const model = new FakeModel(() => response('Ready.'));
+    const env = await setupRuntime(model, { plugins: [plugin] });
+    const thread = env.createThread();
+    try {
+      await env.runtime.submit(thread.id, 'model-prompt-message', 'Hello');
+      await env.runtime.drain();
+
+      expect(model.prompts[0]?.system).toContain('Use concise answers.');
+      expect(env.store.listRecords(thread.id).find((record) => record.kind === 'message')?.payload).toMatchObject({
+        content: 'Hello',
+      });
+      expect(env.store.listRecords(thread.id).filter((record) => record.kind === 'assistant')).toHaveLength(1);
     } finally {
       await env.cleanup();
     }

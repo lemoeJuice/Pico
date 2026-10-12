@@ -1,5 +1,5 @@
 import type { AssistantPayload, CanonicalRecord, Execution, Thread, ToolCall, ToolDefinition } from '../core/types.js';
-import type { ModelPrompt, ModelResponse } from './model.js';
+import type { ModelPrompt } from './model.js';
 
 export interface StepInput {
   thread: Thread;
@@ -21,7 +21,6 @@ export interface ModelStageInput {
   prompt: ModelPrompt;
   signal: AbortSignal;
   onText(delta: string): void;
-  perform(): Promise<ModelResponse>;
 }
 
 export interface ToolBatchInput {

@@ -25,8 +25,14 @@ import { HostExecutor } from '../executor/executor.js';
 import { createToolCatalog, type ToolContext } from '../executor/tools.js';
 import { builtinPlugins } from '../plugins/builtin.js';
 import { CommandRegistry, PluginHost, type CommandResult } from '../plugins/host.js';
-import { OpenAiCompatibleAdapter, type ModelAdapter, type ModelPrompt, type PromptTurn } from './model.js';
-import type { PermissionPolicy, ProjectionInput, ToolInvocationInput } from './stages.js';
+import {
+  OpenAiCompatibleAdapter,
+  type ModelAdapter,
+  type ModelPrompt,
+  type ModelResponse,
+  type PromptTurn,
+} from './model.js';
+import type { ModelStageInput, PermissionPolicy, ProjectionInput, ToolInvocationInput } from './stages.js';
 import type { PicoPlugin } from '../plugins/host.js';
 
 export interface RuntimeEvent {
@@ -465,23 +471,17 @@ export class PicoRuntime {
         model: modelSettings.model,
         temperature: modelSettings.temperature,
       };
-      const response = await this.pipelines.run(
-        'model',
-        {
-          thread,
-          prompt,
-          signal: controller.signal,
-          onText: (delta: string) => {
-            latestDraft += delta;
-            this.publish({ type: 'model.delta', threadId: thread.id, executionId: modelExecutionId, delta });
-          },
-          perform: () =>
-            this.model.complete(prompt, modelSettings, controller.signal, (delta) => {
-              latestDraft += delta;
-              this.publish({ type: 'model.delta', threadId: thread.id, executionId: modelExecutionId, delta });
-            }),
+      const modelInput: ModelStageInput = {
+        thread,
+        prompt,
+        signal: controller.signal,
+        onText: (delta: string) => {
+          latestDraft += delta;
+          this.publish({ type: 'model.delta', threadId: thread.id, executionId: modelExecutionId, delta });
         },
-        (input) => input.perform(),
+      };
+      const response = await this.pipelines.run<ModelStageInput, ModelResponse>('model', modelInput, (input) =>
+        this.model.complete(input.prompt, modelSettings, input.signal, input.onText),
       );
       const seenCallIds = new Set<string>();
       const calls = response.toolCalls.map((call, index) => {
