@@ -34,6 +34,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   });
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
+    if (response.status === 401) window.dispatchEvent(new Event('pico:auth-expired'));
     const message =
       body && typeof body === 'object' && 'error' in body ? String(body.error) : `Request failed (${response.status})`;
     throw new Error(message);
@@ -208,7 +209,7 @@ function ToolCard({
   );
 }
 
-export function App() {
+export function App({ authRequired = false, onSignOut }: { authRequired?: boolean; onSignOut?(): Promise<void> }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState<string | null>(localStorage.getItem('pico.project'));
   const [threads, setThreads] = useState<Thread[]>([]);
@@ -463,6 +464,7 @@ export function App() {
       };
       socket.onclose = () => {
         setSocketConnected(false);
+        window.dispatchEvent(new Event('pico:auth-expired'));
         if (!closed) {
           timer = window.setTimeout(connect, retry);
           retry = Math.min(retry * 1.7, 12_000);
@@ -765,6 +767,11 @@ export function App() {
             <div className="topbar-status">
               <ExecutorPill thread={selectedThread} connected={executorConnected} />
               <StatePill state={currentState} />
+              {authRequired ? (
+                <button className="session-logout" onClick={() => void onSignOut?.()} type="button">
+                  Sign out
+                </button>
+              ) : null}
             </div>
           ) : (
             <div className="topbar-status">
@@ -772,6 +779,11 @@ export function App() {
                 <i className={socketConnected ? 'online' : 'offline'} />
                 {socketConnected ? 'Runtime connected' : 'Connecting…'}
               </span>
+              {authRequired ? (
+                <button className="session-logout" onClick={() => void onSignOut?.()} type="button">
+                  Sign out
+                </button>
+              ) : null}
             </div>
           )}
         </header>

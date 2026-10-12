@@ -26,6 +26,17 @@ The build compiles the Runtime server separately from the static web client, so 
 
 Pico listens on `127.0.0.1:4173` by default. Configure `PICO_HOST` and `PICO_PORT` to change the listener, `PICO_DB_PATH` to change the SQLite file, and `PICO_PLUGIN_DIR` to load `.mjs` plugins from another directory. Model defaults can also be set with `PICO_MODEL_BASE_URL`, `PICO_MODEL_API_KEY`, and `PICO_MODEL`; the Settings page can override them.
 
+### Access from another device
+
+Pico refuses to listen beyond a loopback address unless `PICO_ACCESS_TOKEN` is set to a secret of at least 32 bytes. Generate one and bind Pico to your chosen interface:
+
+```sh
+export PICO_ACCESS_TOKEN="$(openssl rand -hex 32)"
+PICO_HOST=0.0.0.0 npm run dev
+```
+
+The browser asks for the token once and receives a revocable, `HttpOnly`, `SameSite=Strict` session cookie that expires after 12 hours. API routes and the event WebSocket require that session; WebSocket upgrades also check the browser origin. Sign out from the top bar to revoke the current session. The token itself is not stored in browser storage. Use HTTPS when traffic crosses a network you do not fully trust. When TLS terminates at a trusted reverse proxy, set `PICO_TRUST_PROXY=1` so Pico can mark the session cookie `Secure`; only enable this when the direct peer is that proxy.
+
 ## Executors and permissions
 
 - Each Thread stays bound to the Executor selected at creation. Create another Thread in the same Project to use a different Executor.

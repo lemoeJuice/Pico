@@ -375,6 +375,109 @@ button:disabled {
   min-width: 0;
   background: #fbfcfa;
 }
+.auth-screen {
+  display: grid;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 24px;
+  background: radial-gradient(ellipse at 50% 28%, rgba(228, 238, 225, 0.88), transparent 42%), #f5f7f2;
+  place-items: center;
+}
+.auth-card {
+  width: min(100%, 390px);
+  padding: 38px;
+  background: rgba(255, 255, 253, 0.88);
+  border: 1px solid rgba(224, 232, 221, 0.9);
+  border-radius: 25px;
+  box-shadow: 0 24px 70px rgba(65, 83, 67, 0.1);
+  backdrop-filter: blur(20px);
+}
+.auth-mark {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 25px;
+  color: #f7faf4;
+  background: linear-gradient(145deg, #78977a, #58745e);
+  border-radius: 15px 15px 15px 6px;
+  box-shadow: 0 7px 16px rgba(74, 111, 81, 0.2);
+  font-family: Georgia, serif;
+  font-size: 26px;
+  place-items: center;
+}
+.auth-card .eyebrow {
+  margin-bottom: 9px;
+  color: #829184;
+  font-size: 9px;
+  letter-spacing: 0.18em;
+}
+.auth-card h1 {
+  margin: 0;
+  color: #33463a;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 30px;
+  font-weight: 500;
+  letter-spacing: -0.04em;
+}
+.auth-copy {
+  margin: 12px 0 23px;
+  color: #78847a;
+  font-size: 13px;
+  line-height: 1.65;
+}
+.auth-form {
+  display: grid;
+  gap: 17px;
+}
+.auth-form .field {
+  display: grid;
+  gap: 7px;
+  color: #637267;
+  font-size: 11px;
+  font-weight: 600;
+}
+.auth-form input {
+  width: 100%;
+  min-height: 43px;
+  padding: 0 12px;
+  color: #3e5043;
+  background: #fbfcfa;
+  border: 1px solid #dfe7dc;
+  border-radius: 11px;
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+.auth-form input:focus {
+  border-color: #92ad96;
+  box-shadow: 0 0 0 3px rgba(131, 165, 137, 0.13);
+}
+.auth-form .button {
+  min-height: 43px;
+  justify-content: center;
+  margin-top: 2px;
+}
+.auth-error {
+  margin: -6px 0 0;
+  color: #a85149;
+  font-size: 12px;
+}
+.session-logout {
+  padding: 6px 9px;
+  color: #829087;
+  background: transparent;
+  border: 1px solid #e8ede6;
+  border-radius: 9px;
+  font: inherit;
+  font-size: 10px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.session-logout:hover {
+  color: #526f59;
+  background: #f0f4ef;
+  border-color: #dce6db;
+}
 .topbar {
   z-index: 2;
   display: flex;
@@ -1514,6 +1617,13 @@ button:disabled {
 }
 
 @media (max-width: 680px) {
+  .auth-screen {
+    padding: 16px;
+  }
+  .auth-card {
+    padding: 28px 23px;
+    border-radius: 21px;
+  }
   .app-shell {
     min-height: 520px;
   }

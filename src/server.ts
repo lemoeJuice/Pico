@@ -2,6 +2,14 @@ import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import {
+  isLoopbackHost,
+  AccessSessions,
+  clearedSessionCookie,
+  readSessionCookie,
+  sameOrigin,
+  sessionCookie,
+} from './server-auth.js';
 import express, { type ErrorRequestHandler, type Request, type Response } from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
 import { PicoRuntime } from './runtime/runtime.js';
@@ -27,13 +35,53 @@ function notFound(response: Response, message = 'Not found'): void {
 }
 
 export async function startServer(): Promise<{ close(): Promise<void>; runtime: PicoRuntime; port: number }> {
+  const host = process.env.PICO_HOST ?? '127.0.0.1';
+  const accessToken = process.env.PICO_ACCESS_TOKEN;
+  if (accessToken !== undefined && Buffer.byteLength(accessToken) < 32) {
+    throw new Error('PICO_ACCESS_TOKEN must contain at least 32 bytes');
+  }
+  if (!accessToken && !isLoopbackHost(host)) {
+    throw new Error('PICO_ACCESS_TOKEN is required when PICO_HOST is not a loopback address');
+  }
+  const sessions = new AccessSessions(accessToken);
+  const trustProxy = process.env.PICO_TRUST_PROXY === '1';
+
   const store = new PicoStore();
   const runtime = new PicoRuntime(store);
   await runtime.initialize();
 
   const app = express();
   app.disable('x-powered-by');
+  if (trustProxy) app.set('trust proxy', 1);
   app.use(express.json({ limit: '2mb' }));
+  app.use('/api', (_request, response, next) => {
+    response.setHeader('cache-control', 'no-store');
+    next();
+  });
+
+  app.get('/api/auth/status', (request, response) => {
+    response.json({
+      authRequired: sessions.required,
+      authenticated: sessions.authenticated(readSessionCookie(request.headers.cookie)),
+    });
+  });
+  app.post('/api/auth/session', (request, response) => {
+    if (!sessions.required) return response.json({ authenticated: true });
+    const body = bodyObject(request);
+    const sessionId = sessions.login(body.token);
+    if (!sessionId) return response.status(401).json({ error: 'Invalid Pico access token' });
+    response.setHeader('set-cookie', sessionCookie(sessionId, request.secure));
+    return response.json({ authenticated: true });
+  });
+  app.delete('/api/auth/session', (request, response) => {
+    sessions.revoke(readSessionCookie(request.headers.cookie));
+    response.setHeader('set-cookie', clearedSessionCookie(request.secure));
+    response.json({ authenticated: !sessions.required });
+  });
+  app.use('/api', (request, response, next) => {
+    if (sessions.authenticated(readSessionCookie(request.headers.cookie))) return next();
+    response.status(401).json({ error: 'Pico access token required', code: 'AUTH_REQUIRED' });
+  });
 
   app.get('/api/health', (_request, response) => response.json({ ok: true }));
   app.get('/api/info', (_request, response) => response.json({ defaultWorkspace: process.cwd(), version: '0.1.0' }));
@@ -130,6 +178,28 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
       if (production) socket.destroy();
       return;
     }
+    const forwardedProto =
+      trustProxy &&
+      String(request.headers['x-forwarded-proto'] ?? '')
+        .split(',')[0]
+        ?.trim()
+        .toLowerCase() === 'https';
+    if (
+      !sameOrigin(
+        request.headers.origin,
+        request.headers.host,
+        Boolean((request.socket as import('node:tls').TLSSocket).encrypted) || forwardedProto,
+      )
+    ) {
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    if (!sessions.authenticated(readSessionCookie(request.headers.cookie))) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     websocketServer.handleUpgrade(request, socket, head, (websocket) =>
       websocketServer.emit('connection', websocket, request),
     );
@@ -174,7 +244,6 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   };
   app.use(errors);
 
-  const host = process.env.PICO_HOST ?? '127.0.0.1';
   const port = Number(process.env.PICO_PORT ?? '4173');
   await new Promise<void>((resolvePromise, reject) => {
     httpServer.once('error', reject);
@@ -183,12 +252,14 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
       resolvePromise();
     });
   });
-  console.log(`Pico is ready at http://${host}:${port}`);
+  const boundPort = httpServer.address();
+  const actualPort = typeof boundPort === 'object' && boundPort ? boundPort.port : port;
+  console.log(`Pico is ready at http://${host}:${actualPort}`);
   if (runtime.pluginInfo().errors.length > 0) console.warn('Plugin load issues:', runtime.pluginInfo().errors);
 
   return {
     runtime,
-    port,
+    port: actualPort,
     async close() {
       unsubscribe();
       for (const socket of sockets) socket.close();
