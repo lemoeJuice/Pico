@@ -1,7 +1,10 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { CONTAINER_RUNNER } from '../src/executor/container-runner.js';
 import { PicoStore } from '../src/core/store.js';
 import { assistantPayload } from './helpers.js';
 import { ToolCatalog } from '../src/executor/tools.js';
@@ -11,6 +14,128 @@ import { PicoRuntime } from '../src/runtime/runtime.js';
 import { FakeModel, response, setupRuntime } from './helpers.js';
 
 describe('Executor execution identity and recovery', () => {
+  it.skipIf(process.platform === 'win32')(
+    'deduplicates container runner submissions and returns a completed result to a racing Interrupt',
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'pico-container-runner-'));
+      const executionDirectory = join(directory, 'executions');
+      const workspace = join(directory, 'workspace');
+      await mkdir(executionDirectory);
+      await mkdir(workspace);
+      const key = randomUUID().replaceAll('-', '');
+      const firstPatch = ['*** Begin Patch', '*** Add File: original.txt', '+first submission', '*** End Patch'].join(
+        '\n',
+      );
+      const duplicatePatch = [
+        '*** Begin Patch',
+        '*** Add File: duplicate.txt',
+        '+duplicate side effect',
+        '*** End Patch',
+      ].join('\n');
+      const pidFile = join(executionDirectory, `${key}.pid`);
+      const command = spawn(
+        process.execPath,
+        ['-e', CONTAINER_RUNNER, 'run', key, 'apply_patch', executionDirectory, workspace],
+        { stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      const commandResult = captureRunner(command);
+      try {
+        await waitForFile(pidFile);
+        const duplicate = await executeRunner(
+          'run',
+          key,
+          'apply_patch',
+          executionDirectory,
+          workspace,
+          JSON.stringify({ patch: duplicatePatch }),
+        );
+        expect(duplicate.status).toBe('running');
+        expect((await executeRunner('status', key, undefined, executionDirectory, workspace)).status).toBe('running');
+
+        command.stdin!.end(JSON.stringify({ patch: firstPatch }));
+        const completed = await commandResult;
+        expect(completed).toMatchObject({ status: 'completed', result: { changed: ['original.txt'] } });
+        expect(await readFile(join(workspace, 'original.txt'), 'utf8')).toBe('first submission\n');
+        await expect(readFile(join(workspace, 'duplicate.txt'), 'utf8')).rejects.toThrow();
+        expect(await executeRunner('interrupt', key, undefined, executionDirectory, workspace)).toEqual(completed);
+      } finally {
+        if (command.exitCode === null) {
+          command.stdin!.end(JSON.stringify({ patch: firstPatch }));
+          await commandResult.catch(() => undefined);
+        }
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'does not treat a reused process ID as a live container execution',
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'pico-container-stale-pid-'));
+      const executionDirectory = join(directory, 'executions');
+      const workspace = join(directory, 'workspace');
+      await mkdir(executionDirectory);
+      await mkdir(workspace);
+      const key = randomUUID().replaceAll('-', '');
+      try {
+        await writeFile(join(executionDirectory, `${key}.pid`), String(process.pid));
+        expect((await executeRunner('status', key, undefined, executionDirectory, workspace)).status).toBe(
+          'interrupted',
+        );
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'interrupts a Container shell process group and records its terminal state',
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'pico-container-interrupt-'));
+      const executionDirectory = join(directory, 'executions');
+      const workspace = join(directory, 'workspace');
+      await mkdir(executionDirectory);
+      await mkdir(workspace);
+      const key = randomUUID().replaceAll('-', '');
+      const childPidFile = join(executionDirectory, `${key}.child.pid`);
+      const command = spawn(
+        process.execPath,
+        ['-e', CONTAINER_RUNNER, 'run', key, 'shell', executionDirectory, workspace],
+        { stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      const commandResult = captureRunner(command);
+      command.stdin!.end(JSON.stringify({ command: 'sleep 10', timeout_ms: 20_000 }));
+      try {
+        await waitForFile(childPidFile);
+        const interrupt = await executeRunner('interrupt', key, undefined, executionDirectory, workspace);
+        expect(['running', 'interrupted']).toContain(interrupt.status);
+        const completed = await withTimeout(commandResult, 3_000);
+        expect(completed.status).toBe('interrupted');
+        expect((await executeRunner('status', key, undefined, executionDirectory, workspace)).status).toBe(
+          'interrupted',
+        );
+      } finally {
+        const childPid = Number(await readFile(childPidFile, 'utf8').catch(() => ''));
+        if (Number.isSafeInteger(childPid) && childPid > 0) {
+          try {
+            process.kill(-childPid, 'SIGKILL');
+          } catch {
+            try {
+              process.kill(childPid, 'SIGKILL');
+            } catch {
+              /* The shell process group already exited. */
+            }
+          }
+        }
+        if (command.exitCode === null && !command.stdin!.writableEnded) {
+          command.stdin!.end(JSON.stringify({ command: 'sleep 10', timeout_ms: 20_000 }));
+        }
+        await commandResult.catch(() => undefined);
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('treats concurrent and repeated Host Executor submissions with one ID as one execution', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.createThread('host');
@@ -678,5 +803,80 @@ async function until(predicate: () => boolean, timeoutMs = 3_000): Promise<void>
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error('Condition did not become true before timeout');
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
+}
+
+interface RunnerResponse {
+  status: 'running' | 'completed' | 'failed' | 'interrupted';
+  result?: unknown;
+  error?: string;
+}
+
+function captureRunner(command: ChildProcess): Promise<RunnerResponse> {
+  let stdout = '';
+  let stderr = '';
+  command.stdout!.setEncoding('utf8').on('data', (chunk: string) => {
+    stdout += chunk;
+  });
+  command.stderr!.setEncoding('utf8').on('data', (chunk: string) => {
+    stderr += chunk;
+  });
+  return new Promise((resolve, reject) => {
+    command.once('error', reject);
+    command.once('close', (code) => {
+      if (code !== 0) return reject(new Error(stderr || `Container runner exited with code ${code ?? 1}`));
+      try {
+        resolve(JSON.parse(stdout) as RunnerResponse);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+}
+
+function executeRunner(
+  mode: 'run' | 'status' | 'interrupt',
+  key: string,
+  toolName: string | undefined,
+  executionDirectory: string,
+  workspace: string,
+  input?: string,
+): Promise<RunnerResponse> {
+  const command = spawn(
+    process.execPath,
+    ['-e', CONTAINER_RUNNER, mode, key, toolName ?? '', executionDirectory, workspace],
+    { stdio: ['pipe', 'pipe', 'pipe'] },
+  );
+  const result = captureRunner(command);
+  command.stdin!.end(input);
+  return result;
+}
+
+async function waitForFile(path: string, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (
+      await access(path).then(
+        () => true,
+        () => false,
+      )
+    )
+      return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
+  throw new Error(`File did not appear before timeout: ${path}`);
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`Operation did not settle within ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }

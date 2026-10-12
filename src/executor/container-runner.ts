@@ -1,0 +1,225 @@
+export const CONTAINER_RUNNER = String.raw`
+const fs = require('node:fs');
+const fsp = require('node:fs/promises');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+const [mode, key, toolName, configuredFolder, configuredWorkspace] = process.argv.slice(1);
+const folder = configuredFolder || '/tmp/pico-executions';
+const workspace = configuredWorkspace || '/workspace';
+const resultFile = path.join(folder, key + '.json');
+const pidFile = path.join(folder, key + '.pid');
+const childPidFile = path.join(folder, key + '.child.pid');
+const send = value => process.stdout.write(JSON.stringify(value));
+function readPid(file) {
+  try {
+    const pid = Number(fs.readFileSync(file, 'utf8'));
+    return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+  } catch { return null; }
+}
+function alive() {
+  const pid = readPid(pidFile);
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    if (!fs.existsSync('/proc/self/cmdline')) return true;
+    return fs.readFileSync('/proc/' + pid + '/cmdline', 'utf8').split('\0').includes(key);
+  }
+  catch { return false; }
+}
+function childOf(childPid, parentPid) {
+  if (!childPid || !parentPid) return false;
+  try {
+    process.kill(childPid, 0);
+    if (!fs.existsSync('/proc/self/stat')) return true;
+    const stat = fs.readFileSync('/proc/' + childPid + '/stat', 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    return Number(fields[1]) === parentPid;
+  } catch { return false; }
+}
+function claim() {
+  const temporary = pidFile + '.' + process.pid + '.' + Math.random().toString(16).slice(2) + '.tmp';
+  fs.writeFileSync(temporary, String(process.pid), { flag: 'wx', mode: 0o600 });
+  try {
+    // Keep this PID tombstone after exit so uncertain same-ID retries cannot repeat side effects.
+    // Linking the fully written PID file gives concurrent submissions one atomic winner.
+    fs.linkSync(temporary, pidFile);
+    return true;
+  } catch (error) {
+    if (error && error.code === 'EEXIST') return false;
+    throw error;
+  } finally {
+    try { fs.unlinkSync(temporary); } catch {}
+  }
+}
+async function readInput() {
+  const chunks = [];
+  for await (const part of process.stdin) chunks.push(part);
+  return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+}
+async function search(root, pattern) {
+  const regex = new RegExp(pattern);
+  const matches = [];
+  const ignored = new Set(['.git', 'node_modules', 'dist', 'target', '.next', '.pico']);
+  async function walk(dir, depth) {
+    if (depth > 18 || matches.length >= 200) return;
+    for (const entry of await fsp.readdir(dir, { withFileTypes: true })) {
+      if (ignored.has(entry.name)) continue;
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) await walk(file, depth + 1);
+      else if (entry.isFile()) {
+        const info = await fsp.stat(file);
+        if (info.size > 1000000) continue;
+        const text = await fsp.readFile(file, 'utf8').catch(() => null);
+        if (text === null || text.includes('\0')) continue;
+        text.split(/\r?\n/).forEach((line, index) => {
+          regex.lastIndex = 0;
+          if (matches.length < 200 && regex.test(line)) matches.push(path.relative(root, file) + ':' + (index + 1) + ':' + line);
+        });
+      }
+    }
+  }
+  await walk(root, 0);
+  return { matches, truncated: matches.length >= 200 };
+}
+function applyHunks(source, hunks) {
+  const finalNewline = source.endsWith('\n');
+  const lines = source === '' ? [] : source.replace(/\n$/, '').split('\n');
+  const output = [];
+  let cursor = 0;
+  for (const hunk of hunks) {
+    const head = hunk.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (!head) throw new Error('Invalid patch hunk');
+    const target = Number(head[1]) === 0 ? 0 : Number(head[1]) - 1;
+    if (target < cursor || target > lines.length) throw new Error('Patch hunk is outside the file');
+    output.push(...lines.slice(cursor, target));
+    cursor = target;
+    for (const item of hunk.split('\n').slice(1)) {
+      if (item.startsWith('\\ No newline')) continue;
+      const marker = item[0];
+      const value = item.slice(1);
+      if (marker === ' ') {
+        if (lines[cursor] !== value) throw new Error('Patch context did not match: ' + value);
+        output.push(lines[cursor++]);
+      } else if (marker === '-') {
+        if (lines[cursor] !== value) throw new Error('Patch removal did not match: ' + value);
+        cursor++;
+      } else if (marker === '+') output.push(value);
+    }
+  }
+  output.push(...lines.slice(cursor));
+  const result = output.join('\n');
+  return result === '' ? '' : result + (finalNewline ? '\n' : '');
+}
+function pathInside(value) {
+  if (path.isAbsolute(value) || value.split(/[\\/]/).includes('..')) throw new Error('Tool paths must stay inside the selected workspace');
+  const target = path.resolve(workspace, value || '.');
+  const relative = path.relative(workspace, target);
+  if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) throw new Error('Tool path is outside the workspace');
+  return target;
+}
+async function patch(patchText) {
+  const text = patchText.replace(/^\*\*\* Begin Patch\n/, '').replace(/\n\*\*\* End Patch\s*$/, '\n');
+  const blocks = text.split(/(?=^diff --git |^\*\*\* (?:Update|Add|Delete) File: )/m).filter(Boolean);
+  const changed = [];
+  for (const block of blocks) {
+    const added = block.match(/^\*\*\* Add File: (.+)$/m)?.[1];
+    const deleted = block.match(/^\*\*\* Delete File: (.+)$/m)?.[1];
+    const updated = block.match(/^\*\*\* Update File: (.+)$/m)?.[1];
+    const oldName = block.match(/^--- (?:a\/)?(.+)$/m)?.[1];
+    const newName = block.match(/^\+\+\+ (?:b\/)?(.+)$/m)?.[1];
+    const filename = added || deleted || updated || (newName && newName !== '/dev/null' ? newName : oldName);
+    if (!filename || filename === '/dev/null') throw new Error('Patch needs a relative path');
+    const target = pathInside(filename);
+    if (deleted || newName === '/dev/null') { await fsp.unlink(target); changed.push(filename); continue; }
+    const hunks = block.split(/(?=^@@ )/m).filter(part => part.startsWith('@@ '));
+    const before = added || oldName === '/dev/null' ? '' : await fsp.readFile(target, 'utf8');
+    const additions = block.split('\n').filter(line => line.startsWith('+')).map(line => line.slice(1));
+    const after = added && hunks.length === 0
+      ? additions.join('\n') + (additions.length > 0 && block.endsWith('\n') ? '\n' : '')
+      : applyHunks(before, hunks);
+    await fsp.mkdir(path.dirname(target), { recursive: true });
+    await fsp.writeFile(target, after, 'utf8');
+    changed.push(filename);
+  }
+  return changed;
+}
+async function readStoredResult() {
+  return JSON.parse(await fsp.readFile(resultFile, 'utf8'));
+}
+async function writeResult(value) {
+  await fsp.writeFile(resultFile + '.tmp', JSON.stringify(value));
+  await fsp.rename(resultFile + '.tmp', resultFile);
+  try { await fsp.unlink(childPidFile); } catch {}
+}
+async function run() {
+  await fsp.mkdir(folder, { recursive: true });
+  if (mode === 'status') {
+    if (fs.existsSync(resultFile)) return send(await readStoredResult());
+    return send({ status: alive() ? 'running' : 'interrupted' });
+  }
+  if (mode === 'interrupt') {
+    if (fs.existsSync(resultFile)) return send(await readStoredResult());
+    if (alive()) {
+      const runnerPid = readPid(pidFile);
+      const candidateChildPid = readPid(childPidFile);
+      const childPid = childOf(candidateChildPid, runnerPid) ? candidateChildPid : null;
+      const pid = childPid ?? readPid(pidFile);
+      if (pid) {
+        try { process.kill(-(childPid ?? pid), 'SIGTERM'); }
+        catch { try { process.kill(pid, 'SIGTERM'); } catch {} }
+      }
+    }
+    if (fs.existsSync(resultFile)) return send(await readStoredResult());
+    return send({ status: alive() ? 'running' : 'interrupted' });
+  }
+  if (mode !== 'run') throw new Error('Unsupported runner action');
+  if (fs.existsSync(resultFile)) return send(await readStoredResult());
+  if (!claim()) {
+    if (fs.existsSync(resultFile)) return send(await readStoredResult());
+    // A stale claim is an uncertain prior attempt, so the same execution key must not run again.
+    return send({ status: alive() ? 'running' : 'interrupted' });
+  }
+  const toolChild = { pid: null };
+  process.on('SIGTERM', () => {
+    if (toolChild.pid) { try { process.kill(-toolChild.pid, 'SIGTERM'); } catch {} }
+  });
+  try {
+    const args = await readInput();
+    let result;
+    if (toolName === 'read_file') {
+      const file = pathInside(args.path);
+      const contents = await fsp.readFile(file, 'utf8');
+      result = { path: path.relative(workspace, file), contents: contents.slice(0, 60000), truncated: contents.length > 60000 };
+    } else if (toolName === 'search_files') result = await search(workspace, args.pattern);
+    else if (toolName === 'apply_patch') result = { changed: await patch(args.patch) };
+    else if (toolName === 'shell') {
+      const command = spawn('/bin/sh', ['-lc', args.command], { cwd: workspace, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      toolChild.pid = command.pid;
+      fs.writeFileSync(childPidFile, String(command.pid));
+      let stdout = ''; let stderr = '';
+      command.stdout.setEncoding('utf8').on('data', chunk => { stdout = (stdout + chunk).slice(-40000); });
+      command.stderr.setEncoding('utf8').on('data', chunk => { stderr = (stderr + chunk).slice(-40000); });
+      const timeout = setTimeout(() => { try { process.kill(-command.pid, 'SIGTERM'); } catch {} }, Math.min(Math.max(Number(args.timeout_ms) || 120000, 1000), 600000));
+      const exit = await new Promise((resolve, reject) => {
+        command.once('error', reject);
+        command.once('close', (value, signal) => resolve({ code: value == null ? 1 : value, signal }));
+      });
+      clearTimeout(timeout);
+      if (exit.signal) {
+        const interrupted = { status: 'interrupted', error: 'Tool process received an explicit interrupt request.' };
+        await writeResult(interrupted);
+        return send(interrupted);
+      }
+      result = { exitCode: exit.code, stdout, stderr };
+    } else throw new Error('Unknown executor tool: ' + toolName);
+    const completed = { status: 'completed', result };
+    await writeResult(completed);
+    return send(completed);
+  } catch (error) {
+    const failed = { status: 'failed', error: error instanceof Error ? error.message : String(error) };
+    await writeResult(failed);
+    return send(failed);
+  }
+}
+run().catch(error => { send({ status: 'failed', error: error instanceof Error ? error.message : String(error) }); process.exitCode = 1; });
+`;
