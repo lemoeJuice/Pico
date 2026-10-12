@@ -1781,8 +1781,15 @@ button:disabled {
     flex-direction: column;
   }
   .permission-popover {
-    right: auto;
+    right: 0;
     left: 0;
+    width: auto;
+  }
+  .conversation-actions {
+    position: relative;
+  }
+  .permission-menu {
+    position: static;
   }
   .project-select-wrap select,
   .permission-row select,
