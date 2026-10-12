@@ -2,7 +2,9 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
+import { PicoStore } from '../src/core/store.js';
 import { startRemoteExecutorServer } from '../src/executor/remote-server.js';
+import { PicoRuntime } from '../src/runtime/runtime.js';
 import { FakeModel, response, setupRuntime } from './helpers.js';
 
 const token = 'pico-test-remote-executor-token-0123456789abcdef';
@@ -319,6 +321,76 @@ describe('Remote Host Executor', () => {
     } finally {
       globalThis.fetch = originalFetch;
       await env.cleanup();
+      await remote.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('resumes a still-running Remote execution after the Runtime process is recreated', async () => {
+    const directory = await import('node:fs/promises').then(({ mkdtemp }) =>
+      mkdtemp(join(tmpdir(), 'pico-remote-runtime-restart-')),
+    );
+    const workspaceRoot = join(directory, 'remote-root');
+    const remoteWorkspace = join(workspaceRoot, 'repo');
+    const projectWorkspace = join(directory, 'project-workspace');
+    const databasePath = join(directory, 'runtime.sqlite');
+    await mkdir(remoteWorkspace, { recursive: true });
+    await mkdir(projectWorkspace);
+    const remote = await startRemoteExecutorServer({
+      token,
+      workspaceRoot,
+      databasePath: join(directory, 'executor.sqlite'),
+      port: 0,
+    });
+    const endpoint = `http://127.0.0.1:${remote.port}`;
+    const command = "node -e \"setTimeout(() => require('node:fs').appendFileSync('runs.log', 'x'), 3000)\"";
+    const firstModel = new FakeModel((_prompt, callNumber) =>
+      callNumber === 1
+        ? response('', [{ id: 'runtime-restart-call', name: 'shell', arguments: { command } }])
+        : response('First Runtime resumed the call.'),
+    );
+    let store = new PicoStore(databasePath);
+    let runtime = new PicoRuntime(store, { model: firstModel, pluginDirectory: join(directory, 'empty-plugins') });
+    try {
+      await runtime.initialize();
+      const project = await runtime.createProject('Runtime restart', projectWorkspace);
+      const connection = await runtime.addRemoteExecutorConnection('Build host', endpoint, token);
+      const thread = await runtime.createRemoteThread(project.id, connection.id, remoteWorkspace);
+      runtime.setToolPermission(thread.id, 'shell', 'allow');
+      await runtime.submit(thread.id, 'runtime-restart-message', 'Run a command that outlives this Runtime.');
+      await until(() =>
+        store
+          .listExecutions(thread.id)
+          .some((execution) => execution.kind === 'tool' && execution.status === 'running'),
+      );
+      const execution = store.listExecutions(thread.id).find((item) => item.kind === 'tool');
+      expect(execution).toBeDefined();
+      expect(await getJson<{ status: string }>(`${endpoint}/api/executions/${execution!.id}`, token)).toMatchObject({
+        status: 'running',
+      });
+
+      await runtime.shutdownHostExecutor();
+      await runtime.drain();
+      expect(store.getExecution(execution!.id)?.status).toBe('running');
+      expect(runtime.getThread(thread.id)?.state).toBe('paused');
+      store.close();
+
+      store = new PicoStore(databasePath);
+      const resumedModel = new FakeModel(() => response('Resumed after Runtime restart.'));
+      runtime = new PicoRuntime(store, { model: resumedModel, pluginDirectory: join(directory, 'empty-plugins') });
+      await runtime.initialize();
+      expect(runtime.getThread(thread.id)?.state).toBe('paused');
+      runtime.continue(thread.id);
+      await runtime.drain();
+
+      expect(store.getExecution(execution!.id)?.status).toBe('completed');
+      expect(await readFile(join(remoteWorkspace, 'runs.log'), 'utf8')).toBe('x');
+      expect(resumedModel.calls).toBe(1);
+      expect(store.listRecords(thread.id).filter((record) => record.kind === 'message')).toHaveLength(1);
+    } finally {
+      await runtime.shutdownHostExecutor();
+      await runtime.drain();
+      store.close();
       await remote.close();
       await rm(directory, { recursive: true, force: true });
     }
