@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { lstat, readFile, realpath, writeFile, unlink, mkdir } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { Worker } from 'node:worker_threads';
@@ -134,8 +134,27 @@ function runProcess(
     let terminationReason: 'interrupted' | 'timeout' | null = null;
     let killTimer: NodeJS.Timeout | undefined;
     const killProcessTree = (signalName: NodeJS.Signals): void => {
+      if (process.platform === 'win32' && child.pid) {
+        // Windows has no POSIX process groups; taskkill /T ends cmd.exe and its descendants.
+        try {
+          const result = spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
+            stdio: 'ignore',
+            timeout: 2_000,
+            windowsHide: true,
+          });
+          if (!result.error && result.status === 0) return;
+        } catch {
+          /* Fall back to stopping the shell itself if taskkill is unavailable. */
+        }
+        try {
+          child.kill(signalName);
+        } catch {
+          /* The shell may have exited between the tree-kill attempt and fallback. */
+        }
+        return;
+      }
       try {
-        if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, signalName);
+        if (child.pid) process.kill(-child.pid, signalName);
         else child.kill(signalName);
       } catch {
         /* The process may have exited between the request and signal. */
