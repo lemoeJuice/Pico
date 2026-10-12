@@ -126,6 +126,8 @@ export class PicoRuntime {
   private readonly runtimeToolRuns = new Map<string, { promise: Promise<Execution>; controller: AbortController }>();
   private readonly approvalWaiters = new Map<string, Set<(allow: boolean) => void>>();
   private pluginLoadErrors: string[] = [];
+  private shuttingDown = false;
+  private shutdownPromise: Promise<void> | null = null;
 
   constructor(store = new PicoStore(), options: RuntimeOptions = {}) {
     this.store = store;
@@ -163,6 +165,37 @@ export class PicoRuntime {
 
   async shutdownHostExecutor(): Promise<void> {
     await Promise.all([this.hostExecutor.shutdown(), this.remoteHostExecutor.shutdown()]);
+  }
+
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.shuttingDown = true;
+    this.shutdownPromise = this.finishShutdown();
+    return this.shutdownPromise;
+  }
+
+  private async finishShutdown(): Promise<void> {
+    for (const controller of this.modelSignals.values()) controller.abort();
+    for (const active of this.runtimeToolRuns.values()) active.controller.abort();
+
+    await Promise.all([
+      this.hostExecutor.shutdown(),
+      this.containerExecutor.shutdown(),
+      this.remoteHostExecutor.shutdown(),
+      Promise.allSettled([...this.runtimeToolRuns.values()].map((active) => active.promise)),
+    ]);
+
+    // Approval waits are durable and have no work to persist until the user decides.
+    // Leave those promises pending; every other loop must finish before its Store closes.
+    const approvalThreads = new Set(
+      [...this.approvalWaiters.entries()]
+        .filter(([, waiters]) => waiters.size > 0)
+        .map(([executionId]) => this.store.getExecution(executionId)?.threadId)
+        .filter((threadId): threadId is string => threadId !== undefined),
+    );
+    await Promise.allSettled(
+      [...this.loops.entries()].filter(([threadId]) => !approvalThreads.has(threadId)).map(([, loop]) => loop),
+    );
   }
 
   subscribe(listener: (event: RuntimeEvent) => void): () => void {
@@ -483,7 +516,7 @@ export class PicoRuntime {
   }
 
   private startLoop(threadId: string): void {
-    if (this.loops.has(threadId)) return;
+    if (this.shuttingDown || this.loops.has(threadId)) return;
     const thread = this.store.getThread(threadId);
     if (!thread || thread.pauseRequested) return;
     const task = Promise.resolve()
@@ -509,6 +542,7 @@ export class PicoRuntime {
   private async driveThread(threadId: string): Promise<void> {
     let iteration = 0;
     while (true) {
+      if (this.shuttingDown) return;
       const thread = this.store.getThread(threadId);
       if (!thread) return;
       if (!this.latestActiveBatch(threadId) && (thread.pauseRequested || !this.needsModelStep(threadId))) return;
@@ -530,6 +564,7 @@ export class PicoRuntime {
   }
 
   private async performStep(thread: Thread): Promise<void> {
+    if (this.shuttingDown) return;
     const currentThread = this.store.getThread(thread.id);
     if (!currentThread) return;
     const activeBatch = this.latestActiveBatch(thread.id);
@@ -540,6 +575,7 @@ export class PicoRuntime {
     if (currentThread.pauseRequested || !this.needsModelStep(thread.id)) return;
 
     await this.runModelStep(thread);
+    if (this.shuttingDown) return;
     const afterModel = this.store.getThread(thread.id);
     const modelBatch = afterModel ? this.latestActiveBatch(thread.id) : null;
     if (afterModel && modelBatch) await this.runToolBatch(afterModel, modelBatch);
@@ -580,7 +616,7 @@ export class PicoRuntime {
       (execution) => execution.status === 'pending' || execution.status === 'running',
     );
     if (activeExecutions.length > 0) {
-      if (!this.store.getThread(threadId)?.pauseRequested) {
+      if (!this.shuttingDown && !this.store.getThread(threadId)?.pauseRequested) {
         this.store.setPause(
           threadId,
           true,

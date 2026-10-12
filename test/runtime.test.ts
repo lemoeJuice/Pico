@@ -31,6 +31,57 @@ describe('durable Thread runtime invariants', () => {
     }
   });
 
+  it('closes with a pending approval intact and restores it after Runtime restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-approval-restart-'));
+    const workspace = join(directory, 'workspace');
+    await mkdir(workspace);
+    await writeFile(join(workspace, 'input.txt'), 'durable approval', 'utf8');
+    const databasePath = join(directory, 'runtime.sqlite');
+    let modelCalls = 0;
+    const createModel = (): FakeModel =>
+      new FakeModel(() => {
+        modelCalls += 1;
+        return modelCalls === 1
+          ? response('', [{ id: 'approval-read', name: 'read_file', arguments: { path: 'input.txt' } }])
+          : response('The file was read after restart.');
+      });
+    let store = new PicoStore(databasePath);
+    let runtime = new PicoRuntime(store, { model: createModel(), pluginDirectory: join(directory, 'empty-plugins') });
+    await runtime.initialize();
+    const project = await runtime.createProject('Approval recovery', workspace);
+    const thread = runtime.createThread(project.id, 'host');
+    try {
+      await runtime.submit(thread.id, 'approval-restart-message', 'Read the input file.');
+      await until(() => store.listApprovals(thread.id).some((approval) => approval.status === 'pending'));
+      const approval = store.listApprovals(thread.id)[0]!;
+      const executionBeforeShutdown = store.getExecution(approval.executionId);
+
+      await runtime.shutdown();
+      expect(executionBeforeShutdown?.status).toBe('pending');
+      expect(store.getExecution(approval.executionId)?.status).toBe('pending');
+      expect(store.getApproval(approval.executionId)?.status).toBe('pending');
+      store.close();
+
+      store = new PicoStore(databasePath);
+      runtime = new PicoRuntime(store, {
+        model: createModel(),
+        pluginDirectory: join(directory, 'empty-plugins'),
+      });
+      await runtime.initialize();
+      await until(() => runtime.getSnapshot(thread.id)?.approvals[0]?.status === 'pending');
+      runtime.resolveApproval(approval.executionId, true);
+      await runtime.drain();
+
+      expect(store.getExecution(approval.executionId)?.status).toBe('completed');
+      expect(store.getApproval(approval.executionId)?.status).toBe('allowed');
+      expect(store.listRecords(thread.id).filter((record) => record.kind === 'tool_result')).toHaveLength(1);
+      expect(store.listRecords(thread.id).filter((record) => record.kind === 'assistant')).toHaveLength(2);
+    } finally {
+      store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('does not rerun a slash command when its request is retried after Runtime restart', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pico-command-retry-'));
     const workspace = join(directory, 'workspace');

@@ -633,6 +633,91 @@ describe('Executor execution identity and recovery', () => {
     }
   });
 
+  it('detaches Container polling on Runtime shutdown and resumes the same execution after restart', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.createThread('container');
+    const modelExecution = env.store.createModelExecution('shutdown-container-model', thread.id, 0);
+    env.store.transitionExecution(modelExecution.id, 'running');
+    const call = { id: 'shutdown-container-call', name: 'read_file', arguments: { path: 'input.txt' } };
+    env.store.commitModelStep({
+      assistantRecordId: 'shutdown-container-model:assistant',
+      modelExecutionId: modelExecution.id,
+      threadId: thread.id,
+      payload: assistantPayload({ batchId: 'shutdown-container-model:batch', toolCalls: [call] }),
+      toolCalls: [{ call, executionId: 'shutdown-container-tool' }],
+    });
+
+    let containerPresent = false;
+    let runnerStatus: 'running' | 'completed' = 'running';
+    let submissions = 0;
+    let markStatusRequestStarted!: () => void;
+    const statusRequestStarted = new Promise<void>((resolve) => {
+      markStatusRequestStarted = resolve;
+    });
+    const runner = async (args: string[], _input?: string, signal?: AbortSignal) => {
+      if (args[0] === 'info') return { stdout: '5.0.0', stderr: '' };
+      if (args[0] === 'inspect') {
+        if (containerPresent) return { stdout: '{}', stderr: '' };
+        throw new Error('no such container');
+      }
+      if (args[0] === 'run') {
+        containerPresent = true;
+        return { stdout: 'container-id', stderr: '' };
+      }
+      if (args[0] === 'start') return { stdout: 'container-id', stderr: '' };
+      if (args[0] === 'exec') {
+        const mode = args[args.indexOf('-e') + 2];
+        if (mode === 'run') {
+          submissions += 1;
+          return { stdout: JSON.stringify({ status: 'running' }), stderr: '' };
+        }
+        if (mode === 'status' && runnerStatus === 'completed') {
+          return { stdout: JSON.stringify({ status: 'completed', result: { contents: 'recovered' } }), stderr: '' };
+        }
+        if (mode === 'status') {
+          markStatusRequestStarted();
+          return new Promise<{ stdout: string; stderr: string }>((_resolve, reject) => {
+            signal?.addEventListener(
+              'abort',
+              () => reject(new DOMException('Detached local status request', 'AbortError')),
+              { once: true },
+            );
+          });
+        }
+      }
+      throw new Error(`Unexpected Podman command: ${args[0] ?? 'empty'}`);
+    };
+    const catalog = new ToolCatalog();
+    catalog.register({
+      owner: 'test',
+      source: 'executor',
+      definition: { name: 'read_file', description: 'test read', parameters: { type: 'object' } },
+      execute: async () => ({ contents: 'unused' }),
+    });
+    const binding = env.store.executorForThread(thread.id)!;
+    const beforeRestart = new ContainerExecutor(env.store, catalog, undefined, undefined, runner);
+    const executionPromise = beforeRestart.execute('shutdown-container-tool', binding);
+    try {
+      await statusRequestStarted;
+      await beforeRestart.shutdown();
+      expect((await executionPromise).status).toBe('running');
+      expect(env.store.getExecution('shutdown-container-tool')?.status).toBe('running');
+
+      runnerStatus = 'completed';
+      const afterRestart = new ContainerExecutor(env.store, catalog, undefined, undefined, runner);
+      try {
+        const resumed = await afterRestart.execute('shutdown-container-tool', binding);
+        expect(resumed).toMatchObject({ status: 'completed', result: { contents: 'recovered' } });
+        expect(submissions).toBe(1);
+      } finally {
+        await afterRestart.shutdown();
+      }
+    } finally {
+      await beforeRestart.shutdown();
+      await env.cleanup();
+    }
+  });
+
   it('Interrupt cancels Container Executor preparation before the tool starts', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.createThread('container');

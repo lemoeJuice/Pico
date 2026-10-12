@@ -296,17 +296,22 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   console.log(`Pico is ready at http://${host}:${actualPort}`);
   if (runtime.pluginInfo().errors.length > 0) console.warn('Plugin load issues:', runtime.pluginInfo().errors);
 
+  let closePromise: Promise<void> | null = null;
   return {
     runtime,
     port: actualPort,
-    async close() {
-      unsubscribe();
-      for (const socket of sockets) socket.close();
-      websocketServer.close();
-      await new Promise<void>((resolvePromise) => httpServer.close(() => resolvePromise()));
-      await runtime.shutdownHostExecutor();
-      await vite?.close();
-      runtime.store.close();
+    close() {
+      if (closePromise) return closePromise;
+      closePromise = (async () => {
+        unsubscribe();
+        for (const socket of sockets) socket.close();
+        websocketServer.close();
+        await new Promise<void>((resolvePromise) => httpServer.close(() => resolvePromise()));
+        await runtime.shutdown();
+        await vite?.close();
+        runtime.store.close();
+      })();
+      return closePromise;
     },
   };
 }

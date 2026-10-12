@@ -463,18 +463,16 @@ describe('Remote Host Executor', () => {
         status: 'running',
       });
 
-      await runtime.shutdownHostExecutor();
-      await runtime.drain();
+      await runtime.shutdown();
       expect(store.getExecution(execution!.id)?.status).toBe('running');
-      expect(runtime.getThread(thread.id)?.state).toBe('paused');
+      expect(runtime.getThread(thread.id)?.state).toBe('running');
       store.close();
 
       store = new PicoStore(databasePath);
       const resumedModel = new FakeModel(() => response('Resumed after Runtime restart.'));
       runtime = new PicoRuntime(store, { model: resumedModel, pluginDirectory: join(directory, 'empty-plugins') });
       await runtime.initialize();
-      expect(runtime.getThread(thread.id)?.state).toBe('paused');
-      runtime.continue(thread.id);
+      expect(runtime.getThread(thread.id)?.state).toBe('running');
       await runtime.drain();
 
       expect(store.getExecution(execution!.id)?.status).toBe('completed');
@@ -482,8 +480,7 @@ describe('Remote Host Executor', () => {
       expect(resumedModel.calls).toBe(1);
       expect(store.listRecords(thread.id).filter((record) => record.kind === 'message')).toHaveLength(1);
     } finally {
-      await runtime.shutdownHostExecutor();
-      await runtime.drain();
+      await runtime.shutdown();
       store.close();
       await remote.close();
       await rm(directory, { recursive: true, force: true });

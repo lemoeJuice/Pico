@@ -97,6 +97,7 @@ function podman(args: string[], input?: string, signal?: AbortSignal): Promise<{
 export class ContainerExecutor implements ExecutorAdapter {
   readonly kind = 'container' as const;
   private readonly inFlight = new Map<string, { promise: Promise<Execution>; controller: AbortController }>();
+  private readonly detaching = new Set<string>();
   private readonly containerIds = new Map<string, string>();
   private readonly containerSetupTails = new Map<string, Promise<void>>();
   private podmanStorageArgs: string[] | null = null;
@@ -184,6 +185,7 @@ export class ContainerExecutor implements ExecutorAdapter {
         const latest = this.store.getExecution(executionId);
         if (!latest || latest.status === 'completed' || latest.status === 'failed' || latest.status === 'interrupted')
           return latest!;
+        if (this.detaching.has(executionId)) return latest;
         if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
           return this.store.transitionExecution(executionId, 'interrupted', { error: 'Execution was interrupted.' });
         }
@@ -202,6 +204,7 @@ export class ContainerExecutor implements ExecutorAdapter {
       .finally(() => {
         externalSignal?.removeEventListener('abort', relayAbort);
         this.inFlight.delete(executionId);
+        this.detaching.delete(executionId);
       });
     this.inFlight.set(executionId, { promise, controller });
     return promise;
@@ -221,19 +224,40 @@ export class ContainerExecutor implements ExecutorAdapter {
     return this.refreshStatus(executionId, binding);
   }
 
-  private async refreshStatus(executionId: string, binding: ExecutorBinding): Promise<Execution | null> {
+  /** Stop local setup and polling while leaving durable container executions recoverable. */
+  async shutdown(): Promise<void> {
+    const active = [...this.inFlight.entries()];
+    for (const [executionId, execution] of active) {
+      this.detaching.add(executionId);
+      execution.controller.abort();
+    }
+    await Promise.allSettled(active.map(([, execution]) => execution.promise));
+  }
+
+  private async refreshStatus(
+    executionId: string,
+    binding: ExecutorBinding,
+    signal?: AbortSignal,
+  ): Promise<Execution | null> {
     const current = this.store.getExecution(executionId);
     if (!current) return null;
     if (current.status !== 'running') return current;
     const name = this.containerName(binding.id);
-    const exists = await this.containerExists(name);
+    const exists = await this.containerExists(name, signal);
     if (!exists)
       return this.store.transitionExecution(executionId, 'interrupted', {
         error: 'The Container Executor confirmed that its previous container no longer exists.',
         detail: { confirmedMissing: true },
       });
-    await this.startContainer(name);
-    const response = await this.callRunner(name, 'status', this.executionKey(executionId));
+    await this.startContainer(name, signal);
+    const response = await this.callRunner(
+      name,
+      'status',
+      this.executionKey(executionId),
+      undefined,
+      undefined,
+      signal,
+    );
     return this.acceptRunnerResponse(executionId, response);
   }
 
@@ -275,7 +299,7 @@ export class ContainerExecutor implements ExecutorAdapter {
     const relayAbort = (): void => controller.abort();
     signal?.addEventListener('abort', relayAbort, { once: true });
     const promise = (async () => {
-      const existing = await this.status(executionId, binding);
+      const existing = await this.refreshStatus(executionId, binding, controller.signal);
       if (!existing || existing.status !== 'running') return existing!;
       return this.poll(executionId, binding, controller.signal);
     })()
@@ -283,6 +307,7 @@ export class ContainerExecutor implements ExecutorAdapter {
       .finally(() => {
         signal?.removeEventListener('abort', relayAbort);
         this.inFlight.delete(executionId);
+        this.detaching.delete(executionId);
       });
     this.inFlight.set(executionId, { promise, controller });
     return promise;
@@ -305,7 +330,8 @@ export class ContainerExecutor implements ExecutorAdapter {
   private async poll(executionId: string, binding: ExecutorBinding, signal: AbortSignal): Promise<Execution> {
     while (!signal.aborted) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 700));
-      const status = await this.refreshStatus(executionId, binding);
+      if (signal.aborted) break;
+      const status = await this.refreshStatus(executionId, binding, signal);
       if (!status || status.status !== 'running') return status!;
     }
     return this.store.getExecution(executionId)!;
