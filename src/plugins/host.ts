@@ -9,7 +9,11 @@ import type { ToolCatalog, ToolContext } from '../executor/tools.js';
 export interface CommandContext {
   thread: Thread | null;
   projectId: string | null;
+  /** The original text after the command name, preserving spaces and newlines. */
+  rawArgs: string;
 }
+
+export type CommandEnvironment = Omit<CommandContext, 'rawArgs'>;
 
 export interface CommandResult {
   text?: string;
@@ -76,13 +80,17 @@ export class CommandRegistry {
     return [...this.commands.values()].map(({ command }) => ({ name: command.name, description: command.description }));
   }
 
-  async execute(text: string, context: CommandContext): Promise<CommandResult | null> {
+  async execute(text: string, context: CommandEnvironment): Promise<CommandResult | null> {
     if (!text.startsWith('/')) return null;
-    const [rawName, ...args] = text.slice(1).trim().split(/\s+/);
+    const body = text.slice(1).trimStart();
+    const separator = body.search(/\s/);
+    const rawName = separator < 0 ? body : body.slice(0, separator);
+    const rawArgs = separator < 0 ? '' : body.slice(separator).trimStart();
+    const args = rawArgs.trim() ? rawArgs.trim().split(/\s+/) : [];
     const name = (rawName ?? '').toLowerCase();
     const entry = this.commands.get(name);
     if (!entry) return { text: `Unknown command /${name || '?'}; use /help to see available commands.` };
-    return (await entry.command.execute(args, context)) ?? {};
+    return (await entry.command.execute(args, { ...context, rawArgs })) ?? {};
   }
 }
 

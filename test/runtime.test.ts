@@ -856,6 +856,81 @@ describe('durable Thread runtime invariants', () => {
     }
   });
 
+  it('shares explicit Project context across Threads without changing canonical Messages', async () => {
+    const model = new FakeModel(() => response('Ready.'));
+    const env = await setupRuntime(model);
+    const sourceThread = env.createThread('host', 'Context editor');
+    const otherExecutorThread = env.runtime.createThread(env.project.id, 'container', 'Container continuation');
+    const isolatedProject = await env.runtime.createProject('Separate Project', env.workspace);
+    const isolatedThread = env.runtime.createThread(isolatedProject.id, 'host', 'Isolated context');
+    const contextText = 'Keep canonical history append-only.\nUse Project Context for decisions shared across Threads.';
+    try {
+      const saved = await env.runtime.submit(
+        sourceThread.id,
+        'project-context-set',
+        `/project-context set\n${contextText}`,
+      );
+
+      expect(saved.command?.text).toContain('Project context saved');
+      expect(env.store.listRecords(sourceThread.id).filter((record) => record.kind === 'message')).toHaveLength(0);
+      expect(
+        env.store.getPluginState<Record<string, { text: string; revision: number }>>(
+          'pico.project-context',
+          'byProject',
+          {},
+        )[env.project.id],
+      ).toEqual({ text: contextText, revision: 1 });
+      expect(
+        env.store
+          .listRecords(sourceThread.id)
+          .find((record) => record.kind === 'plugin' && record.payload.action === 'project-context.updated')?.payload,
+      ).toMatchObject({
+        pluginId: 'pico.project-context',
+        projectId: env.project.id,
+        revision: 1,
+        operation: 'set',
+        characters: contextText.length,
+      });
+      expect(
+        env.store
+          .listRecords(sourceThread.id)
+          .some(
+            (record) =>
+              record.kind === 'plugin' &&
+              record.payload.action === 'project-context.updated' &&
+              'text' in record.payload,
+          ),
+      ).toBe(false);
+
+      await env.runtime.submit(otherExecutorThread.id, 'context-shared-message', 'Use project guidance.');
+      await env.runtime.drain();
+      const sharedPrompt = model.prompts.find((prompt) =>
+        prompt.turns.some((turn) => turn.kind === 'message' && turn.content === 'Use project guidance.'),
+      );
+      expect(sharedPrompt?.system).toContain(contextText);
+      expect(sharedPrompt?.system).toContain('User-maintained Project Context');
+
+      await env.runtime.submit(isolatedThread.id, 'context-isolated-message', 'Check the other Project.');
+      await env.runtime.drain();
+      const isolatedPrompt = model.prompts.find((prompt) =>
+        prompt.turns.some((turn) => turn.kind === 'message' && turn.content === 'Check the other Project.'),
+      );
+      expect(isolatedPrompt?.system).not.toContain(contextText);
+
+      const cleared = await env.runtime.submit(sourceThread.id, 'project-context-clear', '/project-context clear');
+      expect(cleared.command?.text).toContain('Project context cleared');
+      expect(env.store.listRecords(sourceThread.id).filter((record) => record.kind === 'message')).toHaveLength(0);
+      await env.runtime.submit(otherExecutorThread.id, 'context-cleared-message', 'Check the updated guidance.');
+      await env.runtime.drain();
+      const clearedPrompt = model.prompts.find((prompt) =>
+        prompt.turns.some((turn) => turn.kind === 'message' && turn.content === 'Check the updated guidance.'),
+      );
+      expect(clearedPrompt?.system).not.toContain(contextText);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it('loads a local plugin tool, slash command, semantic UI contribution, state, and canonical log', async () => {
     const model = new FakeModel((_prompt, callNumber) =>
       callNumber === 1
@@ -867,9 +942,18 @@ describe('durable Thread runtime invariants', () => {
     try {
       expect(env.runtime.pluginInfo().plugins.some((plugin) => plugin.id === 'pico.example-notes')).toBe(true);
       expect(env.runtime.availableCommands().some((command) => command.name === 'notes')).toBe(true);
+      expect(env.runtime.availableCommands().some((command) => command.name === 'project-context')).toBe(true);
       expect(env.runtime.pluginInfo().ui.some((contribution) => contribution.id === 'pico.example-notes:notes')).toBe(
         true,
       );
+      expect(
+        env.runtime
+          .pluginInfo()
+          .ui.some(
+            (contribution) =>
+              contribution.id === 'pico.project-context:project-context' && contribution.command === '/project-context',
+          ),
+      ).toBe(true);
 
       await env.runtime.submit(thread.id, 'plugin-tool-message', 'Save a note');
       await env.runtime.drain();

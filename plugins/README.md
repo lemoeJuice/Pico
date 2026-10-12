@@ -8,6 +8,8 @@ Stable contribution surfaces are `tools`, the `step` / `projection` / `model` / 
 
 The UI slots render in distinct places: `thread.toolbar` sits in the selected Thread header, `composer.action` sits next to Send, and `sidebar.panel` appears in the scrollable navigation area. Contributions with a `command` invoke that registered slash command from the selected Thread. A sidebar panel without a command can provide label and description only; toolbar and composer actions without a command appear disabled.
 
+Slash command handlers receive whitespace-split `args` for simple options and `context.rawArgs` for the original text after the command name, preserving spaces and newlines for commands that accept prose. The built-in `/project-context` command uses plugin-local state keyed by Project ID and a projection interceptor to share explicitly maintained context across a Project's Threads. `/project-context set` followed by a new line and text replaces it; `/project-context clear` removes it. This context is never harvested from canonical history or shortened automatically.
+
 The `toolBatch` stage exposes the committed calls and an `execute(call)` function. A scheduler can wrap `execute` or reorder calls while delegating each unchanged call; the default stage runs them concurrently. Preserve each call's ID, name, and arguments. Pico checks the durable Execution records after the stage and will not start the next Model Step until the whole batch is settled.
 
 The `step` stage wraps one full agent-loop iteration: its Model Step and any Tool Batch produced by that Model Step run before the interceptor returns at the next safe boundary. A short-circuit that leaves durable work unprocessed pauses the Thread so the Runtime does not spin without progress.
