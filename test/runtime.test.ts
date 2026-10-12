@@ -974,6 +974,54 @@ describe('durable Thread runtime invariants', () => {
     }
   });
 
+  it('reports an invalid plugin pipeline stage and rolls back its partial contributions', async () => {
+    const invalidPlugin: PicoPlugin = {
+      id: 'test.invalid-pipeline-stage',
+      name: 'Invalid pipeline stage',
+      version: '1',
+      activate({ tools, pipelines, ui }) {
+        tools.register(
+          {
+            name: 'partial_plugin_tool',
+            description: 'Must be removed when activation fails.',
+            parameters: { type: 'object', properties: {} },
+          },
+          async () => ({ registered: true }),
+        );
+        ui.contribute({ slot: 'thread.toolbar', id: 'partial', label: 'Partial contribution' });
+        pipelines.use('projetion' as never, async (input, next) => next(input));
+      },
+    };
+    const validPlugin: PicoPlugin = {
+      id: 'test.valid-after-invalid',
+      name: 'Valid after invalid',
+      version: '1',
+      activate({ pipelines, ui }) {
+        pipelines.use<ProjectionInput, ProjectionInput>('projection', async (input, next) => next(input));
+        ui.contribute({ slot: 'thread.toolbar', id: 'valid', label: 'Valid contribution' });
+      },
+    };
+    const model = new FakeModel(() => response('The remaining plugins loaded.'));
+    const env = await setupRuntime(model, { plugins: [invalidPlugin, validPlugin] });
+    const thread = env.createThread();
+    try {
+      const info = env.runtime.pluginInfo();
+      expect(info.errors).toContain('test.invalid-pipeline-stage: Unsupported execution pipeline stage: projetion');
+      expect(info.plugins.map((plugin) => plugin.id)).toContain('test.valid-after-invalid');
+      expect(info.plugins.map((plugin) => plugin.id)).not.toContain('test.invalid-pipeline-stage');
+      expect(info.ui.map((contribution) => contribution.id)).toContain('test.valid-after-invalid:valid');
+      expect(info.ui.map((contribution) => contribution.id)).not.toContain('test.invalid-pipeline-stage:partial');
+
+      await env.runtime.submit(thread.id, 'plugin-stage-validation-message', 'Check the remaining plugins.');
+      await env.runtime.drain();
+
+      expect(model.prompts[0]?.tools.some((tool) => tool.name === 'partial_plugin_tool')).toBe(false);
+      expect(model.calls).toBe(1);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it('passes frozen projections to plugins while preserving canonical facts', async () => {
     let frozenObserved = false;
     const immutablePlugin: PicoPlugin = {

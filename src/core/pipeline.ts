@@ -1,4 +1,17 @@
 export type PipelineStage = 'step' | 'projection' | 'model' | 'toolBatch' | 'toolInvocation';
+const pipelineStages = [
+  'step',
+  'projection',
+  'model',
+  'toolBatch',
+  'toolInvocation',
+] as const satisfies readonly PipelineStage[];
+
+function assertPipelineStage(stage: string): asserts stage is PipelineStage {
+  if (!pipelineStages.includes(stage as PipelineStage)) {
+    throw new Error(`Unsupported execution pipeline stage: ${stage}`);
+  }
+}
 
 export interface Next<I, O> {
   (): Promise<O>;
@@ -18,6 +31,8 @@ export class ExecutionPipelines {
   private nextRegistration = 0;
 
   use<I, O>(stage: PipelineStage, pluginId: string, interceptor: Interceptor<I, O>): void {
+    assertPipelineStage(stage);
+    if (typeof interceptor !== 'function') throw new Error('Pipeline interceptor must be a function.');
     const registered = this.entries.get(stage) ?? [];
     registered.push({
       pluginId,
@@ -43,6 +58,7 @@ export class ExecutionPipelines {
   }
 
   run<I, O>(stage: PipelineStage, input: I, terminal: (input: I) => Promise<O>): Promise<O> {
+    assertPipelineStage(stage);
     const entries = [...(this.entries.get(stage) ?? [])].sort((a, b) => a.registration - b.registration);
     let index = -1;
     const dispatch = async (position: number, value: I): Promise<O> => {
