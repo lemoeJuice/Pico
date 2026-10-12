@@ -527,6 +527,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           if (expired) window.dispatchEvent(new Event('pico:auth-expired'));
         });
         if (!closed) {
+          // WebSocket deltas are transient and cannot be replayed after reconnect.
+          setAssistantDraft('');
           timer = window.setTimeout(connect, retry);
           retry = Math.min(retry * 1.7, 12_000);
         }
