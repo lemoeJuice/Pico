@@ -17,6 +17,7 @@ import type {
 import type { PermissionPolicy } from '../runtime/stages.js';
 import type { ThreadSnapshot } from '../runtime/runtime.js';
 import { isSessionExpired } from './session.js';
+import { fetchStableSnapshot } from './snapshot-consistency.js';
 
 type PluginInfo = {
   plugins: Array<{ id: string; name: string; version: string; source: string }>;
@@ -263,6 +264,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const listRef = useRef<HTMLDivElement>(null);
   const snapshotRequest = useRef(0);
   const threadUpdateVersions = useRef(new Map<string, number>());
+  const snapshotVersions = useRef(new Map<string, number>());
   const retryMessage = useRef<{ id: string; content: string } | null>(null);
 
   const selectedProject = projects.find((project) => project.id === projectId) ?? null;
@@ -284,8 +286,17 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
   const loadSnapshot = useCallback(async (id: string) => {
     const requestNumber = ++snapshotRequest.current;
-    const value = await api<ThreadSnapshot>(`/api/threads/${encodeURIComponent(id)}`);
-    if (requestNumber === snapshotRequest.current) setSnapshot(value);
+    const value = await fetchStableSnapshot(
+      () => api<ThreadSnapshot>(`/api/threads/${encodeURIComponent(id)}`),
+      () => snapshotVersions.current.get(id) ?? 0,
+      () => requestNumber === snapshotRequest.current,
+    );
+    if (value && requestNumber === snapshotRequest.current) setSnapshot(value);
+  }, []);
+
+  const noteSnapshotChange = useCallback((threadId: string | null | undefined): void => {
+    if (!threadId) return;
+    snapshotVersions.current.set(threadId, (snapshotVersions.current.get(threadId) ?? 0) + 1);
   }, []);
 
   const refreshSelected = useCallback(() => {
@@ -419,6 +430,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         if (event.type === 'thread.created') {
           const created = event.thread as Thread | undefined;
           if (created) {
+            noteSnapshotChange(created.id);
+            noteSnapshotChange(created.parentThreadId);
             setThreads((items) => [created, ...items.filter((item) => item.id !== created.id)]);
             setSnapshot((current) =>
               current && created.parentThreadId === current.thread.id
@@ -430,12 +443,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           const updated = event.thread as Thread | undefined;
           if (updated) {
             threadUpdateVersions.current.set(updated.id, (threadUpdateVersions.current.get(updated.id) ?? 0) + 1);
+            noteSnapshotChange(updated.id);
+            noteSnapshotChange(updated.parentThreadId);
             setThreads((items) => items.map((item) => (item.id === updated.id ? updated : item)));
             setSnapshot((current) => (current?.thread.id === updated.id ? { ...current, thread: updated } : current));
           }
         } else if (event.type === 'record') {
           const record = event.record as CanonicalRecord | undefined;
           if (record?.threadId === threadId) {
+            noteSnapshotChange(record.threadId);
             setSnapshot((current) => {
               if (
                 !current ||
@@ -450,6 +466,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         } else if (event.type === 'execution.updated') {
           const execution = event.execution as Execution | undefined;
           if (execution?.threadId === threadId) {
+            noteSnapshotChange(execution.threadId);
             setSnapshot((current) =>
               current
                 ? {
@@ -462,6 +479,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         } else if (event.type === 'approval.updated') {
           const approval = event.approval as PermissionRequest | undefined;
           if (approval?.threadId === threadId) {
+            noteSnapshotChange(approval.threadId);
             setSnapshot((current) =>
               current
                 ? {
@@ -509,7 +527,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       if (timer) window.clearTimeout(timer);
       socket?.close();
     };
-  }, [refreshSelected, threadId]);
+  }, [noteSnapshotChange, refreshSelected, threadId]);
 
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
