@@ -1,5 +1,26 @@
 export type PendingMessageIds = Map<string, Map<string, string>>;
 
+export const MESSAGE_SUBMISSION_TIMEOUT_MS = 20_000;
+
+export function messageSubmissionRequestInit(
+  id: string,
+  content: string,
+  timeoutMs = MESSAGE_SUBMISSION_TIMEOUT_MS,
+): RequestInit {
+  return {
+    method: 'POST',
+    body: JSON.stringify({ id, content }),
+    signal: AbortSignal.timeout(timeoutMs),
+  };
+}
+
+export function messageSubmissionFailureMessage(error: unknown): string {
+  if (error instanceof Error && error.name === 'TimeoutError') {
+    return 'Message delivery is unconfirmed. Your draft is safe; send it again to retry without duplicating it.';
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function withPendingThreadSubmission(
   pending: ReadonlySet<string>,
   threadId: string,

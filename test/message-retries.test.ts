@@ -1,7 +1,10 @@
+import { createServer } from 'node:http';
 import { describe, expect, it } from 'vitest';
 import {
   clearAcceptedMessageDraft,
   hasPendingMessageSubmission,
+  messageSubmissionFailureMessage,
+  messageSubmissionRequestInit,
   messageSubmissionId,
   settleMessageSubmission,
   type PendingMessageIds,
@@ -9,6 +12,37 @@ import {
 } from '../src/web/message-retries.js';
 
 describe('Thread-scoped message retries', () => {
+  it('times out an unconfirmed Message request so the same draft can be retried', async () => {
+    const pending: PendingMessageIds = new Map();
+    const createId = (): string => 'message-timeout';
+    const id = messageSubmissionId(pending, 'thread-a', 'Keep this draft', createId);
+    const request = messageSubmissionRequestInit(id, 'Keep this draft', 50);
+    const server = createServer(() => undefined);
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        server.removeListener('error', reject);
+        resolve();
+      });
+    });
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Test server did not bind a TCP port');
+
+    expect(request.method).toBe('POST');
+    expect(JSON.parse(String(request.body))).toEqual({ id: 'message-timeout', content: 'Keep this draft' });
+    let timeoutError: unknown;
+    try {
+      await fetch(`http://127.0.0.1:${address.port}/messages`, request);
+    } catch (error) {
+      timeoutError = error;
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    expect(timeoutError).toMatchObject({ name: 'TimeoutError' });
+    expect(messageSubmissionId(pending, 'thread-a', 'Keep this draft', createId)).toBe(id);
+    expect(messageSubmissionFailureMessage(timeoutError)).toContain('delivery is unconfirmed');
+  });
+
   it('reuses an uncertain request ID only for the same content in the same Thread', () => {
     const pending: PendingMessageIds = new Map();
     let nextId = 0;

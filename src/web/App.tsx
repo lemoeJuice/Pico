@@ -38,6 +38,8 @@ import {
   clearAcceptedMessageDraft,
   hasPendingMessageSubmission,
   messageSubmissionId,
+  messageSubmissionFailureMessage,
+  messageSubmissionRequestInit,
   settleMessageSubmission,
   type PendingMessageIds,
   withPendingThreadSubmission,
@@ -764,7 +766,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         accepted: boolean;
         duplicate?: boolean;
         command?: { text?: string; openThreadId?: string };
-      }>(`/api/threads/${sentThreadId}/messages`, { method: 'POST', body: JSON.stringify({ id, content: clean }) });
+      }>(`/api/threads/${sentThreadId}/messages`, messageSubmissionRequestInit(id, clean));
       settleMessageSubmission(pendingMessageIds.current, sentThreadId, id);
       clearAcceptedDraft(sentThreadId, clean);
       const commandText = result.command?.text;
@@ -778,7 +780,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         activeThreadId.current === sentThreadId &&
         hasPendingMessageSubmission(pendingMessageIds.current, sentThreadId, id)
       ) {
-        setError(caught instanceof Error ? caught.message : String(caught));
+        setError(messageSubmissionFailureMessage(caught));
       }
     } finally {
       markThreadSending(sentThreadId, false);
