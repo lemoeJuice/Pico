@@ -22,6 +22,7 @@ import { upsertProjectThread } from './project-threads.js';
 import { fetchStableSnapshot, snapshotForSelection } from './snapshot-consistency.js';
 import { isNearScrollEnd } from './scroll-follow.js';
 import { threadCanBeInterrupted } from './thread-controls.js';
+import { noticeForThread, withThreadNotice, withoutThreadNotice, type ThreadNotices } from './thread-notices.js';
 import { uiContributionsAt } from './ui-contributions.js';
 import {
   clearAcceptedMessageDraft,
@@ -261,6 +262,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [draftsByThread, setDraftsByThread] = useState<Record<string, string>>({});
   const [assistantDraft, setAssistantDraft] = useState('');
   const [notice, setNotice] = useState('');
+  const [threadNotices, setThreadNotices] = useState<ThreadNotices>({});
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
@@ -321,6 +323,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     threads.find((thread) => thread.id === threadId && thread.projectId === projectId) ??
     null;
   const selectedThreadSending = selectedThread ? sendingThreadIds.has(selectedThread.id) : false;
+  const activeNotice = noticeForThread(threadId, threadNotices, notice);
   const filteredCommands = useMemo(() => {
     if (!draft.startsWith('/')) return [];
     const token = draft.slice(1).split(/\s/)[0]?.toLowerCase() ?? '';
@@ -615,8 +618,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         } else if (event.type === 'runtime.error' && event.threadId === activeThreadId.current) {
           setError(String(event.message ?? 'Runtime error'));
           setAssistantDraft('');
-        } else if (event.type === 'runtime.notice' && event.threadId === activeThreadId.current) {
-          setNotice(String(event.message ?? 'Runtime notice'));
+        } else if (event.type === 'runtime.notice' && typeof event.threadId === 'string') {
+          setThreadNotices((current) =>
+            withThreadNotice(current, event.threadId as string, String(event.message ?? 'Runtime notice')),
+          );
         } else if (event.type === 'permissions.updated' && event.threadId === activeThreadId.current) {
           setPermissions(event.permissions as ToolPermission[]);
         } else if (event.type === 'settings.updated') {
@@ -675,8 +680,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       }>(`/api/threads/${sentThreadId}/messages`, { method: 'POST', body: JSON.stringify({ id, content: clean }) });
       settleMessageSubmission(pendingMessageIds.current, sentThreadId, id);
       clearAcceptedDraft(sentThreadId, clean);
+      const commandText = result.command?.text;
+      if (commandText) setThreadNotices((current) => withThreadNotice(current, sentThreadId, commandText));
       if (activeThreadId.current === sentThreadId) {
-        if (result.command?.text) setNotice(result.command.text);
         if (result.command?.openThreadId) setThreadId(result.command.openThreadId);
       }
       void loadSnapshot(sentThreadId);
@@ -856,6 +862,14 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     setError('');
   };
 
+  const dismissNotice = (): void => {
+    if (notice) {
+      setNotice('');
+      return;
+    }
+    if (threadId) setThreadNotices((current) => withoutThreadNotice(current, threadId));
+  };
+
   const records = activeSnapshot?.records ?? [];
   const executions = activeSnapshot?.executions ?? [];
   const approvals = activeSnapshot?.approvals ?? [];
@@ -897,7 +911,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       left.at.localeCompare(right.at) || Number(left.type !== 'record') - Number(right.type !== 'record'),
   );
   const currentState = selectedThread?.state ?? 'idle';
-  const pauseReason = visiblePauseReason(currentState, selectedThread?.pauseReason ?? null, [error, notice]);
+  const pauseReason = visiblePauseReason(currentState, selectedThread?.pauseReason ?? null, [error, activeNotice]);
 
   return (
     <div className="app-shell">
@@ -1075,10 +1089,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             <button onClick={() => setError('')}>Dismiss</button>
           </div>
         ) : null}
-        {notice ? (
+        {activeNotice ? (
           <div className="banner banner-notice">
-            <span>{notice}</span>
-            <button onClick={() => setNotice('')}>Dismiss</button>
+            <span>{activeNotice}</span>
+            <button onClick={dismissNotice}>Dismiss</button>
           </div>
         ) : null}
 
