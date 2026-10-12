@@ -17,6 +17,7 @@ import type {
 import type { PermissionPolicy } from '../runtime/stages.js';
 import type { ThreadSnapshot } from '../runtime/runtime.js';
 import { isSessionExpired } from './session.js';
+import { visiblePauseReason } from './pause-reason.js';
 import { fetchStableSnapshot, snapshotForSelection } from './snapshot-consistency.js';
 import { isNearScrollEnd } from './scroll-follow.js';
 
@@ -758,6 +759,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   );
   const renderedRecords = records.filter((record) => record.kind === 'message' || record.kind === 'assistant');
   const currentState = selectedThread?.state ?? 'idle';
+  const pauseReason = visiblePauseReason(currentState, selectedThread?.pauseReason ?? null, [error, notice]);
 
   return (
     <div className="app-shell">
@@ -884,6 +886,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               </strong>{' '}
               {executorError}
             </span>
+          </div>
+        ) : null}
+        {pauseReason ? (
+          <div className="banner banner-notice pause-reason" role="status">
+            <span>{pauseReason}</span>
           </div>
         ) : null}
         {error ? (
