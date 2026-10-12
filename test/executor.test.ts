@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -109,6 +109,71 @@ describe('Executor execution identity and recovery', () => {
           .listRecords(thread.id)
           .some((record) => record.kind === 'tool_result' && record.id === `${lostToolId}:result`),
       ).toBe(true);
+    } finally {
+      store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('repairs a missing canonical Tool result from a completed durable execution after restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-result-recovery-'));
+    const workspace = join(directory, 'workspace');
+    await mkdir(workspace);
+    await writeFile(join(workspace, 'observed.txt'), 'captured before restart');
+    const databasePath = join(directory, 'runtime.sqlite');
+    const storeBeforeRestart = new PicoStore(databasePath);
+    const project = storeBeforeRestart.createProject('Result recovery', workspace);
+    const thread = storeBeforeRestart.createThread(project.id, 'host');
+    const toolExecutionId = `${thread.id}:durable-step:durable-call`;
+    const call = { id: 'durable-call', name: 'read_file', arguments: { path: 'observed.txt' } };
+    const modelExecution = storeBeforeRestart.createModelExecution('durable-step', thread.id, 0);
+    storeBeforeRestart.transitionExecution(modelExecution.id, 'running');
+    storeBeforeRestart.commitModelStep({
+      assistantRecordId: 'durable-step:assistant',
+      modelExecutionId: modelExecution.id,
+      threadId: thread.id,
+      payload: assistantPayload({ batchId: 'durable-step:batch', toolCalls: [call] }),
+      toolCalls: [{ call, executionId: toolExecutionId }],
+    });
+    storeBeforeRestart.transitionExecution(toolExecutionId, 'running');
+    storeBeforeRestart.transitionExecution(toolExecutionId, 'completed', {
+      result: { path: 'observed.txt', contents: 'captured before restart', truncated: false },
+    });
+    expect(storeBeforeRestart.hasToolResult(toolExecutionId)).toBe(false);
+    storeBeforeRestart.close();
+    await writeFile(join(workspace, 'observed.txt'), 'changed after restart');
+
+    let repeatedToolInvocations = 0;
+    const model = new FakeModel(() => response('Recovered result acknowledged.'));
+    const store = new PicoStore(databasePath);
+    const runtime = new PicoRuntime(store, { model, pluginDirectory: join(directory, 'empty-plugins') });
+    runtime.tools.replace({
+      owner: 'recovery-test',
+      source: 'executor',
+      definition: { name: 'read_file', description: 'recovery spy', parameters: { type: 'object' } },
+      execute: async () => {
+        repeatedToolInvocations += 1;
+        return { contents: 'changed after restart' };
+      },
+    });
+    await runtime.initialize();
+    try {
+      await runtime.drain();
+      const results = store
+        .listRecords(thread.id)
+        .filter((record) => record.kind === 'tool_result' && record.id === `${toolExecutionId}:result`);
+      expect(results).toHaveLength(1);
+      expect((results[0]?.payload as { result: unknown }).result).toEqual({
+        path: 'observed.txt',
+        contents: 'captured before restart',
+        truncated: false,
+      });
+      expect(store.getExecution(toolExecutionId)?.status).toBe('completed');
+      expect(repeatedToolInvocations).toBe(0);
+      expect(model.calls).toBe(1);
+      expect(model.prompts[0]?.turns.find((turn) => turn.kind === 'tool_result')?.content).toContain(
+        'captured before restart',
+      );
     } finally {
       store.close();
       await rm(directory, { recursive: true, force: true });
