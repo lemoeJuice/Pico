@@ -217,6 +217,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
       await reader.cancel().catch(() => undefined);
       throw error;
     }
+    await reader.cancel().catch(() => undefined);
     if (!finishReason && !done) throw new Error('Model stream ended before the step completed');
     const toolCalls = [...calls.values()]
       .sort((a, b) => a.index - b.index)

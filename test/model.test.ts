@@ -93,4 +93,51 @@ describe('OpenAI-compatible streaming adapter', () => {
       toolCalls: [{ id: 'call_1', name: 'read_file', arguments: { path: 'note.txt' } }],
     });
   });
+
+  it('closes a provider stream after the done marker even when the server keeps the connection open', async () => {
+    let resolveClosed!: () => void;
+    let finishResponse: (() => void) | undefined;
+    const streamClosed = new Promise<void>((resolve) => {
+      resolveClosed = resolve;
+    });
+    const server = createServer((request, outgoing) => {
+      request.resume();
+      outgoing.writeHead(200, { 'content-type': 'text/event-stream' });
+      outgoing.once('close', resolveClosed);
+      outgoing.write('data: [DONE]\n\n');
+      finishResponse = () => outgoing.end();
+    });
+    servers.push(server);
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Test server did not bind a TCP port');
+
+    try {
+      await new OpenAiCompatibleAdapter().complete(
+        {
+          system: 'You are testing Pico.',
+          turns: [],
+          tools: [],
+          model: 'configured-model',
+          temperature: 0.2,
+        },
+        {
+          baseUrl: `http://127.0.0.1:${address.port}/v1`,
+          apiKey: 'test-key',
+          model: 'configured-model',
+          temperature: 0.2,
+        },
+        new AbortController().signal,
+        () => undefined,
+      );
+      const closed = await Promise.race([
+        streamClosed.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 500)),
+      ]);
+      expect(closed).toBe(true);
+    } finally {
+      finishResponse?.();
+    }
+  });
 });
