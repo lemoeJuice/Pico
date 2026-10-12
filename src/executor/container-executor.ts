@@ -186,6 +186,11 @@ interface ToolRunnerResponse {
 }
 
 type PodmanRunner = typeof podman;
+const DEFAULT_CONTAINER_IMAGE = 'docker.io/library/node:22-bookworm-slim';
+
+function configuredContainerImage(): string {
+  return process.env.PICO_CONTAINER_IMAGE?.trim() || DEFAULT_CONTAINER_IMAGE;
+}
 
 function findOverlayMountProgram(): string | undefined {
   const configured = process.env.PICO_PODMAN_OVERLAY_MOUNT_PROGRAM?.trim();
@@ -270,7 +275,7 @@ export class ContainerExecutor implements ExecutorAdapter {
     private readonly store: PicoStore,
     private readonly tools: ToolCatalog,
     private readonly onExecution: ExecutionListener = () => undefined,
-    private readonly image = 'docker.io/library/node:22-bookworm-slim',
+    private readonly image = configuredContainerImage(),
     private readonly runPodmanCommand: PodmanRunner = podman,
     private readonly overlayMountProgram = findOverlayMountProgram(),
     private readonly vfsStorageRoot = defaultVfsStorageRoot(),

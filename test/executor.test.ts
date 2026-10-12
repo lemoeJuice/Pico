@@ -344,6 +344,58 @@ describe('Executor execution identity and recovery', () => {
     }
   });
 
+  it('uses PICO_CONTAINER_IMAGE for Container Executor provisioning', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const previousImage = process.env.PICO_CONTAINER_IMAGE;
+    process.env.PICO_CONTAINER_IMAGE = 'registry.example.test/pico/node:22';
+    const thread = env.createThread('container');
+    const modelExecution = env.store.createModelExecution('image-model', thread.id, 0);
+    env.store.transitionExecution(modelExecution.id, 'running');
+    const call = { id: 'image-call', name: 'shell', arguments: { command: 'true' } };
+    env.store.commitModelStep({
+      assistantRecordId: 'image-model:assistant',
+      modelExecutionId: modelExecution.id,
+      threadId: thread.id,
+      payload: assistantPayload({ batchId: 'image-model:batch', toolCalls: [call] }),
+      toolCalls: [{ call, executionId: 'image-tool' }],
+    });
+
+    let selectedImage: string | undefined;
+    const runner = async (args: string[]) => {
+      if (args[0] === 'info') return { stdout: '5.0.0', stderr: '' };
+      if (args[0] === 'inspect') throw new Error('no such container');
+      if (args[0] === 'run') {
+        selectedImage = args[args.indexOf('--workdir') + 2];
+        return { stdout: 'container-id', stderr: '' };
+      }
+      if (args[0] === 'exec') {
+        return {
+          stdout: JSON.stringify({ status: 'completed', result: { exitCode: 0, stdout: 'ok', stderr: '' } }),
+          stderr: '',
+        };
+      }
+      throw new Error(`Unexpected Podman command: ${args[0] ?? 'empty'}`);
+    };
+    const catalog = new ToolCatalog();
+    catalog.register({
+      owner: 'test',
+      source: 'executor',
+      definition: { name: 'shell', description: 'test shell', parameters: { type: 'object' } },
+      execute: async () => ({ exitCode: 0 }),
+    });
+    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, runner);
+    try {
+      const binding = env.store.executorForThread(thread.id)!;
+      const result = await executor.execute('image-tool', binding);
+      expect(result.status).toBe('completed');
+      expect(selectedImage).toBe('registry.example.test/pico/node:22');
+    } finally {
+      if (previousImage === undefined) delete process.env.PICO_CONTAINER_IMAGE;
+      else process.env.PICO_CONTAINER_IMAGE = previousImage;
+      await env.cleanup();
+    }
+  });
+
   it('retries Btrfs overlay storage with the discovered fuse-overlayfs helper', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.createThread('container');

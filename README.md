@@ -4,7 +4,7 @@ Pico is a local-first agent harness built around durable Projects, Threads, Mess
 
 ## Run Pico
 
-Requirements: Node.js 26 or newer and npm. Podman is needed for the default Container Executor. When a Btrfs-backed Podman store cannot use kernel overlay, Pico uses `fuse-overlayfs` if available and otherwise falls back to a separate VFS store at `data/podman-vfs`. Set `PICO_PODMAN_OVERLAY_MOUNT_PROGRAM` for a helper outside `PATH` or `PICO_PODMAN_VFS_ROOT` to move the fallback store. VFS can use more disk and run image operations more slowly than overlay. A Host Thread can run without Podman.
+Requirements: Node.js 26 or newer and npm. Podman is needed for the default Container Executor. Set `PICO_CONTAINER_IMAGE` to use a compatible image from another registry; by default Pico uses `docker.io/library/node:22-bookworm-slim`. The image must provide Node.js and `/bin/sh`. When a Btrfs-backed Podman store cannot use kernel overlay, Pico uses `fuse-overlayfs` if available and otherwise falls back to a separate VFS store at `data/podman-vfs`. Set `PICO_PODMAN_OVERLAY_MOUNT_PROGRAM` for a helper outside `PATH` or `PICO_PODMAN_VFS_ROOT` to move the fallback store. VFS can use more disk and run image operations more slowly than overlay. A Host Thread can run without Podman.
 
 ```sh
 npm install
