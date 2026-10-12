@@ -675,6 +675,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     }
   };
 
+  const startAlternateExecutorThread = (): void => {
+    if (!selectedThread) return;
+    setNewThreadTitle('');
+    setNewThreadExecutor(selectedThread.executorKind === 'container' ? 'host' : 'container');
+    setNewThreadOpen(true);
+  };
+
   const controlThread = async (action: 'pause' | 'continue' | 'interrupt'): Promise<void> => {
     if (!threadId) return;
     if (action === 'continue') setError('');
@@ -972,12 +979,24 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
         {selectedThread && executorConnected === false && executorError ? (
           <div className="banner banner-error executor-error" role="status">
-            <span>
+            <div className="executor-error-copy">
               <strong>
                 {selectedThread.executorKind === 'container' ? 'Container' : 'Host'} Executor unavailable.
               </strong>{' '}
-              {executorError}
-            </span>
+              <span>
+                Continue in a new {selectedThread.executorKind === 'container' ? 'Host' : 'Container'} Thread in this
+                Project.
+              </span>
+            </div>
+            <div className="executor-error-actions">
+              <button type="button" onClick={startAlternateExecutorThread}>
+                New {selectedThread.executorKind === 'container' ? 'Host' : 'Container'} Thread
+              </button>
+              <details className="executor-error-details">
+                <summary>Diagnostics</summary>
+                <pre>{executorError}</pre>
+              </details>
+            </div>
           </div>
         ) : null}
         {pauseReason ? (

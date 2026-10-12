@@ -680,6 +680,64 @@ button:disabled {
   min-width: 0;
   overflow-wrap: anywhere;
 }
+.executor-error-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.executor-error-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+}
+.executor-error-actions > button {
+  padding: 6px 9px;
+  color: #805b4e;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid #ecd7ce;
+  border-radius: 7px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.executor-error-actions > button:hover {
+  background: #fff;
+}
+.executor-error-details {
+  position: relative;
+  font-size: 10px;
+}
+.executor-error-details summary {
+  color: #8e5f51;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.executor-error-details pre {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 5;
+  width: min(560px, 82vw);
+  max-height: 220px;
+  overflow: auto;
+  margin: 7px 0 0;
+  padding: 10px;
+  color: #654b43;
+  background: #fffdfa;
+  border: 1px solid #ecd7ce;
+  border-radius: 8px;
+  box-shadow: 0 8px 22px rgba(70, 48, 40, 0.12);
+  font:
+    11px/1.45 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 
 .conversation-header {
   z-index: 1;
@@ -1918,6 +1976,15 @@ button:disabled {
   .banner {
     margin: 7px 10px 0;
     font-size: 10px;
+  }
+  .executor-error {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .executor-error-actions {
+    width: 100%;
+    justify-content: space-between;
   }
   .executor-choice-grid {
     grid-template-columns: 1fr;
