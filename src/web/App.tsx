@@ -22,6 +22,12 @@ import { upsertProjectThread } from './project-threads.js';
 import { fetchStableSnapshot, snapshotForSelection } from './snapshot-consistency.js';
 import { isNearScrollEnd } from './scroll-follow.js';
 import { threadCanBeInterrupted } from './thread-controls.js';
+import {
+  appendAssistantDraft,
+  assistantDraftForThread,
+  clearAssistantDraft,
+  type AssistantDrafts,
+} from './assistant-drafts.js';
 import { noticeForThread, withThreadNotice, withoutThreadNotice, type ThreadNotices } from './thread-notices.js';
 import { uiContributionsAt } from './ui-contributions.js';
 import {
@@ -260,7 +266,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [socketConnected, setSocketConnected] = useState(false);
   const [sendingThreadIds, setSendingThreadIds] = useState<Set<string>>(new Set());
   const [draftsByThread, setDraftsByThread] = useState<Record<string, string>>({});
-  const [assistantDraft, setAssistantDraft] = useState('');
+  const [assistantDrafts, setAssistantDrafts] = useState<AssistantDrafts>({});
   const [notice, setNotice] = useState('');
   const [threadNotices, setThreadNotices] = useState<ThreadNotices>({});
   const [error, setError] = useState('');
@@ -324,6 +330,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     null;
   const selectedThreadSending = selectedThread ? sendingThreadIds.has(selectedThread.id) : false;
   const activeNotice = noticeForThread(threadId, threadNotices, notice);
+  const assistantDraft = assistantDraftForThread(assistantDrafts, threadId);
   const filteredCommands = useMemo(() => {
     if (!draft.startsWith('/')) return [];
     const token = draft.slice(1).split(/\s/)[0]?.toLowerCase() ?? '';
@@ -450,7 +457,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       return;
     }
     localStorage.setItem(`pico.thread.${projectId ?? 'none'}`, threadId);
-    setAssistantDraft('');
     void loadSnapshot(threadId).catch((caught: unknown) =>
       setError(caught instanceof Error ? caught.message : String(caught)),
     );
@@ -576,7 +582,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 return current;
               return { ...current, records: [...current.records, record].sort((a, b) => a.seq - b.seq) };
             });
-            if (record.kind === 'assistant') setAssistantDraft('');
+          }
+          const recordThreadId = record?.threadId;
+          if (recordThreadId && record?.kind === 'assistant' && record.id.endsWith(':assistant')) {
+            const executionId = record.id.slice(0, -':assistant'.length);
+            setAssistantDrafts((current) => clearAssistantDraft(current, recordThreadId, executionId));
           }
         } else if (event.type === 'execution.updated') {
           const execution = event.execution as Execution | undefined;
@@ -609,15 +619,30 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           }
         } else if (
           event.type === 'model.delta' &&
-          event.threadId === activeThreadId.current &&
+          typeof event.threadId === 'string' &&
+          typeof event.executionId === 'string' &&
           typeof event.delta === 'string'
         ) {
-          setAssistantDraft((text) => text + event.delta);
-        } else if (event.type === 'model.draft-ended' && event.threadId === activeThreadId.current) {
-          setAssistantDraft('');
-        } else if (event.type === 'runtime.error' && event.threadId === activeThreadId.current) {
-          setError(String(event.message ?? 'Runtime error'));
-          setAssistantDraft('');
+          const draftThreadId = event.threadId;
+          const executionId = event.executionId;
+          const delta = event.delta;
+          setAssistantDrafts((current) => appendAssistantDraft(current, draftThreadId, executionId, delta));
+        } else if (
+          event.type === 'model.draft-ended' &&
+          typeof event.threadId === 'string' &&
+          typeof event.executionId === 'string'
+        ) {
+          const draftThreadId = event.threadId;
+          const executionId = event.executionId;
+          setAssistantDrafts((current) => clearAssistantDraft(current, draftThreadId, executionId));
+        } else if (event.type === 'runtime.error') {
+          const failedThreadId = typeof event.threadId === 'string' ? event.threadId : null;
+          if (failedThreadId) {
+            setAssistantDrafts((current) => clearAssistantDraft(current, failedThreadId));
+          }
+          if (failedThreadId === activeThreadId.current) {
+            setError(String(event.message ?? 'Runtime error'));
+          }
         } else if (event.type === 'runtime.notice' && typeof event.threadId === 'string') {
           setThreadNotices((current) =>
             withThreadNotice(current, event.threadId as string, String(event.message ?? 'Runtime notice')),
@@ -638,7 +663,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         });
         if (!closed) {
           // WebSocket deltas are transient and cannot be replayed after reconnect.
-          setAssistantDraft('');
+          setAssistantDrafts({});
           timer = window.setTimeout(connect, retry);
           retry = Math.min(retry * 1.7, 12_000);
         }
