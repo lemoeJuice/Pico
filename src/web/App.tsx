@@ -16,6 +16,7 @@ import type {
 } from '../core/types.js';
 import type { PermissionPolicy } from '../runtime/stages.js';
 import type { ThreadSnapshot } from '../runtime/runtime.js';
+import { isSessionExpired } from './session.js';
 
 type PluginInfo = {
   plugins: Array<{ id: string; name: string; version: string; source: string }>;
@@ -473,7 +474,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       };
       socket.onclose = () => {
         setSocketConnected(false);
-        window.dispatchEvent(new Event('pico:auth-expired'));
+        void isSessionExpired().then((expired) => {
+          if (expired) window.dispatchEvent(new Event('pico:auth-expired'));
+        });
         if (!closed) {
           timer = window.setTimeout(connect, retry);
           retry = Math.min(retry * 1.7, 12_000);
