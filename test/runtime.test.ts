@@ -82,6 +82,63 @@ describe('durable Thread runtime invariants', () => {
     }
   });
 
+  it('discards an in-flight Model draft on shutdown and resumes from the last durable boundary', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-model-shutdown-'));
+    const workspace = join(directory, 'workspace');
+    await mkdir(workspace);
+    const databasePath = join(directory, 'runtime.sqlite');
+    let notifyModelStarted!: () => void;
+    const modelStarted = new Promise<void>((resolve) => {
+      notifyModelStarted = resolve;
+    });
+    const interruptedModel = new FakeModel((_prompt, _callNumber, signal, onText) => {
+      onText('This partial answer must not become history.');
+      notifyModelStarted();
+      return new Promise((_resolve, reject) => {
+        const abort = (): void => reject(new DOMException('Runtime is shutting down.', 'AbortError'));
+        if (signal.aborted) abort();
+        else signal.addEventListener('abort', abort, { once: true });
+      });
+    });
+    let store = new PicoStore(databasePath);
+    let runtime = new PicoRuntime(store, {
+      model: interruptedModel,
+      pluginDirectory: join(directory, 'empty-plugins'),
+    });
+    await runtime.initialize();
+    const project = await runtime.createProject('Model recovery', workspace);
+    const thread = runtime.createThread(project.id, 'host');
+    try {
+      await runtime.submit(thread.id, 'model-shutdown-message', 'Please finish this response.');
+      await modelStarted;
+      await runtime.shutdown();
+
+      const unfinished = store.listExecutions(thread.id).find((execution) => execution.kind === 'model');
+      expect(interruptedModel.signals[0]?.aborted).toBe(true);
+      expect(unfinished?.status).toBe('interrupted');
+      expect(store.listRecords(thread.id).filter((record) => record.kind === 'assistant')).toHaveLength(0);
+      expect(store.listRecords(thread.id).filter((record) => record.kind === 'message')).toHaveLength(1);
+      expect(runtime.getThread(thread.id)?.pauseRequested).toBe(false);
+      store.close();
+
+      store = new PicoStore(databasePath);
+      runtime = new PicoRuntime(store, {
+        model: new FakeModel(() => response('Recovered from the durable Message.')),
+        pluginDirectory: join(directory, 'empty-plugins'),
+      });
+      await runtime.initialize();
+      await runtime.drain();
+
+      expect(store.listRecords(thread.id).filter((record) => record.kind === 'assistant')).toMatchObject([
+        { payload: { content: 'Recovered from the durable Message.' } },
+      ]);
+      expect(store.listRecords(thread.id).filter((record) => record.kind === 'message')).toHaveLength(1);
+    } finally {
+      store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('does not rerun a slash command when its request is retried after Runtime restart', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pico-command-retry-'));
     const workspace = join(directory, 'workspace');
