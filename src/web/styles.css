@@ -1913,37 +1913,40 @@ button:disabled {
     margin-left: auto;
   }
   .menu-button {
-    flex: 0 0 31px;
-    width: 31px;
-    height: 31px;
+    flex: 0 0 40px;
+    width: 40px;
+    height: 40px;
     margin-right: 8px;
     font-size: 16px;
   }
   .topbar {
     justify-content: flex-start;
-    min-height: 48px;
+    min-height: 54px;
     padding: 0 12px;
   }
   .breadcrumbs {
     flex: 1;
     gap: 6px;
-    font-size: 10px;
+    font-size: 11px;
+  }
+  .breadcrumbs strong {
+    font-size: 11px;
   }
   .topbar-status {
     gap: 5px;
   }
   .executor-pill {
-    min-height: 25px;
-    padding: 3px 6px;
-    font-size: 9px;
+    min-height: 30px;
+    padding: 4px 7px;
+    font-size: 10px;
   }
   .executor-glyph {
     display: none;
   }
   .state-pill {
-    min-height: 25px;
-    padding: 3px 7px;
-    font-size: 9px;
+    min-height: 30px;
+    padding: 4px 8px;
+    font-size: 10px;
   }
   .conversation-header {
     align-items: flex-start;
@@ -1955,20 +1958,28 @@ button:disabled {
     width: 100%;
   }
   .conversation-title h1 {
-    font-size: 14px;
+    font-size: 16px;
+  }
+  .conversation-title p {
+    font-size: 11px;
   }
   .conversation-actions {
     max-width: 100%;
     flex-wrap: wrap;
   }
   .conversation-actions .button {
-    min-height: 29px;
+    min-height: 40px;
+    padding-right: 10px;
+    padding-left: 10px;
+    font-size: 11px;
   }
   .conversation-actions .plugin-action {
     display: inline-flex;
   }
   .interrupt-button {
-    padding-left: 4px;
+    min-height: 40px;
+    padding: 0 8px;
+    font-size: 11px;
   }
   .conversation-scroll {
     padding: 2px 6px 0;
@@ -1982,7 +1993,30 @@ button:disabled {
   }
   .markdown-like,
   .user-bubble {
-    font-size: 12px;
+    font-size: 14px;
+  }
+  .message-author {
+    min-height: 24px;
+    font-size: 11px;
+  }
+  .model-label,
+  .usage-label,
+  .completion-label {
+    font-size: 10px;
+  }
+  .inline-link {
+    min-height: 32px;
+    font-size: 11px;
+  }
+  .tool-card > summary {
+    min-height: 44px;
+  }
+  .tool-name {
+    font-size: 11px;
+  }
+  .tool-status {
+    padding: 4px 8px;
+    font-size: 10px;
   }
   .composer-wrap {
     padding: 6px 10px 9px;
@@ -1999,10 +2033,22 @@ button:disabled {
     font-size: 16px;
   }
   .composer-footer {
-    font-size: 8px;
+    gap: 8px;
+    color: #78857c;
+    font-size: 10px;
   }
   .composer-caption {
-    font-size: 8px;
+    color: #849087;
+    font-size: 10px;
+  }
+  .composer-plugin-action {
+    min-height: 40px;
+    padding: 0 10px;
+    font-size: 11px;
+  }
+  .send-button {
+    width: 42px;
+    height: 42px;
   }
   .welcome-screen {
     padding: 40px 28px 55px;
@@ -2033,6 +2079,23 @@ button:disabled {
     padding: 18px;
     border-radius: 17px;
   }
+  .modal .icon-button {
+    width: 40px;
+    height: 40px;
+  }
+  .modal .button {
+    min-height: 42px;
+    font-size: 12px;
+  }
+  .form-intro {
+    font-size: 12px;
+  }
+  .form-stack label {
+    font-size: 12px;
+  }
+  .field-note {
+    font-size: 11px;
+  }
   .form-actions {
     align-items: flex-end;
   }
@@ -2042,6 +2105,35 @@ button:disabled {
   .approval-box {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .approval-box strong {
+    font-size: 12px;
+  }
+  .approval-box p {
+    font-size: 11px;
+    line-height: 1.5;
+  }
+  .approval-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .approval-actions .button {
+    min-height: 40px;
+    flex: 1 1 100px;
+    font-size: 11px;
+  }
+  .icon-button,
+  .icon-button.small {
+    width: 40px;
+    height: 40px;
+  }
+  .child-thread-item {
+    min-height: 47px;
+  }
+  .sidebar-add-project,
+  .settings-link,
+  .plugin-sidebar-action {
+    min-height: 42px;
   }
   .permission-popover {
     right: 0;
