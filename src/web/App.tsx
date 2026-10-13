@@ -1806,27 +1806,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             </div>
 
             <div className="composer-wrap">
-              {pluginUiContext && composerModelContributions.length > 0 ? (
-                <div className="composer-plugin-controls" aria-label="Model controls">
-                  {composerModelContributions.map((item) => {
-                    return item.pluginId && item.entry && item.component ? (
-                      <PluginWebView
-                        key={item.id}
-                        pluginId={item.pluginId}
-                        entry={item.entry}
-                        viewType="component"
-                        viewId={item.component}
-                        {...pluginUiContext}
-                        isRegisteredPage={isRegisteredPluginPage}
-                      />
-                    ) : (
-                      <span className="field-note" key={item.id}>
-                        {item.label} requires a plugin Web UI entry.
-                      </span>
-                    );
-                  })}
-                </div>
-              ) : null}
               {filteredCommands.length > 0 ? (
                 <div className="command-menu">
                   {filteredCommands.map((command) => (
@@ -1837,51 +1816,74 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   ))}
                 </div>
               ) : null}
-              <div className="composer-box">
-                <textarea
-                  value={draft}
-                  onChange={(event) => updateDraft(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (shouldSubmitOnEnter(event.nativeEvent)) {
-                      event.preventDefault();
-                      if (filteredCommands.length > 0 && draft.trim() === '/')
-                        updateDraft(`/${filteredCommands[0]!.name} `);
-                      else void sendMessage();
-                    }
-                  }}
-                  placeholder="Write a message… use / for commands"
-                  rows={2}
-                  aria-label="Message"
-                />
-                <div className="composer-footer">
-                  <div className="composer-footer-actions">
-                    {composerActions.map((item) => (
+              <div className="composer-entry-row">
+                {pluginUiContext && composerModelContributions.length > 0 ? (
+                  <div className="composer-plugin-controls" aria-label="Model controls">
+                    {composerModelContributions.map((item) => {
+                      return item.pluginId && item.entry && item.component ? (
+                        <PluginWebView
+                          key={item.id}
+                          pluginId={item.pluginId}
+                          entry={item.entry}
+                          viewType="component"
+                          viewId={item.component}
+                          {...pluginUiContext}
+                          isRegisteredPage={isRegisteredPluginPage}
+                        />
+                      ) : (
+                        <span className="field-note" key={item.id}>
+                          {item.label} requires a plugin Web UI entry.
+                        </span>
+                      );
+                    })}
+                  </div>
+                ) : null}
+                <div className="composer-box">
+                  <textarea
+                    value={draft}
+                    onChange={(event) => updateDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (shouldSubmitOnEnter(event.nativeEvent)) {
+                        event.preventDefault();
+                        if (filteredCommands.length > 0 && draft.trim() === '/')
+                          updateDraft(`/${filteredCommands[0]!.name} `);
+                        else void sendMessage();
+                      }
+                    }}
+                    placeholder="Write a message… use / for commands"
+                    rows={2}
+                    aria-label="Message"
+                  />
+                  <div className="composer-footer">
+                    <div className="composer-footer-actions">
+                      {composerActions.map((item) => (
+                        <button
+                          key={item.id}
+                          className="composer-plugin-action"
+                          disabled={!item.command || busy || selectedThreadSending}
+                          title={item.description ?? item.label}
+                          onClick={() => executeContribution(item)}
+                        >
+                          {item.label}
+                        </button>
+                      ))}
                       <button
-                        key={item.id}
-                        className="composer-plugin-action"
-                        disabled={!item.command || busy || selectedThreadSending}
-                        title={item.description ?? item.label}
-                        onClick={() => executeContribution(item)}
+                        className="send-button"
+                        aria-label="Send message"
+                        title="Send message"
+                        disabled={!draft.trim() || busy || selectedThreadSending}
+                        onClick={() => void sendMessage()}
                       >
-                        {item.label}
+                        {selectedThreadSending ? <i className="tiny-spinner" /> : <Send size={15} aria-hidden="true" />}
                       </button>
-                    ))}
-                    <ThreadStateControl
-                      state={currentState}
-                      canInterrupt={threadCanBeInterrupted(currentState, executions)}
-                      onAction={(action) => void controlThread(action)}
-                    />
-                    <button
-                      className="send-button"
-                      aria-label="Send message"
-                      title="Send message"
-                      disabled={!draft.trim() || busy || selectedThreadSending}
-                      onClick={() => void sendMessage()}
-                    >
-                      {selectedThreadSending ? <i className="tiny-spinner" /> : <Send size={15} aria-hidden="true" />}
-                    </button>
+                    </div>
                   </div>
                 </div>
+                <ThreadStateControl
+                  state={currentState}
+                  canInterrupt={threadCanBeInterrupted(currentState, executions)}
+                  onAction={(action) => void controlThread(action)}
+                />
               </div>
               {settings?.model ? (
                 <div className="composer-caption">

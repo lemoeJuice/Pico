@@ -137,6 +137,7 @@ export function createChatGptPlanPlugin(): PicoPlugin {
 
       context.http.register('GET', '/status', () => auth!.status());
       context.http.register('GET', '/models', async () => await auth!.listModels());
+      context.http.register('POST', '/models/refresh', async () => await auth!.listModels(true));
       context.http.register('POST', '/sign-in', async (request: PluginHttpRequest) => {
         const uiOrigin = request.origin;
         if (!uiOrigin) throw new Error('ChatGPT sign-in must be started from the Pico Web UI.');
@@ -158,7 +159,10 @@ export function createChatGptPlanPlugin(): PicoPlugin {
           handlingCallback = true;
           void auth!
             .completeSignIn(callbackUrl.searchParams, redirectUri)
-            .then(() => ({ status: 'connected' as const, message: 'ChatGPT is connected. Return to Pico.' }))
+            .then(() => {
+              void auth!.refreshModels().catch(() => undefined);
+              return { status: 'connected' as const, message: 'ChatGPT is connected. Return to Pico.' };
+            })
             .catch((error: unknown) => ({
               status: 'failed' as const,
               message: error instanceof Error ? error.message : 'ChatGPT sign-in failed.',

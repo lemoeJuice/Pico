@@ -39,7 +39,15 @@ describe('ChatGPT provider plugin', () => {
     expect(contributions).toContainEqual(
       expect.objectContaining({ slot: 'composer.model', component: 'ChatGptPlanComposerModel', entry: 'webui' }),
     );
-    expect(routes).toEqual(expect.arrayContaining(['GET /status', 'GET /models', 'POST /sign-in', 'PUT /preferences']));
+    expect(routes).toEqual(
+      expect.arrayContaining([
+        'GET /status',
+        'GET /models',
+        'POST /models/refresh',
+        'POST /sign-in',
+        'PUT /preferences',
+      ]),
+    );
     expect(await commands.execute('/chatgpt-provider', { thread: null, projectId: null })).toEqual({
       text: 'No ChatGPT account is connected. Open the ChatGPT plugin settings to connect one.',
     });

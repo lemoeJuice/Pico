@@ -48,21 +48,28 @@ function AccountPage({ api, onError, onNotice }: PluginUiProps): ReactElement {
   const popupRef = useRef<Window | null>(null);
   const signInRef = useRef<{ callbackOrigin: string; operationId: string } | null>(null);
 
-  const refresh = useCallback(async (): Promise<void> => {
-    setLoading(true);
-    setError('');
-    try {
-      const account = await api<AccountStatus>(`${apiRoot}/status`);
-      setStatus(account);
-      setModels(account.connected ? await api<ChatGptModelChoice[]>(`${apiRoot}/models`) : []);
-    } catch (caught) {
-      const message = errorMessage(caught);
-      setError(message);
-      onError(message);
-    } finally {
-      setLoading(false);
-    }
-  }, [api, onError]);
+  const refresh = useCallback(
+    async (refreshModels = false): Promise<void> => {
+      setLoading(true);
+      setError('');
+      try {
+        const account = await api<AccountStatus>(`${apiRoot}/status`);
+        setStatus(account);
+        setModels(
+          account.connected
+            ? await api<ChatGptModelChoice[]>(refreshModels ? `${apiRoot}/models/refresh` : `${apiRoot}/models`)
+            : [],
+        );
+      } catch (caught) {
+        const message = errorMessage(caught);
+        setError(message);
+        onError(message);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [api, onError],
+  );
 
   useEffect(() => {
     void refresh();
@@ -162,7 +169,12 @@ function AccountPage({ api, onError, onNotice }: PluginUiProps): ReactElement {
               {models.length} available model{models.length === 1 ? '' : 's'}
             </span>
             <div className="form-actions chatgpt-account-actions">
-              <button type="button" className="button button-soft" onClick={() => void refresh()} disabled={loading}>
+              <button
+                type="button"
+                className="button button-soft"
+                onClick={() => void refresh(true)}
+                disabled={loading}
+              >
                 {loading ? 'Refreshing…' : 'Refresh models'}
               </button>
               <button
@@ -206,13 +218,28 @@ function ChatGptPlanComposerModel({
   const loadProviderData = useCallback(async (): Promise<void> => {
     setLoading(true);
     try {
-      const [account, savedPreferences] = await Promise.all([
+      const [accountResult, preferencesResult] = await Promise.allSettled([
         api<AccountStatus>(`${apiRoot}/status`),
         api<Preferences>(`${apiRoot}/preferences`),
       ]);
-      setStatus(account);
-      setPreferences({ ...defaultPreferences, ...savedPreferences });
-      setModels(account.connected ? await api<ChatGptModelChoice[]>(`${apiRoot}/models`) : []);
+      if (accountResult.status === 'rejected') onError(errorMessage(accountResult.reason));
+      else if (preferencesResult.status === 'rejected') onError(errorMessage(preferencesResult.reason));
+      if (preferencesResult.status === 'fulfilled') {
+        setPreferences({ ...defaultPreferences, ...preferencesResult.value });
+      }
+      if (accountResult.status === 'fulfilled') {
+        const account = accountResult.value;
+        setStatus(account);
+        if (account.connected) {
+          try {
+            setModels(await api<ChatGptModelChoice[]>(`${apiRoot}/models`));
+          } catch (caught) {
+            onError(errorMessage(caught));
+          }
+        } else {
+          setModels([]);
+        }
+      }
     } catch (caught) {
       onError(errorMessage(caught));
     } finally {
@@ -269,12 +296,12 @@ function ChatGptPlanComposerModel({
 
   if (!status?.connected) {
     return (
-      <div className="form-stack">
-        <span className="field-note">
-          {loading ? 'Loading ChatGPT account…' : 'Connect a ChatGPT account to choose a model.'}
-        </span>
+      <div className="chatgpt-composer-controls">
+        <select aria-label="Model" disabled>
+          <option>{loading ? 'Loading models…' : 'Connect ChatGPT account'}</option>
+        </select>
         <button type="button" className="button button-quiet" onClick={() => openPage('pico.chatgpt-plan', 'account')}>
-          Open ChatGPT account settings
+          Connect
         </button>
       </div>
     );
@@ -282,53 +309,56 @@ function ChatGptPlanComposerModel({
 
   const supportedEfforts = reasoningEffortsFor(models.find((choice) => choice.slug === settings.model));
   return (
-    <div className="form-stack chatgpt-composer-model">
-      <label>
-        Model
-        <select value={settings.model} onChange={(event) => void selectModel(event.target.value)} disabled={loading}>
-          {settings.model && !models.some((choice) => choice.slug === settings.model) ? (
-            <option value={settings.model}>{settings.model} · no longer listed</option>
-          ) : null}
-          {models.map((model) => (
-            <option key={model.slug} value={model.slug}>
-              {model.displayName}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        Reasoning effort
-        <select
-          value={preferences.reasoningEffort}
-          onChange={(event) =>
-            void savePreferences({
-              ...preferences,
-              reasoningEffort: event.target.value as Preferences['reasoningEffort'],
-            })
-          }
-          disabled={saving}
-        >
-          {supportedEfforts.map((effort) => (
-            <option key={effort} value={effort}>
-              {reasoningEffortLabels[effort]}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="chatgpt-fast-control">
-        <input
-          type="checkbox"
-          checked={preferences.fastMode}
-          onChange={(event) => void savePreferences({ ...preferences, fastMode: event.target.checked })}
-          disabled={saving}
-        />
-        <span>
-          Fast mode
-          <small className="field-note">
-            Uses the Fast service tier where supported; eligible requests may cost more.
-          </small>
-        </span>
-      </label>
+    <div className="chatgpt-composer-controls">
+      <select
+        aria-label="Model"
+        value={settings.model}
+        onChange={(event) => void selectModel(event.target.value)}
+        disabled={loading}
+      >
+        {!settings.model ? (
+          <option value="" disabled>
+            {loading ? 'Loading models…' : 'Choose model'}
+          </option>
+        ) : null}
+        {settings.model && !models.some((choice) => choice.slug === settings.model) ? (
+          <option value={settings.model}>{settings.model} · saved</option>
+        ) : null}
+        {models.map((model) => (
+          <option key={model.slug} value={model.slug}>
+            {model.displayName}
+          </option>
+        ))}
+      </select>
+      <select
+        aria-label="Reasoning effort"
+        value={preferences.reasoningEffort}
+        onChange={(event) =>
+          void savePreferences({
+            ...preferences,
+            reasoningEffort: event.target.value as Preferences['reasoningEffort'],
+          })
+        }
+        disabled={saving}
+      >
+        {supportedEfforts.map((effort) => (
+          <option key={effort} value={effort}>
+            {reasoningEffortLabels[effort]}
+          </option>
+        ))}
+      </select>
+      <button
+        type="button"
+        role="switch"
+        aria-label="Fast mode"
+        aria-checked={preferences.fastMode}
+        className={`chatgpt-fast-control ${preferences.fastMode ? 'enabled' : ''}`}
+        onClick={() => void savePreferences({ ...preferences, fastMode: !preferences.fastMode })}
+        disabled={saving}
+      >
+        <span>{preferences.fastMode ? 'Fast mode on' : 'Fast mode'}</span>
+        <i aria-hidden="true" />
+      </button>
     </div>
   );
 }

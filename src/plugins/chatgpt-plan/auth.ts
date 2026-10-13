@@ -9,6 +9,14 @@ const authStateKey = 'oauth';
 const planScope = 'chatgpt.tokens.use.direct';
 const requestedScopes = 'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct';
 const refreshAheadMs = 120_000;
+const modelCatalogRefreshMs = 10 * 60_000;
+const modelCatalogRetryMs = 60_000;
+const modelCatalogStateKey = 'modelCatalog';
+
+interface CachedModelCatalog {
+  models: ChatGptModelChoice[];
+  refreshedAt: number;
+}
 
 interface StoredCredentials {
   hostId: string;
@@ -123,6 +131,8 @@ export class ChatGptPlanAuth {
   private refreshInFlight: Promise<string> | null = null;
   private metadata: OidcMetadata | null = null;
   private jwks: JsonWebKeySet | null = null;
+  private modelCatalogRefreshInFlight: Promise<ChatGptModelChoice[]> | null = null;
+  private modelCatalogLastRefreshAttemptAt = 0;
 
   constructor(
     private readonly state: ChatGptPluginState,
@@ -274,7 +284,51 @@ export class ChatGptPlanAuth {
     return this.refreshInFlight;
   }
 
-  async listModels(): Promise<ChatGptModelChoice[]> {
+  async listModels(forceRefresh = false): Promise<ChatGptModelChoice[]> {
+    const cached = this.readModelCatalog();
+    if (cached && !forceRefresh) {
+      if (
+        cached.refreshedAt + modelCatalogRefreshMs <= this.now() &&
+        this.modelCatalogLastRefreshAttemptAt + modelCatalogRetryMs <= this.now()
+      ) {
+        void this.refreshModels().catch(() => undefined);
+      }
+      return cached.models;
+    }
+    try {
+      return await this.refreshModels();
+    } catch (error) {
+      if (cached) return cached.models;
+      throw error;
+    }
+  }
+
+  refreshModels(): Promise<ChatGptModelChoice[]> {
+    if (this.modelCatalogRefreshInFlight) return this.modelCatalogRefreshInFlight;
+    this.modelCatalogLastRefreshAttemptAt = this.now();
+    const request = this.fetchModels()
+      .then((models) => {
+        this.state.set<CachedModelCatalog>(modelCatalogStateKey, { models, refreshedAt: this.now() });
+        return models;
+      })
+      .finally(() => {
+        this.modelCatalogRefreshInFlight = null;
+      });
+    this.modelCatalogRefreshInFlight = request;
+    return request;
+  }
+
+  private readModelCatalog(): CachedModelCatalog | null {
+    const value: unknown = this.state.get<unknown>(modelCatalogStateKey, null);
+    if (!isObject(value) || !Array.isArray(value.models) || typeof value.refreshedAt !== 'number') return null;
+    const models = value.models.flatMap((entry): ChatGptModelChoice[] => {
+      if (!isObject(entry) || typeof entry.slug !== 'string' || typeof entry.displayName !== 'string') return [];
+      return [{ slug: entry.slug, displayName: entry.displayName }];
+    });
+    return { models, refreshedAt: value.refreshedAt };
+  }
+
+  private async fetchModels(): Promise<ChatGptModelChoice[]> {
     let accessToken = await this.accessToken();
     const response = await this.fetcher('https://api.openai.com/v1/models', {
       headers: { authorization: `Bearer ${accessToken}`, accept: 'application/json' },
@@ -343,6 +397,7 @@ export class ChatGptPlanAuth {
         scopes: [],
       });
     }
+    this.state.set<CachedModelCatalog | null>(modelCatalogStateKey, null);
     return { remoteRevoked };
   }
 
