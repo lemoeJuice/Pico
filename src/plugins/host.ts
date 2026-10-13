@@ -1,3 +1,4 @@
+import type { ExecutorPluginContext } from '../executor/plugin-host.js';
 import { unavailablePluginServices, type PluginServices } from './services.js';
 import { readdir } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
@@ -37,7 +38,8 @@ export interface PicoPlugin {
   id: string;
   name: string;
   version: string;
-  activate(context: PluginContext): Promise<void> | void;
+  activate?(context: PluginContext): Promise<void> | void;
+  activateExecutor?(context: ExecutorPluginContext): Promise<void> | void;
   deactivate?(): Promise<void> | void;
 }
 
@@ -189,10 +191,14 @@ export class PluginHost {
       this.pages.some((page) => page.pluginId === pluginId && page.entry === entry) ||
       this.contributions.some((contribution) => contribution.pluginId === pluginId && contribution.entry === entry);
     if (!registered) return undefined;
+    const pluginsRoot =
+      this.loaded.find((plugin) => plugin.id === pluginId)?.source === 'built-in'
+        ? resolve(process.cwd(), 'plugins')
+        : this.pluginDirectory;
     return {
-      pluginsRoot: this.pluginDirectory,
-      packageRoot: join(this.pluginDirectory, pluginId),
-      assetRoot: join(this.pluginDirectory, pluginId, 'webui'),
+      pluginsRoot,
+      packageRoot: join(pluginsRoot, pluginId),
+      assetRoot: join(pluginsRoot, pluginId, 'webui'),
     };
   }
 
@@ -262,11 +268,12 @@ export class PluginHost {
       !/^[a-z0-9][a-z0-9._-]*$/.test(plugin.id) ||
       !plugin.name ||
       !plugin.version ||
-      typeof plugin.activate !== 'function'
+      (typeof plugin.activate !== 'function' && typeof plugin.activateExecutor !== 'function')
     ) {
       throw new Error(`Invalid plugin manifest in ${source}`);
     }
     if (this.loaded.some((item) => item.id === plugin.id)) throw new Error(`Duplicate plugin ID: ${plugin.id}`);
+    if (!plugin.activate) return;
     const contributionsStart = this.contributions.length;
     const pagesStart = this.pages.length;
     const providersStart = this.providers.length;

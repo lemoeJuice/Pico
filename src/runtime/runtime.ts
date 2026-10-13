@@ -209,10 +209,16 @@ export class PicoRuntime {
             source: (surface.sources[definition.name] ?? 'runtime') as 'runtime' | 'executor',
           }));
         },
-        createChild: (parentId, prompt, title, messageId) => {
-          const parent = this.store.getThread(parentId);
-          if (!parent) throw new Error('Parent Thread not found');
-          return this.createChildThread(parent, prompt, title, messageId);
+        binding: (threadId) => this.store.executorForThread(threadId),
+        create: (projectId, executorKind, title, options = {}) => {
+          if (options.parentThreadId) {
+            const parent = this.store.getThread(options.parentThreadId);
+            if (!parent || parent.projectId !== projectId)
+              throw new Error('Parent Thread must belong to the same Project');
+          }
+          const thread = this.store.createThread(projectId, executorKind, title, options);
+          this.publish({ type: 'thread.created', thread });
+          return thread;
         },
         send: (senderThreadId, targetId, content, messageId) => {
           const sender = this.store.getThread(senderThreadId);
@@ -254,9 +260,7 @@ export class PicoRuntime {
   async initialize(): Promise<void> {
     this.storeUnsubscribers.push(
       this.store.subscribePluginState((pluginId) => this.publish({ type: 'plugin.updated', pluginId })),
-      this.store.subscribeCanonical((record) => {
-        if (record.kind === 'plugin') this.publishRecord(record);
-      }),
+      this.store.subscribeCanonical((record) => this.publishRecord(record)),
     );
     const disabled = new Set([
       ...(process.env.PICO_DISABLED_PLUGINS ?? '')
@@ -557,20 +561,18 @@ export class PicoRuntime {
           },
         };
       }
-      this.publishRecord(receipt.record);
       const command = await this.commands.execute(commandText, {
         thread: this.getThread(threadId),
         projectId: thread.projectId,
       });
       if (command) {
-        const completed = this.store.appendCanonical(threadId, completedId, 'plugin', {
+        this.store.appendCanonical(threadId, completedId, 'plugin', {
           pluginId: 'pico.commands',
           action: 'invocation-completed',
           requestHash,
           commandHash,
           result: command,
         });
-        if (completed.inserted) this.publishRecord(completed.record);
         return { accepted: true, duplicate: false, command };
       }
     }
@@ -589,7 +591,6 @@ export class PicoRuntime {
   ): { record: CanonicalRecord<MessagePayload>; inserted: boolean } {
     const result = this.store.appendMessage(thread.id, id, payload);
     if (result.inserted) {
-      this.publishRecord(result.record);
       if (!thread.pauseRequested) this.startLoop(thread.id);
     }
     this.publishThreadUpdate(thread.id);
@@ -981,7 +982,7 @@ export class PicoRuntime {
         call,
         executionId: `${thread.id}:${modelExecutionId}:${call.id}`,
       }));
-      const record = this.store.commitModelStep({
+      this.store.commitModelStep({
         assistantRecordId: `${modelExecutionId}:assistant`,
         modelExecutionId,
         threadId: thread.id,
@@ -995,7 +996,6 @@ export class PicoRuntime {
           'The model reached its output token limit. Review the response, adjust the model or context, then Continue.',
         );
       }
-      this.publishRecord(record);
       const committedModelExecution = this.store.getExecution(modelExecutionId);
       if (committedModelExecution) this.executionChanged(committedModelExecution);
       for (const item of toolExecutions) {
@@ -1255,41 +1255,13 @@ export class PicoRuntime {
         ? { result: execution.result }
         : { error: execution.error ?? 'Execution ended without a result.' }),
     };
-    const appended = this.store.appendToolResult(threadId, payload);
-    this.publishRecord(appended);
+    this.store.appendToolResult(threadId, payload);
   }
 
   private adapterFor(binding: ExecutorBinding): ExecutorAdapter {
     if (binding.remoteConnectionId) return this.remoteHostExecutor;
     if (binding.kind === 'runtime') throw new Error('Chat mode does not submit work to an external Executor.');
     return binding.kind === 'container' ? this.containerExecutor : this.hostExecutor;
-  }
-
-  private createChildThread(
-    parent: Thread,
-    prompt: string,
-    requestedTitle?: string,
-    messageId: string = randomUUID(),
-  ): { threadId: string; title: string; executor: string } {
-    const cleanedPrompt = prompt.trim();
-    if (!cleanedPrompt) throw new Error('Child Thread prompt is required');
-    const title = requestedTitle?.trim() || prompt.slice(0, 72) || 'Child Thread';
-    const parentBinding = this.store.executorForThread(parent.id);
-    const child = this.store.createThread(parent.projectId, parent.executorKind, title, {
-      parentThreadId: parent.id,
-      createdByAgent: true,
-      ...(parentBinding?.remoteConnectionId ? { remoteConnectionId: parentBinding.remoteConnectionId } : {}),
-      ...(parent.executorRemote ? { workspacePath: parent.workspacePath } : {}),
-    });
-    this.publish({ type: 'thread.created', thread: child });
-    this.postMessage(child, messageId, {
-      role: 'user',
-      content: cleanedPrompt,
-      source: 'agent',
-      senderThreadId: parent.id,
-      senderLabel: parent.title,
-    });
-    return { threadId: child.id, title: child.title, executor: child.executorLabel };
   }
 
   getModelSettings(): ModelSettings {

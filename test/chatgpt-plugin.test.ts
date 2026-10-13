@@ -36,7 +36,7 @@ describe('ChatGPT provider plugin', () => {
       },
       canonical: { append: () => ({}) as never, list: () => [], read: () => [], subscribe: () => () => undefined },
     };
-    await plugin.activate(context);
+    await plugin.activate?.(context);
 
     expect(providers).toContainEqual(expect.objectContaining({ id: 'chatgpt-plan' }));
     expect(pages).toContainEqual(expect.objectContaining({ id: 'account', entry: 'webui' }));

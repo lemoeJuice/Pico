@@ -12,6 +12,26 @@ function setup() {
 }
 
 describe('committed canonical observations', () => {
+  it('publishes state changes only after commit and ignores unchanged values', () => {
+    const { store } = setup();
+    const observed: string[] = [];
+    store.subscribePluginState((pluginId) => observed.push(pluginId));
+    store.transaction(() => {
+      store.setPluginState('example', 'rules', { allow: true });
+      expect(observed).toEqual([]);
+    });
+    store.setPluginState('example', 'rules', { allow: true });
+    expect(observed).toEqual(['example']);
+    expect(() =>
+      store.transaction(() => {
+        store.setPluginState('example', 'rules', { allow: false });
+        throw new Error('rollback');
+      }),
+    ).toThrow('rollback');
+    expect(observed).toEqual(['example']);
+    expect(store.getPluginState('example', 'rules', null)).toEqual({ allow: true });
+    store.close();
+  });
   it('publishes only committed records and discards rolled-back savepoints', () => {
     const { store, thread } = setup();
     const received: string[] = [];
@@ -80,5 +100,29 @@ describe('committed canonical observations', () => {
     store.appendMessage(thread.id, 'after', { role: 'user', source: 'user', content: 'After' });
     expect(observed).toEqual(['user', 'other']);
     store.close();
+  });
+});
+
+describe('Runtime fact delivery', () => {
+  it('delivers direct plugin facts and command receipts once each', async () => {
+    const { setupRuntime, FakeModel, response } = await import('./helpers.js');
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.createThread();
+    env.runtime.pause(thread.id);
+    const records: string[] = [];
+    const unsubscribe = env.runtime.subscribe((event) => {
+      if (event.type === 'record') records.push((event.record as { id: string }).id);
+    });
+    try {
+      await env.runtime.submit(thread.id, 'event-user', 'Hello');
+      await env.runtime.submit(thread.id, 'event-command', '/workspace');
+      await env.runtime.submit(thread.id, 'event-command', '/workspace');
+      expect(records).toEqual(env.store.listRecords(thread.id).map((record) => record.id));
+      expect(new Set(records).size).toBe(records.length);
+    } finally {
+      unsubscribe();
+      await env.runtime.shutdown();
+      await env.cleanup();
+    }
   });
 });

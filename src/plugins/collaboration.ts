@@ -35,7 +35,15 @@ export const collaborationPlugin: PicoPlugin = {
         if (!prompt) throw new Error('Child Thread prompt is required');
         const requestedTitle = typeof args.title === 'string' ? args.title.trim() : '';
         const title = requestedTitle || prompt.replace(/\s+/g, ' ').slice(0, 60) || 'Child Thread';
-        return threads.createChild(parent.id, prompt, title, `${toolContext.executionId}:child-message`);
+        const binding = threads.binding(parent.id);
+        const child = threads.create(parent.projectId, parent.executorKind, title, {
+          parentThreadId: parent.id,
+          createdByAgent: true,
+          ...(binding?.remoteConnectionId ? { remoteConnectionId: binding.remoteConnectionId } : {}),
+          ...(parent.executorRemote ? { workspacePath: parent.workspacePath } : {}),
+        });
+        threads.send(parent.id, child.id, prompt, `${toolContext.executionId}:child-message`);
+        return { threadId: child.id, title: child.title, executor: child.executorLabel };
       },
     );
     tools.register(

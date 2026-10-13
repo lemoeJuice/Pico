@@ -125,7 +125,7 @@ export async function loadExecutorPlugins(
   const pluginDirectory = resolve(options.pluginDirectory ?? executorPluginDirectory());
   const loaded: LoadedExecutorPlugin[] = [];
   const errors: string[] = [];
-  let filenames: string[] = [];
+  let filenames: string[];
   try {
     filenames = (await readdir(pluginDirectory, { withFileTypes: true }))
       .filter((entry) => entry.isFile() && entry.name.endsWith('.mjs'))
