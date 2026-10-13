@@ -1,10 +1,4 @@
-import type {
-  AssistantPayload,
-  CanonicalRecord,
-  Execution,
-  PermissionRequest,
-  ToolResultPayload,
-} from '../core/types.js';
+import type { AssistantPayload, CanonicalRecord, Execution, ToolResultPayload } from '../core/types.js';
 import type { ThreadSnapshot } from '../runtime/runtime.js';
 
 function mergeById<T>(older: readonly T[], newer: readonly T[], idOf: (item: T) => string): T[] {
@@ -20,7 +14,6 @@ function mergeSnapshotData(current: ThreadSnapshot, next: ThreadSnapshot, hasEar
       (left, right) => left.seq - right.seq,
     ),
     executions: mergeById<Execution>(current.executions, next.executions, (execution) => execution.id),
-    approvals: mergeById<PermissionRequest>(current.approvals, next.approvals, (approval) => approval.executionId),
     hasEarlierRecords,
   };
 }

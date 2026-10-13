@@ -17,7 +17,6 @@ import type {
   MessagePayload,
   ModelProviderContribution,
   ModelSettings,
-  PermissionRequest,
   Project,
   PublicSettings,
   RemoteExecutorConnectionView,
@@ -26,18 +25,12 @@ import type {
   ToolResultPayload,
   UiContribution,
 } from '../core/types.js';
-import type { PermissionPolicy } from '../runtime/stages.js';
 import type { ModelInputAttempt, ThreadSnapshot } from '../runtime/runtime.js';
 import { isSessionExpired } from './session.js';
 import { visiblePauseReason } from './pause-reason.js';
 import { shouldSubmitOnEnter } from './composer-keys.js';
 import { upsertProjectThread } from './project-threads.js';
-import {
-  fetchStableSnapshot,
-  snapshotForSelection,
-  snapshotThreadIsSelected,
-  updateSnapshotForThread,
-} from './snapshot-consistency.js';
+import { fetchStableSnapshot, snapshotForSelection, snapshotThreadIsSelected } from './snapshot-consistency.js';
 import { isNearScrollEnd } from './scroll-follow.js';
 import { threadCanBeInterrupted } from './thread-controls.js';
 import { executorStatusFromProbe } from './executor-status.js';
@@ -112,7 +105,6 @@ type PluginInfo = {
 type PluginHostUiProps = Omit<PluginUiProps, 'executeCommand'>;
 
 type RuntimeEvent = Record<string, unknown> & { type: string };
-type ToolPermission = { name: string; description: string; policy: PermissionPolicy };
 type ThreadExecutorChoice = ExecutorKind | 'remote';
 
 function readComposerState(): ComposerState {
@@ -395,16 +387,12 @@ function ToolCard({
   call,
   execution,
   result,
-  approval,
-  onApproval,
 }: {
   call: ToolCall;
   execution: Execution | undefined;
   result: ToolResultPayload | undefined;
-  approval: PermissionRequest | undefined;
-  onApproval(executionId: string, allow: boolean, rememberForThread?: boolean): void;
 }) {
-  const status = approval?.status === 'pending' ? 'needs approval' : (execution?.status ?? 'pending');
+  const status = execution?.status ?? 'pending';
   const resultText =
     result?.status === 'interrupted'
       ? `The tool was interrupted. Its side effects may be partial or unknown. Inspect the workspace before retrying.${result.error ? `\n\n${result.error}` : ''}`
@@ -425,36 +413,9 @@ function ToolCard({
       <summary>
         <ChevronDown className="tool-chevron" size={14} aria-hidden="true" />
         <span className="tool-name">{call.name}</span>
-        <span
-          className={`tool-status status-${approval?.status === 'pending' ? 'pending' : (execution?.status ?? 'pending')}`}
-        >
-          {status}
-        </span>
+        <span className={`tool-status status-${execution?.status ?? 'pending'}`}>{status}</span>
       </summary>
       <div className="tool-card-body">
-        {approval?.status === 'pending' && execution ? (
-          <div className="approval-box">
-            <div>
-              <strong>Permission needed</strong>
-              <p>Allow once, or remember this Tool choice for the Thread.</p>
-            </div>
-            <div className="approval-actions">
-              <button className="button button-soft" onClick={() => onApproval(execution.id, false)}>
-                Deny
-              </button>
-              <button className="button button-primary compact" onClick={() => onApproval(execution.id, true)}>
-                Allow once
-              </button>
-              <button
-                className="button button-soft compact"
-                onClick={() => onApproval(execution.id, true, true)}
-                title={`Allow ${call.name} in this Thread from now on`}
-              >
-                Allow in Thread
-              </button>
-            </div>
-          </div>
-        ) : null}
         <details className="tool-detail">
           <summary>Arguments</summary>
           <pre>{toJson(call.arguments)}</pre>
@@ -499,8 +460,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [pluginInfo, setPluginInfo] = useState<PluginInfo | null>(null);
   const [pluginEvents, setPluginEvents] = useState<Array<{ sequence: number; event: PluginUiEvent }>>([]);
   const [commands, setCommands] = useState<Array<{ name: string; description: string }>>([]);
-  const [permissions, setPermissions] = useState<ToolPermission[]>([]);
-  const [permissionsThreadId, setPermissionsThreadId] = useState<string | null>(null);
   const [executorConnected, setExecutorConnected] = useState<boolean | null>(null);
   const [executorError, setExecutorError] = useState<string | null>(null);
   const [socketConnected, setSocketConnected] = useState(false);
@@ -538,7 +497,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const messageTextareaRef = useRef<HTMLTextAreaElement>(null);
   const followLatest = useRef(true);
   const snapshotRequest = useRef(0);
-  const permissionRefreshError = useRef<string | null>(null);
   const projectThreadVersions = useRef(new Map<string, number>());
   const activeProjectId = useRef(projectId);
   const threadUpdateVersions = useRef(new Map<string, number>());
@@ -635,7 +593,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     threads.find((thread) => thread.id === threadId && thread.projectId === projectId) ??
     null;
   const selectedThreadSending = selectedThread ? sendingThreadIds.has(selectedThread.id) : false;
-  const displayedPermissions = permissionsThreadId === threadId ? permissions : [];
   const activeNotice = noticeForThread(threadId, threadNotices, notice);
   const assistantDraft = assistantDraftForThread(assistantDrafts, threadId);
   const filteredCommands = useMemo(() => {
@@ -812,43 +769,23 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     if (!threadId) {
       setExecutorConnected(null);
       setExecutorError(null);
-      setPermissions([]);
-      setPermissionsThreadId(null);
       return;
     }
     setExecutorConnected(null);
     setExecutorError(null);
-    setPermissions([]);
-    setPermissionsThreadId(threadId);
     let alive = true;
     let refreshing = false;
     const refresh = async (): Promise<void> => {
       if (!alive || refreshing) return;
       refreshing = true;
       try {
-        const [executorResult, permissionsResult] = await Promise.allSettled([
+        const [executorResult] = await Promise.allSettled([
           api<{ connected: boolean; error?: string }>(`/api/threads/${threadId}/executor`),
-          api<ToolPermission[]>(`/api/threads/${threadId}/permissions`),
         ]);
         if (!alive) return;
         const executorStatus = executorStatusFromProbe(executorResult);
         setExecutorConnected(executorStatus.connected);
         setExecutorError(executorStatus.error);
-        if (permissionsResult.status === 'fulfilled') {
-          setPermissions(permissionsResult.value);
-          setPermissionsThreadId(threadId);
-          const previousError = permissionRefreshError.current;
-          permissionRefreshError.current = null;
-          if (previousError) setError((current) => (current === previousError ? '' : current));
-        } else {
-          const reason =
-            permissionsResult.reason instanceof Error
-              ? permissionsResult.reason.message
-              : String(permissionsResult.reason);
-          const nextError = `Could not refresh Tool permissions: ${reason}`;
-          permissionRefreshError.current = nextError;
-          setError(nextError);
-        }
       } finally {
         refreshing = false;
       }
@@ -982,22 +919,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 : current,
             );
           }
-        } else if (event.type === 'approval.updated') {
-          const approval = event.approval as PermissionRequest | undefined;
-          if (approval?.threadId === activeThreadId.current) {
-            noteSnapshotChange(approval.threadId);
-            setSnapshot((current) =>
-              current
-                ? {
-                    ...current,
-                    approvals: [
-                      approval,
-                      ...current.approvals.filter((item) => item.executionId !== approval.executionId),
-                    ],
-                  }
-                : current,
-            );
-          }
         } else if (
           event.type === 'model.delta' &&
           typeof event.threadId === 'string' &&
@@ -1039,13 +960,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           setThreadNotices((current) =>
             withThreadNotice(current, event.threadId as string, String(event.message ?? 'Runtime notice')),
           );
-        } else if (
-          event.type === 'permissions.updated' &&
-          typeof event.threadId === 'string' &&
-          event.threadId === activeThreadId.current
-        ) {
-          setPermissions(event.permissions as ToolPermission[]);
-          setPermissionsThreadId(event.threadId);
         } else if (event.type === 'settings.updated') {
           const value = event.settings as PublicSettings;
           setSettings(value);
@@ -1276,48 +1190,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     }
   };
 
-  const resolveApproval = async (executionId: string, allow: boolean, rememberForThread = false): Promise<void> => {
-    const targetThreadId = threadId;
-    if (!targetThreadId) return;
-    try {
-      const approval = await api<PermissionRequest>(`/api/approvals/${executionId}`, {
-        method: 'POST',
-        body: JSON.stringify({ allow, ...(rememberForThread ? { rememberForThread: true } : {}) }),
-      });
-      setSnapshot((current) =>
-        updateSnapshotForThread(current, targetThreadId, (snapshot) => ({
-          ...snapshot,
-          approvals: [approval, ...snapshot.approvals.filter((item) => item.executionId !== executionId)],
-        })),
-      );
-    } catch (caught) {
-      if (snapshotThreadIsSelected(targetThreadId, activeThreadId.current)) {
-        setError(caught instanceof Error ? caught.message : String(caught));
-      }
-    }
-  };
-
-  const updatePermission = async (toolName: string, policy: PermissionPolicy): Promise<void> => {
-    const targetThreadId = threadId;
-    if (!targetThreadId) return;
-    try {
-      const next = await api<ToolPermission[]>(
-        `/api/threads/${targetThreadId}/permissions/${encodeURIComponent(toolName)}`,
-        {
-          method: 'PUT',
-          body: JSON.stringify({ policy }),
-        },
-      );
-      if (!snapshotThreadIsSelected(targetThreadId, activeThreadId.current)) return;
-      setPermissions(next);
-      setPermissionsThreadId(targetThreadId);
-    } catch (caught) {
-      if (snapshotThreadIsSelected(targetThreadId, activeThreadId.current)) {
-        setError(caught instanceof Error ? caught.message : String(caught));
-      }
-    }
-  };
-
   const saveModelSettings = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
     setSettingsSaving(true);
@@ -1399,8 +1271,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     call: ToolCall,
     execution: Execution | undefined,
     result: ToolResultPayload | undefined,
-    approval: PermissionRequest | undefined,
-    onApproval: (executionId: string, allow: boolean, rememberForThread?: boolean) => void,
   ): ReactNode => {
     const renderer = toolRendererForCall(toolRenderers, call.name);
     if (renderer?.entry && renderer.component && renderer.pluginId && pluginUiContext && selectedThread) {
@@ -1426,16 +1296,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         </div>
       );
     }
-    return (
-      <ToolCard
-        key={execution?.id ?? call.id}
-        call={call}
-        execution={execution}
-        result={result}
-        approval={approval}
-        onApproval={onApproval}
-      />
-    );
+    return <ToolCard key={execution?.id ?? call.id} call={call} execution={execution} result={result} />;
   };
 
   const clearApiKey = async (): Promise<void> => {
@@ -1539,7 +1400,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
   const records = activeSnapshot?.records ?? [];
   const executions = activeSnapshot?.executions ?? [];
-  const approvals = activeSnapshot?.approvals ?? [];
   const committedModelExecutionIds = new Set(
     records.filter((record) => record.kind === 'assistant').map((record) => record.id.replace(/:assistant$/, '')),
   );
@@ -1875,35 +1735,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     buttonClassName="button button-quiet plugin-action"
                   />
                 ))}
-                <details className="permission-menu">
-                  <summary className="button button-quiet">
-                    Tools <span className="permission-count">{displayedPermissions.length}</span>
-                  </summary>
-                  <div className="permission-popover">
-                    <div className="popover-heading">
-                      <strong>Tool permissions</strong>
-                      <span>Saved for this Thread</span>
-                    </div>
-                    {displayedPermissions.map((permission) => (
-                      <label className="permission-row" key={permission.name}>
-                        <span>
-                          <strong>{permission.name}</strong>
-                          <small>{permission.description}</small>
-                        </span>
-                        <select
-                          value={permission.policy}
-                          onChange={(event) =>
-                            void updatePermission(permission.name, event.target.value as PermissionPolicy)
-                          }
-                        >
-                          <option value="allow">Allow</option>
-                          <option value="ask">Ask</option>
-                          <option value="deny">Deny</option>
-                        </select>
-                      </label>
-                    ))}
-                  </div>
-                </details>
               </div>
             </div>
 
@@ -1947,11 +1778,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       key={item.record.id}
                       record={item.record}
                       executions={executions}
-                      approvals={approvals}
                       records={records}
                       threadId={selectedThread.id}
                       renderTool={renderToolView}
-                      onApproval={(id, allow, rememberForThread) => void resolveApproval(id, allow, rememberForThread)}
                     />
                   ),
                 )}
@@ -2635,25 +2464,15 @@ function ModelExecutionNotice({
 function AssistantBubble({
   record,
   executions,
-  approvals,
   records,
   threadId,
   renderTool,
-  onApproval,
 }: {
   record: CanonicalRecord;
   executions: Execution[];
-  approvals: PermissionRequest[];
   records: CanonicalRecord[];
   threadId: string;
-  renderTool(
-    call: ToolCall,
-    execution: Execution | undefined,
-    result: ToolResultPayload | undefined,
-    approval: PermissionRequest | undefined,
-    onApproval: (executionId: string, allow: boolean, rememberForThread?: boolean) => void,
-  ): ReactNode;
-  onApproval(id: string, allow: boolean, rememberForThread?: boolean): void;
+  renderTool(call: ToolCall, execution: Execution | undefined, result: ToolResultPayload | undefined): ReactNode;
 }) {
   const assistant = recordPayload<AssistantPayload>(record);
   const calls = assistant.toolCalls ?? [];
@@ -2697,8 +2516,7 @@ function AssistantBubble({
                   (item.payload as unknown as ToolResultPayload).executionId === executionId,
               );
               const result = resultRecord ? recordPayload<ToolResultPayload>(resultRecord) : undefined;
-              const approval = approvals.find((item) => item.executionId === executionId);
-              return renderTool(call, execution, result, approval, onApproval);
+              return renderTool(call, execution, result);
             })}
           </div>
         ) : null}

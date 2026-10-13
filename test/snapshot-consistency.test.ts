@@ -124,15 +124,15 @@ describe('snapshot refresh consistency', () => {
     expect(snapshotThreadIsSelected('thread-b', 'thread-b')).toBe(true);
   });
 
-  it('does not apply a late approval response to the selected Thread snapshot', () => {
-    const current = { thread: { id: 'thread-b' }, approvals: [{ executionId: 'approval-b' }] };
-    const update = vi.fn((snapshot: typeof current) => ({ ...snapshot, approvals: [] }));
+  it('does not apply a late plugin response to the selected Thread snapshot', () => {
+    const current = { thread: { id: 'thread-b' }, pluginState: 'current' };
+    const update = vi.fn((snapshot: typeof current) => ({ ...snapshot, pluginState: 'updated' }));
 
     const unchanged = updateSnapshotForThread(current, 'thread-a', update);
     const changed = updateSnapshotForThread(current, 'thread-b', update);
 
     expect(unchanged).toBe(current);
     expect(update).toHaveBeenCalledTimes(1);
-    expect(changed).toEqual({ thread: { id: 'thread-b' }, approvals: [] });
+    expect(changed).toEqual({ thread: { id: 'thread-b' }, pluginState: 'updated' });
   });
 });

@@ -14,7 +14,6 @@ function snapshot(
     thread: { id: threadId, projectId: 'project', state } as Thread,
     records,
     executions,
-    approvals: [],
     children: [],
     hasEarlierRecords,
     historyPageSize: 100,
