@@ -260,6 +260,99 @@ describe('Executor execution identity and recovery', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'escalates an explicit Container Interrupt when the shell ignores SIGTERM',
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'pico-container-force-interrupt-'));
+      const executionDirectory = join(directory, 'executions');
+      const workspace = join(directory, 'workspace');
+      await mkdir(executionDirectory);
+      await mkdir(workspace);
+      const key = randomUUID().replaceAll('-', '');
+      const childPidFile = join(executionDirectory, `${key}.child.pid`);
+      const command = spawn(
+        process.execPath,
+        ['-e', CONTAINER_RUNNER, 'run', key, 'shell', executionDirectory, workspace],
+        { stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      const commandResult = captureRunner(command);
+      command.stdin!.end(
+        JSON.stringify({ command: "trap '' TERM; while :; do sleep 0.05; done", timeout_ms: 600_000 }),
+      );
+      try {
+        await waitForFile(childPidFile);
+        const interrupt = await withTimeout(
+          executeRunner('interrupt', key, undefined, executionDirectory, workspace),
+          5_000,
+        );
+        const completed = await withTimeout(commandResult, 2_000);
+
+        expect(interrupt.status).toBe('interrupted');
+        expect(completed.status).toBe('interrupted');
+        expect((await executeRunner('status', key, undefined, executionDirectory, workspace)).status).toBe(
+          'interrupted',
+        );
+      } finally {
+        const identity = JSON.parse(await readFile(childPidFile, 'utf8').catch(() => 'null')) as {
+          pid?: number;
+        } | null;
+        if (identity?.pid) {
+          try {
+            process.kill(-identity.pid, 'SIGKILL');
+          } catch {
+            /* The shell process group already exited. */
+          }
+        }
+        if (command.exitCode === null) command.kill('SIGKILL');
+        await commandResult.catch(() => undefined);
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'force-stops a SIGTERM-resistant Container shell when its timeout expires',
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'pico-container-force-timeout-'));
+      const executionDirectory = join(directory, 'executions');
+      const workspace = join(directory, 'workspace');
+      await mkdir(executionDirectory);
+      await mkdir(workspace);
+      const key = randomUUID().replaceAll('-', '');
+      const childPidFile = join(executionDirectory, `${key}.child.pid`);
+      const command = spawn(
+        process.execPath,
+        ['-e', CONTAINER_RUNNER, 'run', key, 'shell', executionDirectory, workspace],
+        { stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      const commandResult = captureRunner(command);
+      command.stdin!.end(JSON.stringify({ command: "trap '' TERM; while :; do sleep 0.05; done", timeout_ms: 1_000 }));
+      try {
+        await waitForFile(childPidFile);
+        const settled = await withTimeout(commandResult, 5_000);
+
+        expect(settled.status).toBe('failed');
+        expect(settled.error).toMatch(/timed out after 1000ms/i);
+        expect((await executeRunner('status', key, undefined, executionDirectory, workspace)).status).toBe('failed');
+      } finally {
+        const identity = JSON.parse(await readFile(childPidFile, 'utf8').catch(() => 'null')) as {
+          pid?: number;
+        } | null;
+        if (identity?.pid) {
+          try {
+            process.kill(-identity.pid, 'SIGKILL');
+          } catch {
+            /* The shell process group already exited. */
+          }
+        }
+        if (command.exitCode === null) command.kill('SIGKILL');
+        await commandResult.catch(() => undefined);
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
+
   it.skipIf(process.platform !== 'linux')(
     'keeps a detached shell running and interruptible after its Container Runner exits',
     async () => {

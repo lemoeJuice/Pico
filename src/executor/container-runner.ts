@@ -268,10 +268,29 @@ async function run() {
     const hasRunner = runnerAlive();
     const childIdentity = readChildIdentity();
     const hasChild = childAlive(childIdentity, runnerPid);
-    const targetPid = hasChild ? childIdentity.pid : hasRunner && !childIdentity ? runnerPid : null;
-    if (targetPid) {
-      try { process.kill(-targetPid, 'SIGTERM'); }
-      catch { try { process.kill(targetPid, 'SIGTERM'); } catch {} }
+    if (hasChild && childIdentity) {
+      try { process.kill(-childIdentity.pid, 'SIGTERM'); }
+      catch { try { process.kill(childIdentity.pid, 'SIGTERM'); } catch {} }
+    } else if (hasRunner && runnerPid) {
+      try { process.kill(runnerPid, 'SIGTERM'); } catch {}
+    }
+    const graceDeadline = Date.now() + 1500;
+    while (Date.now() < graceDeadline) {
+      if (fs.existsSync(resultFile)) return send(await readStoredResult());
+      if (!alive()) return send({ status: 'interrupted' });
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    if (hasChild && childIdentity) {
+      try { process.kill(-childIdentity.pid, 'SIGKILL'); }
+      catch { try { process.kill(childIdentity.pid, 'SIGKILL'); } catch {} }
+    } else if (runnerAlive() && runnerPid) {
+      try { process.kill(runnerPid, 'SIGKILL'); } catch {}
+    }
+    const settleDeadline = Date.now() + 2000;
+    while (Date.now() < settleDeadline) {
+      if (fs.existsSync(resultFile)) return send(await readStoredResult());
+      if (!alive()) return send({ status: 'interrupted' });
+      await new Promise(resolve => setTimeout(resolve, 25));
     }
     if (fs.existsSync(resultFile)) return send(await readStoredResult());
     return send({ status: alive() ? 'running' : 'interrupted' });
@@ -324,12 +343,25 @@ async function run() {
       let stdout = ''; let stderr = '';
       command.stdout.setEncoding('utf8').on('data', chunk => { stdout = (stdout + chunk).slice(-40000); });
       command.stderr.setEncoding('utf8').on('data', chunk => { stderr = (stderr + chunk).slice(-40000); });
-      const timeout = setTimeout(() => { try { process.kill(-command.pid, 'SIGTERM'); } catch {} }, Math.min(Math.max(Number(args.timeout_ms) || 120000, 1000), 600000));
+      const timeoutMs = Math.min(Math.max(Number(args.timeout_ms) || 120000, 1000), 600000);
+      let timedOut = false;
+      let killTimer;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        try { process.kill(-command.pid, 'SIGTERM'); } catch {}
+        killTimer = setTimeout(() => { try { process.kill(-command.pid, 'SIGKILL'); } catch {} }, 1500);
+      }, timeoutMs);
       const exit = await new Promise((resolve, reject) => {
         command.once('error', reject);
         command.once('close', (value, signal) => resolve({ code: value == null ? 1 : value, signal }));
       });
       clearTimeout(timeout);
+      if (killTimer) clearTimeout(killTimer);
+      if (timedOut) {
+        const failed = { status: 'failed', error: 'Command timed out after ' + timeoutMs + 'ms' };
+        await writeResult(failed);
+        return send(failed);
+      }
       if (exit.signal) {
         const interrupted = { status: 'interrupted', error: 'Tool process received an explicit interrupt request.' };
         await writeResult(interrupted);
