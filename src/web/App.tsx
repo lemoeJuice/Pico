@@ -29,6 +29,7 @@ import {
 } from './snapshot-consistency.js';
 import { isNearScrollEnd } from './scroll-follow.js';
 import { threadCanBeInterrupted } from './thread-controls.js';
+import { executorStatusFromProbe } from './executor-status.js';
 import {
   appendAssistantDraft,
   assistantStreamsAfterDisconnect,
@@ -153,16 +154,26 @@ function ExecutorPill({
   connected: boolean | null;
   error: string | null;
 }) {
+  const connectionLabel = connected === null ? (error ? 'Status unknown' : 'Checking…') : undefined;
+  const accessibleStatus =
+    connected === null ? (error ? 'status unknown' : 'checking connection') : connected ? 'connected' : 'disconnected';
   return (
-    <span className={`executor-pill ${connected === false ? 'executor-offline' : ''}`} title={error ?? undefined}>
+    <span
+      className={`executor-pill ${connected === false ? 'executor-offline' : ''}`}
+      title={error ?? undefined}
+      aria-label={`${executorLabel(thread)} Executor ${accessibleStatus}${error ? `: ${error}` : ''}`}
+    >
       <span className="executor-glyph">
         {thread.executorKind === 'container' ? '▧' : thread.executorRemote ? '⇄' : '⌂'}
       </span>
       <span>{executorLabel(thread)} Executor</span>
       {connected === null ? (
-        <i className="tiny-spinner" />
+        <>
+          {connectionLabel ? <span>{connectionLabel}</span> : null}
+          {error ? <i className="connection-dot" aria-hidden="true" /> : <i className="tiny-spinner" />}
+        </>
       ) : (
-        <i className={`connection-dot ${connected ? 'online' : 'offline'}`} />
+        <i className={`connection-dot ${connected ? 'online' : 'offline'}`} aria-hidden="true" />
       )}
     </span>
   );
@@ -381,6 +392,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const listRef = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
   const snapshotRequest = useRef(0);
+  const permissionRefreshError = useRef<string | null>(null);
   const projectThreadVersions = useRef(new Map<string, number>());
   const activeProjectId = useRef(projectId);
   const threadUpdateVersions = useRef(new Map<string, number>());
@@ -625,30 +637,41 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     setPermissions([]);
     setPermissionsThreadId(threadId);
     let alive = true;
+    let refreshing = false;
     const refresh = async (): Promise<void> => {
-      const [executor, nextPermissions] = await Promise.all([
-        api<{ connected: boolean; error?: string }>(`/api/threads/${threadId}/executor`),
-        api<ToolPermission[]>(`/api/threads/${threadId}/permissions`),
-      ]);
-      if (!alive) return;
-      setExecutorConnected(executor.connected);
-      setExecutorError(executor.connected ? null : (executor.error ?? 'Executor connection failed.'));
-      setPermissions(nextPermissions);
-      setPermissionsThreadId(threadId);
-    };
-    void refresh().catch((caught: unknown) => {
-      if (alive) {
-        setExecutorConnected(false);
-        setExecutorError(caught instanceof Error ? caught.message : String(caught));
-      }
-    });
-    const timer = window.setInterval(() => {
-      void refresh().catch((caught: unknown) => {
-        if (alive) {
-          setExecutorConnected(false);
-          setExecutorError(caught instanceof Error ? caught.message : String(caught));
+      if (!alive || refreshing) return;
+      refreshing = true;
+      try {
+        const [executorResult, permissionsResult] = await Promise.allSettled([
+          api<{ connected: boolean; error?: string }>(`/api/threads/${threadId}/executor`),
+          api<ToolPermission[]>(`/api/threads/${threadId}/permissions`),
+        ]);
+        if (!alive) return;
+        const executorStatus = executorStatusFromProbe(executorResult);
+        setExecutorConnected(executorStatus.connected);
+        setExecutorError(executorStatus.error);
+        if (permissionsResult.status === 'fulfilled') {
+          setPermissions(permissionsResult.value);
+          setPermissionsThreadId(threadId);
+          const previousError = permissionRefreshError.current;
+          permissionRefreshError.current = null;
+          if (previousError) setError((current) => (current === previousError ? '' : current));
+        } else {
+          const reason =
+            permissionsResult.reason instanceof Error
+              ? permissionsResult.reason.message
+              : String(permissionsResult.reason);
+          const nextError = `Could not refresh Tool permissions: ${reason}`;
+          permissionRefreshError.current = nextError;
+          setError(nextError);
         }
-      });
+      } finally {
+        refreshing = false;
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => {
+      void refresh();
     }, 15_000);
     return () => {
       alive = false;
