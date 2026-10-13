@@ -121,6 +121,10 @@ button:disabled {
   color: #66736b;
   background: #f0f3ef;
   border-right: 1px solid #e6eae5;
+  transition:
+    flex-basis 0.22s ease,
+    padding 0.22s ease,
+    border-color 0.22s ease;
 }
 .brand-row {
   display: flex;
@@ -494,9 +498,15 @@ button:disabled {
 .connection-label i.offline {
   background: #cd8c77;
 }
-.mobile-close,
 .menu-button {
   display: none;
+}
+.sidebar-collapse-button {
+  display: inline-grid;
+  margin-left: auto;
+}
+.desktop-sidebar-collapsed .menu-button {
+  display: inline-grid;
 }
 
 .main-panel {
@@ -1421,7 +1431,9 @@ button:disabled {
 }
 .composer-plugin-controls {
   display: flex;
-  flex: 1 1 470px;
+  flex: 0 1 clamp(260px, 48%, 390px);
+  transform: translateX(-3px);
+  max-width: 100%;
   min-width: 0;
   align-items: center;
   gap: 8px;
@@ -1436,44 +1448,7 @@ button:disabled {
 .composer-plugin-controls .plugin-web-view-component {
   flex: 1 1 100%;
   min-width: 0;
-  height: 36px;
-}
-.composer-plugin-controls .form-stack {
-  flex: 1 1 220px;
-  flex-direction: row;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-}
-.composer-plugin-controls .form-stack label {
-  flex: 0 1 180px;
-  flex-direction: row;
-  align-items: center;
-  gap: 7px;
-  color: #849187;
-  font-size: 9px;
-  font-weight: 500;
-}
-.composer-plugin-controls .form-stack select {
-  width: auto;
-  min-width: 120px;
-  min-height: 30px;
-  padding: 0 8px;
-  font-size: 10px;
-}
-.composer-plugin-controls .chatgpt-fast-control {
-  flex: 0 1 auto;
-  min-height: 30px;
-  padding: 5px 8px;
-  background: #f6f8f5;
-}
-.composer-plugin-controls .chatgpt-fast-control span {
-  flex-direction: row;
-  align-items: center;
-  gap: 6px;
-}
-.composer-plugin-controls .chatgpt-fast-control small {
-  display: none;
+  height: var(--pico-composer-control-height, 32px);
 }
 .plugin-settings-pages {
   display: flex;
@@ -1499,7 +1474,7 @@ button:disabled {
 .composer-box {
   flex: 1 1 auto;
   min-width: 170px;
-  padding: 11px 12px 9px 14px;
+  padding: 10px 14px 8px 14px;
   background: white;
   border: 1px solid #e4eae2;
   border-radius: 15px;
@@ -1515,9 +1490,10 @@ button:disabled {
 .composer-box textarea {
   display: block;
   width: 100%;
-  min-height: 42px;
-  max-height: 170px;
-  resize: vertical;
+  min-height: 1.65em;
+  max-height: calc(1.65em * 5 + 4px);
+  overflow-y: hidden;
+  resize: none;
   padding: 2px 0;
   color: #46564b;
   background: transparent;
@@ -1534,13 +1510,15 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  padding-top: 6px;
 }
 .composer-footer-actions {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
   justify-content: flex-end;
+  transform: translateX(3px);
   max-width: 100%;
   gap: 6px;
   flex-wrap: wrap;
@@ -1550,7 +1528,8 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 30px;
+  height: var(--pico-composer-control-height, 32px);
+  min-height: var(--pico-composer-control-height, 32px);
   gap: 7px;
   padding: 0 10px;
   color: #718078;
@@ -1595,7 +1574,7 @@ button:disabled {
   animation: spin 0.9s linear infinite;
 }
 .interrupt-icon-button {
-  width: 30px;
+  width: var(--pico-composer-control-height, 32px);
   padding: 0;
   color: #a36d5d;
   background: #fbf2ee;
@@ -1605,7 +1584,8 @@ button:disabled {
   background: #f7e8e1;
 }
 .composer-plugin-action {
-  min-height: 29px;
+  height: var(--pico-composer-control-height, 32px);
+  min-height: var(--pico-composer-control-height, 32px);
   padding: 0 9px;
   color: #627c67;
   background: #f0f5f0;
@@ -1624,8 +1604,8 @@ button:disabled {
 .send-button {
   display: grid;
   place-items: center;
-  width: 29px;
-  height: 29px;
+  width: var(--pico-composer-control-height, 32px);
+  height: var(--pico-composer-control-height, 32px);
   color: white;
   background: #64866b;
   border: 0;
@@ -2175,9 +2155,6 @@ button:disabled {
   .composer-entry-row {
     flex-wrap: wrap;
   }
-  .composer-plugin-controls {
-    flex: 1 1 100%;
-  }
   .command-menu {
     right: 22px;
     left: 22px;
@@ -2215,12 +2192,9 @@ button:disabled {
     background: rgba(40, 52, 43, 0.23);
     border: 0;
   }
-  .mobile-close,
+  .sidebar-collapse-button,
   .menu-button {
     display: inline-grid;
-  }
-  .mobile-close {
-    margin-left: auto;
   }
   .menu-button {
     flex: 0 0 40px;
@@ -2323,11 +2297,8 @@ button:disabled {
     flex-wrap: wrap;
     gap: 7px;
   }
-  .composer-plugin-controls {
-    flex: 1 1 100%;
-  }
   .composer-plugin-controls .plugin-web-view-component {
-    height: 36px;
+    height: var(--pico-composer-control-height, 32px);
   }
   .composer-box {
     flex: 1 1 0;
@@ -2338,10 +2309,9 @@ button:disabled {
     left: 10px;
   }
   .composer-box {
-    padding: 9px 9px 7px 11px;
+    padding: 9px 11px 7px 11px;
   }
   .composer-box textarea {
-    min-height: 38px;
     font-size: 16px;
   }
   .composer-footer {
@@ -2354,23 +2324,24 @@ button:disabled {
     font-size: 10px;
   }
   .composer-plugin-action {
-    min-height: 40px;
+    min-height: var(--pico-composer-control-height, 32px);
     padding: 0 10px;
     font-size: 11px;
   }
   .send-button {
-    width: 42px;
-    height: 42px;
+    width: var(--pico-composer-control-height, 32px);
+    height: var(--pico-composer-control-height, 32px);
   }
   .composer-state-control,
   .interrupt-icon-button {
-    min-height: 40px;
+    height: var(--pico-composer-control-height, 32px);
+    min-height: var(--pico-composer-control-height, 32px);
     padding-right: 11px;
     padding-left: 11px;
     font-size: 11px;
   }
   .interrupt-icon-button {
-    width: 40px;
+    width: var(--pico-composer-control-height, 32px);
     padding: 0;
   }
   .welcome-screen {
@@ -2489,6 +2460,19 @@ button:disabled {
   .permission-row select,
   .form-stack input:not([type='range']) {
     font-size: 16px;
+  }
+}
+
+@media (min-width: 681px) {
+  .desktop-sidebar-collapsed .sidebar {
+    flex-basis: 0;
+    padding-right: 0;
+    padding-left: 0;
+    overflow: hidden;
+    border-right-color: transparent;
+  }
+  .desktop-sidebar-collapsed .sidebar > * {
+    visibility: hidden;
   }
 }
 

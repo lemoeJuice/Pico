@@ -1,4 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+  type ReactNode,
+} from 'react';
 import type {
   AssistantPayload,
   CanonicalRecord,
@@ -43,7 +53,7 @@ import {
 } from './assistant-drafts.js';
 import { noticeForThread, withThreadNotice, withoutThreadNotice, type ThreadNotices } from './thread-notices.js';
 import { uiContributionsAt } from './ui-contributions.js';
-import type { PluginUiProps } from '../plugins/ui-protocol.js';
+import { PLUGIN_COMPOSER_CONTROL_HEIGHT_PX, type PluginUiProps } from '../plugins/ui-protocol.js';
 import { PluginWebView } from './plugin-web-view.js';
 import { appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from './history-pages.js';
 import {
@@ -432,6 +442,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newThreadOpen, setNewThreadOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [desktopSidebarCollapsed, setDesktopSidebarCollapsed] = useState(false);
   const [defaultWorkspace, setDefaultWorkspace] = useState('');
   const [pluginInfo, setPluginInfo] = useState<PluginInfo | null>(null);
   const [commands, setCommands] = useState<Array<{ name: string; description: string }>>([]);
@@ -471,6 +482,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     hasApiKey: false,
   });
   const listRef = useRef<HTMLDivElement>(null);
+  const messageTextareaRef = useRef<HTMLTextAreaElement>(null);
   const followLatest = useRef(true);
   const snapshotRequest = useRef(0);
   const permissionRefreshError = useRef<string | null>(null);
@@ -493,6 +505,22 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   activeThreadId.current = threadId;
   assistantDraftsRef.current = assistantDrafts;
   draftRef.current = { threadId, value: draft };
+
+  useLayoutEffect(() => {
+    const textarea = messageTextareaRef.current;
+    if (!textarea) return;
+
+    textarea.style.height = 'auto';
+    const style = window.getComputedStyle(textarea);
+    const fontSize = Number.parseFloat(style.fontSize) || 12;
+    const parsedLineHeight = Number.parseFloat(style.lineHeight);
+    const lineHeight = Number.isFinite(parsedLineHeight) ? parsedLineHeight : fontSize * 1.65;
+    const verticalPadding = Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom);
+    const maxHeight = Math.ceil(lineHeight * 5 + verticalPadding);
+    const contentHeight = textarea.scrollHeight;
+    textarea.style.height = `${Math.min(contentHeight, maxHeight)}px`;
+    textarea.style.overflowY = contentHeight > maxHeight ? 'auto' : 'hidden';
+  }, [draft, threadId]);
 
   const updateDraft = (value: string): void => {
     const targetThreadId = activeThreadId.current;
@@ -1442,7 +1470,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const pauseReason = visiblePauseReason(currentState, selectedThread?.pauseReason ?? null, [error, activeNotice]);
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${desktopSidebarCollapsed ? 'desktop-sidebar-collapsed' : ''}`}>
       {mobileSidebarOpen ? (
         <button className="mobile-scrim" aria-label="Close navigation" onClick={() => setMobileSidebarOpen(false)} />
       ) : null}
@@ -1453,9 +1481,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           </div>
           <div className="brand-name">pico</div>
           <button
-            className="icon-button mobile-close"
+            className="icon-button sidebar-collapse-button"
             aria-label="Collapse sidebar"
-            onClick={() => setMobileSidebarOpen(false)}
+            title="Collapse sidebar"
+            onClick={() => {
+              if (window.matchMedia('(max-width: 680px)').matches) setMobileSidebarOpen(false);
+              else setDesktopSidebarCollapsed(true);
+            }}
           >
             <ChevronLeft size={18} aria-hidden="true" />
           </button>
@@ -1574,8 +1606,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         <header className="topbar">
           <button
             className="icon-button menu-button"
-            aria-label="Open navigation"
-            onClick={() => setMobileSidebarOpen(true)}
+            aria-label="Open sidebar"
+            title="Open sidebar"
+            onClick={() => {
+              if (window.matchMedia('(max-width: 680px)').matches) setMobileSidebarOpen(true);
+              else setDesktopSidebarCollapsed(false);
+            }}
           >
             <Menu size={18} aria-hidden="true" />
           </button>
@@ -1817,8 +1853,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 </div>
               ) : null}
               <div className="composer-entry-row">
-                <div className="composer-box">
+                <div
+                  className="composer-box"
+                  style={
+                    {
+                      '--pico-composer-control-height': `${PLUGIN_COMPOSER_CONTROL_HEIGHT_PX}px`,
+                    } as CSSProperties
+                  }
+                >
                   <textarea
+                    ref={messageTextareaRef}
                     value={draft}
                     onChange={(event) => updateDraft(event.target.value)}
                     onKeyDown={(event) => {
@@ -1830,7 +1874,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       }
                     }}
                     placeholder="Write a message… use / for commands"
-                    rows={2}
+                    rows={1}
                     aria-label="Message"
                   />
                   <div className="composer-footer">
@@ -1844,6 +1888,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                               entry={item.entry}
                               viewType="component"
                               viewId={item.component}
+                              uiSlot={item.slot}
                               {...pluginUiContext}
                               isRegisteredPage={isRegisteredPluginPage}
                             />

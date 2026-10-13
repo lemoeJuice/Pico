@@ -1,6 +1,8 @@
-import type { ModelSettings, PublicSettings } from '../core/types.js';
+import type { ModelSettings, PublicSettings, UiContribution } from '../core/types.js';
 
 export const PLUGIN_UI_PROTOCOL_VERSION = 1;
+export const PLUGIN_COMPOSER_CONTROL_HEIGHT_PX = 32;
+export type PluginUiSlot = UiContribution['slot'];
 
 export type PluginApiInit = {
   method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -41,7 +43,14 @@ export interface PluginUiInitMessage {
   entry: string;
   viewType: 'page' | 'component';
   viewId: string;
+  uiSlot?: PluginUiSlot;
+  controlHeightPx?: number;
   settings: PublicSettings;
+}
+
+export function pluginUiLayoutForSlot(uiSlot?: PluginUiSlot): Pick<PluginUiInitMessage, 'uiSlot' | 'controlHeightPx'> {
+  if (!uiSlot) return {};
+  return uiSlot === 'composer.model' ? { uiSlot, controlHeightPx: PLUGIN_COMPOSER_CONTROL_HEIGHT_PX } : { uiSlot };
 }
 
 export interface PluginUiClient {

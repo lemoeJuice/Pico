@@ -311,6 +311,7 @@ function ChatGptPlanComposerModel({
   return (
     <div className="chatgpt-composer-controls">
       <select
+        className="chatgpt-model-select"
         aria-label="Model"
         value={settings.model}
         onChange={(event) => void selectModel(event.target.value)}
@@ -331,6 +332,7 @@ function ChatGptPlanComposerModel({
         ))}
       </select>
       <select
+        className="chatgpt-reasoning-select"
         aria-label="Reasoning effort"
         value={preferences.reasoningEffort}
         onChange={(event) =>
@@ -356,7 +358,7 @@ function ChatGptPlanComposerModel({
         onClick={() => void savePreferences({ ...preferences, fastMode: !preferences.fastMode })}
         disabled={saving}
       >
-        <span>{preferences.fastMode ? 'Fast mode on' : 'Fast mode'}</span>
+        <span>Fast mode</span>
         <i aria-hidden="true" />
       </button>
     </div>

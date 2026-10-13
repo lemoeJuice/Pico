@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactElement } from 'react';
+import { useEffect, useState, type CSSProperties, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import './webui.css';
 import { createPluginUiClient, PLUGIN_UI_PROTOCOL_VERSION, type PluginUiInitMessage } from '../ui-protocol.js';
@@ -35,7 +35,15 @@ function PluginView({
 
   if (!Component) return <p>This ChatGPT plugin view is not available.</p>;
   return (
-    <div className={`plugin-ui plugin-ui-${init.viewType}`}>
+    <div
+      className={`plugin-ui plugin-ui-${init.viewType}`}
+      data-pico-ui-slot={init.uiSlot}
+      style={
+        init.controlHeightPx === undefined
+          ? undefined
+          : ({ '--pico-composer-control-height': `${init.controlHeightPx}px` } as CSSProperties)
+      }
+    >
       <Component {...client.props(settings)} />
     </div>
   );
@@ -52,6 +60,14 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
     init.entry !== entry ||
     (init.viewType !== 'page' && init.viewType !== 'component') ||
     typeof init.viewId !== 'string' ||
+    (init.uiSlot !== undefined &&
+      !['thread.toolbar', 'composer.action', 'composer.model', 'sidebar.panel'].includes(init.uiSlot)) ||
+    (init.controlHeightPx !== undefined &&
+      (init.uiSlot !== 'composer.model' ||
+        typeof init.controlHeightPx !== 'number' ||
+        !Number.isFinite(init.controlHeightPx) ||
+        init.controlHeightPx < 24 ||
+        init.controlHeightPx > 64)) ||
     !init.settings ||
     event.ports.length !== 1
   ) {

@@ -4,12 +4,14 @@ import {
   isPluginApiPath,
   isPluginModelSettingsUpdate,
   isPluginUiRequest,
+  pluginUiLayoutForSlot,
   PLUGIN_UI_PROTOCOL_VERSION,
   pluginUiUrl,
   type PluginApiInit,
   type PluginModelSettingsUpdate,
   type PluginUiInitMessage,
   type PluginUiRequest,
+  type PluginUiSlot,
 } from '../plugins/ui-protocol.js';
 
 type PluginWebViewProps = {
@@ -17,6 +19,7 @@ type PluginWebViewProps = {
   entry: string;
   viewType: PluginUiInitMessage['viewType'];
   viewId: string;
+  uiSlot?: PluginUiSlot;
   settings: PublicSettings;
   api<T>(path: string, init?: PluginApiInit): Promise<T>;
   updateModelSettings(update: PluginModelSettingsUpdate): Promise<void>;
@@ -53,6 +56,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
   current.current = props;
 
   const src = pluginUiUrl(props.pluginId, props.entry, props.viewType, props.viewId);
+  const layout = pluginUiLayoutForSlot(props.uiSlot);
 
   useEffect(() => {
     portRef.current?.postMessage({ type: 'pico:plugin-ui:settings', settings: props.settings });
@@ -79,6 +83,11 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
     hostPort.onmessage = (event: MessageEvent<unknown>): void => {
       const message = event.data as { type?: unknown; height?: unknown } | null;
       if (message?.type === 'pico:plugin-ui:resize' && typeof message.height === 'number') {
+        const fixedHeight = pluginUiLayoutForSlot(current.current.uiSlot).controlHeightPx;
+        if (fixedHeight !== undefined) {
+          if (frame.current) frame.current.style.height = `${fixedHeight}px`;
+          return;
+        }
         const limits = current.current.viewType === 'page' ? { min: 220, max: 620 } : { min: 46, max: 180 };
         const height = Math.max(limits.min, Math.min(limits.max, Math.ceil(message.height)));
         if (frame.current) frame.current.style.height = `${height}px`;
@@ -106,6 +115,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       entry: props.entry,
       viewType: props.viewType,
       viewId: props.viewId,
+      ...layout,
       settings: props.settings,
     };
     frameWindow.postMessage(init, '*', [channel.port2]);
@@ -142,6 +152,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
     <iframe
       ref={frame}
       className={`plugin-web-view plugin-web-view-${props.viewType}`}
+      style={layout.controlHeightPx === undefined ? undefined : { height: `${layout.controlHeightPx}px` }}
       title={`${props.pluginId} ${props.viewType} ${props.viewId}`}
       src={src}
       sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
