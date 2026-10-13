@@ -117,8 +117,7 @@ export interface TokenUsage {
   totalTokens?: number;
 }
 
-export type ModelProvider = 'openai-compatible' | 'chatgpt-plan';
-export type ReasoningEffort = 'auto' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type ModelProvider = string;
 
 export interface ModelSettings {
   baseUrl: string;
@@ -126,8 +125,6 @@ export interface ModelSettings {
   model: string;
   temperature: number;
   provider: ModelProvider;
-  reasoningEffort: ReasoningEffort;
-  fastMode: boolean;
 }
 
 export interface ToolDefinition {
@@ -146,11 +143,20 @@ export interface PermissionRequest {
 }
 
 export interface UiContribution {
-  slot: 'thread.toolbar' | 'composer.action' | 'sidebar.panel';
+  slot: 'thread.toolbar' | 'composer.action' | 'composer.model' | 'sidebar.panel';
   id: string;
   label: string;
   description?: string;
   command?: string;
+  pluginId?: string;
+  entry?: string;
+  component?: string;
+}
+
+export interface ModelProviderContribution {
+  id: ModelProvider;
+  label: string;
+  description?: string;
 }
 
 export interface PublicSettings {
@@ -158,14 +164,5 @@ export interface PublicSettings {
   model: string;
   temperature: number;
   provider: ModelProvider;
-  reasoningEffort: ReasoningEffort;
-  fastMode: boolean;
   hasApiKey: boolean;
-  chatGptConnected: boolean;
-  chatGptAccountLabel: string | null;
-}
-
-export interface ChatGptModelChoice {
-  slug: string;
-  displayName: string;
 }

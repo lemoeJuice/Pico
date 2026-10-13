@@ -1,12 +1,11 @@
 import { createHash, createPublicKey, randomBytes, randomUUID, verify } from 'node:crypto';
-import type { ChatGptModelChoice } from '../core/types.js';
-import type { PicoStore } from '../core/store.js';
+import type { ChatGptModelChoice } from './types.js';
 
 const authIssuer = 'https://auth.openai.com';
 const authorizeEndpoint = `${authIssuer}/api/accounts/authorize`;
 const tokenEndpoint = `${authIssuer}/api/accounts/oauth/token`;
 const resource = 'https://api.openai.com/v1';
-const authSettingKey = 'chatgpt.oauth';
+const authStateKey = 'oauth';
 const planScope = 'chatgpt.tokens.use.direct';
 const requestedScopes = 'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct';
 const refreshAheadMs = 120_000;
@@ -113,6 +112,11 @@ export interface ChatGptAccountStatus {
   accountLabel: string | null;
 }
 
+export interface ChatGptPluginState {
+  get<T>(key: string, fallback: T): T;
+  set<T>(key: string, value: T): void;
+}
+
 /** Implements OpenAI's public Sign in with ChatGPT flow for eligible open-source clients. */
 export class ChatGptPlanAuth {
   private readonly pending = new Map<string, PendingAuthorization>();
@@ -121,7 +125,7 @@ export class ChatGptPlanAuth {
   private jwks: JsonWebKeySet | null = null;
 
   constructor(
-    private readonly store: PicoStore,
+    private readonly state: ChatGptPluginState,
     private readonly fetcher: typeof fetch = fetch,
     private readonly now: () => number = Date.now,
   ) {}
@@ -503,10 +507,10 @@ export class ChatGptPlanAuth {
   }
 
   private readCredentials(): StoredCredentials | null {
-    return normalizedCredential(this.store.getSetting<unknown>(authSettingKey, null));
+    return normalizedCredential(this.state.get<unknown>(authStateKey, null));
   }
 
   private writeCredentials(credentials: StoredCredentials): void {
-    this.store.setSetting(authSettingKey, credentials);
+    this.state.set(authStateKey, credentials);
   }
 }

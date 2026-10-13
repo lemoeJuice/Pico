@@ -1,5 +1,4 @@
-import { createServer, type Server } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -46,8 +45,6 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   }
   const sessions = new AccessSessions(accessToken);
   const trustProxy = process.env.PICO_TRUST_PROXY === '1';
-  const chatGptCallbackServers = new Set<Server>();
-
   const store = new PicoStore();
   const runtime = new PicoRuntime(store);
   await runtime.initialize();
@@ -210,24 +207,16 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     if (typeof body.model === 'string') update.model = body.model;
     if (typeof body.apiKey === 'string') update.apiKey = body.apiKey;
     if (typeof body.temperature === 'number') update.temperature = body.temperature;
-    if (body.provider === 'openai-compatible' || body.provider === 'chatgpt-plan') update.provider = body.provider;
-    if (
-      body.reasoningEffort === 'auto' ||
-      body.reasoningEffort === 'none' ||
-      body.reasoningEffort === 'minimal' ||
-      body.reasoningEffort === 'low' ||
-      body.reasoningEffort === 'medium' ||
-      body.reasoningEffort === 'high' ||
-      body.reasoningEffort === 'xhigh' ||
-      body.reasoningEffort === 'max'
-    ) {
-      update.reasoningEffort = body.reasoningEffort;
-    }
-    if (typeof body.fastMode === 'boolean') update.fastMode = body.fastMode;
+    if (typeof body.provider === 'string') update.provider = body.provider;
     response.json(runtime.updateModelSettings(update));
   });
-  app.post('/api/settings/chatgpt/sign-in', async (request, response) => {
-    const origin = request.headers.origin;
+  app.get('/api/commands', (_request, response) => response.json(runtime.availableCommands()));
+  app.get('/api/plugins', (_request, response) => response.json(runtime.pluginInfo()));
+  app.use('/api/plugins/:pluginId', async (request, response) => {
+    const route = runtime.pluginHttpRoute(request.params.pluginId!, request.method, request.path || '/');
+    if (!route) return notFound(response, 'Plugin API route not found');
+    const mutatesState = !['GET', 'HEAD'].includes(request.method);
+    const origin = request.headers.origin ?? null;
     const forwardedProto =
       trustProxy &&
       String(request.headers['x-forwarded-proto'] ?? '')
@@ -235,97 +224,21 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
         ?.trim()
         .toLowerCase() === 'https';
     if (
-      !origin ||
-      !sameOrigin(
-        origin,
-        request.headers.host,
-        Boolean((request.socket as import('node:tls').TLSSocket).encrypted) || forwardedProto,
-      )
+      mutatesState &&
+      (!origin ||
+        !sameOrigin(
+          origin,
+          request.headers.host,
+          Boolean((request.socket as import('node:tls').TLSSocket).encrypted) || forwardedProto,
+        ))
     ) {
-      throw new Error('ChatGPT sign-in must be started from the Pico Web UI.');
+      throw new Error('Plugin state changes must come from the Pico Web UI.');
     }
-    const callbackOrigin = new URL(origin).origin;
-    const operationId = randomUUID();
-    let handlingCallback = false;
-    let callbackServer: Server;
-    let timeout: NodeJS.Timeout | undefined;
-    const closeCallbackServer = (): void => {
-      if (timeout) clearTimeout(timeout);
-      chatGptCallbackServers.delete(callbackServer);
-      if (callbackServer.listening) callbackServer.close();
-    };
-    callbackServer = createServer((callbackRequest, callbackResponse) => {
-      const callbackUrl = new URL(callbackRequest.url ?? '/', 'http://127.0.0.1');
-      if (callbackRequest.method !== 'GET' || callbackUrl.pathname !== '/auth/callback') {
-        callbackResponse.writeHead(404).end('Not found');
-        return;
-      }
-      if (handlingCallback) {
-        callbackResponse.writeHead(409).end('Authorization is already being completed.');
-        return;
-      }
-      handlingCallback = true;
-      void runtime
-        .completeChatGptSignIn(
-          callbackUrl.searchParams,
-          `http://127.0.0.1:${(callbackServer.address() as import('node:net').AddressInfo).port}/auth/callback`,
-        )
-        .then(() => ({ status: 'connected', message: 'ChatGPT is connected. Return to Pico.' }))
-        .catch((error: unknown) => ({
-          status: 'failed',
-          message: error instanceof Error ? error.message : 'ChatGPT sign-in failed.',
-        }))
-        .then((result) => {
-          const message = result.message.replace(/[<>]/g, '');
-          const payload = JSON.stringify({ type: 'pico:chatgpt-auth', operationId, ...result }).replace(
-            /</g,
-            '\\u003c',
-          );
-          const target = JSON.stringify(callbackOrigin).replace(/</g, '\\u003c');
-          callbackResponse.writeHead(200, {
-            'cache-control': 'no-store',
-            'content-type': 'text/html; charset=utf-8',
-            'referrer-policy': 'no-referrer',
-            'x-content-type-options': 'nosniff',
-          });
-          callbackResponse.end(
-            `<!doctype html><meta charset="utf-8"><title>ChatGPT sign-in</title><p>${message}</p><p>You can close this tab and return to Pico.</p><script>if(window.opener){window.opener.postMessage(${payload},${target});window.close();}</script>`,
-          );
-          closeCallbackServer();
-        });
-    });
-    chatGptCallbackServers.add(callbackServer);
-    await new Promise<void>((resolvePromise, reject) => {
-      callbackServer.once('error', reject);
-      callbackServer.listen(0, '127.0.0.1', () => {
-        callbackServer.removeListener('error', reject);
-        resolvePromise();
-      });
-    });
-    const address = callbackServer.address();
-    if (!address || typeof address === 'string') {
-      closeCallbackServer();
-      throw new Error('Could not start the local ChatGPT sign-in callback.');
-    }
-    const redirectUri = `http://127.0.0.1:${address.port}/auth/callback`;
-    try {
-      const { authorizationUrl } = await runtime.beginChatGptSignIn(redirectUri);
-      timeout = setTimeout(closeCallbackServer, 10 * 60_000);
-      timeout.unref();
-      response.json({ authorizationUrl, callbackOrigin: `http://127.0.0.1:${address.port}`, operationId });
-    } catch (error) {
-      closeCallbackServer();
-      throw error;
-    }
+    const requestUrl = new URL(request.originalUrl, `http://${request.headers.host ?? 'localhost'}`);
+    const result = await route.handler({ body: request.body, query: requestUrl.searchParams, origin });
+    if (result === undefined) return response.status(204).end();
+    return response.json(result);
   });
-  app.get('/api/settings/chatgpt/models', async (_request, response) => {
-    response.json(await runtime.chatGptModels());
-  });
-  app.delete('/api/settings/chatgpt', async (_request, response) => {
-    response.json(await runtime.disconnectChatGpt());
-  });
-  app.get('/api/commands', (_request, response) => response.json(runtime.availableCommands()));
-  app.get('/api/plugins', (_request, response) => response.json(runtime.pluginInfo()));
 
   const httpServer = createServer(app);
   const sockets = new Set<WebSocket>();
@@ -424,9 +337,6 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
       closePromise = (async () => {
         unsubscribe();
         for (const socket of sockets) socket.close();
-        for (const callbackServer of chatGptCallbackServers) {
-          await new Promise<void>((resolvePromise) => callbackServer.close(() => resolvePromise()));
-        }
         websocketServer.close();
         await new Promise<void>((resolvePromise) => httpServer.close(() => resolvePromise()));
         await runtime.shutdown();

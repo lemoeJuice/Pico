@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ChatGptResponsesAdapter } from '../src/runtime/responses-model.js';
-import type { ChatGptPlanAuth } from '../src/runtime/chatgpt-auth.js';
+import { ChatGptResponsesAdapter } from '../src/plugins/chatgpt-plan/model.js';
+import type { ChatGptPlanAuth } from '../src/plugins/chatgpt-plan/auth.js';
 import type { ModelPrompt } from '../src/runtime/model.js';
+import type { ChatGptPlanPreferences } from '../src/plugins/chatgpt-plan/types.js';
 
 describe('ChatGPT Responses adapter', () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -43,8 +44,6 @@ describe('ChatGPT Responses adapter', () => {
       system: 'You are Pico.',
       model: 'selected-model',
       temperature: 0.2,
-      reasoningEffort: 'high',
-      fastMode: true,
       turns: [
         { kind: 'message', role: 'user', content: 'Read this file.' },
         {
@@ -66,15 +65,7 @@ describe('ChatGPT Responses adapter', () => {
     const adapter = new ChatGptResponsesAdapter(auth);
     const result = await adapter.complete(
       prompt,
-      {
-        baseUrl: 'https://api.openai.com/v1',
-        apiKey: '',
-        model: prompt.model,
-        temperature: prompt.temperature,
-        provider: 'chatgpt-plan',
-        reasoningEffort: 'high',
-        fastMode: true,
-      },
+      { reasoningEffort: 'high', fastMode: true } satisfies ChatGptPlanPreferences,
       new AbortController().signal,
       (delta) => deltas.push(delta),
     );
@@ -119,15 +110,7 @@ describe('ChatGPT Responses adapter', () => {
     await expect(
       adapter.complete(
         { system: '', model: 'selected-model', temperature: 0.2, turns: [], tools: [] },
-        {
-          baseUrl: 'https://api.openai.com/v1',
-          apiKey: '',
-          model: 'selected-model',
-          temperature: 0.2,
-          provider: 'chatgpt-plan',
-          reasoningEffort: 'auto',
-          fastMode: false,
-        },
+        { reasoningEffort: 'auto', fastMode: false } satisfies ChatGptPlanPreferences,
         new AbortController().signal,
         () => undefined,
       ),
@@ -136,15 +119,7 @@ describe('ChatGPT Responses adapter', () => {
 
   it('treats output-token exhaustion as a limit result and other incomplete responses as failures', async () => {
     const prompt: ModelPrompt = { system: '', model: 'selected-model', temperature: 0.2, turns: [], tools: [] };
-    const settings = {
-      baseUrl: 'https://api.openai.com/v1',
-      apiKey: '',
-      model: 'selected-model',
-      temperature: 0.2,
-      provider: 'chatgpt-plan' as const,
-      reasoningEffort: 'auto' as const,
-      fastMode: false,
-    };
+    const settings = { reasoningEffort: 'auto', fastMode: false } satisfies ChatGptPlanPreferences;
 
     vi.stubGlobal(
       'fetch',
@@ -205,15 +180,7 @@ describe('ChatGPT Responses adapter', () => {
     await expect(
       adapter.complete(
         { system: '', model: 'selected-model', temperature: 0.2, turns: [], tools: [] },
-        {
-          baseUrl: 'https://api.openai.com/v1',
-          apiKey: '',
-          model: 'selected-model',
-          temperature: 0.2,
-          provider: 'chatgpt-plan',
-          reasoningEffort: 'auto',
-          fastMode: false,
-        },
+        { reasoningEffort: 'auto', fastMode: false } satisfies ChatGptPlanPreferences,
         new AbortController().signal,
         () => undefined,
       ),

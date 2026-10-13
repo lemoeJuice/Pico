@@ -260,14 +260,14 @@ describe('Pico server access boundary', () => {
         body: JSON.stringify({ token: process.env.PICO_ACCESS_TOKEN }),
       });
       const cookie = (login.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
-      const unauthorized = await fetch(`${base}/api/settings/chatgpt/sign-in`, {
+      const unauthorized = await fetch(`${base}/api/plugins/pico.chatgpt-plan/sign-in`, {
         method: 'POST',
         headers: { origin, 'content-type': 'application/json' },
         body: '{}',
       });
       expect(unauthorized.status).toBe(401);
 
-      const start = await fetch(`${base}/api/settings/chatgpt/sign-in`, {
+      const start = await fetch(`${base}/api/plugins/pico.chatgpt-plan/sign-in`, {
         method: 'POST',
         headers: { origin, cookie, 'content-type': 'application/json' },
         body: '{}',

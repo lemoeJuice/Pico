@@ -1,7 +1,13 @@
 import { readdir } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { join, resolve } from 'node:path';
-import type { CanonicalRecord, Thread, ToolDefinition, UiContribution } from '../core/types.js';
+import type {
+  CanonicalRecord,
+  ModelProviderContribution,
+  Thread,
+  ToolDefinition,
+  UiContribution,
+} from '../core/types.js';
 import type { ExecutionPipelines, Interceptor, PipelineStage } from '../core/pipeline.js';
 import type { PicoStore } from '../core/store.js';
 import type { ToolCatalog, ToolContext } from '../executor/tools.js';
@@ -31,6 +37,31 @@ export interface PicoPlugin {
   name: string;
   version: string;
   activate(context: PluginContext): Promise<void> | void;
+  deactivate?(): Promise<void> | void;
+}
+
+export interface PluginPageContribution {
+  id: string;
+  label: string;
+  description?: string;
+  entry: string;
+}
+
+export interface PluginHttpRequest {
+  body: unknown;
+  query: URLSearchParams;
+  origin: string | null;
+}
+
+interface RegisteredPluginHttpRoute {
+  pluginId: string;
+  method: string;
+  path: string;
+  handler(request: PluginHttpRequest): Promise<unknown> | unknown;
+}
+
+interface RegisteredPluginPage extends PluginPageContribution {
+  pluginId: string;
 }
 
 export interface PluginContext {
@@ -40,11 +71,22 @@ export interface PluginContext {
       execute: (args: Record<string, unknown>, context: ToolContext) => Promise<unknown> | unknown,
     ): void;
   };
+  models: { registerProvider(provider: ModelProviderContribution): void };
   pipelines: {
     use<I, O>(stage: PipelineStage, interceptor: Interceptor<I, O>): void;
   };
   commands: { register(command: PluginCommand): void };
-  ui: { contribute(contribution: UiContribution): void };
+  ui: {
+    contribute(contribution: UiContribution): void;
+    registerPage(page: PluginPageContribution): void;
+  };
+  http: {
+    register(
+      method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+      path: string,
+      handler: (request: PluginHttpRequest) => Promise<unknown> | unknown,
+    ): void;
+  };
   state: {
     get<T>(key: string, fallback: T): T;
     set<T>(key: string, value: T): void;
@@ -97,6 +139,12 @@ export class CommandRegistry {
 export class PluginHost {
   private readonly loaded: LoadedPlugin[] = [];
   private readonly contributions: UiContribution[] = [];
+  private readonly pages: RegisteredPluginPage[] = [];
+  private readonly providers: Array<{ pluginId: string } & ModelProviderContribution> = [
+    { pluginId: 'pico.core', id: 'openai-compatible', label: 'OpenAI-compatible API key' },
+  ];
+  private readonly routes: RegisteredPluginHttpRoute[] = [];
+  private readonly activePlugins: PicoPlugin[] = [];
   private readonly loadErrors: string[] = [];
 
   constructor(
@@ -115,8 +163,34 @@ export class PluginHost {
     return [...this.contributions];
   }
 
+  uiPages(): RegisteredPluginPage[] {
+    return [...this.pages];
+  }
+
+  modelProviders(): ModelProviderContribution[] {
+    return this.providers.map(({ id, label, description }) => ({ id, label, ...(description ? { description } : {}) }));
+  }
+
+  httpRoutes(): ReadonlyArray<RegisteredPluginHttpRoute> {
+    return [...this.routes];
+  }
+
+  findHttpRoute(pluginId: string, method: string, path: string): RegisteredPluginHttpRoute | undefined {
+    return this.routes.find((route) => route.pluginId === pluginId && route.method === method && route.path === path);
+  }
+
   errors(): string[] {
     return [...this.loadErrors];
+  }
+
+  async shutdown(): Promise<void> {
+    for (const plugin of this.activePlugins.splice(0).reverse()) {
+      try {
+        await plugin.deactivate?.();
+      } catch (error) {
+        this.loadErrors.push(`${plugin.id} shutdown: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   }
 
   async load(plugins: PicoPlugin[] = []): Promise<LoadedPlugin[]> {
@@ -158,6 +232,14 @@ export class PluginHost {
     }
     if (this.loaded.some((item) => item.id === plugin.id)) throw new Error(`Duplicate plugin ID: ${plugin.id}`);
     const contributionsStart = this.contributions.length;
+    const pagesStart = this.pages.length;
+    const providersStart = this.providers.length;
+    const routesStart = this.routes.length;
+    const assertStaticPath = (path: string, label: string): void => {
+      if (!path.startsWith('/') || path.includes('?') || path.includes('#') || path.split('/').includes('..')) {
+        throw new Error(`${label} must be an absolute, static path.`);
+      }
+    };
     const context: PluginContext = {
       tools: {
         register: (definition, execute) =>
@@ -171,13 +253,47 @@ export class PluginHost {
       pipelines: {
         use: (stage, interceptor) => this.pipelines.use(stage, plugin.id, interceptor),
       },
+      models: {
+        registerProvider: (provider) => {
+          if (!/^[a-z0-9][a-z0-9._-]*$/.test(provider.id)) throw new Error(`Invalid model provider ID: ${provider.id}`);
+          if (!provider.label.trim()) throw new Error('Model provider label is required.');
+          if (this.providers.some((item) => item.id === provider.id)) {
+            throw new Error(`Model provider ${provider.id} is already registered`);
+          }
+          this.providers.push({ ...provider, pluginId: plugin.id });
+        },
+      },
       commands: { register: (command) => this.commands.register(plugin.id, command) },
       ui: {
         contribute: (contribution) => {
-          if (!['thread.toolbar', 'composer.action', 'sidebar.panel'].includes(contribution.slot)) {
+          if (!['thread.toolbar', 'composer.action', 'composer.model', 'sidebar.panel'].includes(contribution.slot)) {
             throw new Error(`Unsupported UI semantic slot: ${contribution.slot}`);
           }
-          this.contributions.push({ ...contribution, id: `${plugin.id}:${contribution.id}` });
+          if (contribution.slot === 'composer.model' && (!contribution.entry || !contribution.component)) {
+            throw new Error('composer.model contributions must name a Web UI entry and component.');
+          }
+          this.contributions.push({ ...contribution, pluginId: plugin.id, id: `${plugin.id}:${contribution.id}` });
+        },
+        registerPage: (page) => {
+          if (!/^[a-z0-9][a-z0-9._-]*$/.test(page.id)) throw new Error(`Invalid plugin page ID: ${page.id}`);
+          if (!page.label.trim() || !/^[a-z0-9][a-z0-9._-]*$/.test(page.entry)) {
+            throw new Error('Plugin pages require a label and a simple Web UI entry name.');
+          }
+          if (this.pages.some((item) => item.pluginId === plugin.id && item.id === page.id)) {
+            throw new Error(`Plugin page ${page.id} is already registered`);
+          }
+          this.pages.push({ ...page, pluginId: plugin.id });
+        },
+      },
+      http: {
+        register: (method, path, handler) => {
+          assertStaticPath(path, 'Plugin API route');
+          if (
+            this.routes.some((route) => route.pluginId === plugin.id && route.method === method && route.path === path)
+          ) {
+            throw new Error(`Plugin API route ${method} ${path} is already registered`);
+          }
+          this.routes.push({ pluginId: plugin.id, method, path, handler });
         },
       },
       state: {
@@ -195,11 +311,16 @@ export class PluginHost {
     try {
       await plugin.activate(context);
       this.loaded.push({ id: plugin.id, name: plugin.name, version: plugin.version, source });
+      this.activePlugins.push(plugin);
     } catch (error) {
       this.tools.removeOwner(plugin.id);
       this.pipelines.removePlugin(plugin.id);
       this.commands.removeOwner(plugin.id);
       this.contributions.splice(contributionsStart);
+      this.pages.splice(pagesStart);
+      this.providers.splice(providersStart);
+      this.routes.splice(routesStart);
+      await plugin.deactivate?.();
       throw error;
     }
   }

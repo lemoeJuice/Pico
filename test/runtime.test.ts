@@ -14,20 +14,22 @@ import { assistantPayload, deferred, FakeModel, response, setupRuntime } from '.
 
 describe('durable Thread runtime invariants', () => {
   it('loads the ChatGPT provider as a first-party plugin and keeps OAuth secrets private', async () => {
-    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const env = await setupRuntime(new FakeModel(() => response('unused')), {
+      pluginDirectory: resolve(process.cwd(), 'plugins'),
+    });
     try {
       const info = env.runtime.pluginInfo();
       expect(info.plugins.some((plugin) => plugin.id === 'pico.chatgpt-plan')).toBe(true);
       expect(
         info.pipelines.some((pipeline) => pipeline.stage === 'model' && pipeline.pluginId === 'pico.chatgpt-plan'),
       ).toBe(true);
-      expect(info.ui).toContainEqual(
-        expect.objectContaining({ id: 'pico.chatgpt-plan:chatgpt-provider', command: '/chatgpt-provider' }),
+      expect(info.pages).toContainEqual(
+        expect.objectContaining({ id: 'account', pluginId: 'pico.chatgpt-plan', entry: 'webui' }),
       );
+      expect(info.providers).toContainEqual(expect.objectContaining({ id: 'chatgpt-plan' }));
       expect(env.runtime.availableCommands()).toContainEqual(expect.objectContaining({ name: 'chatgpt-provider' }));
-      expect(() => env.runtime.updateModelSettings({ provider: 'chatgpt-plan' })).toThrow('Connect a ChatGPT account');
 
-      env.store.setSetting('chatgpt.oauth', {
+      env.store.setPluginState('pico.chatgpt-plan', 'oauth', {
         hostId: 'urn:uuid:pico-test',
         clientId: 'oaiapp_pico_test',
         subject: 'chatgpt-user-1',
@@ -39,9 +41,8 @@ describe('durable Thread runtime invariants', () => {
         scopes: ['openid', 'offline_access', 'resource.invoke', 'chatgpt.tokens.use.direct'],
       });
       const publicSettings = env.runtime.publicModelSettings();
-      expect(publicSettings.chatGptConnected).toBe(true);
-      expect(publicSettings.chatGptAccountLabel).toBe('pico-user@example.test');
       expect(JSON.stringify(publicSettings)).not.toContain('token-secret');
+      expect(publicSettings.provider).toBe('openai-compatible');
     } finally {
       await env.cleanup();
     }

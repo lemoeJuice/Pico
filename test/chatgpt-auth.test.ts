@@ -1,7 +1,6 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { afterEach, describe, expect, it } from 'vitest';
-import { PicoStore } from '../src/core/store.js';
-import { ChatGptPlanAuth } from '../src/runtime/chatgpt-auth.js';
+import { describe, expect, it } from 'vitest';
+import { ChatGptPlanAuth, type ChatGptPluginState } from '../src/plugins/chatgpt-plan/auth.js';
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const jwk = {
@@ -31,13 +30,19 @@ function identityToken(clientId: string, nonce: string, now: number): string {
   return `${content}.${signature}`;
 }
 
-describe('Sign in with ChatGPT credentials', () => {
-  const stores: PicoStore[] = [];
-  afterEach(() => stores.splice(0).forEach((store) => store.close()));
+class MemoryPluginState implements ChatGptPluginState {
+  values = new Map<string, unknown>();
+  get<T>(key: string, fallback: T): T {
+    return this.values.has(key) ? (this.values.get(key) as T) : fallback;
+  }
+  set<T>(key: string, value: T): void {
+    this.values.set(key, value);
+  }
+}
 
+describe('Sign in with ChatGPT credentials', () => {
   it('validates PKCE callback state, OIDC identity and scope, then refreshes rotating tokens once', async () => {
-    const store = new PicoStore(':memory:');
-    stores.push(store);
+    const state = new MemoryPluginState();
     const now = { value: 1_800_000_000_000 };
     const tokenRequests: URLSearchParams[] = [];
     let refreshRequests = 0;
@@ -87,7 +92,7 @@ describe('Sign in with ChatGPT credentials', () => {
       }
       throw new Error(`Unexpected mocked request: ${url}`);
     };
-    const auth = new ChatGptPlanAuth(store, fetcher, () => now.value);
+    const auth = new ChatGptPlanAuth(state, fetcher, () => now.value);
     const redirectUri = 'http://127.0.0.1:14555/auth/callback';
     const { authorizationUrl } = await auth.beginSignIn(redirectUri);
     const authorization = new URL(authorizationUrl);
@@ -99,10 +104,10 @@ describe('Sign in with ChatGPT credentials', () => {
     expect(authorization.searchParams.get('scope')).toContain('chatgpt.tokens.use.direct');
     expect(authorization.searchParams.has('client_secret')).toBe(false);
 
-    const state = authorization.searchParams.get('state')!;
+    const oauthState = authorization.searchParams.get('state')!;
     const connected = await auth.completeSignIn(
       new URLSearchParams({
-        state,
+        state: oauthState,
         code: 'one-time-code',
         client_id: 'oaiapp_pico_test',
         scope: scopes,
@@ -116,17 +121,20 @@ describe('Sign in with ChatGPT credentials', () => {
     expect(tokenRequests[0]?.get('redirect_uri')).toBe(redirectUri);
     expect(tokenRequests[0]?.get('resource')).toBe('https://api.openai.com/v1');
     expect(tokenRequests[0]?.get('code_verifier')).toBeTruthy();
-    expect(store.getSetting<Record<string, unknown>>('chatgpt.oauth', {}).refreshToken).toBe('refresh-1');
+    expect(state.get<Record<string, unknown>>('oauth', {}).refreshToken).toBe('refresh-1');
 
     await expect(
-      auth.completeSignIn(new URLSearchParams({ state, code: 'replayed', client_id: 'oaiapp_pico_test' }), redirectUri),
+      auth.completeSignIn(
+        new URLSearchParams({ state: oauthState, code: 'replayed', client_id: 'oaiapp_pico_test' }),
+        redirectUri,
+      ),
     ).rejects.toThrow('expired or did not match');
 
     now.value += 3_600_000;
     await expect(Promise.all([auth.accessToken(), auth.accessToken()])).resolves.toEqual(['access-2', 'access-2']);
     expect(refreshRequests).toBe(1);
     expect(tokenRequests.at(-1)?.get('refresh_token')).toBe('refresh-1');
-    expect(store.getSetting<Record<string, unknown>>('chatgpt.oauth', {}).refreshToken).toBe('refresh-2');
+    expect(state.get<Record<string, unknown>>('oauth', {}).refreshToken).toBe('refresh-2');
 
     await expect(auth.listModels()).resolves.toEqual([{ slug: 'gpt-6.1-sol', displayName: 'GPT 6.1 Sol' }]);
     expect(auth.status().connected).toBe(true);
@@ -146,14 +154,13 @@ describe('Sign in with ChatGPT credentials', () => {
 
     await expect(auth.signOut()).resolves.toEqual({ remoteRevoked: true });
     expect(auth.status()).toEqual({ connected: false, accountLabel: null });
-    const retained = store.getSetting<Record<string, unknown>>('chatgpt.oauth', {});
+    const retained = state.get<Record<string, unknown>>('oauth', {});
     expect(retained.clientId).toBe('oaiapp_pico_test');
     expect(retained.refreshToken).toBeNull();
   });
 
   it('does not save credentials when ChatGPT plan scope is missing', async () => {
-    const store = new PicoStore(':memory:');
-    stores.push(store);
+    const state = new MemoryPluginState();
     const now = 1_800_000_000_000;
     let authorization: URL | null = null;
     const fetcher: typeof fetch = async (input, init) => {
@@ -178,7 +185,7 @@ describe('Sign in with ChatGPT credentials', () => {
       }
       throw new Error(`Unexpected mocked request: ${url}`);
     };
-    const auth = new ChatGptPlanAuth(store, fetcher, () => now);
+    const auth = new ChatGptPlanAuth(state, fetcher, () => now);
     const result = await auth.beginSignIn('http://127.0.0.1:14556/auth/callback');
     authorization = new URL(result.authorizationUrl);
 
@@ -197,9 +204,8 @@ describe('Sign in with ChatGPT credentials', () => {
   });
 
   it('preserves credentials during transient refresh failures and clears an unusable rotating token', async () => {
-    const store = new PicoStore(':memory:');
-    stores.push(store);
-    store.setSetting('chatgpt.oauth', {
+    const state = new MemoryPluginState();
+    state.set('oauth', {
       hostId: 'urn:uuid:pico-test',
       clientId: 'oaiapp_pico_test',
       subject: 'chatgpt-user-1',
@@ -211,18 +217,16 @@ describe('Sign in with ChatGPT credentials', () => {
       scopes: scopes.split(' '),
     });
     let refreshError = 'temporarily_unavailable';
-    const auth = new ChatGptPlanAuth(store, async () => Response.json({ error: refreshError }, { status: 503 }));
+    const auth = new ChatGptPlanAuth(state, async () => Response.json({ error: refreshError }, { status: 503 }));
 
     await expect(auth.accessToken(true)).rejects.toThrow('HTTP 503');
     expect(auth.status().connected).toBe(true);
-    expect(store.getSetting<Record<string, unknown>>('chatgpt.oauth', {}).refreshToken).toBe(
-      'still-live-refresh-token',
-    );
+    expect(state.get<Record<string, unknown>>('oauth', {}).refreshToken).toBe('still-live-refresh-token');
 
     refreshError = 'invalid_grant';
     await expect(auth.accessToken(true)).rejects.toThrow('Reconnect your account');
     expect(auth.status()).toEqual({ connected: false, accountLabel: null });
-    const expired = store.getSetting<Record<string, unknown>>('chatgpt.oauth', {});
+    const expired = state.get<Record<string, unknown>>('oauth', {});
     expect(expired.refreshToken).toBeNull();
     expect(expired.accessToken).toBeNull();
     expect(expired.idToken).toBe('retained-id-token');

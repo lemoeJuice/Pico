@@ -7,5 +7,5 @@
     "rootDir": "src",
     "sourceMap": true
   },
-  "include": ["src/server.ts", "src/executor/agent.ts"]
+  "include": ["src/server.ts", "src/executor/agent.ts", "src/plugins/chatgpt-plan.ts"]
 }

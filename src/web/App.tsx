@@ -4,8 +4,8 @@ import type {
   CanonicalRecord,
   Execution,
   ExecutorKind,
-  ChatGptModelChoice,
   MessagePayload,
+  ModelProviderContribution,
   ModelSettings,
   PermissionRequest,
   Project,
@@ -43,6 +43,7 @@ import {
 } from './assistant-drafts.js';
 import { noticeForThread, withThreadNotice, withoutThreadNotice, type ThreadNotices } from './thread-notices.js';
 import { uiContributionsAt } from './ui-contributions.js';
+import { pluginComponent, pluginPageComponent, type PluginUiProps } from './plugin-ui.js';
 import { appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from './history-pages.js';
 import {
   ArrowRight,
@@ -87,6 +88,8 @@ import {
 type PluginInfo = {
   plugins: Array<{ id: string; name: string; version: string; source: string }>;
   ui: UiContribution[];
+  pages: Array<{ id: string; label: string; description?: string; entry: string; pluginId: string }>;
+  providers: ModelProviderContribution[];
   pipelines: Array<{ stage: string; pluginId: string; order: number }>;
   errors: string[];
 };
@@ -118,26 +121,6 @@ function persistComposerState(state: ComposerState): void {
 function executorLabel(thread: Thread): string {
   if (thread.executorRemote) return 'Remote';
   return thread.executorKind === 'container' ? 'Container' : 'Local';
-}
-
-const reasoningEffortLabels: Record<ModelSettings['reasoningEffort'], string> = {
-  auto: 'Model default',
-  none: 'None',
-  minimal: 'Minimal',
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High',
-  xhigh: 'Extra high',
-  max: 'Maximum',
-};
-
-function reasoningEffortsFor(model: ChatGptModelChoice | undefined): ModelSettings['reasoningEffort'][] {
-  if (!model) return ['auto'];
-  const slug = model?.slug.toLowerCase() ?? '';
-  if (slug.includes('gpt-6.1-sol')) return ['auto', 'low', 'medium', 'high', 'xhigh', 'max'];
-  if (slug.includes('gpt-6-astra')) return ['auto', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-  if (slug.startsWith('gpt-6-')) return ['auto', 'low', 'medium', 'high'];
-  return ['auto', 'low', 'medium', 'high'];
 }
 
 class HttpError extends Error {
@@ -435,11 +418,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [snapshot, setSnapshot] = useState<ThreadSnapshot | null>(null);
   const [bootstrapping, setBootstrapping] = useState(true);
   const [settings, setSettings] = useState<PublicSettings | null>(null);
-  const [chatGptModels, setChatGptModels] = useState<ChatGptModelChoice[]>([]);
-  const [chatGptModelsLoading, setChatGptModelsLoading] = useState(false);
-  const chatGptOAuthAttempt = useRef<{ operationId: string; callbackOrigin: string } | null>(null);
   const [remoteConnections, setRemoteConnections] = useState<RemoteExecutorConnectionView[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pluginPageSelection, setPluginPageSelection] = useState<{ pluginId: string; pageId: string } | null>(null);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newThreadOpen, setNewThreadOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -479,8 +460,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     apiKey: '',
     temperature: 0.2,
     provider: 'openai-compatible' as ModelSettings['provider'],
-    reasoningEffort: 'auto' as ModelSettings['reasoningEffort'],
-    fastMode: false,
     hasApiKey: false,
   });
   const listRef = useRef<HTMLDivElement>(null);
@@ -577,6 +556,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const uiContributions = pluginInfo?.ui ?? [];
   const toolbarContributions = uiContributionsAt(uiContributions, 'thread.toolbar');
   const composerActions = uiContributionsAt(uiContributions, 'composer.action');
+  const composerModelContributions = uiContributionsAt(uiContributions, 'composer.model');
   const sidebarPanels = uiContributionsAt(uiContributions, 'sidebar.panel');
 
   const loadSnapshot = useCallback(
@@ -644,17 +624,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const refreshSelectedRef = useRef(refreshSelected);
   refreshSelectedRef.current = refreshSelected;
 
-  const refreshChatGptModels = useCallback(async (): Promise<ChatGptModelChoice[]> => {
-    setChatGptModelsLoading(true);
-    try {
-      const choices = await api<ChatGptModelChoice[]>('/api/settings/chatgpt/models');
-      setChatGptModels(choices);
-      return choices;
-    } finally {
-      setChatGptModelsLoading(false);
-    }
-  }, []);
-
   useEffect(() => {
     let alive = true;
     void fetchStableSnapshot(
@@ -698,43 +667,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       alive = false;
     };
   }, []);
-
-  useEffect(() => {
-    if (!settingsOpen || !settings?.chatGptConnected || chatGptModels.length > 0) return;
-    void refreshChatGptModels().catch((caught: unknown) => {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    });
-  }, [chatGptModels.length, refreshChatGptModels, settings?.chatGptConnected, settingsOpen]);
-
-  useEffect(() => {
-    const receiveChatGptOAuthResult = (event: MessageEvent<unknown>): void => {
-      const attempt = chatGptOAuthAttempt.current;
-      if (!attempt || event.origin !== attempt.callbackOrigin || !event.data || typeof event.data !== 'object') return;
-      const result = event.data as { type?: unknown; operationId?: unknown; status?: unknown; message?: unknown };
-      if (result.type !== 'pico:chatgpt-auth' || result.operationId !== attempt.operationId) return;
-      chatGptOAuthAttempt.current = null;
-      if (result.status !== 'connected') {
-        setError(typeof result.message === 'string' ? result.message : 'ChatGPT sign-in failed.');
-        return;
-      }
-      void api<PublicSettings>('/api/settings/model')
-        .then((updated) => setSettings(updated))
-        .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : String(caught)));
-      setModelForm((current) => ({ ...current, apiKey: '', provider: 'chatgpt-plan' }));
-      setNotice('ChatGPT account connected. Choose a model and save settings.');
-      void refreshChatGptModels()
-        .then((choices) => {
-          setModelForm((current) => ({
-            ...current,
-            provider: 'chatgpt-plan',
-            model: choices.some((choice) => choice.slug === current.model) ? current.model : (choices[0]?.slug ?? ''),
-          }));
-        })
-        .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : String(caught)));
-    };
-    window.addEventListener('message', receiveChatGptOAuthResult);
-    return () => window.removeEventListener('message', receiveChatGptOAuthResult);
-  }, [refreshChatGptModels]);
 
   useEffect(() => {
     for (const project of projects) {
@@ -1299,8 +1231,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       model: modelForm.model,
       temperature: Number(modelForm.temperature),
       provider: modelForm.provider,
-      reasoningEffort: modelForm.reasoningEffort,
-      fastMode: modelForm.fastMode,
     };
     if (modelForm.apiKey) body.apiKey = modelForm.apiKey;
     try {
@@ -1316,52 +1246,39 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     }
   };
 
-  const startChatGptSignIn = async (): Promise<void> => {
+  const updateModelSettingsFromPlugin: PluginUiProps['updateModelSettings'] = async (update) => {
+    const saved = await api<PublicSettings>('/api/settings/model', { method: 'PUT', body: JSON.stringify(update) });
+    setSettings(saved);
+    setModelForm((current) => ({ ...current, ...saved, apiKey: '' }));
+  };
+
+  const openPluginPage = (pluginId: string, pageId: string): void => {
+    setPluginPageSelection({ pluginId, pageId });
+    setSettingsOpen(true);
     setError('');
-    const popup = window.open('about:blank', 'pico-chatgpt-sign-in', 'popup,width=520,height=720');
-    if (!popup) {
-      setError('Allow pop-up windows for Pico to continue with ChatGPT.');
-      return;
-    }
-    try {
-      const result = await api<{ authorizationUrl: string; callbackOrigin: string; operationId: string }>(
-        '/api/settings/chatgpt/sign-in',
-        { method: 'POST', body: JSON.stringify({}) },
-      );
-      chatGptOAuthAttempt.current = { callbackOrigin: result.callbackOrigin, operationId: result.operationId };
-      popup.location.replace(result.authorizationUrl);
-    } catch (caught) {
-      popup.close();
-      setError(caught instanceof Error ? caught.message : String(caught));
-    }
   };
 
-  const disconnectChatGpt = async (): Promise<void> => {
-    try {
-      const result = await api<{ remoteRevoked: boolean }>('/api/settings/chatgpt', { method: 'DELETE' });
-      const updated = await api<PublicSettings>('/api/settings/model');
-      setSettings(updated);
-      setChatGptModels([]);
-      setModelForm((current) => ({ ...current, apiKey: '', ...updated }));
-      setNotice(
-        result.remoteRevoked
-          ? 'ChatGPT account disconnected.'
-          : 'Signed out locally; remote revocation was not confirmed. You can disconnect Pico in ChatGPT Settings.',
-      );
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    }
+  const pluginUiProps = (): PluginUiProps | null => {
+    if (!settings) return null;
+    return {
+      api,
+      settings,
+      updateModelSettings: updateModelSettingsFromPlugin,
+      openPage: openPluginPage,
+      onError: setError,
+      onNotice: setNotice,
+    };
   };
 
-  const selectChatGptModel = (slug: string): void => {
-    const model = chatGptModels.find((choice) => choice.slug === slug);
-    const modelEfforts = reasoningEffortsFor(model);
-    setModelForm((current) => ({
-      ...current,
-      model: slug,
-      ...(!modelEfforts.includes(current.reasoningEffort) ? { reasoningEffort: 'auto' as const } : {}),
-    }));
-  };
+  const pluginUiContext = pluginUiProps();
+  const selectedPluginPage = pluginPageSelection
+    ? pluginInfo?.pages.find(
+        (page) => page.pluginId === pluginPageSelection.pluginId && page.id === pluginPageSelection.pageId,
+      )
+    : undefined;
+  const SelectedPluginPage = selectedPluginPage
+    ? pluginPageComponent(selectedPluginPage.pluginId, selectedPluginPage.entry, selectedPluginPage.id)
+    : undefined;
 
   const clearApiKey = async (): Promise<void> => {
     try {
@@ -1882,6 +1799,23 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             </div>
 
             <div className="composer-wrap">
+              {pluginUiContext && composerModelContributions.length > 0 ? (
+                <div className="composer-plugin-controls" aria-label="Model controls">
+                  {composerModelContributions.map((item) => {
+                    const Component =
+                      item.pluginId && item.entry && item.component
+                        ? pluginComponent(item.pluginId, item.entry, item.component)
+                        : undefined;
+                    return Component ? (
+                      <Component key={item.id} {...pluginUiContext} />
+                    ) : (
+                      <span className="field-note" key={item.id}>
+                        {item.label} is contributed by a plugin without a bundled Web UI entry.
+                      </span>
+                    );
+                  })}
+                </div>
+              ) : null}
               {filteredCommands.length > 0 ? (
                 <div className="command-menu">
                   {filteredCommands.map((command) => (
@@ -1955,290 +1889,229 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       {settingsOpen ? (
         <Modal
           title="Model and Executor connections"
-          onClose={() => setSettingsOpen(false)}
+          onClose={() => {
+            setSettingsOpen(false);
+            setPluginPageSelection(null);
+          }}
           error={error}
           onDismissError={() => setError('')}
         >
-          <form className="form-stack" onSubmit={(event) => void saveModelSettings(event)}>
-            <p className="form-intro">Choose how this Runtime connects to its model provider.</p>
-            <label>
-              Provider
-              <select
-                value={modelForm.provider}
-                onChange={(event) =>
-                  setModelForm((form) => ({ ...form, provider: event.target.value as ModelSettings['provider'] }))
-                }
+          {pluginInfo?.pages.length ? (
+            <nav className="plugin-settings-pages" aria-label="Plugin settings pages">
+              <button
+                type="button"
+                className={`button ${pluginPageSelection ? 'button-quiet' : 'button-soft'}`}
+                onClick={() => setPluginPageSelection(null)}
               >
-                <option value="openai-compatible">OpenAI-compatible API key</option>
-                <option value="chatgpt-plan">ChatGPT account</option>
-              </select>
-            </label>
-            {modelForm.provider === 'openai-compatible' ? (
-              <>
-                <label>
-                  API base URL
-                  <input
-                    value={modelForm.baseUrl}
-                    onChange={(event) => setModelForm((form) => ({ ...form, baseUrl: event.target.value }))}
-                    placeholder="https://api.openai.com/v1"
-                    autoComplete="url"
-                  />
-                </label>
-                <label>
-                  Model
-                  <input
-                    value={modelForm.model}
-                    onChange={(event) => setModelForm((form) => ({ ...form, model: event.target.value }))}
-                    placeholder="gpt-4.1-mini"
-                  />
-                </label>
-                <label>
-                  API key{' '}
-                  <span className="field-note">
-                    {modelForm.hasApiKey
-                      ? 'A key is saved. Leave blank to keep it.'
-                      : 'Stored locally in Pico’s data file.'}
-                  </span>
-                  <input
-                    value={modelForm.apiKey}
-                    onChange={(event) => setModelForm((form) => ({ ...form, apiKey: event.target.value }))}
-                    type="password"
-                    placeholder={modelForm.hasApiKey ? 'Saved · enter a new key to replace' : 'sk-…'}
-                    autoComplete="new-password"
-                  />
-                </label>
-                <label className="temperature-label">
-                  Temperature <span>{Number(modelForm.temperature).toFixed(1)}</span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="2"
-                    step="0.1"
-                    value={modelForm.temperature}
-                    onChange={(event) => setModelForm((form) => ({ ...form, temperature: Number(event.target.value) }))}
-                  />
-                </label>
-              </>
-            ) : (
-              <>
-                <section className="chatgpt-account-card">
-                  <div>
-                    <strong>{settings?.chatGptConnected ? 'ChatGPT connected' : 'Use your ChatGPT plan'}</strong>
-                    <p className="field-note">
-                      OAuth returns to 127.0.0.1, so the browser and Pico Runtime must run on the same machine.
-                      Credentials stay in this Runtime’s private data file and refresh automatically.
-                    </p>
-                  </div>
-                  {settings?.chatGptConnected ? (
-                    <>
-                      <span className="chatgpt-account-label">{settings.chatGptAccountLabel}</span>
-                      <div className="form-actions chatgpt-account-actions">
-                        <button
-                          type="button"
-                          className="button button-soft"
-                          onClick={() =>
-                            void refreshChatGptModels().catch((caught: unknown) =>
-                              setError(caught instanceof Error ? caught.message : String(caught)),
-                            )
-                          }
-                          disabled={chatGptModelsLoading}
-                        >
-                          {chatGptModelsLoading ? 'Refreshing…' : 'Refresh models'}
-                        </button>
-                        <button type="button" className="button button-quiet" onClick={() => void disconnectChatGpt()}>
-                          Disconnect
-                        </button>
-                      </div>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      className="button button-primary chatgpt-sign-in"
-                      onClick={() => void startChatGptSignIn()}
-                    >
-                      Continue with ChatGPT
-                    </button>
-                  )}
-                </section>
-                {settings?.chatGptConnected ? (
-                  <>
-                    <label>
-                      Model
-                      <select
-                        value={modelForm.model}
-                        onChange={(event) => selectChatGptModel(event.target.value)}
-                        disabled={chatGptModelsLoading || chatGptModels.length === 0}
-                      >
-                        {modelForm.model && !chatGptModels.some((model) => model.slug === modelForm.model) ? (
-                          <option value={modelForm.model}>{modelForm.model} · no longer listed</option>
-                        ) : null}
-                        {chatGptModels.length === 0 ? (
-                          <option value="">{chatGptModelsLoading ? 'Loading models…' : 'No models available'}</option>
-                        ) : null}
-                        {chatGptModels.map((model) => (
-                          <option key={model.slug} value={model.slug}>
-                            {model.displayName}
-                          </option>
-                        ))}
-                      </select>
-                      <span className="field-note">
-                        Choices come from the connected account. Access is checked when a model is used.
-                      </span>
-                    </label>
-                    <label>
-                      Reasoning effort
-                      <select
-                        value={modelForm.reasoningEffort}
-                        onChange={(event) =>
-                          setModelForm((form) => ({
-                            ...form,
-                            reasoningEffort: event.target.value as ModelSettings['reasoningEffort'],
-                          }))
-                        }
-                      >
-                        {reasoningEffortsFor(chatGptModels.find((model) => model.slug === modelForm.model)).map(
-                          (effort) => (
-                            <option key={effort} value={effort}>
-                              {reasoningEffortLabels[effort]}
-                            </option>
-                          ),
-                        )}
-                      </select>
-                    </label>
-                    <label className="chatgpt-fast-control">
-                      <input
-                        type="checkbox"
-                        checked={modelForm.fastMode}
-                        onChange={(event) => setModelForm((form) => ({ ...form, fastMode: event.target.checked }))}
-                      />
-                      <span>
-                        Fast mode
-                        <small className="field-note">
-                          Uses OpenAI’s Fast service tier where supported; eligible requests may cost more.
-                        </small>
-                      </span>
-                    </label>
-                  </>
-                ) : null}
-              </>
-            )}
-            <div className="form-actions">
-              {modelForm.provider === 'openai-compatible' ? (
+                Model connection
+              </button>
+              {pluginInfo.pages.map((page) => (
                 <button
                   type="button"
-                  className="button button-quiet"
-                  onClick={() => void clearApiKey()}
-                  disabled={!settings?.hasApiKey}
+                  className={`button ${pluginPageSelection?.pluginId === page.pluginId && pluginPageSelection.pageId === page.id ? 'button-soft' : 'button-quiet'}`}
+                  key={`${page.pluginId}:${page.id}`}
+                  onClick={() => setPluginPageSelection({ pluginId: page.pluginId, pageId: page.id })}
+                  title={page.description}
                 >
-                  Clear saved key
+                  {page.label}
                 </button>
+              ))}
+            </nav>
+          ) : null}
+          {pluginPageSelection ? (
+            <section className="plugin-settings-page">
+              {selectedPluginPage && SelectedPluginPage && pluginUiContext ? (
+                <SelectedPluginPage {...pluginUiContext} />
               ) : (
-                <span />
+                <p className="field-note">
+                  This plugin page is registered by {selectedPluginPage?.pluginId ?? pluginPageSelection.pluginId}, but
+                  its Web UI entry is not bundled with this Pico build.
+                </p>
               )}
-              <button
-                className="button button-primary"
-                disabled={
-                  settingsSaving ||
-                  (modelForm.provider === 'chatgpt-plan' &&
-                    (!settings?.chatGptConnected ||
-                      !modelForm.model ||
-                      !chatGptModels.some((model) => model.slug === modelForm.model)))
-                }
-              >
-                {settingsSaving ? 'Saving…' : 'Save settings'}
-              </button>
-            </div>
-          </form>
-          <section className="form-stack remote-connections-section">
-            <div>
-              <p className="eyebrow">REMOTE HOST EXECUTORS</p>
-              <p className="form-intro">
-                Start a Pico Executor on the machine that owns the workspace, then connect it here. Tokens stay in
-                Pico’s local data file and are never returned by the API.
-              </p>
-            </div>
-            {remoteConnectionNotice ? (
-              <p className="remote-connection-notice" role="status">
-                {remoteConnectionNotice}
-              </p>
-            ) : null}
-            {remoteConnections.map((connection) => (
-              <div className="remote-connection-item" key={connection.id}>
-                <strong>{connection.name}</strong>
-                <span>{connection.endpointUrl}</span>
-                <code>{connection.workspaceRoot}</code>
+            </section>
+          ) : (
+            <>
+              <form className="form-stack" onSubmit={(event) => void saveModelSettings(event)}>
+                <p className="form-intro">Choose how this Runtime connects to its model provider.</p>
+                <label>
+                  Provider
+                  <select
+                    value={modelForm.provider}
+                    onChange={(event) =>
+                      setModelForm((form) => ({ ...form, provider: event.target.value as ModelSettings['provider'] }))
+                    }
+                  >
+                    {pluginInfo?.providers.map((provider) => (
+                      <option value={provider.id} key={provider.id}>
+                        {provider.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {modelForm.provider === 'openai-compatible' ? (
+                  <>
+                    <label>
+                      API base URL
+                      <input
+                        value={modelForm.baseUrl}
+                        onChange={(event) => setModelForm((form) => ({ ...form, baseUrl: event.target.value }))}
+                        placeholder="https://api.openai.com/v1"
+                        autoComplete="url"
+                      />
+                    </label>
+                    <label>
+                      Model
+                      <input
+                        value={modelForm.model}
+                        onChange={(event) => setModelForm((form) => ({ ...form, model: event.target.value }))}
+                        placeholder="gpt-4.1-mini"
+                      />
+                    </label>
+                    <label>
+                      API key{' '}
+                      <span className="field-note">
+                        {modelForm.hasApiKey
+                          ? 'A key is saved. Leave blank to keep it.'
+                          : 'Stored locally in Pico’s data file.'}
+                      </span>
+                      <input
+                        value={modelForm.apiKey}
+                        onChange={(event) => setModelForm((form) => ({ ...form, apiKey: event.target.value }))}
+                        type="password"
+                        placeholder={modelForm.hasApiKey ? 'Saved · enter a new key to replace' : 'sk-…'}
+                        autoComplete="new-password"
+                      />
+                    </label>
+                    <label className="temperature-label">
+                      Temperature <span>{Number(modelForm.temperature).toFixed(1)}</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="2"
+                        step="0.1"
+                        value={modelForm.temperature}
+                        onChange={(event) =>
+                          setModelForm((form) => ({ ...form, temperature: Number(event.target.value) }))
+                        }
+                      />
+                    </label>
+                  </>
+                ) : (
+                  <p className="field-note">
+                    Provider-specific sign-in and model choices are contributed by the provider plugin. Choose its
+                    controls below the message composer, or open its settings page above. Save to use this provider.
+                  </p>
+                )}
+                <div className="form-actions">
+                  {modelForm.provider === 'openai-compatible' ? (
+                    <button
+                      type="button"
+                      className="button button-quiet"
+                      onClick={() => void clearApiKey()}
+                      disabled={!settings?.hasApiKey}
+                    >
+                      Clear saved key
+                    </button>
+                  ) : (
+                    <span />
+                  )}
+                  <button className="button button-primary" disabled={settingsSaving}>
+                    {settingsSaving ? 'Saving…' : 'Save settings'}
+                  </button>
+                </div>
+              </form>
+              <section className="form-stack remote-connections-section">
+                <div>
+                  <p className="eyebrow">REMOTE HOST EXECUTORS</p>
+                  <p className="form-intro">
+                    Start a Pico Executor on the machine that owns the workspace, then connect it here. Tokens stay in
+                    Pico’s local data file and are never returned by the API.
+                  </p>
+                </div>
+                {remoteConnectionNotice ? (
+                  <p className="remote-connection-notice" role="status">
+                    {remoteConnectionNotice}
+                  </p>
+                ) : null}
+                {remoteConnections.map((connection) => (
+                  <div className="remote-connection-item" key={connection.id}>
+                    <strong>{connection.name}</strong>
+                    <span>{connection.endpointUrl}</span>
+                    <code>{connection.workspaceRoot}</code>
+                    <form
+                      className="remote-token-form"
+                      onSubmit={(event) => void updateRemoteExecutorToken(event, connection.id)}
+                    >
+                      <label>
+                        Replace access token
+                        <input
+                          type="password"
+                          autoComplete="new-password"
+                          placeholder="New access token"
+                          value={remoteTokenEdits[connection.id] ?? ''}
+                          onChange={(event) => {
+                            setRemoteTokenEdits((items) => ({ ...items, [connection.id]: event.target.value }));
+                            setRemoteConnectionNotice('');
+                          }}
+                        />
+                      </label>
+                      <button
+                        className="button button-soft"
+                        disabled={remoteConnectionSaving || !remoteTokenEdits[connection.id]?.trim()}
+                      >
+                        {remoteConnectionSaving ? 'Checking…' : 'Replace token'}
+                      </button>
+                      <p className="field-note">
+                        Pico checks the token before saving it. Existing Threads keep this Executor binding.
+                      </p>
+                    </form>
+                  </div>
+                ))}
                 <form
-                  className="remote-token-form"
-                  onSubmit={(event) => void updateRemoteExecutorToken(event, connection.id)}
+                  className="form-stack remote-connection-add-form"
+                  onSubmit={(event) => void addRemoteExecutorConnection(event)}
                 >
                   <label>
-                    Replace access token
+                    Connection name
                     <input
-                      type="password"
-                      autoComplete="new-password"
-                      placeholder="New access token"
-                      value={remoteTokenEdits[connection.id] ?? ''}
-                      onChange={(event) => {
-                        setRemoteTokenEdits((items) => ({ ...items, [connection.id]: event.target.value }));
-                        setRemoteConnectionNotice('');
-                      }}
+                      value={remoteForm.name}
+                      onChange={(event) => setRemoteForm((form) => ({ ...form, name: event.target.value }))}
+                      placeholder="Build machine"
                     />
                   </label>
-                  <button
-                    className="button button-soft"
-                    disabled={remoteConnectionSaving || !remoteTokenEdits[connection.id]?.trim()}
-                  >
-                    {remoteConnectionSaving ? 'Checking…' : 'Replace token'}
-                  </button>
-                  <p className="field-note">
-                    Pico checks the token before saving it. Existing Threads keep this Executor binding.
-                  </p>
+                  <label>
+                    Executor URL
+                    <input
+                      value={remoteForm.endpointUrl}
+                      onChange={(event) => setRemoteForm((form) => ({ ...form, endpointUrl: event.target.value }))}
+                      placeholder="https://build.example.test:4174"
+                      autoComplete="url"
+                    />
+                    <span className="field-note">
+                      Use an address reachable from the Pico Runtime, not the Web UI address.
+                    </span>
+                  </label>
+                  <label>
+                    Access token <span className="field-note">Generated on the Executor machine</span>
+                    <input
+                      value={remoteForm.accessToken}
+                      onChange={(event) => setRemoteForm((form) => ({ ...form, accessToken: event.target.value }))}
+                      type="password"
+                      autoComplete="new-password"
+                    />
+                  </label>
+                  <div className="form-actions remote-executor-form-actions">
+                    <span className="field-note remote-executor-footnote">
+                      Remote workspaces are limited to the Executor’s configured root.
+                    </span>
+                    <button className="button button-primary" disabled={remoteConnectionSaving}>
+                      {remoteConnectionSaving ? 'Connecting…' : 'Connect Executor'}
+                    </button>
+                  </div>
                 </form>
-              </div>
-            ))}
-            <form
-              className="form-stack remote-connection-add-form"
-              onSubmit={(event) => void addRemoteExecutorConnection(event)}
-            >
-              <label>
-                Connection name
-                <input
-                  value={remoteForm.name}
-                  onChange={(event) => setRemoteForm((form) => ({ ...form, name: event.target.value }))}
-                  placeholder="Build machine"
-                />
-              </label>
-              <label>
-                Executor URL
-                <input
-                  value={remoteForm.endpointUrl}
-                  onChange={(event) => setRemoteForm((form) => ({ ...form, endpointUrl: event.target.value }))}
-                  placeholder="https://build.example.test:4174"
-                  autoComplete="url"
-                />
-                <span className="field-note">
-                  Use an address reachable from the Pico Runtime, not the Web UI address.
-                </span>
-              </label>
-              <label>
-                Access token <span className="field-note">Generated on the Executor machine</span>
-                <input
-                  value={remoteForm.accessToken}
-                  onChange={(event) => setRemoteForm((form) => ({ ...form, accessToken: event.target.value }))}
-                  type="password"
-                  autoComplete="new-password"
-                />
-              </label>
-              <div className="form-actions remote-executor-form-actions">
-                <span className="field-note remote-executor-footnote">
-                  Remote workspaces are limited to the Executor’s configured root.
-                </span>
-                <button className="button button-primary" disabled={remoteConnectionSaving}>
-                  {remoteConnectionSaving ? 'Connecting…' : 'Connect Executor'}
-                </button>
-              </div>
-            </form>
-          </section>
+              </section>
+            </>
+          )}
         </Modal>
       ) : null}
 

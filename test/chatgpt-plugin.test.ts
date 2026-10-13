@@ -1,92 +1,67 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { ExecutionPipelines } from '../src/core/pipeline.js';
-import type { ModelSettings, Thread } from '../src/core/types.js';
+import type { Thread } from '../src/core/types.js';
 import { CommandRegistry, type PluginContext } from '../src/plugins/host.js';
 import { createChatGptPlanPlugin } from '../src/plugins/chatgpt-plan.js';
-import type { ModelAdapter, ModelPrompt, ModelResponse } from '../src/runtime/model.js';
+import type { ModelPrompt, ModelResponse } from '../src/runtime/model.js';
 import type { ModelStageInput } from '../src/runtime/stages.js';
 
 describe('ChatGPT provider plugin', () => {
-  it('routes only selected ChatGPT model calls and contributes its command and toolbar action', async () => {
-    const prompt: ModelPrompt = {
-      system: 'system',
-      turns: [],
-      tools: [],
-      model: 'gpt-test',
-      temperature: 0.3,
-    };
-    const settings: ModelSettings = {
-      baseUrl: 'https://api.openai.com/v1',
-      apiKey: '',
-      model: 'gpt-test',
-      temperature: 0.3,
-      provider: 'chatgpt-plan',
-      reasoningEffort: 'auto',
-      fastMode: false,
-    };
-    const response: ModelResponse = {
-      content: 'From ChatGPT',
-      toolCalls: [],
-      usage: null,
-      model: 'gpt-test',
-      finishReason: 'stop',
-    };
-    const complete = vi.fn<ModelAdapter['complete']>(async () => response);
-    const plugin = createChatGptPlanPlugin({
-      auth: { status: () => ({ connected: true, accountLabel: 'person@example.test' }) },
-      model: { complete },
-      getSettings: () => settings,
-    });
+  it('registers provider, model pipeline, account page, composer contribution, command and routes', async () => {
+    const plugin = createChatGptPlanPlugin();
     const pipelines = new ExecutionPipelines();
     const commands = new CommandRegistry();
-    const contributions: PluginContext extends { ui: { contribute(value: infer T): void } } ? T[] : never[] = [];
+    const contributions: unknown[] = [];
+    const pages: unknown[] = [];
+    const providers: unknown[] = [];
+    const routes: string[] = [];
+    const state = new Map<string, unknown>();
     const context: PluginContext = {
       tools: { register: () => undefined },
-      pipelines: {
-        use: (stage, interceptor) => pipelines.use(stage, plugin.id, interceptor),
-      },
+      models: { registerProvider: (provider) => providers.push(provider) },
+      pipelines: { use: (stage, interceptor) => pipelines.use(stage, plugin.id, interceptor) },
       commands: { register: (command) => commands.register(plugin.id, command) },
-      ui: { contribute: (contribution) => contributions.push(contribution) },
+      ui: {
+        contribute: (contribution) => contributions.push(contribution),
+        registerPage: (page) => pages.push(page),
+      },
+      http: { register: (method, path) => routes.push(`${method} ${path}`) },
       state: {
-        get: (_key, fallback) => fallback,
-        set: () => undefined,
+        get: (key, fallback) => (state.has(key) ? (state.get(key) as typeof fallback) : fallback),
+        set: (key, value) => void state.set(key, value),
       },
       canonical: { append: () => ({}) as never, list: () => [] },
     };
-    plugin.activate(context);
+    await plugin.activate(context);
 
-    const recorded: Array<[ModelPrompt, ModelStageInput['provider']]> = [];
-    const input = (provider: ModelStageInput['provider']): ModelStageInput => ({
+    expect(providers).toContainEqual(expect.objectContaining({ id: 'chatgpt-plan' }));
+    expect(pages).toContainEqual(expect.objectContaining({ id: 'account', entry: 'webui' }));
+    expect(contributions).toContainEqual(
+      expect.objectContaining({ slot: 'composer.model', component: 'ChatGptPlanComposerModel', entry: 'webui' }),
+    );
+    expect(routes).toEqual(expect.arrayContaining(['GET /status', 'GET /models', 'POST /sign-in', 'PUT /preferences']));
+    expect(await commands.execute('/chatgpt-provider', { thread: null, projectId: null })).toEqual({
+      text: 'No ChatGPT account is connected. Open the ChatGPT plugin settings to connect one.',
+    });
+
+    const prompt: ModelPrompt = { system: '', turns: [], tools: [], model: 'test', temperature: 0.2 };
+    const input: ModelStageInput = {
       thread: {} as Thread,
-      provider,
+      provider: 'openai-compatible',
       prompt,
       signal: new AbortController().signal,
-      onText: vi.fn(),
-      recordModelInput: (actualPrompt, actualProvider) => recorded.push([actualPrompt, actualProvider]),
-    });
-
-    const defaultResult = await pipelines.run<ModelStageInput, ModelResponse>(
-      'model',
-      input('openai-compatible'),
-      async () => ({ ...response, content: 'Default adapter' }),
-    );
-    const chatGptResult = await pipelines.run<ModelStageInput, ModelResponse>(
-      'model',
-      input('chatgpt-plan'),
-      async () => {
-        throw new Error('ChatGPT plugin should short-circuit to its provider adapter.');
-      },
-    );
-
-    expect(defaultResult.content).toBe('Default adapter');
-    expect(chatGptResult.content).toBe('From ChatGPT');
-    expect(complete).toHaveBeenCalledWith(prompt, settings, expect.any(AbortSignal), expect.any(Function));
-    expect(recorded).toEqual([[prompt, 'chatgpt-plan']]);
-    expect(await commands.execute('/chatgpt-provider', { thread: null, projectId: null })).toEqual({
-      text: 'ChatGPT account connected as person@example.test.',
-    });
-    expect(contributions).toContainEqual(
-      expect.objectContaining({ slot: 'thread.toolbar', command: '/chatgpt-provider' }),
+      onText: () => undefined,
+      recordModelInput: () => undefined,
+    };
+    const fallback: ModelResponse = {
+      content: 'fallback',
+      toolCalls: [],
+      usage: null,
+      model: 'test',
+      finishReason: 'stop',
+    };
+    await expect(pipelines.run<ModelStageInput, ModelResponse>('model', input, async () => fallback)).resolves.toBe(
+      fallback,
     );
   });
 });

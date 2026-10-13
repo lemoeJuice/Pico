@@ -1412,6 +1412,67 @@ button:disabled {
   margin: 0 auto;
   padding: 8px 40px 15px;
 }
+.composer-plugin-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px 14px;
+  padding: 0 3px 8px;
+}
+.composer-plugin-controls .form-stack {
+  flex: 1 1 220px;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.composer-plugin-controls .form-stack label {
+  flex: 0 1 180px;
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+  color: #849187;
+  font-size: 9px;
+  font-weight: 500;
+}
+.composer-plugin-controls .form-stack select {
+  width: auto;
+  min-width: 120px;
+  min-height: 30px;
+  padding: 0 8px;
+  font-size: 10px;
+}
+.composer-plugin-controls .chatgpt-fast-control {
+  flex: 0 1 auto;
+  min-height: 30px;
+  padding: 5px 8px;
+  background: #f6f8f5;
+}
+.composer-plugin-controls .chatgpt-fast-control span {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+.composer-plugin-controls .chatgpt-fast-control small {
+  display: none;
+}
+.plugin-settings-pages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 19px;
+  padding-bottom: 13px;
+  border-bottom: 1px solid var(--line);
+}
+.plugin-settings-pages .button {
+  min-height: 31px;
+  padding: 6px 10px;
+  font-size: 10px;
+}
+.plugin-settings-page {
+  min-height: 120px;
+  padding: 2px 0 10px;
+}
 .composer-box {
   padding: 11px 12px 9px 14px;
   background: white;

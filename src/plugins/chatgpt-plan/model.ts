@@ -1,6 +1,7 @@
-import type { ModelSettings, TokenUsage, ToolCall, ToolDefinition } from '../core/types.js';
-import type { ChatGptPlanAuth } from './chatgpt-auth.js';
-import type { ModelAdapter, ModelPrompt, ModelResponse } from './model.js';
+import type { TokenUsage, ToolCall, ToolDefinition } from '../../core/types.js';
+import type { ChatGptPlanAuth } from './auth.js';
+import type { ModelPrompt, ModelResponse } from '../../runtime/model.js';
+import type { ChatGptPlanPreferences } from './types.js';
 
 const responsesUrl = 'https://api.openai.com/v1/responses';
 
@@ -101,7 +102,7 @@ function outputFrom(response: Record<string, unknown>, prompt: ModelPrompt): Mod
   };
 }
 
-export class ChatGptResponsesAdapter implements ModelAdapter {
+export class ChatGptResponsesAdapter {
   constructor(
     private readonly auth: ChatGptPlanAuth,
     private readonly fetcher: typeof fetch = fetch,
@@ -109,7 +110,7 @@ export class ChatGptResponsesAdapter implements ModelAdapter {
 
   async complete(
     prompt: ModelPrompt,
-    settings: ModelSettings,
+    preferences: ChatGptPlanPreferences,
     signal: AbortSignal,
     onText: (delta: string) => void,
   ): Promise<ModelResponse> {
@@ -122,10 +123,8 @@ export class ChatGptResponsesAdapter implements ModelAdapter {
       stream: true,
       parallel_tool_calls: true,
       tools: responseTools(prompt.tools),
-      ...((prompt.reasoningEffort ?? settings.reasoningEffort) === 'auto'
-        ? {}
-        : { reasoning: { effort: prompt.reasoningEffort ?? settings.reasoningEffort } }),
-      ...((prompt.fastMode ?? settings.fastMode) ? { service_tier: 'fast' } : {}),
+      ...(preferences.reasoningEffort === 'auto' ? {} : { reasoning: { effort: preferences.reasoningEffort } }),
+      ...(preferences.fastMode ? { service_tier: 'fast' } : {}),
     };
     let accessToken = await this.auth.accessToken();
     let response = await this.request(body, accessToken, signal);

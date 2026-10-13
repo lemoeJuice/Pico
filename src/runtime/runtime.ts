@@ -9,7 +9,6 @@ import type {
   ExecutorBinding,
   MessagePayload,
   ModelSettings,
-  ChatGptModelChoice,
   PermissionRequest,
   Project,
   PublicSettings,
@@ -28,7 +27,6 @@ import { RemoteHostExecutor, inspectRemoteExecutor, validateRemoteWorkspace } fr
 import { normalizeRemoteExecutorUrl } from '../executor/remote-protocol.js';
 import { createToolCatalog, type ToolContext } from '../executor/tools.js';
 import { builtinPlugins } from '../plugins/builtin.js';
-import { createChatGptPlanPlugin } from '../plugins/chatgpt-plan.js';
 import { CommandRegistry, PluginHost, type CommandResult } from '../plugins/host.js';
 import {
   OpenAiCompatibleAdapter,
@@ -37,8 +35,6 @@ import {
   type ModelResponse,
   type PromptTurn,
 } from './model.js';
-import { ChatGptPlanAuth, type ChatGptAccountStatus } from './chatgpt-auth.js';
-import { ChatGptResponsesAdapter } from './responses-model.js';
 import type {
   ModelStageInput,
   PermissionPolicy,
@@ -112,8 +108,6 @@ const defaultModelSettings: ModelSettings = {
   model: process.env.PICO_MODEL ?? '',
   temperature: 0.2,
   provider: 'openai-compatible',
-  reasoningEffort: 'auto',
-  fastMode: false,
 };
 
 const baseSystemPrompt = `You are Pico, an agent working in one durable Thread. Use the available tools when they help you inspect or change the selected workspace.\n\nTools in one model step may run concurrently. Their results arrive together before the next step. A tool result marked interrupted means its real-world side effects may be partial or unknown: inspect the environment before deciding whether to retry.\n\nA Thread stays bound to its displayed Executor for its lifetime. To work in parallel, spawn a child Thread; spawning returns immediately. Child Threads and their parent communicate with ordinary messages. A child can send a message to its parent Thread ID shown below. Do not wait for a child unless you have other useful work to do.\n\nNew user messages can arrive while you work. They will appear at the next model step; finish the current tool batch first.`;
@@ -163,7 +157,6 @@ export interface RuntimeOptions {
 
 export class PicoRuntime {
   readonly store: PicoStore;
-  readonly chatGptAuth: ChatGptPlanAuth;
   readonly tools = createToolCatalog();
   readonly pipelines = new ExecutionPipelines();
   readonly commands = new CommandRegistry();
@@ -184,16 +177,8 @@ export class PicoRuntime {
 
   constructor(store = new PicoStore(), options: RuntimeOptions = {}) {
     this.store = store;
-    this.chatGptAuth = new ChatGptPlanAuth(store);
     this.model = options.model ?? new OpenAiCompatibleAdapter();
-    this.additionalPlugins = [
-      createChatGptPlanPlugin({
-        auth: this.chatGptAuth,
-        model: new ChatGptResponsesAdapter(this.chatGptAuth),
-        getSettings: () => this.getModelSettings(),
-      }),
-      ...(options.plugins ?? []),
-    ];
+    this.additionalPlugins = [...(options.plugins ?? [])];
     this.hostExecutor = new HostExecutor(store, this.tools, (execution) => this.executionChanged(execution));
     this.containerExecutor = new ContainerExecutor(store, this.tools, (execution) => this.executionChanged(execution));
     this.remoteHostExecutor = new RemoteHostExecutor(store, (execution) => this.executionChanged(execution));
@@ -257,6 +242,7 @@ export class PicoRuntime {
     await Promise.allSettled(
       [...this.loops.entries()].filter(([threadId]) => !approvalThreads.has(threadId)).map(([, loop]) => loop),
     );
+    await this.plugins.shutdown();
   }
 
   subscribe(listener: (event: RuntimeEvent) => void): () => void {
@@ -835,8 +821,6 @@ export class PicoRuntime {
         tools: projected.tools,
         model: modelSettings.model,
         temperature: modelSettings.temperature,
-        reasoningEffort: modelSettings.reasoningEffort,
-        fastMode: modelSettings.fastMode,
       };
       let requestId: string | null = null;
       const recordModelInput: ModelStageInput['recordModelInput'] = (actualPrompt, provider) => {
@@ -1322,72 +1306,48 @@ export class PicoRuntime {
   }
 
   getModelSettings(): ModelSettings {
-    const stored = this.store.getSetting<Partial<ModelSettings>>('model', {});
-    return { ...defaultModelSettings, ...stored };
+    const stored = this.store.getSetting<Record<string, unknown>>('model', {});
+    return {
+      baseUrl: typeof stored.baseUrl === 'string' ? stored.baseUrl : defaultModelSettings.baseUrl,
+      apiKey: typeof stored.apiKey === 'string' ? stored.apiKey : defaultModelSettings.apiKey,
+      model: typeof stored.model === 'string' ? stored.model : defaultModelSettings.model,
+      temperature: typeof stored.temperature === 'number' ? stored.temperature : defaultModelSettings.temperature,
+      provider: typeof stored.provider === 'string' ? stored.provider : defaultModelSettings.provider,
+    };
   }
 
   publicModelSettings(): PublicSettings {
     const settings = this.getModelSettings();
-    const chatGpt = this.chatGptAuth.status();
     return {
       baseUrl: settings.baseUrl,
       model: settings.model,
       temperature: settings.temperature,
       provider: settings.provider,
-      reasoningEffort: settings.reasoningEffort,
-      fastMode: settings.fastMode,
       hasApiKey: Boolean(settings.apiKey),
-      chatGptConnected: chatGpt.connected,
-      chatGptAccountLabel: chatGpt.accountLabel,
     };
   }
 
   updateModelSettings(update: Partial<ModelSettings>): PublicSettings {
     const current = this.getModelSettings();
     const next = { ...current, ...update };
-    if (next.provider !== 'openai-compatible' && next.provider !== 'chatgpt-plan') {
-      throw new Error('Provider must be openai-compatible or chatgpt-plan.');
+    if (!this.plugins.modelProviders().some((provider) => provider.id === next.provider)) {
+      throw new Error(`Model provider ${next.provider} is not registered.`);
     }
-    if (!['auto', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(next.reasoningEffort)) {
-      throw new Error('Unsupported reasoning effort.');
+    if (next.provider === 'openai-compatible') {
+      if (!next.baseUrl.trim()) throw new Error('Base URL is required');
+      try {
+        new URL(next.baseUrl);
+      } catch {
+        throw new Error('Base URL must be a valid http or https URL');
+      }
+      if (!/^https?:$/.test(new URL(next.baseUrl).protocol)) throw new Error('Base URL must use http or https');
     }
-    if (typeof next.fastMode !== 'boolean') throw new Error('Fast mode must be a boolean.');
-    if (next.provider === 'chatgpt-plan' && !this.chatGptAuth.status().connected) {
-      throw new Error('Connect a ChatGPT account before selecting this provider.');
-    }
-    if (!next.baseUrl.trim()) throw new Error('Base URL is required');
-    try {
-      new URL(next.baseUrl);
-    } catch {
-      throw new Error('Base URL must be a valid http or https URL');
-    }
-    if (!/^https?:$/.test(new URL(next.baseUrl).protocol)) throw new Error('Base URL must use http or https');
     if (!Number.isFinite(next.temperature) || next.temperature < 0 || next.temperature > 2) {
       throw new Error('Temperature must be between 0 and 2');
     }
     this.store.setSetting('model', next);
     this.publish({ type: 'settings.updated', settings: this.publicModelSettings() });
     return this.publicModelSettings();
-  }
-
-  chatGptAccountStatus(): ChatGptAccountStatus {
-    return this.chatGptAuth.status();
-  }
-
-  beginChatGptSignIn(redirectUri: string): Promise<{ authorizationUrl: string }> {
-    return this.chatGptAuth.beginSignIn(redirectUri);
-  }
-
-  completeChatGptSignIn(callback: URLSearchParams, redirectUri: string): Promise<ChatGptAccountStatus> {
-    return this.chatGptAuth.completeSignIn(callback, redirectUri);
-  }
-
-  chatGptModels(): Promise<ChatGptModelChoice[]> {
-    return this.chatGptAuth.listModels();
-  }
-
-  disconnectChatGpt(): Promise<{ remoteRevoked: boolean }> {
-    return this.chatGptAuth.signOut();
   }
 
   availableCommands(): Array<{ name: string; description: string }> {
@@ -1397,15 +1357,23 @@ export class PicoRuntime {
   pluginInfo(): {
     plugins: ReturnType<PluginHost['list']>;
     ui: ReturnType<PluginHost['uiContributions']>;
+    pages: ReturnType<PluginHost['uiPages']>;
+    providers: ReturnType<PluginHost['modelProviders']>;
     pipelines: ReturnType<ExecutionPipelines['registrations']>;
     errors: string[];
   } {
     return {
       plugins: this.plugins.list(),
       ui: this.plugins.uiContributions(),
+      pages: this.plugins.uiPages(),
+      providers: this.plugins.modelProviders(),
       pipelines: this.pipelines.registrations(),
       errors: [...this.pluginLoadErrors],
     };
+  }
+
+  pluginHttpRoute(pluginId: string, method: string, path: string) {
+    return this.plugins.findHttpRoute(pluginId, method, path);
   }
 
   async executorStatus(threadId: string): Promise<{ connected: boolean; kind: string; label: string; error?: string }> {
