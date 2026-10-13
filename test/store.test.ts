@@ -59,3 +59,41 @@ describe('PicoStore migrations', () => {
     }
   });
 });
+
+describe('PicoStore execution transactions', () => {
+  it('keeps execution state and its append-only log entry atomic', () => {
+    const store = new PicoStore(':memory:');
+    try {
+      const project = store.createProject('Execution transaction', '/');
+      const thread = store.createThread(project.id, 'host');
+      const transition = store.createModelExecution('atomic-transition', thread.id, 0);
+      store.db.exec(`
+        CREATE TRIGGER fail_running_execution_log
+        BEFORE INSERT ON execution_log
+        WHEN NEW.execution_id = 'atomic-transition' AND NEW.kind = 'running'
+        BEGIN SELECT RAISE(ABORT, 'simulated execution log failure'); END;
+      `);
+
+      expect(() => store.transitionExecution(transition.id, 'running')).toThrow(/simulated execution log failure/);
+      expect(store.getExecution(transition.id)?.status).toBe('pending');
+      expect(store.listExecutionLog(transition.id, 'created')).toHaveLength(1);
+      expect(store.listExecutionLog(transition.id, 'running')).toHaveLength(0);
+
+      store.db.exec('DROP TRIGGER fail_running_execution_log;');
+      store.db.exec(`
+        CREATE TRIGGER fail_created_execution_log
+        BEFORE INSERT ON execution_log
+        WHEN NEW.execution_id = 'atomic-create' AND NEW.kind = 'created'
+        BEGIN SELECT RAISE(ABORT, 'simulated execution creation log failure'); END;
+      `);
+
+      expect(() => store.createModelExecution('atomic-create', thread.id, 0)).toThrow(
+        /simulated execution creation log failure/,
+      );
+      expect(store.getExecution('atomic-create')).toBeNull();
+      expect(store.listExecutionLog('atomic-create', 'created')).toHaveLength(0);
+    } finally {
+      store.close();
+    }
+  });
+});

@@ -537,26 +537,36 @@ export class PicoStore {
 
   createModelExecution(id: string, threadId: string, projectionThrough: number): Execution {
     const now = isoNow();
-    const existing = this.getExecution(id);
-    if (existing) return existing;
-    this.db
-      .prepare(
-        `
+    return this.transaction(() => {
+      const existing = this.getExecution(id);
+      if (existing) return existing;
+      this.db
+        .prepare(
+          `
       INSERT INTO executions (
         id, thread_id, batch_id, kind, tool_name, arguments_json, status,
         result_json, error, created_at, updated_at
       ) VALUES (?, ?, NULL, 'model', NULL, ?, 'pending', NULL, NULL, ?, ?)
     `,
-      )
-      .run(id, threadId, JSON.stringify({ projectionThrough }), now, now);
-    this.logExecution(id, 'created', { status: 'pending', projectionThrough }, now);
-    return this.getExecution(id)!;
+        )
+        .run(id, threadId, JSON.stringify({ projectionThrough }), now, now);
+      this.logExecution(id, 'created', { status: 'pending', projectionThrough }, now);
+      return this.getExecution(id)!;
+    });
   }
 
   transitionExecution(
     id: string,
     status: ExecutionStatus,
     data: { result?: unknown; error?: string; detail?: Record<string, unknown> } = {},
+  ): Execution {
+    return this.transaction(() => this.transitionExecutionInternal(id, status, data));
+  }
+
+  private transitionExecutionInternal(
+    id: string,
+    status: ExecutionStatus,
+    data: { result?: unknown; error?: string; detail?: Record<string, unknown> },
   ): Execution {
     const current = this.getExecution(id);
     if (!current) throw new Error(`Execution ${id} not found`);
@@ -772,7 +782,7 @@ export class PicoStore {
           "UPDATE approvals SET status = 'cancelled', decided_at = ? WHERE execution_id = ? AND status = 'pending'",
         )
         .run(isoNow(), executionId);
-      const interrupted = this.transitionExecution(executionId, 'interrupted', {
+      const interrupted = this.transitionExecutionInternal(executionId, 'interrupted', {
         error: 'Interrupted while waiting for tool approval.',
         detail: { userInterrupted: true, beforeApproval: true },
       });
