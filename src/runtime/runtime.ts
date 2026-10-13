@@ -28,6 +28,7 @@ import { RemoteHostExecutor, inspectRemoteExecutor, validateRemoteWorkspace } fr
 import { normalizeRemoteExecutorUrl } from '../executor/remote-protocol.js';
 import { createToolCatalog, type ToolContext } from '../executor/tools.js';
 import { builtinPlugins } from '../plugins/builtin.js';
+import { createChatGptPlanPlugin } from '../plugins/chatgpt-plan.js';
 import { CommandRegistry, PluginHost, type CommandResult } from '../plugins/host.js';
 import {
   OpenAiCompatibleAdapter,
@@ -168,7 +169,6 @@ export class PicoRuntime {
   readonly commands = new CommandRegistry();
   readonly plugins: PluginHost;
   private readonly model: ModelAdapter;
-  private readonly chatGptModel: ChatGptResponsesAdapter;
   private readonly additionalPlugins: PicoPlugin[];
   private readonly hostExecutor: HostExecutor;
   private readonly containerExecutor: ContainerExecutor;
@@ -185,19 +185,19 @@ export class PicoRuntime {
   constructor(store = new PicoStore(), options: RuntimeOptions = {}) {
     this.store = store;
     this.chatGptAuth = new ChatGptPlanAuth(store);
-    this.chatGptModel = new ChatGptResponsesAdapter(this.chatGptAuth);
     this.model = options.model ?? new OpenAiCompatibleAdapter();
-    this.additionalPlugins = options.plugins ?? [];
+    this.additionalPlugins = [
+      createChatGptPlanPlugin({
+        auth: this.chatGptAuth,
+        model: new ChatGptResponsesAdapter(this.chatGptAuth),
+        getSettings: () => this.getModelSettings(),
+      }),
+      ...(options.plugins ?? []),
+    ];
     this.hostExecutor = new HostExecutor(store, this.tools, (execution) => this.executionChanged(execution));
     this.containerExecutor = new ContainerExecutor(store, this.tools, (execution) => this.executionChanged(execution));
     this.remoteHostExecutor = new RemoteHostExecutor(store, (execution) => this.executionChanged(execution));
     this.plugins = new PluginHost(store, this.tools, this.pipelines, this.commands, options.pluginDirectory);
-    this.pipelines.use<ModelStageInput, ModelResponse>('model', 'pico.chatgpt-plan', async (input, next) => {
-      if (input.provider !== 'chatgpt-plan') return next();
-      const settings = this.getModelSettings();
-      input.recordModelInput(input.prompt, input.provider);
-      return this.chatGptModel.complete(input.prompt, settings, input.signal, input.onText);
-    });
     this.registerControlTools();
   }
 
@@ -868,14 +868,15 @@ export class PicoRuntime {
         if (requestId)
           this.store.appendExecutionLog(modelExecutionId, 'model-input-settled', { requestId, status: 'completed' });
       } catch (error) {
-        this.store.appendExecutionLog(modelExecutionId, 'model-input-settled', {
-          ...(requestId ? { requestId } : {}),
-          status:
-            controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')
-              ? 'interrupted'
-              : 'failed',
-          error: error instanceof Error ? error.message : String(error),
-        });
+        if (requestId)
+          this.store.appendExecutionLog(modelExecutionId, 'model-input-settled', {
+            requestId,
+            status:
+              controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')
+                ? 'interrupted'
+                : 'failed',
+            error: error instanceof Error ? error.message : String(error),
+          });
         throw error;
       }
       const hitOutputLimit = response.finishReason === 'length';

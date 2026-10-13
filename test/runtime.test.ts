@@ -13,14 +13,18 @@ import { threadCanBeInterrupted } from '../src/web/thread-controls.js';
 import { assistantPayload, deferred, FakeModel, response, setupRuntime } from './helpers.js';
 
 describe('durable Thread runtime invariants', () => {
-  it('routes ChatGPT model calls through the reserved model Pipeline and keeps OAuth secrets private', async () => {
+  it('loads the ChatGPT provider as a first-party plugin and keeps OAuth secrets private', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     try {
-      expect(env.runtime.pluginInfo().pipelines).toContainEqual({
-        stage: 'model',
-        pluginId: 'pico.chatgpt-plan',
-        order: 0,
-      });
+      const info = env.runtime.pluginInfo();
+      expect(info.plugins.some((plugin) => plugin.id === 'pico.chatgpt-plan')).toBe(true);
+      expect(
+        info.pipelines.some((pipeline) => pipeline.stage === 'model' && pipeline.pluginId === 'pico.chatgpt-plan'),
+      ).toBe(true);
+      expect(info.ui).toContainEqual(
+        expect.objectContaining({ id: 'pico.chatgpt-plan:chatgpt-provider', command: '/chatgpt-provider' }),
+      );
+      expect(env.runtime.availableCommands()).toContainEqual(expect.objectContaining({ name: 'chatgpt-provider' }));
       expect(() => env.runtime.updateModelSettings({ provider: 'chatgpt-plan' })).toThrow('Connect a ChatGPT account');
 
       env.store.setSetting('chatgpt.oauth', {
