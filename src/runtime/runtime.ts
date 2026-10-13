@@ -716,10 +716,8 @@ export class PicoRuntime {
   }
 
   private needsModelStep(threadId: string): boolean {
-    const records = this.store.listRecords(threadId);
-    const latestAssistant = [...records].reverse().find((record) => record.kind === 'assistant') as
-      CanonicalRecord<AssistantPayload> | undefined;
-    if (!latestAssistant) return records.some((record) => record.kind === 'message');
+    const latestAssistant = this.store.modelOutputForThread(threadId);
+    if (!latestAssistant) return this.store.hasMessage(threadId);
     if (latestAssistant.payload.toolCalls.length > 0) {
       const executions = this.store.listExecutionsByBatch(latestAssistant.payload.batchId ?? '');
       return (
@@ -727,9 +725,7 @@ export class PicoRuntime {
         executions.every((execution) => terminalStatus(execution.status) && this.store.hasToolResult(execution.id))
       );
     }
-    return records.some(
-      (record) => record.kind === 'message' && record.seq > latestAssistant.payload.projectionThrough,
-    );
+    return this.store.hasMessageAfter(threadId, latestAssistant.payload.projectionThrough);
   }
 
   private hasUnprocessedWork(threadId: string): boolean {

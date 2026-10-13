@@ -138,6 +138,34 @@ describe('PicoStore execution transactions', () => {
 });
 
 describe('canonical history pages', () => {
+  it('checks Message existence and projection watermarks without materializing history', () => {
+    const store = new PicoStore(':memory:');
+    try {
+      const project = store.createProject('Message watermarks', '/');
+      const thread = store.createThread(project.id, 'host');
+      expect(store.hasMessage(thread.id)).toBe(false);
+      expect(store.hasMessageAfter(thread.id, 0)).toBe(false);
+
+      const first = store.appendMessage(thread.id, 'watermark-first', {
+        role: 'user',
+        content: 'First input',
+        source: 'user',
+      }).record;
+      store.appendCanonical(thread.id, 'watermark-assistant', 'assistant', assistantPayload({ content: 'Reply' }));
+      const later = store.appendMessage(thread.id, 'watermark-later', {
+        role: 'user',
+        content: 'Follow-up input',
+        source: 'user',
+      }).record;
+
+      expect(store.hasMessage(thread.id)).toBe(true);
+      expect(store.hasMessageAfter(thread.id, first.seq)).toBe(true);
+      expect(store.hasMessageAfter(thread.id, later.seq)).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
   it('pages append-only records newest-first without gaps or overlap', () => {
     const store = new PicoStore(':memory:');
     try {

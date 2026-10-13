@@ -127,6 +127,7 @@ export class PicoStore {
         UNIQUE(thread_id, seq)
       );
       CREATE INDEX IF NOT EXISTS canonical_thread_seq ON canonical_records(thread_id, seq);
+      CREATE INDEX IF NOT EXISTS canonical_thread_kind_seq ON canonical_records(thread_id, kind, seq);
       CREATE TRIGGER IF NOT EXISTS canonical_records_no_update
       BEFORE UPDATE ON canonical_records BEGIN
         SELECT RAISE(ABORT, 'canonical records are append-only');
@@ -483,6 +484,20 @@ export class PicoStore {
     return (
       this.db.prepare('SELECT * FROM canonical_records WHERE thread_id = ? ORDER BY seq').all(threadId) as SqlRow[]
     ).map((row) => this.recordFromRow(row));
+  }
+
+  hasMessage(threadId: string): boolean {
+    return Boolean(
+      this.db.prepare("SELECT 1 FROM canonical_records WHERE thread_id = ? AND kind = 'message' LIMIT 1").get(threadId),
+    );
+  }
+
+  hasMessageAfter(threadId: string, sequence: number): boolean {
+    return Boolean(
+      this.db
+        .prepare("SELECT 1 FROM canonical_records WHERE thread_id = ? AND kind = 'message' AND seq > ? LIMIT 1")
+        .get(threadId, sequence),
+    );
   }
 
   listRecordPage(threadId: string, beforeSeq?: number, limit = 100): CanonicalRecordPage {

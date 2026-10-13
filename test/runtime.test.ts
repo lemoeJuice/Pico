@@ -1059,10 +1059,18 @@ describe('durable Thread runtime invariants', () => {
         });
       }
 
+      const listRecords = env.store.listRecords.bind(env.store);
+      let fullHistoryReads = 0;
+      env.store.listRecords = (threadId) => {
+        fullHistoryReads += 1;
+        return listRecords(threadId);
+      };
+
       await env.runtime.submit(thread.id, 'projection-latest-message', 'Use the complete project history.');
       await env.runtime.drain();
 
       const turns = model.prompts[0]?.turns ?? [];
+      expect(fullHistoryReads).toBe(1);
       expect(turns).toHaveLength(historySteps * 3 + 1);
       expect(turns[0]).toMatchObject({ kind: 'message', content: 'User fact 0' });
       expect(turns.filter((turn) => turn.kind === 'assistant_tools')).toHaveLength(historySteps);
