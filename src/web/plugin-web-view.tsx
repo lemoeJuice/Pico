@@ -5,6 +5,8 @@ import {
   isPluginModelSettingsUpdate,
   isPluginUiRequest,
   pluginUiLayoutForSlot,
+  pluginUiEventMatchesPlugin,
+  samePluginUiContext,
   PLUGIN_UI_PROTOCOL_VERSION,
   pluginUiUrl,
   type PluginApiInit,
@@ -57,7 +59,8 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
   const frame = useRef<HTMLIFrameElement>(null);
   const portRef = useRef<MessagePort | null>(null);
   const connected = useRef(false);
-  const deliveredEventSequence = useRef(0);
+  const deliveredEventSequence = useRef(props.events?.at(-1)?.sequence ?? 0);
+  const deliveredContext = useRef(props.context);
   const current = useRef(props);
   current.current = props;
 
@@ -69,6 +72,8 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
   }, [props.settings]);
 
   useEffect(() => {
+    if (samePluginUiContext(deliveredContext.current, props.context)) return;
+    deliveredContext.current = props.context;
     portRef.current?.postMessage({ type: 'pico:plugin-ui:context', context: props.context });
   }, [props.context]);
 
@@ -78,7 +83,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
     for (const queued of props.events ?? []) {
       if (queued.sequence <= deliveredEventSequence.current) continue;
       deliveredEventSequence.current = queued.sequence;
-      if (queued.event.type === 'plugin.updated' && queued.event.pluginId === props.pluginId) {
+      if (pluginUiEventMatchesPlugin(queued.event, props.pluginId)) {
         port.postMessage({ type: 'pico:plugin-ui:event', event: queued.event });
       }
     }
@@ -110,7 +115,12 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
           if (frame.current) frame.current.style.height = `${fixedHeight}px`;
           return;
         }
-        const limits = current.current.viewType === 'page' ? { min: 220, max: 620 } : { min: 46, max: 180 };
+        const limits =
+          current.current.uiSlot === 'tool.renderer'
+            ? { min: 72, max: 620 }
+            : current.current.viewType === 'page'
+              ? { min: 220, max: 620 }
+              : { min: 46, max: 180 };
         const height = Math.max(limits.min, Math.min(limits.max, Math.ceil(message.height)));
         if (frame.current) frame.current.style.height = `${height}px`;
         return;
@@ -145,7 +155,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
     for (const queued of current.current.events ?? []) {
       if (queued.sequence <= deliveredEventSequence.current) continue;
       deliveredEventSequence.current = queued.sequence;
-      if (queued.event.type === 'plugin.updated' && queued.event.pluginId === current.current.pluginId) {
+      if (pluginUiEventMatchesPlugin(queued.event, current.current.pluginId)) {
         hostPort.postMessage({ type: 'pico:plugin-ui:event', event: queued.event });
       }
     }

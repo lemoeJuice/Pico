@@ -20,6 +20,19 @@ export interface PluginUiContext {
   result?: ToolResultPayload;
 }
 
+export function samePluginUiContext(left: PluginUiContext, right: PluginUiContext): boolean {
+  return (
+    left.thread === right.thread &&
+    left.execution === right.execution &&
+    left.toolCall === right.toolCall &&
+    left.result === right.result
+  );
+}
+
+export function pluginUiEventMatchesPlugin(event: PluginUiEvent, pluginId: string): boolean {
+  return event.type === 'plugin.updated' && event.pluginId === pluginId;
+}
+
 export type PluginApiInit = {
   method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   body?: string;

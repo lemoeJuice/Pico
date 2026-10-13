@@ -4,7 +4,9 @@ import {
   isPluginModelSettingsUpdate,
   isPluginUiRequest,
   createPluginUiClient,
+  pluginUiEventMatchesPlugin,
   pluginUiUrl,
+  samePluginUiContext,
   type PluginUiContext,
 } from '../src/plugins/ui-protocol.js';
 
@@ -121,5 +123,21 @@ describe('dynamic plugin UI boundary', () => {
     } as MessageEvent<unknown>);
     await expect(response).resolves.toEqual({ text: 'opened' });
     client.close();
+  });
+
+  it('keeps context messages stable across unrelated renders and scopes plugin events by owner', () => {
+    const threadA = { id: 'thread-a' } as PluginUiContext['thread'];
+    const threadB = { id: 'thread-b' } as PluginUiContext['thread'];
+    expect(samePluginUiContext({ thread: threadA }, { thread: threadA })).toBe(true);
+    expect(samePluginUiContext({ thread: threadA }, { thread: threadB })).toBe(false);
+    expect(
+      pluginUiEventMatchesPlugin({ type: 'plugin.updated', pluginId: 'pico.permissions' }, 'pico.permissions'),
+    ).toBe(true);
+    expect(pluginUiEventMatchesPlugin({ type: 'plugin.updated', pluginId: 'other.plugin' }, 'pico.permissions')).toBe(
+      false,
+    );
+    expect(
+      pluginUiEventMatchesPlugin({ type: 'execution.updated', pluginId: 'pico.permissions' }, 'pico.permissions'),
+    ).toBe(false);
   });
 });
