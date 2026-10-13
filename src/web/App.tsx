@@ -43,12 +43,15 @@ import { noticeForThread, withThreadNotice, withoutThreadNotice, type ThreadNoti
 import { uiContributionsAt } from './ui-contributions.js';
 import { appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from './history-pages.js';
 import {
-  clearAcceptedMessageDraft,
+  COMPOSER_STATE_STORAGE_KEY,
+  acceptComposerMessage,
   hasPendingMessageSubmission,
   messageSubmissionId,
   messageSubmissionFailureMessage,
   messageSubmissionRequestInit,
-  settleMessageSubmission,
+  parseComposerState,
+  serializeComposerState,
+  type ComposerState,
   type PendingMessageIds,
   withPendingThreadSubmission,
 } from './message-retries.js';
@@ -63,6 +66,26 @@ type PluginInfo = {
 type RuntimeEvent = Record<string, unknown> & { type: string };
 type ToolPermission = { name: string; description: string; policy: PermissionPolicy };
 type ThreadExecutorChoice = ExecutorKind | 'remote';
+
+function readComposerState(): ComposerState {
+  try {
+    return parseComposerState(
+      typeof window === 'undefined' ? null : window.localStorage.getItem(COMPOSER_STATE_STORAGE_KEY),
+    );
+  } catch {
+    return parseComposerState(null);
+  }
+}
+
+function persistComposerState(state: ComposerState): void {
+  try {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(COMPOSER_STATE_STORAGE_KEY, serializeComposerState(state));
+    }
+  } catch {
+    // Keep in-memory sending and drafting available when browser storage is disabled or full.
+  }
+}
 
 function executorLabel(thread: Thread): string {
   if (thread.executorRemote) return `Remote Host · ${thread.executorLabel.split(' · ')[1] ?? 'Executor'}`;
@@ -289,6 +312,8 @@ function ToolCard({
 }
 
 export function App({ authRequired = false, onSignOut }: { authRequired?: boolean; onSignOut?(): Promise<void> }) {
+  const composerState = useRef<ComposerState | null>(null);
+  if (composerState.current === null) composerState.current = readComposerState();
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
@@ -309,7 +334,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [executorError, setExecutorError] = useState<string | null>(null);
   const [socketConnected, setSocketConnected] = useState(false);
   const [sendingThreadIds, setSendingThreadIds] = useState<Set<string>>(new Set());
-  const [draftsByThread, setDraftsByThread] = useState<Record<string, string>>({});
+  const [draftsByThread, setDraftsByThread] = useState<Record<string, string>>(
+    () => composerState.current!.draftsByThread,
+  );
   const [assistantDrafts, setAssistantDrafts] = useState<AssistantDrafts>({});
   const [unavailableModelExecutionIds, setUnavailableModelExecutionIds] = useState<Set<string>>(new Set());
   const [notice, setNotice] = useState('');
@@ -342,7 +369,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const activeProjectId = useRef(projectId);
   const threadUpdateVersions = useRef(new Map<string, number>());
   const snapshotVersions = useRef(new Map<string, number>());
-  const pendingMessageIds = useRef<PendingMessageIds>(new Map());
+  const pendingMessageIds = useRef<PendingMessageIds>(composerState.current.pendingMessages);
   const pendingSubmissionThreads = useRef(new Set<string>());
   const assistantDraftsRef = useRef(assistantDrafts);
   const activeModelExecutions = useRef<AssistantStreamExecutions>(new Map());
@@ -361,15 +388,22 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     const targetThreadId = activeThreadId.current;
     if (!targetThreadId) return;
     draftRef.current = { threadId: targetThreadId, value };
-    setDraftsByThread((current) => ({ ...current, [targetThreadId]: value }));
+    const state = composerState.current!;
+    state.draftsByThread = { ...state.draftsByThread, [targetThreadId]: value };
+    setDraftsByThread(state.draftsByThread);
+    persistComposerState(state);
   };
 
-  const clearAcceptedDraft = (targetThreadId: string, content: string): void => {
+  const acceptMessage = useCallback((targetThreadId: string, id: string, content: string): boolean => {
+    const state = composerState.current!;
+    if (!acceptComposerMessage(state, targetThreadId, id, content)) return false;
     if (draftRef.current.threadId === targetThreadId && draftRef.current.value.trim() === content) {
       draftRef.current = { threadId: targetThreadId, value: '' };
     }
-    setDraftsByThread((current) => clearAcceptedMessageDraft(current, targetThreadId, content));
-  };
+    setDraftsByThread(state.draftsByThread);
+    persistComposerState(state);
+    return true;
+  }, []);
 
   const observeModelExecutions = useCallback((executions: readonly Execution[]): void => {
     const next = observeAssistantExecutions(
@@ -436,17 +470,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         for (const record of value.records) {
           if (
             record.kind === 'message' &&
-            settleMessageSubmission(pendingMessageIds.current, id, record.id) &&
             record.payload.source === 'user' &&
             typeof record.payload.content === 'string'
           ) {
-            clearAcceptedDraft(id, record.payload.content);
+            acceptMessage(id, record.id, record.payload.content);
           }
         }
         setSnapshot((current) => mergeLatestSnapshot(current, value));
       }
     },
-    [observeModelExecutions],
+    [acceptMessage, observeModelExecutions],
   );
 
   const noteSnapshotChange = useCallback((threadId: string | null | undefined): void => {
@@ -656,12 +689,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         } else if (event.type === 'record') {
           const record = event.record as CanonicalRecord | undefined;
           if (record?.kind === 'message' && record.threadId) {
-            if (
-              settleMessageSubmission(pendingMessageIds.current, record.threadId, record.id) &&
-              record.payload.source === 'user' &&
-              typeof record.payload.content === 'string'
-            ) {
-              clearAcceptedDraft(record.threadId, record.payload.content);
+            if (record.payload.source === 'user' && typeof record.payload.content === 'string') {
+              acceptMessage(record.threadId, record.id, record.payload.content);
             }
           }
           if (record?.threadId === activeThreadId.current) {
@@ -807,7 +836,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       if (timer) window.clearTimeout(timer);
       socket?.close();
     };
-  }, [noteSnapshotChange, observeModelExecutions, settleModelExecution]);
+  }, [acceptMessage, noteSnapshotChange, observeModelExecutions, settleModelExecution]);
 
   useEffect(() => {
     followLatest.current = true;
@@ -826,14 +855,14 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     markThreadSending(sentThreadId, true);
     setError('');
     const id = messageSubmissionId(pendingMessageIds.current, sentThreadId, clean, () => crypto.randomUUID());
+    persistComposerState(composerState.current!);
     try {
       const result = await api<{
         accepted: boolean;
         duplicate?: boolean;
         command?: { text?: string; openThreadId?: string };
       }>(`/api/threads/${sentThreadId}/messages`, messageSubmissionRequestInit(id, clean));
-      settleMessageSubmission(pendingMessageIds.current, sentThreadId, id);
-      clearAcceptedDraft(sentThreadId, clean);
+      acceptMessage(sentThreadId, id, clean);
       const commandText = result.command?.text;
       if (commandText) setThreadNotices((current) => withThreadNotice(current, sentThreadId, commandText));
       if (activeThreadId.current === sentThreadId) {

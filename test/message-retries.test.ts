@@ -1,17 +1,59 @@
 import { createServer } from 'node:http';
 import { describe, expect, it } from 'vitest';
 import {
+  acceptComposerMessage,
   clearAcceptedMessageDraft,
   hasPendingMessageSubmission,
   messageSubmissionFailureMessage,
   messageSubmissionRequestInit,
   messageSubmissionId,
+  parseComposerState,
   settleMessageSubmission,
+  serializeComposerState,
+  type ComposerState,
   type PendingMessageIds,
   withPendingThreadSubmission,
 } from '../src/web/message-retries.js';
 
 describe('Thread-scoped message retries', () => {
+  it('restores drafts and uncertain Message IDs across a browser reload', () => {
+    const pending: PendingMessageIds = new Map([
+      ['thread-a', new Map([['Unconfirmed message', 'stable-message-id']])],
+      ['thread-b', new Map([['Another message', 'other-message-id']])],
+    ]);
+    const state: ComposerState = {
+      draftsByThread: { 'thread-a': 'Unconfirmed message', 'thread-b': 'Other draft', 'thread-c': '' },
+      pendingMessages: pending,
+    };
+
+    const restored = parseComposerState(serializeComposerState(state));
+
+    expect(restored.draftsByThread).toEqual({ 'thread-a': 'Unconfirmed message', 'thread-b': 'Other draft' });
+    expect(messageSubmissionId(restored.pendingMessages, 'thread-a', 'Unconfirmed message', () => 'new-id')).toBe(
+      'stable-message-id',
+    );
+    expect(messageSubmissionId(restored.pendingMessages, 'thread-b', 'Another message', () => 'new-id')).toBe(
+      'other-message-id',
+    );
+    expect(messageSubmissionId(restored.pendingMessages, 'thread-a', 'Other text', () => 'new-id')).toBe('new-id');
+
+    expect(acceptComposerMessage(restored, 'thread-a', 'stable-message-id', 'Unconfirmed message')).toBe(true);
+    const settled = parseComposerState(serializeComposerState(restored));
+    expect(settled.draftsByThread).toEqual({ 'thread-b': 'Other draft' });
+    expect(hasPendingMessageSubmission(settled.pendingMessages, 'thread-a', 'stable-message-id')).toBe(false);
+    expect(messageSubmissionId(settled.pendingMessages, 'thread-a', 'Unconfirmed message', () => 'fresh-id')).toBe(
+      'fresh-id',
+    );
+  });
+
+  it('ignores malformed or unsupported persisted composer state', () => {
+    expect(parseComposerState('{broken')).toEqual({ draftsByThread: {}, pendingMessages: new Map() });
+    expect(parseComposerState(JSON.stringify({ version: 2, draftsByThread: { a: 'draft' } }))).toEqual({
+      draftsByThread: {},
+      pendingMessages: new Map(),
+    });
+  });
+
   it('times out an unconfirmed Message request so the same draft can be retried', async () => {
     const pending: PendingMessageIds = new Map();
     const createId = (): string => 'message-timeout';
