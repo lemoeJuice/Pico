@@ -67,6 +67,33 @@ export interface SubmitResult {
   command?: CommandResult;
 }
 
+function commandResultFromRecord(
+  record: CanonicalRecord | null,
+  threadId: string,
+  requestHash: string,
+  commandHash: string,
+): CommandResult | null {
+  if (
+    !record ||
+    record.threadId !== threadId ||
+    record.kind !== 'plugin' ||
+    record.payload.pluginId !== 'pico.commands' ||
+    record.payload.action !== 'invocation-completed' ||
+    record.payload.requestHash !== requestHash ||
+    record.payload.commandHash !== commandHash
+  ) {
+    return null;
+  }
+
+  const result = record.payload.result;
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return null;
+  const value = result as Record<string, unknown>;
+  const command: CommandResult = {};
+  if (typeof value.text === 'string') command.text = value.text;
+  if (typeof value.openThreadId === 'string') command.openThreadId = value.openThreadId;
+  return command;
+}
+
 export interface ModelInputAttempt {
   id: string;
   prompt: ModelPrompt;
@@ -413,13 +440,22 @@ export class PicoRuntime {
       const commandText = content.trim();
       const requestHash = createHash('sha256').update(`${threadId}\0${id}`).digest('hex');
       const commandHash = createHash('sha256').update(commandText).digest('hex');
-      const receipt = this.store.appendCanonical(threadId, `pico:command:${requestHash}`, 'plugin', {
+      const receiptId = `pico:command:${requestHash}`;
+      const completedId = `${receiptId}:completed`;
+      const receipt = this.store.appendCanonical(threadId, receiptId, 'plugin', {
         pluginId: 'pico.commands',
         action: 'invocation-accepted',
         requestHash,
         commandHash,
       });
       if (!receipt.inserted) {
+        const completedCommand = commandResultFromRecord(
+          this.store.getCanonicalRecordById(completedId),
+          threadId,
+          requestHash,
+          commandHash,
+        );
+        if (completedCommand) return { accepted: true, duplicate: true, command: completedCommand };
         return {
           accepted: true,
           duplicate: true,
@@ -433,7 +469,17 @@ export class PicoRuntime {
         thread: this.getThread(threadId),
         projectId: thread.projectId,
       });
-      if (command) return { accepted: true, duplicate: false, command };
+      if (command) {
+        const completed = this.store.appendCanonical(threadId, completedId, 'plugin', {
+          pluginId: 'pico.commands',
+          action: 'invocation-completed',
+          requestHash,
+          commandHash,
+          result: command,
+        });
+        if (completed.inserted) this.publishRecord(completed.record);
+        return { accepted: true, duplicate: false, command };
+      }
     }
     const result = this.postMessage(thread, id, {
       role: 'user',

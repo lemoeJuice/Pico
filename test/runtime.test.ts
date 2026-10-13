@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -203,6 +204,7 @@ describe('durable Thread runtime invariants', () => {
       await commandStarted.promise;
       const racingRetry = await runtime.submit(thread.id, 'stable-command-id', '/count');
       expect(racingRetry.duplicate).toBe(true);
+      expect(racingRetry.command?.text).toContain('already accepted');
       releaseCommand.resolve({ text: `Invocation ${invocations}` });
       const first = await firstPromise;
       expect(first.duplicate).toBe(false);
@@ -220,7 +222,7 @@ describe('durable Thread runtime invariants', () => {
       const retry = await runtime.submit(thread.id, 'stable-command-id', '/count');
 
       expect(retry.duplicate).toBe(true);
-      expect(retry.command?.text).toContain('already accepted');
+      expect(retry.command?.text).toBe('Invocation 1');
       expect(invocations).toBe(1);
       expect(store.listRecords(thread.id).filter((record) => record.kind === 'message')).toHaveLength(0);
       expect(
@@ -228,11 +230,85 @@ describe('durable Thread runtime invariants', () => {
           .listRecords(thread.id)
           .filter((record) => record.kind === 'plugin' && record.payload.action === 'invocation-accepted'),
       ).toHaveLength(1);
+      expect(
+        store
+          .listRecords(thread.id)
+          .filter((record) => record.kind === 'plugin' && record.payload.action === 'invocation-completed'),
+      ).toMatchObject([{ payload: { result: { text: 'Invocation 1' } } }]);
       await expect(runtime.submit(thread.id, 'stable-command-id', '/other')).rejects.toThrow(
         /reused with different content/i,
       );
     } finally {
       releaseCommand.resolve({ text: 'cleanup' });
+      store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('does not rerun a command whose accepted receipt survived without a completion record', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-command-incomplete-'));
+    const workspace = join(directory, 'workspace');
+    await mkdir(workspace);
+    const databasePath = join(directory, 'runtime.sqlite');
+    let invocations = 0;
+    const plugin: PicoPlugin = {
+      id: 'test.incomplete-command',
+      name: 'Incomplete command',
+      version: '1',
+      activate({ commands }) {
+        commands.register({
+          name: 'count',
+          description: 'Increment the test counter',
+          execute() {
+            invocations += 1;
+            return { text: `Invocation ${invocations}` };
+          },
+        });
+      },
+    };
+    let store = new PicoStore(databasePath);
+    let runtime = new PicoRuntime(store, {
+      model: new FakeModel(() => response('unused')),
+      plugins: [plugin],
+      pluginDirectory: join(directory, 'empty-plugins'),
+    });
+    await runtime.initialize();
+    const project = await runtime.createProject('Incomplete command', workspace);
+    const thread = runtime.createThread(project.id, 'host');
+    const id = 'incomplete-command-id';
+    const commandText = '/count';
+    const requestHash = createHash('sha256').update(`${thread.id}\0${id}`).digest('hex');
+    const commandHash = createHash('sha256').update(commandText).digest('hex');
+
+    try {
+      store.appendCanonical(thread.id, `pico:command:${requestHash}`, 'plugin', {
+        pluginId: 'pico.commands',
+        action: 'invocation-accepted',
+        requestHash,
+        commandHash,
+      });
+      await runtime.shutdown();
+      store.close();
+
+      store = new PicoStore(databasePath);
+      runtime = new PicoRuntime(store, {
+        model: new FakeModel(() => response('unused')),
+        plugins: [plugin],
+        pluginDirectory: join(directory, 'empty-plugins'),
+      });
+      await runtime.initialize();
+      const retry = await runtime.submit(thread.id, id, commandText);
+
+      expect(retry.duplicate).toBe(true);
+      expect(retry.command?.text).toContain('already accepted');
+      expect(invocations).toBe(0);
+      expect(
+        store
+          .listRecords(thread.id)
+          .filter((record) => record.kind === 'plugin' && record.payload.action === 'invocation-completed'),
+      ).toHaveLength(0);
+    } finally {
+      await runtime.shutdown();
       store.close();
       await rm(directory, { recursive: true, force: true });
     }

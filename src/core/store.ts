@@ -486,6 +486,11 @@ export class PicoStore {
     ).map((row) => this.recordFromRow(row));
   }
 
+  getCanonicalRecordById(id: string): CanonicalRecord | null {
+    const row = this.db.prepare('SELECT * FROM canonical_records WHERE id = ?').get(id) as SqlRow | undefined;
+    return row ? this.recordFromRow(row) : null;
+  }
+
   hasMessage(threadId: string): boolean {
     return Boolean(
       this.db.prepare("SELECT 1 FROM canonical_records WHERE thread_id = ? AND kind = 'message' LIMIT 1").get(threadId),
