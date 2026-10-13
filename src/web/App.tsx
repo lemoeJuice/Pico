@@ -44,6 +44,29 @@ import { noticeForThread, withThreadNotice, withoutThreadNotice, type ThreadNoti
 import { uiContributionsAt } from './ui-contributions.js';
 import { appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from './history-pages.js';
 import {
+  ArrowRight,
+  ArrowUpRight,
+  Box,
+  ChevronDown,
+  ChevronRight,
+  Cloud,
+  GitBranch,
+  LoaderCircle,
+  LogOut,
+  Menu,
+  MessageSquare,
+  Monitor,
+  Pause,
+  Play,
+  Plus,
+  Send,
+  Settings,
+  Sparkles,
+  Square,
+  UserRound,
+  X,
+} from 'lucide-react';
+import {
   COMPOSER_STATE_STORAGE_KEY,
   acceptComposerMessage,
   hasPendingMessageSubmission,
@@ -89,8 +112,8 @@ function persistComposerState(state: ComposerState): void {
 }
 
 function executorLabel(thread: Thread): string {
-  if (thread.executorRemote) return `Remote Host · ${thread.executorLabel.split(' · ')[1] ?? 'Executor'}`;
-  return thread.executorKind === 'container' ? 'Container' : 'Host';
+  if (thread.executorRemote) return 'Remote';
+  return thread.executorKind === 'container' ? 'Container' : 'Local';
 }
 
 class HttpError extends Error {
@@ -130,21 +153,6 @@ function recordPayload<T>(record: CanonicalRecord): T {
   return record.payload as unknown as T;
 }
 
-function StatePill({ state }: { state: Thread['state'] }) {
-  const labels: Record<Thread['state'], string> = {
-    idle: 'Idle',
-    running: 'Working',
-    pausing: 'Pausing',
-    paused: 'Paused',
-  };
-  return (
-    <span className={`state-pill state-${state}`}>
-      <span className="state-dot" />
-      {labels[state]}
-    </span>
-  );
-}
-
 function ExecutorPill({
   thread,
   connected,
@@ -154,28 +162,77 @@ function ExecutorPill({
   connected: boolean | null;
   error: string | null;
 }) {
-  const connectionLabel = connected === null ? (error ? 'Status unknown' : 'Checking…') : undefined;
+  const ExecutorIcon = thread.executorRemote ? Cloud : thread.executorKind === 'container' ? Box : Monitor;
   const accessibleStatus =
     connected === null ? (error ? 'status unknown' : 'checking connection') : connected ? 'connected' : 'disconnected';
   return (
     <span
       className={`executor-pill ${connected === false ? 'executor-offline' : ''}`}
       title={error ?? undefined}
-      aria-label={`${executorLabel(thread)} Executor ${accessibleStatus}${error ? `: ${error}` : ''}`}
+      aria-label={`${executorLabel(thread)} ${accessibleStatus}${error ? `: ${error}` : ''}`}
     >
-      <span className="executor-glyph">
-        {thread.executorKind === 'container' ? '▧' : thread.executorRemote ? '⇄' : '⌂'}
-      </span>
-      <span>{executorLabel(thread)} Executor</span>
+      <ExecutorIcon className="executor-glyph" size={14} aria-hidden="true" />
+      <span>{executorLabel(thread)}</span>
       {connected === null ? (
-        <>
-          {connectionLabel ? <span>{connectionLabel}</span> : null}
-          {error ? <i className="connection-dot" aria-hidden="true" /> : <i className="tiny-spinner" />}
-        </>
+        error ? (
+          <i className="connection-dot offline" aria-hidden="true" />
+        ) : (
+          <i className="tiny-spinner" aria-hidden="true" />
+        )
       ) : (
         <i className={`connection-dot ${connected ? 'online' : 'offline'}`} aria-hidden="true" />
       )}
     </span>
+  );
+}
+
+function ThreadStateControl({
+  state,
+  canInterrupt,
+  onAction,
+}: {
+  state: Thread['state'];
+  canInterrupt: boolean;
+  onAction(action: 'pause' | 'continue' | 'interrupt'): void;
+}) {
+  const control =
+    state === 'running'
+      ? { label: 'Pause', accessible: 'Thread working. Pause after the active execution settles.', icon: Pause }
+      : state === 'pausing'
+        ? { label: 'Pausing', accessible: 'Thread is pausing after the active execution settles.', icon: LoaderCircle }
+        : state === 'paused'
+          ? { label: 'Continue', accessible: 'Thread is paused. Continue this Thread.', icon: Play }
+          : { label: 'Idle', accessible: 'Thread is idle.', icon: null };
+  const ControlIcon = control.icon;
+  return (
+    <>
+      <button
+        type="button"
+        className={`composer-state-control state-${state}`}
+        aria-label={control.accessible}
+        title={control.accessible}
+        disabled={state === 'idle' || state === 'pausing'}
+        onClick={() => onAction(state === 'running' ? 'pause' : 'continue')}
+      >
+        {ControlIcon ? (
+          <ControlIcon className={state === 'pausing' ? 'state-spinner' : undefined} size={14} aria-hidden="true" />
+        ) : (
+          <i className="state-dot" aria-hidden="true" />
+        )}
+        <span>{control.label}</span>
+      </button>
+      {canInterrupt ? (
+        <button
+          type="button"
+          className="interrupt-icon-button"
+          aria-label="Interrupt active execution"
+          title="Interrupt active execution"
+          onClick={() => onAction('interrupt')}
+        >
+          <Square size={13} aria-hidden="true" />
+        </button>
+      ) : null}
+    </>
   );
 }
 
@@ -207,7 +264,7 @@ function Modal({
             <h2>{title}</h2>
           </div>
           <button className="icon-button" aria-label="Close dialog" onClick={onClose}>
-            ×
+            <X size={17} aria-hidden="true" />
           </button>
         </div>
         {error ? (
@@ -240,14 +297,19 @@ function ThreadListItem({
       className={`thread-list-item ${active ? 'selected' : ''} ${child ? 'child-thread-item' : ''}`}
       onClick={onSelect}
     >
-      <span className="thread-item-icon">{child ? '↳' : '◌'}</span>
+      <span className="thread-item-icon" aria-hidden="true">
+        {child ? <GitBranch size={14} /> : <MessageSquare size={14} />}
+      </span>
       <span className="thread-item-copy">
         <span className="thread-item-title">{thread.title}</span>
-        <span className="thread-item-meta">
-          {executorLabel(thread)} · {thread.state}
-        </span>
+        <span className="thread-item-meta">{executorLabel(thread)}</span>
       </span>
-      {thread.state === 'running' || thread.state === 'pausing' ? <span className="mini-active-dot" /> : null}
+      <span
+        className={`thread-state-dot state-${thread.state}`}
+        role="img"
+        aria-label={thread.state}
+        title={thread.state}
+      />
     </button>
   );
 }
@@ -284,7 +346,7 @@ function ToolCard({
       open={execution?.status === 'pending' && Boolean(execution.error)}
     >
       <summary>
-        <span className="tool-chevron">⌄</span>
+        <ChevronDown className="tool-chevron" size={14} aria-hidden="true" />
         <span className="tool-name">{call.name}</span>
         <span
           className={`tool-status status-${approval?.status === 'pending' ? 'pending' : (execution?.status ?? 'pending')}`}
@@ -1258,8 +1320,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       <aside className={`sidebar ${mobileSidebarOpen ? 'sidebar-open' : ''}`}>
         <div className="brand-row">
           <div className="brand-mark">
-            <span>p</span>
-            <i />
+            <Sparkles size={17} aria-hidden="true" />
           </div>
           <div className="brand-name">
             pico<span>·</span>
@@ -1269,7 +1330,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             aria-label="Close sidebar"
             onClick={() => setMobileSidebarOpen(false)}
           >
-            ×
+            <X size={17} aria-hidden="true" />
           </button>
         </div>
         <div className="project-switcher">
@@ -1294,7 +1355,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 </option>
               ))}
             </select>
-            <span className="select-chevron">⌄</span>
+            <ChevronDown className="select-chevron" size={15} aria-hidden="true" />
           </div>
           <button
             className="sidebar-add-project"
@@ -1302,7 +1363,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             onClick={() => setNewProjectOpen(true)}
             title={bootstrapping ? 'Loading workspace data…' : undefined}
           >
-            <span>＋</span> Add Project
+            <Plus size={15} aria-hidden="true" /> Add Project
           </button>
         </div>
         <div className="thread-section-heading">
@@ -1313,7 +1374,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             disabled={!projectId}
             onClick={() => setNewThreadOpen(true)}
           >
-            ＋
+            <Plus size={14} aria-hidden="true" />
           </button>
         </div>
         <div className="thread-list">
@@ -1348,10 +1409,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         </div>
         <div className="sidebar-bottom">
           <button className="settings-link" disabled={bootstrapping} onClick={() => setSettingsOpen(true)}>
-            <span className="settings-icon">⚙</span>
-            <span>Settings</span>
-            {!settings?.model ? <span className="settings-needs-config">Set up</span> : null}
+            <Settings size={15} aria-hidden="true" />
+            <span>{settings?.model ? 'Settings' : 'Set up'}</span>
           </button>
+          {authRequired ? (
+            <button className="session-logout" onClick={() => void onSignOut?.()} type="button">
+              <LogOut size={14} aria-hidden="true" />
+              Sign out
+            </button>
+          ) : null}
           <div className="runtime-foot">
             <i className={socketConnected ? 'online' : 'offline'} />
             Runtime {socketConnected ? 'connected' : 'reconnecting'}
@@ -1366,7 +1432,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             aria-label="Open navigation"
             onClick={() => setMobileSidebarOpen(true)}
           >
-            ☰
+            <Menu size={18} aria-hidden="true" />
           </button>
           <div className="breadcrumbs">
             <span>{selectedProject?.name ?? 'Pico'}</span>
@@ -1376,12 +1442,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           {selectedThread ? (
             <div className="topbar-status">
               <ExecutorPill thread={selectedThread} connected={executorConnected} error={executorError} />
-              <StatePill state={currentState} />
-              {authRequired ? (
-                <button className="session-logout" onClick={() => void onSignOut?.()} type="button">
-                  Sign out
-                </button>
-              ) : null}
             </div>
           ) : (
             <div className="topbar-status">
@@ -1390,11 +1450,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 {bootstrapping ? 'Loading workspace…' : socketConnected ? 'Runtime connected' : 'Connecting…'}
                 {bootstrapping ? <i className="tiny-spinner" aria-hidden="true" /> : null}
               </span>
-              {authRequired ? (
-                <button className="session-logout" onClick={() => void onSignOut?.()} type="button">
-                  Sign out
-                </button>
-              ) : null}
             </div>
           )}
         </header>
@@ -1440,8 +1495,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         {!selectedThread ? (
           <section className="welcome-screen">
             <div className="welcome-mark">
-              <span>p</span>
-              <i />
+              <Sparkles size={21} aria-hidden="true" />
             </div>
             <p className="eyebrow">A SMALL PLACE TO THINK WITH AGENTS</p>
             <h1>
@@ -1460,7 +1514,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 disabled={bootstrapping}
                 onClick={() => setNewProjectOpen(true)}
               >
-                Create a Project <span>↗</span>
+                Create a Project <ArrowUpRight size={14} aria-hidden="true" />
               </button>
               {selectedProject ? (
                 <button className="button button-soft" disabled={bootstrapping} onClick={() => setNewThreadOpen(true)}>
@@ -1469,24 +1523,14 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               ) : null}
             </div>
             {!settings?.model ? (
-              <button className="welcome-settings" onClick={() => setSettingsOpen(true)}>
-                Configure a model connection <span>→</span>
+              <button className="welcome-settings button button-soft" onClick={() => setSettingsOpen(true)}>
+                <Settings size={14} aria-hidden="true" /> Configure a model connection
               </button>
             ) : null}
           </section>
         ) : (
           <>
             <div className="conversation-header">
-              <div className="conversation-title">
-                <div className="thread-sparkle">✳</div>
-                <div>
-                  <h1>{selectedThread.title}</h1>
-                  <p>
-                    {selectedThread.parentThreadId ? 'Child Thread · ' : ''}
-                    {selectedProject?.name} <span>·</span> {selectedThread.executorLabel}
-                  </p>
-                </div>
-              </div>
               <div className="conversation-actions">
                 {toolbarContributions.map((item) => (
                   <button
@@ -1528,30 +1572,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     ))}
                   </div>
                 </details>
-                {currentState === 'running' ? (
-                  <button className="button button-soft" onClick={() => void controlThread('pause')}>
-                    Pause
-                  </button>
-                ) : null}
-                {currentState === 'pausing' ? (
-                  <button className="button button-soft" onClick={() => void controlThread('pause')}>
-                    Pausing…
-                  </button>
-                ) : null}
-                {currentState === 'paused' ? (
-                  <button className="button button-primary compact" onClick={() => void controlThread('continue')}>
-                    Continue
-                  </button>
-                ) : null}
-                {threadCanBeInterrupted(currentState, executions) ? (
-                  <button
-                    className="interrupt-button"
-                    onClick={() => void controlThread('interrupt')}
-                    title="Try to stop the active execution"
-                  >
-                    Interrupt
-                  </button>
-                ) : null}
               </div>
             </div>
 
@@ -1604,7 +1624,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 )}
                 {assistantDraft ? (
                   <div className="assistant-message draft-message">
-                    <div className="assistant-avatar">p</div>
+                    <div className="assistant-avatar">
+                      <Sparkles size={13} aria-hidden="true" />
+                    </div>
                     <div className="message-body">
                       <div className="message-author">
                         Pico <span className="typing-label">writing</span>
@@ -1618,11 +1640,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 ) : null}
                 {renderedRecords.length === 0 && !assistantDraft ? (
                   <div className="empty-thread">
-                    <div className="empty-orbit">✳</div>
+                    <div className="empty-orbit">
+                      <Sparkles size={19} aria-hidden="true" />
+                    </div>
                     <h2>A fresh Thread</h2>
                     <p>
-                      Send a message to begin. This Thread will stay bound to its {executorLabel(selectedThread)}{' '}
-                      Executor.
+                      Send a message to begin. This Thread stays bound to its {executorLabel(selectedThread)}
+                      environment.
                     </p>
                   </div>
                 ) : null}
@@ -1657,11 +1681,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   aria-label="Message"
                 />
                 <div className="composer-footer">
-                  <span>
-                    {selectedThread.state === 'paused' || selectedThread.state === 'pausing'
-                      ? 'Messages are saved while paused.'
-                      : 'Enter to send · Shift + Enter for a new line'}
-                  </span>
                   <div className="composer-footer-actions">
                     {composerActions.map((item) => (
                       <button
@@ -1674,13 +1693,19 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                         {item.label}
                       </button>
                     ))}
+                    <ThreadStateControl
+                      state={currentState}
+                      canInterrupt={threadCanBeInterrupted(currentState, executions)}
+                      onAction={(action) => void controlThread(action)}
+                    />
                     <button
                       className="send-button"
                       aria-label="Send message"
+                      title="Send message"
                       disabled={!draft.trim() || busy || selectedThreadSending}
                       onClick={() => void sendMessage()}
                     >
-                      {selectedThreadSending ? <i className="tiny-spinner" /> : '↑'}
+                      {selectedThreadSending ? <i className="tiny-spinner" /> : <Send size={15} aria-hidden="true" />}
                     </button>
                   </div>
                 </div>
@@ -1691,7 +1716,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 </div>
               ) : (
                 <button className="composer-caption setup-caption" onClick={() => setSettingsOpen(true)}>
-                  Choose a model in Settings to start a conversation →
+                  Choose a model in Settings to start a conversation <ArrowRight size={12} aria-hidden="true" />
                 </button>
               )}
             </div>
@@ -1913,7 +1938,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 className={`executor-choice ${newThreadExecutor === 'container' ? 'chosen' : ''}`}
                 onClick={() => setNewThreadExecutor('container')}
               >
-                <span className="choice-icon">▧</span>
+                <span className="choice-icon">
+                  <Box size={15} aria-hidden="true" />
+                </span>
                 <strong>Container</strong>
                 <small>Isolated workspace, root inside the container</small>
                 <i>{newThreadExecutor === 'container' ? 'Selected' : 'Choose'}</i>
@@ -1923,7 +1950,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 className={`executor-choice ${newThreadExecutor === 'host' ? 'chosen' : ''}`}
                 onClick={() => setNewThreadExecutor('host')}
               >
-                <span className="choice-icon">⌂</span>
+                <span className="choice-icon">
+                  <Monitor size={15} aria-hidden="true" />
+                </span>
                 <strong>Host</strong>
                 <small>Use tools and software already on this machine</small>
                 <i>{newThreadExecutor === 'host' ? 'Selected' : 'Choose'}</i>
@@ -1942,8 +1971,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 }}
                 disabled={remoteConnections.length === 0}
               >
-                <span className="choice-icon">⇄</span>
-                <strong>Remote Host</strong>
+                <span className="choice-icon">
+                  <Cloud size={15} aria-hidden="true" />
+                </span>
+                <strong>Remote</strong>
                 <small>Run tools on a connected machine</small>
                 <i>{newThreadExecutor === 'remote' ? 'Selected' : 'Choose'}</i>
               </button>
@@ -2039,13 +2070,15 @@ function MessageBubble({
           )}
           {incoming && message.senderThreadId ? (
             <button className="inline-link" onClick={() => onOpenThread(message.senderThreadId!)}>
-              Open Thread ↗
+              Open Thread <ArrowUpRight size={12} aria-hidden="true" />
             </button>
           ) : null}
         </div>
         <div className="user-bubble">{message.content}</div>
       </div>
-      <div className="user-avatar">{incoming ? '↗' : 'Y'}</div>
+      <div className="user-avatar">
+        {incoming ? <GitBranch size={13} aria-hidden="true" /> : <UserRound size={13} aria-hidden="true" />}
+      </div>
     </div>
   );
 }
@@ -2069,7 +2102,9 @@ function ModelInputDisclosure({ threadId, executionId }: { threadId: string; exe
           .finally(() => setModelInputsLoading(false));
       }}
     >
-      <summary>Model input</summary>
+      <summary>
+        <ChevronRight className="projection-chevron" size={13} aria-hidden="true" /> Model input
+      </summary>
       <p className="projection-note">The exact prompt passed to the model adapter. API credentials are not included.</p>
       {modelInputsLoading ? <p className="projection-state">Loading model input…</p> : null}
       {modelInputsError ? <p className="projection-error">{modelInputsError}</p> : null}
@@ -2079,6 +2114,7 @@ function ModelInputDisclosure({ threadId, executionId }: { threadId: string; exe
       {modelInputs?.map((attempt, index) => (
         <details className="projection-attempt" key={attempt.id}>
           <summary>
+            <ChevronRight className="projection-chevron" size={13} aria-hidden="true" />
             Attempt {index + 1} · {attempt.status}
           </summary>
           {attempt.error ? <p className="projection-error">{attempt.error}</p> : null}
@@ -2100,7 +2136,9 @@ function ModelExecutionNotice({
 }) {
   return (
     <div className="assistant-message model-execution-notice">
-      <div className="assistant-avatar">p</div>
+      <div className="assistant-avatar">
+        <Sparkles size={13} aria-hidden="true" />
+      </div>
       <div className="message-body">
         <div className="message-author">
           Model step <span className={`tool-status status-${execution.status}`}>{execution.status}</span>
@@ -2157,7 +2195,9 @@ function AssistantBubble({
       : null;
   return (
     <div className="assistant-message">
-      <div className="assistant-avatar">p</div>
+      <div className="assistant-avatar">
+        <Sparkles size={13} aria-hidden="true" />
+      </div>
       <div className="message-body">
         <div className="message-author">
           Pico {assistant.model ? <span className="model-label">· {assistant.model}</span> : null}
@@ -2168,7 +2208,8 @@ function AssistantBubble({
         {calls.length > 0 ? (
           <div className="tool-group">
             <div className="tool-group-label">
-              <span>✳</span> {calls.length} tool {calls.length === 1 ? 'call' : 'calls'} · parallel batch
+              <Sparkles size={12} aria-hidden="true" /> {calls.length} tool {calls.length === 1 ? 'call' : 'calls'} ·
+              parallel batch
             </div>
             {calls.map((call) => {
               const executionId = `${threadId}:${record.id.replace(/:assistant$/, '')}:${call.id}`;

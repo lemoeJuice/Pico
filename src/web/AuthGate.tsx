@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { Sparkles } from 'lucide-react';
 
 type AuthStatus = { authRequired: boolean; authenticated: boolean };
 
@@ -109,7 +110,9 @@ export function AuthGate({
   return (
     <main className="auth-screen">
       <section className="auth-card">
-        <div className="auth-mark">p</div>
+        <div className="auth-mark">
+          <Sparkles size={20} aria-hidden="true" />
+        </div>
         <p className="eyebrow">PICO · PRIVATE WORKSPACE</p>
         <h1>{status?.authRequired ? 'Welcome back.' : 'Connecting to Pico…'}</h1>
         {status?.authRequired ? (
