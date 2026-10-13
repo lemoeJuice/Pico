@@ -6,3 +6,12 @@ export function uiContributionsAt(
 ): UiContribution[] {
   return contributions.filter((contribution) => contribution.slot === slot);
 }
+
+export function toolRendererForCall(
+  contributions: readonly UiContribution[],
+  toolName: string,
+): UiContribution | undefined {
+  return uiContributionsAt(contributions, 'tool.renderer').find(
+    (contribution) => contribution.toolNames === undefined || contribution.toolNames.includes(toolName),
+  );
+}

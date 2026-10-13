@@ -408,6 +408,11 @@ button:disabled {
   border: 1px solid #e2e9e1;
   border-radius: 11px;
 }
+.plugin-sidebar-panel:has(> .plugin-web-view-component) {
+  display: block;
+  padding: 0;
+  overflow: hidden;
+}
 .plugin-sidebar-copy {
   display: grid;
   min-width: 0;
@@ -1444,6 +1449,18 @@ button:disabled {
   min-height: 0;
   border: 0;
   background: transparent;
+}
+.conversation-actions > .plugin-web-view-component,
+.composer-footer-actions > .plugin-web-view-component {
+  flex: 0 0 auto;
+  width: auto;
+  height: var(--pico-composer-control-height, 32px);
+}
+.plugin-tool-renderer {
+  width: 100%;
+}
+.plugin-tool-renderer > .plugin-web-view-component {
+  min-height: 46px;
 }
 .composer-plugin-controls .plugin-web-view-component {
   flex: 1 1 100%;

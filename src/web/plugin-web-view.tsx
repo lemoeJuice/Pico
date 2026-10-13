@@ -10,6 +10,8 @@ import {
   type PluginApiInit,
   type PluginModelSettingsUpdate,
   type PluginUiInitMessage,
+  type PluginUiContext,
+  type PluginUiEvent,
   type PluginUiRequest,
   type PluginUiSlot,
 } from '../plugins/ui-protocol.js';
@@ -20,9 +22,12 @@ type PluginWebViewProps = {
   viewType: PluginUiInitMessage['viewType'];
   viewId: string;
   uiSlot?: PluginUiSlot;
+  context: PluginUiContext;
+  events?: Array<{ sequence: number; event: PluginUiEvent }>;
   settings: PublicSettings;
   api<T>(path: string, init?: PluginApiInit): Promise<T>;
   updateModelSettings(update: PluginModelSettingsUpdate): Promise<void>;
+  runCommand(pluginId: string, threadId: string | null, command: string): Promise<unknown>;
   openPage(pluginId: string, pageId: string): void;
   isRegisteredPage(pluginId: string, pageId: string): boolean;
   onError(message: string): void;
@@ -52,6 +57,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
   const frame = useRef<HTMLIFrameElement>(null);
   const portRef = useRef<MessagePort | null>(null);
   const connected = useRef(false);
+  const deliveredEventSequence = useRef(0);
   const current = useRef(props);
   current.current = props;
 
@@ -61,6 +67,22 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
   useEffect(() => {
     portRef.current?.postMessage({ type: 'pico:plugin-ui:settings', settings: props.settings });
   }, [props.settings]);
+
+  useEffect(() => {
+    portRef.current?.postMessage({ type: 'pico:plugin-ui:context', context: props.context });
+  }, [props.context]);
+
+  useEffect(() => {
+    const port = portRef.current;
+    if (!port) return;
+    for (const queued of props.events ?? []) {
+      if (queued.sequence <= deliveredEventSequence.current) continue;
+      deliveredEventSequence.current = queued.sequence;
+      if (queued.event.type === 'plugin.updated' && queued.event.pluginId === props.pluginId) {
+        port.postMessage({ type: 'pico:plugin-ui:event', event: queued.event });
+      }
+    }
+  }, [props.events, props.pluginId]);
 
   useEffect(
     () => () => {
@@ -117,8 +139,16 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       viewId: props.viewId,
       ...layout,
       settings: props.settings,
+      context: props.context,
     };
     frameWindow.postMessage(init, '*', [channel.port2]);
+    for (const queued of current.current.events ?? []) {
+      if (queued.sequence <= deliveredEventSequence.current) continue;
+      deliveredEventSequence.current = queued.sequence;
+      if (queued.event.type === 'plugin.updated' && queued.event.pluginId === current.current.pluginId) {
+        hostPort.postMessage({ type: 'pico:plugin-ui:event', event: queued.event });
+      }
+    }
   };
 
   const handleRequest = async (message: PluginUiRequest): Promise<unknown> => {
@@ -134,6 +164,10 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       if (!isPluginModelSettingsUpdate(message.update)) throw new Error('Invalid model settings update.');
       await latest.updateModelSettings(message.update);
       return null;
+    }
+    if (message.action === 'command') {
+      if (message.command.length > 200) throw new Error('Plugin UI commands are too long.');
+      return await latest.runCommand(latest.pluginId, latest.context.thread?.id ?? null, message.command);
     }
     if (message.action === 'open-page') {
       if (message.pluginId !== latest.pluginId || !latest.isRegisteredPage(message.pluginId, message.pageId)) {

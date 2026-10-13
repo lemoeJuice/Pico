@@ -52,8 +52,13 @@ import {
   type AssistantStreamExecutions,
 } from './assistant-drafts.js';
 import { noticeForThread, withThreadNotice, withoutThreadNotice, type ThreadNotices } from './thread-notices.js';
-import { uiContributionsAt } from './ui-contributions.js';
-import { PLUGIN_COMPOSER_CONTROL_HEIGHT_PX, type PluginUiProps } from '../plugins/ui-protocol.js';
+import { toolRendererForCall, uiContributionsAt } from './ui-contributions.js';
+import {
+  PLUGIN_COMPOSER_CONTROL_HEIGHT_PX,
+  type PluginUiContext,
+  type PluginUiEvent,
+  type PluginUiProps,
+} from '../plugins/ui-protocol.js';
 import { PluginWebView } from './plugin-web-view.js';
 import { appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from './history-pages.js';
 import {
@@ -104,6 +109,7 @@ type PluginInfo = {
   pipelines: Array<{ stage: string; pluginId: string; order: number }>;
   errors: string[];
 };
+type PluginHostUiProps = Omit<PluginUiProps, 'executeCommand'>;
 
 type RuntimeEvent = Record<string, unknown> & { type: string };
 type ToolPermission = { name: string; description: string; policy: PermissionPolicy };
@@ -339,6 +345,52 @@ function ThreadListItem({
   );
 }
 
+function PluginContributionView({
+  item,
+  pluginProps,
+  events,
+  isRegisteredPage,
+  runCommand,
+  onActivate,
+  disabled,
+  buttonClassName,
+}: {
+  item: UiContribution;
+  pluginProps: PluginHostUiProps | null;
+  events: Array<{ sequence: number; event: PluginUiEvent }>;
+  isRegisteredPage(pluginId: string, pageId: string): boolean;
+  runCommand(pluginId: string, threadId: string | null, command: string): Promise<unknown>;
+  onActivate(item: UiContribution): void;
+  disabled: boolean;
+  buttonClassName: string;
+}) {
+  if (pluginProps && item.pluginId && item.entry && item.component) {
+    return (
+      <PluginWebView
+        pluginId={item.pluginId}
+        entry={item.entry}
+        viewType="component"
+        viewId={item.component}
+        uiSlot={item.slot}
+        events={events}
+        {...pluginProps}
+        isRegisteredPage={isRegisteredPage}
+        runCommand={runCommand}
+      />
+    );
+  }
+  return (
+    <button
+      className={buttonClassName}
+      disabled={disabled || !item.command}
+      title={item.description}
+      onClick={() => onActivate(item)}
+    >
+      {item.label}
+    </button>
+  );
+}
+
 function ToolCard({
   call,
   execution,
@@ -445,6 +497,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [desktopSidebarCollapsed, setDesktopSidebarCollapsed] = useState(false);
   const [defaultWorkspace, setDefaultWorkspace] = useState('');
   const [pluginInfo, setPluginInfo] = useState<PluginInfo | null>(null);
+  const [pluginEvents, setPluginEvents] = useState<Array<{ sequence: number; event: PluginUiEvent }>>([]);
   const [commands, setCommands] = useState<Array<{ name: string; description: string }>>([]);
   const [permissions, setPermissions] = useState<ToolPermission[]>([]);
   const [permissionsThreadId, setPermissionsThreadId] = useState<string | null>(null);
@@ -494,6 +547,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const pendingSubmissionThreads = useRef(new Set<string>());
   const assistantDraftsRef = useRef(assistantDrafts);
   const activeModelExecutions = useRef<AssistantStreamExecutions>(new Map());
+  const pluginEventSequence = useRef(0);
   const unavailableModelExecutions = useRef<AssistantStreamExecutions>(new Map());
   const observedModelExecutions = useRef(new Set<string>());
   const historyExpandedThreads = useRef(new Set<string>());
@@ -594,6 +648,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const composerActions = uiContributionsAt(uiContributions, 'composer.action');
   const composerModelContributions = uiContributionsAt(uiContributions, 'composer.model');
   const sidebarPanels = uiContributionsAt(uiContributions, 'sidebar.panel');
+  const toolRenderers = uiContributionsAt(uiContributions, 'tool.renderer');
 
   const loadSnapshot = useCallback(
     async (id: string) => {
@@ -834,6 +889,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           event = JSON.parse(String(message.data)) as RuntimeEvent;
         } catch {
           return;
+        }
+        if (event.type === 'plugin.updated' && typeof event.pluginId === 'string') {
+          const pluginEvent = { type: event.type, pluginId: event.pluginId } satisfies PluginUiEvent;
+          const sequence = ++pluginEventSequence.current;
+          setPluginEvents((current) => [...current.slice(-99), { sequence, event: pluginEvent }]);
         }
         if (event.type === 'thread.created') {
           const created = event.thread as Thread | undefined;
@@ -1294,11 +1354,31 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     setError('');
   };
 
-  const pluginUiProps = (): PluginUiProps | null => {
+  const viewContext: PluginUiContext = { thread: selectedThread };
+
+  const runPluginCommand = async (
+    pluginId: string,
+    targetThreadId: string | null,
+    command: string,
+  ): Promise<unknown> => {
+    if (!targetThreadId) throw new Error('This plugin command requires an active Thread.');
+    return await api('/api/commands/execute', {
+      method: 'POST',
+      body: JSON.stringify({
+        pluginId,
+        threadId: targetThreadId,
+        id: crypto.randomUUID(),
+        command,
+      }),
+    });
+  };
+
+  const pluginUiProps = (): PluginHostUiProps | null => {
     if (!settings) return null;
     return {
       api,
       settings,
+      context: viewContext,
       updateModelSettings: updateModelSettingsFromPlugin,
       openPage: openPluginPage,
       onError: setError,
@@ -1314,6 +1394,49 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     : undefined;
   const isRegisteredPluginPage = (pluginId: string, pageId: string): boolean =>
     Boolean(pluginInfo?.pages.some((page) => page.pluginId === pluginId && page.id === pageId));
+
+  const renderToolView = (
+    call: ToolCall,
+    execution: Execution | undefined,
+    result: ToolResultPayload | undefined,
+    approval: PermissionRequest | undefined,
+    onApproval: (executionId: string, allow: boolean, rememberForThread?: boolean) => void,
+  ): ReactNode => {
+    const renderer = toolRendererForCall(toolRenderers, call.name);
+    if (renderer?.entry && renderer.component && renderer.pluginId && pluginUiContext && selectedThread) {
+      return (
+        <div className="plugin-tool-renderer" key={execution?.id ?? call.id}>
+          <PluginWebView
+            pluginId={renderer.pluginId}
+            entry={renderer.entry}
+            viewType="component"
+            viewId={renderer.component}
+            uiSlot={renderer.slot}
+            {...pluginUiContext}
+            context={{
+              thread: selectedThread,
+              toolCall: call,
+              ...(execution ? { execution } : {}),
+              ...(result ? { result } : {}),
+            }}
+            events={pluginEvents}
+            isRegisteredPage={isRegisteredPluginPage}
+            runCommand={runPluginCommand}
+          />
+        </div>
+      );
+    }
+    return (
+      <ToolCard
+        key={execution?.id ?? call.id}
+        call={call}
+        execution={execution}
+        result={result}
+        approval={approval}
+        onApproval={onApproval}
+      />
+    );
+  };
 
   const clearApiKey = async (): Promise<void> => {
     try {
@@ -1560,23 +1683,41 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               <span className="eyebrow">PLUGIN PANELS</span>
               {sidebarPanels.map((item) => (
                 <div className="plugin-sidebar-panel" key={item.id}>
-                  <div className="plugin-sidebar-copy">
-                    <strong>{item.label}</strong>
-                    {item.description ? <p>{item.description}</p> : null}
-                  </div>
-                  {item.command ? (
-                    <button
-                      className="plugin-sidebar-action"
-                      disabled={!threadId || busy || selectedThreadSending}
-                      title={item.description ?? item.label}
-                      onClick={() => {
-                        executeContribution(item);
+                  {item.entry && item.component ? (
+                    <PluginContributionView
+                      item={item}
+                      pluginProps={pluginUiContext}
+                      events={pluginEvents}
+                      isRegisteredPage={isRegisteredPluginPage}
+                      runCommand={runPluginCommand}
+                      onActivate={(contribution) => {
+                        executeContribution(contribution);
                         setMobileSidebarOpen(false);
                       }}
-                    >
-                      Open
-                    </button>
-                  ) : null}
+                      disabled={busy || selectedThreadSending}
+                      buttonClassName="plugin-sidebar-action"
+                    />
+                  ) : (
+                    <>
+                      <div className="plugin-sidebar-copy">
+                        <strong>{item.label}</strong>
+                        {item.description ? <p>{item.description}</p> : null}
+                      </div>
+                      {item.command ? (
+                        <button
+                          className="plugin-sidebar-action"
+                          disabled={!threadId || busy || selectedThreadSending}
+                          title={item.description ?? item.label}
+                          onClick={() => {
+                            executeContribution(item);
+                            setMobileSidebarOpen(false);
+                          }}
+                        >
+                          Open
+                        </button>
+                      ) : null}
+                    </>
+                  )}
                 </div>
               ))}
             </section>
@@ -1722,15 +1863,17 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             <div className="conversation-header">
               <div className="conversation-actions">
                 {toolbarContributions.map((item) => (
-                  <button
+                  <PluginContributionView
                     key={item.id}
-                    className="button button-quiet plugin-action"
-                    disabled={!item.command || busy || selectedThreadSending}
-                    title={item.description}
-                    onClick={() => executeContribution(item)}
-                  >
-                    {item.label}
-                  </button>
+                    item={item}
+                    pluginProps={pluginUiContext}
+                    events={pluginEvents}
+                    isRegisteredPage={isRegisteredPluginPage}
+                    runCommand={runPluginCommand}
+                    onActivate={executeContribution}
+                    disabled={busy || selectedThreadSending}
+                    buttonClassName="button button-quiet plugin-action"
+                  />
                 ))}
                 <details className="permission-menu">
                   <summary className="button button-quiet">
@@ -1807,6 +1950,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       approvals={approvals}
                       records={records}
                       threadId={selectedThread.id}
+                      renderTool={renderToolView}
                       onApproval={(id, allow, rememberForThread) => void resolveApproval(id, allow, rememberForThread)}
                     />
                   ),
@@ -1889,8 +2033,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                               viewType="component"
                               viewId={item.component}
                               uiSlot={item.slot}
+                              events={pluginEvents}
                               {...pluginUiContext}
                               isRegisteredPage={isRegisteredPluginPage}
+                              runCommand={runPluginCommand}
                             />
                           ) : (
                             <span className="field-note" key={item.id}>
@@ -1902,15 +2048,17 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     ) : null}
                     <div className="composer-footer-actions">
                       {composerActions.map((item) => (
-                        <button
+                        <PluginContributionView
                           key={item.id}
-                          className="composer-plugin-action"
-                          disabled={!item.command || busy || selectedThreadSending}
-                          title={item.description ?? item.label}
-                          onClick={() => executeContribution(item)}
-                        >
-                          {item.label}
-                        </button>
+                          item={item}
+                          pluginProps={pluginUiContext}
+                          events={pluginEvents}
+                          isRegisteredPage={isRegisteredPluginPage}
+                          runCommand={runPluginCommand}
+                          onActivate={executeContribution}
+                          disabled={busy || selectedThreadSending}
+                          buttonClassName="composer-plugin-action"
+                        />
                       ))}
                       <ThreadStateControl
                         state={currentState}
@@ -1987,6 +2135,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   viewId={selectedPluginPage.id}
                   {...pluginUiContext}
                   isRegisteredPage={isRegisteredPluginPage}
+                  runCommand={runPluginCommand}
                 />
               ) : (
                 <p className="field-note">
@@ -2489,6 +2638,7 @@ function AssistantBubble({
   approvals,
   records,
   threadId,
+  renderTool,
   onApproval,
 }: {
   record: CanonicalRecord;
@@ -2496,6 +2646,13 @@ function AssistantBubble({
   approvals: PermissionRequest[];
   records: CanonicalRecord[];
   threadId: string;
+  renderTool(
+    call: ToolCall,
+    execution: Execution | undefined,
+    result: ToolResultPayload | undefined,
+    approval: PermissionRequest | undefined,
+    onApproval: (executionId: string, allow: boolean, rememberForThread?: boolean) => void,
+  ): ReactNode;
   onApproval(id: string, allow: boolean, rememberForThread?: boolean): void;
 }) {
   const assistant = recordPayload<AssistantPayload>(record);
@@ -2541,16 +2698,7 @@ function AssistantBubble({
               );
               const result = resultRecord ? recordPayload<ToolResultPayload>(resultRecord) : undefined;
               const approval = approvals.find((item) => item.executionId === executionId);
-              return (
-                <ToolCard
-                  key={executionId}
-                  call={call}
-                  execution={execution}
-                  result={result}
-                  approval={approval}
-                  onApproval={onApproval}
-                />
-              );
+              return renderTool(call, execution, result, approval, onApproval);
             })}
           </div>
         ) : null}
