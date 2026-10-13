@@ -1,6 +1,6 @@
 # Local plugins
 
-Pico loads `.mjs` Runtime entries from this directory when the Runtime starts. Each entry exports a default plugin object with `id`, `name`, `version`, and `activate(context)`. Runtime modules are loaded independently from Pico's compiled server.
+Pico loads `.mjs` Runtime entries from this directory when the Runtime starts. Each entry exports a default plugin object with `id`, `name`, `version`, and a Runtime `activate(context)` contribution. Executor-only manifests may omit the Runtime contribution. Runtime modules are loaded independently from Pico's compiled server.
 
 A plugin package can contain several contributions together. The ChatGPT example is installed as `pico.chatgpt-plan.mjs` plus the `pico.chatgpt-plan/` directory. The Runtime entry dynamically imports its independently built `runtime.mjs`; `webui/index.html` and its `webui/build/` assets provide the matching browser UI. Build the ChatGPT package with `npm run plugins:build:chatgpt`. Pico's normal `npm run build` does not compile plugin code into the Runtime or main Web UI. The Runtime discovers packages when it starts, so installing or updating a package requires restarting the Runtime, not rebuilding Pico.
 
@@ -38,3 +38,31 @@ The `toolBatch` stage exposes the committed calls and an `execute(call)` functio
 The `step` stage wraps one full agent-loop iteration: its Model Step and any Tool Batch produced by that Model Step run before the interceptor returns at the next safe boundary. A short-circuit that leaves durable work unprocessed pauses the Thread so the Runtime does not spin without progress.
 
 Slash commands stay explicit actions and do not become user Messages. Pico records an append-only receipt before running a command handler; retrying the same request ID will not invoke the handler again. If a handler throws or its outcome is uncertain, inspect the Thread or plugin state before submitting it again with a new ID.
+
+## Workflow ownership and configuration
+
+The default Runtime workflows are `pico.workspace`, `pico.project-context`, `pico.commands`, `pico.collaboration`, and `pico.permissions`. Set `PICO_DISABLED_PLUGINS` to a comma-separated list of default plugin IDs, or use `RuntimeOptions.disabledBuiltinPlugins`, to disable a default implementation before loading a replacement. Selection happens at startup; loaded plugins and pipeline registration order are inspectable through `/api/plugins`. Disabling permissions removes its rules, approval interaction, and interceptors from the active workflow. It does not change Executor isolation.
+
+`context.threads` exposes Thread lookup, listing, bound Executor lookup, available tool discovery, creation, and same-Project message delivery. The collaboration plugin owns the agent-facing spawn/message tools and guidance. Message senders provide stable IDs so a retry does not create a second message. Child Threads retain ordinary Thread and Message semantics.
+
+`context.executions` provides lookup, explicit failure, and subscriptions to execution changes. The `toolInvocation` input provides an abort signal, tool source, `fail(reason, result?)`, and `invoke()`. Permission policies and approval state live in `pico.permissions` plugin state. Its static API routes are `GET /api/plugins/pico.permissions/threads?threadId=...`, `PUT .../rules`, and `POST .../approvals`; the toolbar and Tool renderer come from its independently loaded Web UI package. Existing core approval tables and permission settings are migrated once to plugin state, preserving canonical audit records.
+
+## Canonical facts and state
+
+`canonical.list(threadId)` reads all committed fact kinds. Prefer `canonical.read(threadId, { afterSeq, limit })` for bounded forward pagination (maximum 1,000 records), and save the last processed sequence in plugin state when needed. `canonical.subscribe(threadId, listener)` delivers committed records while the Runtime is alive. It does not replay history or provide a durable queue; reconnecting consumers resume with `read`. Notifications are emitted after the outer transaction commits, rolled-back writes emit nothing, and observer errors cannot roll back committed facts. Plugin-owned subscriptions are disposed on activation failure or shutdown.
+
+`canonical.append` remains restricted to the owning plugin namespace. Existing records cannot be edited. `state.transaction(operation)` groups state and canonical writes atomically, while `state.subscribe(listener)` observes committed changes to the owning plugin's state. State writes with identical serialized values do not emit another update.
+
+## Executor contributions
+
+One manifest can provide optional `activate(context)` for Runtime contributions and optional `activateExecutor(context)` for environment tools. At least one entrypoint is required. Install self-contained Executor `.mjs` bundles under `executor-plugins/` or `PICO_EXECUTOR_PLUGIN_DIR`; Runtime-only bundles are ignored by the Executor loader and Executor-only bundles are ignored by the Runtime loader. Executor activation receives `tools.register(definition, execute)`. Tool execution receives the environment's `workspacePath`, stable `executionId`, and abort `signal`.
+
+Host and Remote Executors load their own bundles. Container Executor copies bundles to `/opt/pico/executor-plugins` and discovers the tool schemas actually registered inside the container. Bundle dependencies must be included in the self-contained file. The default `pico.executor-tools` package registers file, search, patch, and shell tools through the same registry. Failed plugin registrations do not expose a partial toolset.
+
+Remote `/api/info` uses protocol version 1 and returns validated tool schemas; no particular tool names are mandatory. Model tool surfaces combine the bound Executor's schemas with Runtime tools. A name registered by both sources is rejected with a diagnostic instead of silently routing to one implementation. Chat Threads expose Runtime plugin tools without attaching an external Executor toolset.
+
+## UI components and commands
+
+Components can contribute to `thread.toolbar`, `composer.action`, `sidebar.panel`, `composer.model`, and `tool.renderer`. Tool renderers may specify `toolNames`; without a matching renderer the host uses its generic Tool Card. The iframe init message includes a `context` with the current Thread and, for a tool renderer, its Tool Call, Execution, and canonical result. `pico:plugin-ui:context` updates that context; `pico:plugin-ui:event` delivers events for the owning plugin. The typed client exposes `subscribeContext` and `subscribeEvents`.
+
+A `command` request contains the complete slash command text. The host injects the owning plugin and current Thread, and the server verifies command ownership before executing it. The command uses a stable request ID and the ordinary command receipt path. A plugin frame cannot invoke another plugin's command, open another plugin's page, call another plugin's API, or access the host DOM.
