@@ -14,6 +14,8 @@
   let data = { tools: [], approvals: [] };
   let busy = false;
   let error = '';
+  let toolsExpanded = false;
+  let renderedThreadId = null;
   const pending = new Map();
 
   function send(action, payload = {}) {
@@ -92,7 +94,10 @@
     return `<section class="panel">
       <div class="heading"><strong>Tool permissions · ${escape(context.thread.title)}</strong><span class="muted">${pendingCount} pending</span></div>
       ${error ? `<div class="error">${escape(error)}</div>` : ''}
-      <div class="tools">${rows || '<div class="empty">Tool definitions will appear after the next Model projection.</div>'}</div>
+      <details class="tool-list-disclosure" ${toolsExpanded ? 'open' : ''}>
+        <summary>Tools ${data.tools.length}</summary>
+        <div class="tools-scroll"><div class="tools">${rows || '<div class="empty">No tools are available for this Thread.</div>'}</div></div>
+      </details>
     </section>`;
   }
 
@@ -110,10 +115,10 @@
     const awaiting = status === 'pending' && approval?.status === 'pending';
     return `<section class="panel"><article class="card">
       <div class="card-header"><strong>${escape(name)}</strong><span class="status ${awaiting ? 'pending' : ''}">${escape(awaiting ? 'awaiting approval' : status)}</span></div>
-      ${args === undefined ? '' : `<details><summary>Arguments</summary><pre>${escape(JSON.stringify(args, null, 2))}</pre></details>`}
+      ${args === undefined ? '' : `<details ${awaiting ? 'open' : ''}><summary>Arguments</summary><pre>${escape(JSON.stringify(args, null, 2))}</pre></details>`}
       ${failure ? `<div class="error">${escape(failure)}</div>` : ''}
       ${status === 'interrupted' ? '<div class="muted">Execution was interrupted. Side effects may be partial or unknown.</div>' : ''}
-      ${result === undefined ? '' : `<details open><summary>Result</summary><pre>${escape(typeof result === 'string' ? result : JSON.stringify(result, null, 2))}</pre></details>`}
+      ${result === undefined ? '' : `<details><summary>Result</summary><pre>${escape(typeof result === 'string' ? result : JSON.stringify(result, null, 2))}</pre></details>`}
       ${awaiting ? `<div class="actions"><label class="remember"><input id="remember" type="checkbox" /> Allow this tool in this Thread</label><button class="deny" data-decision="deny" ${busy ? 'disabled' : ''}>Deny</button><button class="allow" data-decision="allow" ${busy ? 'disabled' : ''}>Allow once</button></div>` : ''}
       ${error ? `<div class="error">${escape(error)}</div>` : ''}
     </article></section>`;
@@ -122,6 +127,11 @@
   function draw() {
     root.innerHTML = init?.viewId === 'ToolPermissions' ? toolbar() : renderer();
     if (init?.viewId === 'ToolPermissions') {
+      const disclosure = root.querySelector('.tool-list-disclosure');
+      disclosure?.addEventListener('toggle', () => {
+        toolsExpanded = disclosure.open;
+        resizeToContent();
+      });
       root.querySelectorAll('select[data-tool]').forEach((select) => {
         select.addEventListener('change', async () => {
           const target = select;
@@ -162,8 +172,12 @@
         }
       });
     });
+    resizeToContent();
+  }
+
+  function resizeToContent() {
     requestAnimationFrame(() =>
-      port?.postMessage({ type: 'pico:plugin-ui:resize', height: document.documentElement.scrollHeight }),
+      port?.postMessage({ type: 'pico:plugin-ui:resize', height: root.getBoundingClientRect().height }),
     );
   }
 
@@ -180,6 +194,9 @@
       if (message.ok) handler.resolve(message.value);
       else handler.reject(new Error(message.error));
     } else if (message.type === 'pico:plugin-ui:context') {
+      const nextThreadId = message.context?.thread?.id ?? null;
+      if (nextThreadId !== renderedThreadId) toolsExpanded = false;
+      renderedThreadId = nextThreadId;
       context = message.context ?? { thread: null };
       void refresh();
     } else if (message.type === 'pico:plugin-ui:event') {

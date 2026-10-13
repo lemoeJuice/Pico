@@ -13,6 +13,10 @@
 body {
   margin: 0;
 }
+#root {
+  width: 100%;
+  overflow: visible;
+}
 button,
 select {
   font: inherit;
@@ -53,6 +57,15 @@ button:disabled {
 .tools {
   display: grid;
   gap: 6px;
+}
+.tool-list-disclosure {
+  min-width: 0;
+}
+.tools-scroll {
+  max-height: 260px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 3px;
 }
 .tool {
   display: grid;
@@ -97,6 +110,9 @@ button:disabled {
 }
 pre {
   margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  overscroll-behavior: contain;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font:
@@ -129,6 +145,10 @@ label.remember {
 }
 .error {
   color: #a22;
+  max-height: 180px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 @media (prefers-color-scheme: dark) {
