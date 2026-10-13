@@ -51,6 +51,8 @@ import {
   ChevronRight,
   Cloud,
   GitBranch,
+  Folder,
+  FolderOpen,
   LoaderCircle,
   LogOut,
   Menu,
@@ -403,6 +405,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const composerState = useRef<ComposerState | null>(null);
   if (composerState.current === null) composerState.current = readComposerState();
   const [projects, setProjects] = useState<Project[]>([]);
+  const [threadsByProject, setThreadsByProject] = useState<Record<string, Thread[]>>({});
+  const [expandedProjectIds, setExpandedProjectIds] = useState<Set<string>>(() => new Set());
   const [projectId, setProjectId] = useState<string | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
   const [threadId, setThreadId] = useState<string | null>(null);
@@ -466,6 +470,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const unavailableModelExecutions = useRef<AssistantStreamExecutions>(new Map());
   const observedModelExecutions = useRef(new Set<string>());
   const historyExpandedThreads = useRef(new Set<string>());
+  const projectThreadLoads = useRef(new Set<string>());
   const draft = threadId ? (draftsByThread[threadId] ?? '') : '';
   const draftRef = useRef({ threadId, value: draft });
   activeProjectId.current = projectId;
@@ -578,15 +583,24 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   }, []);
 
   const loadProjectThreads = useCallback(async (id: string): Promise<Thread[] | null> => {
+    projectThreadLoads.current.add(id);
     const version = projectThreadVersions.current.get(id) ?? 0;
     projectThreadVersions.current.set(id, version + 1);
-    const values = await fetchStableSnapshot(
-      () => api<Thread[]>(`/api/projects/${encodeURIComponent(id)}/threads`),
-      () => projectThreadVersions.current.get(id) ?? 0,
-      () => activeProjectId.current === id,
-    );
-    if (values) setThreads(values);
-    return values;
+    try {
+      const values = await fetchStableSnapshot(
+        () => api<Thread[]>(`/api/projects/${encodeURIComponent(id)}/threads`),
+        () => projectThreadVersions.current.get(id) ?? 0,
+        () => true,
+      );
+      if (values) {
+        setThreadsByProject((current) => ({ ...current, [id]: values }));
+        if (activeProjectId.current === id) setThreads(values);
+      }
+      return values;
+    } catch (caught) {
+      projectThreadLoads.current.delete(id);
+      throw caught;
+    }
   }, []);
 
   const refreshSelected = useCallback(() => {
@@ -631,8 +645,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         const remembered = localStorage.getItem('pico.project');
         const initial = projectList.find((project) => project.id === remembered)?.id ?? projectList[0]?.id ?? null;
         setProjectId(initial);
+        setExpandedProjectIds(new Set(initial ? [initial] : []));
         if (initial) localStorage.setItem('pico.project', initial);
-        else setNewProjectOpen(true);
         if (modelSettings.model.trim() === '') setSettingsOpen(false);
       })
       .catch((caught: unknown) => {
@@ -645,6 +659,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       alive = false;
     };
   }, []);
+
+  useEffect(() => {
+    for (const project of projects) {
+      if (project.id === projectId || projectThreadLoads.current.has(project.id)) continue;
+      void loadProjectThreads(project.id).catch((caught: unknown) => {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      });
+    }
+  }, [loadProjectThreads, projectId, projects]);
 
   useEffect(() => {
     let current = true;
@@ -777,6 +800,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             );
             noteSnapshotChange(created.id);
             noteSnapshotChange(created.parentThreadId);
+            setThreadsByProject((current) => ({
+              ...current,
+              [created.projectId]: upsertProjectThread(current[created.projectId] ?? [], created, created.projectId),
+            }));
             setThreads((items) => upsertProjectThread(items, created, activeProjectId.current));
             setSnapshot((current) =>
               current && created.parentThreadId === current.thread.id
@@ -794,6 +821,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             threadUpdateVersions.current.set(updated.id, (threadUpdateVersions.current.get(updated.id) ?? 0) + 1);
             noteSnapshotChange(updated.id);
             noteSnapshotChange(updated.parentThreadId);
+            setThreadsByProject((current) => ({
+              ...current,
+              [updated.projectId]: upsertProjectThread(current[updated.projectId] ?? [], updated, updated.projectId),
+            }));
             setThreads((items) => upsertProjectThread(items, updated, activeProjectId.current));
             setSnapshot((current) => (current?.thread.id === updated.id ? { ...current, thread: updated } : current));
           }
@@ -1002,7 +1033,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         body: JSON.stringify({ name: newProjectName, workspacePath: newProjectPath || defaultWorkspace }),
       });
       setProjects((items) => [project, ...items]);
+      projectThreadLoads.current.add(project.id);
+      setThreadsByProject((current) => ({ ...current, [project.id]: [] }));
       setProjectId(project.id);
+      setExpandedProjectIds((current) => new Set(current).add(project.id));
       localStorage.setItem('pico.project', project.id);
       setNewProjectOpen(false);
       setNewProjectName('');
@@ -1037,6 +1071,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         }),
       });
       setThreads((items) => [thread, ...items.filter((item) => item.id !== thread.id)]);
+      setThreadsByProject((current) => ({
+        ...current,
+        [projectId]: [thread, ...(current[projectId] ?? []).filter((item) => item.id !== thread.id)],
+      }));
       setThreadId(thread.id);
       localStorage.setItem(`pico.thread.${projectId}`, thread.id);
       setSnapshot(null);
@@ -1121,6 +1159,14 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           ? items.map((item) => (item.id === updated.id ? updated : item))
           : items,
       );
+      if ((threadUpdateVersions.current.get(threadId) ?? 0) === updateVersion) {
+        setThreadsByProject((current) => ({
+          ...current,
+          [updated.projectId]: (current[updated.projectId] ?? []).map((item) =>
+            item.id === updated.id ? updated : item,
+          ),
+        }));
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
@@ -1213,15 +1259,36 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     if (item.command) void sendMessage(item.command);
   };
 
-  const chooseThread = (id: string): void => {
-    if (id !== threadId) {
+  const chooseThread = (id: string, targetProjectId = projectId): void => {
+    if (!targetProjectId) return;
+    setExpandedProjectIds((current) => new Set(current).add(targetProjectId));
+    localStorage.setItem(`pico.thread.${targetProjectId}`, id);
+    if (targetProjectId !== projectId) {
+      setProjectId(targetProjectId);
+      setThreadId(null);
+      setSnapshot(null);
+    } else if (id !== threadId) {
       setThreadId(id);
       setSnapshot(null);
     }
-    localStorage.setItem(`pico.thread.${projectId ?? 'none'}`, id);
     setMobileSidebarOpen(false);
     setNotice('');
     setError('');
+  };
+
+  const startThreadInProject = (targetProjectId: string): void => {
+    if (targetProjectId !== projectId) {
+      setProjectId(targetProjectId);
+      setThreads([]);
+      setThreadId(null);
+      setSnapshot(null);
+    }
+    setExpandedProjectIds((current) => new Set(current).add(targetProjectId));
+    setNewThreadTitle('');
+    setNewThreadExecutor('container');
+    setNewThreadRemoteConnectionId('');
+    setNewThreadRemoteWorkspacePath('');
+    setNewThreadOpen(true);
   };
 
   const dismissNotice = (): void => {
@@ -1279,24 +1346,36 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     (execution) =>
       execution.kind === 'model' && execution.status !== 'completed' && !committedModelExecutionIds.has(execution.id),
   );
-  const childrenByParent = new Map<string, Thread[]>();
-  for (const thread of threads) {
-    if (!thread.parentThreadId) continue;
-    const children = childrenByParent.get(thread.parentThreadId) ?? [];
-    children.push(thread);
-    childrenByParent.set(thread.parentThreadId, children);
-  }
-  const renderThreadTree = (thread: Thread, child = false, depth = 0): ReactNode => (
-    <div key={thread.id} style={depth > 1 ? { marginLeft: `${Math.min(depth - 1, 4) * 8}px` } : undefined}>
-      <ThreadListItem
-        thread={thread}
-        active={thread.id === threadId}
-        child={child}
-        onSelect={() => chooseThread(thread.id)}
-      />
-      {(childrenByParent.get(thread.id) ?? []).map((nested) => renderThreadTree(nested, true, depth + 1))}
-    </div>
-  );
+  const renderProjectThreads = (project: Project): ReactNode => {
+    const projectThreads = threadsByProject[project.id];
+    if (projectThreads === undefined) {
+      return <div className="sidebar-empty project-thread-empty">Loading Threads…</div>;
+    }
+    const childrenByParent = new Map<string, Thread[]>();
+    for (const thread of projectThreads) {
+      if (!thread.parentThreadId) continue;
+      const children = childrenByParent.get(thread.parentThreadId) ?? [];
+      children.push(thread);
+      childrenByParent.set(thread.parentThreadId, children);
+    }
+    const renderThreadTree = (thread: Thread, child = false, depth = 0): ReactNode => (
+      <div key={thread.id} style={depth > 1 ? { marginLeft: `${Math.min(depth - 1, 4) * 8}px` } : undefined}>
+        <ThreadListItem
+          thread={thread}
+          active={thread.id === threadId && project.id === projectId}
+          child={child}
+          onSelect={() => chooseThread(thread.id, project.id)}
+        />
+        {(childrenByParent.get(thread.id) ?? []).map((nested) => renderThreadTree(nested, true, depth + 1))}
+      </div>
+    );
+    const roots = projectThreads.filter((thread) => !thread.parentThreadId);
+    return roots.length ? (
+      <div className="project-thread-list">{roots.map((thread) => renderThreadTree(thread))}</div>
+    ) : (
+      <div className="sidebar-empty project-thread-empty">No Threads yet. Start one with the + button.</div>
+    );
+  };
   const renderedRecords = records.filter((record) => record.kind === 'message' || record.kind === 'assistant');
   const timeline = [
     ...renderedRecords.map((record) => ({ type: 'record' as const, at: record.createdAt, record })),
@@ -1333,53 +1412,69 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             <X size={17} aria-hidden="true" />
           </button>
         </div>
-        <div className="project-switcher">
-          <label className="eyebrow" htmlFor="project-select">
-            PROJECT
-          </label>
-          <div className="project-select-wrap">
-            <select
-              id="project-select"
-              value={projectId ?? ''}
-              onChange={(event) => {
-                setProjectId(event.target.value || null);
-                setThreads([]);
-                setThreadId(null);
-                setSnapshot(null);
-              }}
-            >
-              <option value="">Choose a Project…</option>
-              {projects.map((project) => (
-                <option value={project.id} key={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="select-chevron" size={15} aria-hidden="true" />
-          </div>
-          <button
-            className="sidebar-add-project"
-            disabled={bootstrapping}
-            onClick={() => setNewProjectOpen(true)}
-            title={bootstrapping ? 'Loading workspace data…' : undefined}
-          >
-            <Plus size={15} aria-hidden="true" /> Add Project
-          </button>
-        </div>
-        <div className="thread-section-heading">
-          <span className="eyebrow">THREADS</span>
+        <div className="project-section-heading">
+          <span className="eyebrow">PROJECTS</span>
           <button
             className="icon-button small"
-            aria-label="Create Thread"
-            disabled={!projectId}
-            onClick={() => setNewThreadOpen(true)}
+            aria-label="Create Project"
+            disabled={bootstrapping}
+            title="Create Project"
+            onClick={() => setNewProjectOpen(true)}
           >
             <Plus size={14} aria-hidden="true" />
           </button>
         </div>
         <div className="thread-list">
-          {!selectedProject ? <div className="sidebar-empty">Create a Project to get started.</div> : null}
-          {threads.filter((thread) => !thread.parentThreadId).map((thread) => renderThreadTree(thread))}
+          {projects.length === 0 ? (
+            <div className="sidebar-empty">No Projects yet. Create one to get started.</div>
+          ) : null}
+          {projects.map((project) => {
+            const expanded = expandedProjectIds.has(project.id);
+            const projectThreads = threadsByProject[project.id] ?? [];
+            return (
+              <section className="project-group" key={project.id}>
+                <div className={`project-group-heading ${project.id === projectId ? 'active' : ''}`}>
+                  <button
+                    className="project-group-toggle"
+                    type="button"
+                    aria-expanded={expanded}
+                    onClick={() => {
+                      setProjectId(project.id);
+                      setExpandedProjectIds((current) => {
+                        const next = new Set(current);
+                        if (next.has(project.id)) next.delete(project.id);
+                        else next.add(project.id);
+                        return next;
+                      });
+                      if (!projectThreadLoads.current.has(project.id)) {
+                        void loadProjectThreads(project.id).catch((caught: unknown) =>
+                          setError(caught instanceof Error ? caught.message : String(caught)),
+                        );
+                      }
+                    }}
+                  >
+                    <span className="project-folder-icon" aria-hidden="true">
+                      {expanded ? <FolderOpen size={15} /> : <Folder size={15} />}
+                    </span>
+                    <span className="project-group-name">{project.name}</span>
+                    <span className="project-group-count">{projectThreads.length}</span>
+                    <ChevronRight className={`project-group-chevron ${expanded ? 'expanded' : ''}`} size={14} />
+                  </button>
+                  <button
+                    className="icon-button small project-new-thread"
+                    type="button"
+                    aria-label={`Create Thread in ${project.name}`}
+                    title={`Create Thread in ${project.name}`}
+                    disabled={bootstrapping}
+                    onClick={() => startThreadInProject(project.id)}
+                  >
+                    <Plus size={14} aria-hidden="true" />
+                  </button>
+                </div>
+                {expanded ? renderProjectThreads(project) : null}
+              </section>
+            );
+          })}
           {sidebarPanels.length > 0 ? (
             <section className="plugin-sidebar-panels" aria-label="Plugin panels">
               <span className="eyebrow">PLUGIN PANELS</span>
