@@ -143,8 +143,6 @@ export interface UiContribution {
   entry?: string;
   component?: string;
   toolNames?: string[];
-  controlWidthPx?: number;
-  controlHeightPx?: number;
   supportsPopover?: boolean;
 }
 

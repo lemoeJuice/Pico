@@ -898,6 +898,17 @@ button:disabled {
   color: #4e725a;
   background: #f3f7f3;
 }
+.plugin-toolbar-badge {
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  color: #758279;
+  background: #edf1ed;
+  border-radius: 50%;
+  font-size: 9px;
+  line-height: 1;
+}
 .interrupt-button {
   padding: 7px 2px 7px 7px;
   color: #ac7c6c;

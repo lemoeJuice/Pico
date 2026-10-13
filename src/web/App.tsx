@@ -364,8 +364,8 @@ function PluginContributionView({
         viewType="component"
         viewId={item.component}
         uiSlot={item.slot}
-        controlWidthPx={item.controlWidthPx}
-        controlHeightPx={item.controlHeightPx}
+        controlLabel={item.label}
+        controlClassName={buttonClassName}
         supportsPopover={item.supportsPopover}
         events={events}
         {...pluginProps}

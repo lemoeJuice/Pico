@@ -19,6 +19,11 @@ export interface PluginUiPopoverMessage {
   height: number;
 }
 
+export interface PluginUiToolbarStateMessage {
+  type: 'pico:plugin-ui:toolbar-state';
+  badgeCount: number;
+}
+
 export function isPluginUiPopoverMessage(value: unknown): value is PluginUiPopoverMessage {
   if (!value || typeof value !== 'object') return false;
   const message = value as Record<string, unknown>;
@@ -29,6 +34,18 @@ export function isPluginUiPopoverMessage(value: unknown): value is PluginUiPopov
     Number.isFinite(message.width) &&
     typeof message.height === 'number' &&
     Number.isFinite(message.height)
+  );
+}
+
+export function isPluginUiToolbarStateMessage(value: unknown): value is PluginUiToolbarStateMessage {
+  if (!value || typeof value !== 'object') return false;
+  const message = value as Record<string, unknown>;
+  return (
+    message.type === 'pico:plugin-ui:toolbar-state' &&
+    typeof message.badgeCount === 'number' &&
+    Number.isInteger(message.badgeCount) &&
+    message.badgeCount >= 0 &&
+    message.badgeCount <= 999
   );
 }
 

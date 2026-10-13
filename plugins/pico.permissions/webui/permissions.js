@@ -15,6 +15,7 @@
   let busy = false;
   let error = '';
   let toolsExpanded = false;
+  let popoverMaxHeight = 480;
   let renderedThreadId = null;
   const pending = new Map();
 
@@ -77,8 +78,9 @@
   }
 
   function toolbar() {
+    port?.postMessage({ type: 'pico:plugin-ui:toolbar-state', badgeCount: Math.min(999, data.tools.length) });
     if (!context.thread)
-      return '<section class="panel"><strong>Tool permissions</strong><div class="empty">Choose a Thread to review its tools.</div></section>';
+      return '<section class="panel toolbar-panel"><div class="permission-menu"><div class="permission-popover"><div class="popover-heading"><strong>Tool permissions</strong><span>Saved for this Thread</span></div><div class="empty">Choose a Thread to review its tools.</div></div></div></section>';
     const rows = data.tools
       .map(
         (tool) => `
@@ -91,30 +93,36 @@
       )
       .join('');
     return `<section class="panel toolbar-panel">
-      <details class="permission-menu" ${toolsExpanded ? 'open' : ''}>
-        <summary class="tools-trigger">Tools <span class="permission-count">${data.tools.length}</span></summary>
-        <div class="permission-popover">
+      <div class="permission-menu">
+        <div class="permission-popover" role="dialog" aria-label="Tool permissions">
           <div class="popover-heading"><strong>Tool permissions</strong><span>Saved for this Thread</span></div>
           ${error ? `<div class="error">${escape(error)}</div>` : ''}
           <div class="tools">${rows || '<div class="empty">Tool definitions will appear after the next Model projection.</div>'}</div>
         </div>
-      </details>
+      </div>
     </section>`;
   }
 
-  function setPopover(open) {
-    port?.postMessage({
-      type: 'pico:plugin-ui:popover',
-      open,
-      width: 390,
-      height: Math.min(480, Math.max(100, 61 + data.tools.length * 56 + (error ? 140 : 0))),
+  function setPopover(open, maxHeight) {
+    toolsExpanded = open;
+    if (typeof maxHeight === 'number' && Number.isFinite(maxHeight)) {
+      popoverMaxHeight = Math.max(80, Math.min(480, maxHeight));
+    }
+    const panel = root.querySelector('.permission-popover');
+    if (panel) panel.style.maxHeight = `${popoverMaxHeight}px`;
+    if (!open) {
+      port?.postMessage({ type: 'pico:plugin-ui:popover', open: false, width: 390, height: 0 });
+      return;
+    }
+    requestAnimationFrame(() => {
+      const height = panel?.getBoundingClientRect().height ?? 160;
+      port?.postMessage({ type: 'pico:plugin-ui:popover', open: true, width: 390, height });
     });
   }
 
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || !toolsExpanded) return;
-    toolsExpanded = false;
-    draw();
+    setPopover(false);
   });
 
   function renderer() {
@@ -143,11 +151,6 @@
   function draw() {
     root.innerHTML = init?.viewId === 'ToolPermissions' ? toolbar() : renderer();
     if (init?.viewId === 'ToolPermissions') {
-      const disclosure = root.querySelector('.permission-menu');
-      disclosure?.addEventListener('toggle', () => {
-        toolsExpanded = disclosure.open;
-        setPopover(toolsExpanded);
-      });
       root.querySelectorAll('select[data-tool]').forEach((select) => {
         select.addEventListener('change', async () => {
           const target = select;
@@ -165,6 +168,9 @@
           }
         });
       });
+      if (toolsExpanded) {
+        setPopover(true, popoverMaxHeight);
+      }
     }
     root.querySelectorAll('button[data-decision]').forEach((button) => {
       button.addEventListener('click', async () => {
@@ -219,9 +225,11 @@
       context = message.context ?? { thread: null };
       void refresh();
     } else if (message.type === 'pico:plugin-ui:popover-dismiss') {
-      toolsExpanded = false;
-      const disclosure = root.querySelector('.permission-menu');
-      if (disclosure) disclosure.open = false;
+      setPopover(false);
+    } else if (message.type === 'pico:plugin-ui:toolbar-toggle') {
+      setPopover(message.open === true, message.maxHeight);
+    } else if (message.type === 'pico:plugin-ui:popover-viewport') {
+      if (toolsExpanded) setPopover(true, message.maxHeight);
     } else if (message.type === 'pico:plugin-ui:event') {
       if (message.event?.type === 'plugin.updated' && message.event.pluginId === pluginId) void refresh();
     }

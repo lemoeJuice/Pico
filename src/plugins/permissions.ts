@@ -52,14 +52,14 @@ const permissionsUi = (slot: 'thread.toolbar' | 'tool.renderer', id: string, com
   ({
     slot,
     id,
-    label: slot === 'thread.toolbar' ? 'Tool permissions' : 'Tool execution',
+    label: slot === 'thread.toolbar' ? 'Tools' : 'Tool execution',
     description:
       slot === 'thread.toolbar'
         ? 'Review and change this Thread’s tool permission rules.'
         : 'Inspect a Tool execution and resolve a pending permission request.',
     entry: 'webui',
     component,
-    ...(slot === 'thread.toolbar' ? { controlWidthPx: 68, controlHeightPx: 29, supportsPopover: true } : {}),
+    ...(slot === 'thread.toolbar' ? { supportsPopover: true } : {}),
     ...(slot === 'tool.renderer' ? {} : { command: '/permissions' }),
   }) as unknown as UiContribution;
 
