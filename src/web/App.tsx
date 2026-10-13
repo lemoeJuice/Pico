@@ -1584,7 +1584,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     type="button"
                     aria-expanded={expanded}
                     onClick={() => {
-                      setProjectId(project.id);
                       setExpandedProjectIds((current) => {
                         const next = new Set(current);
                         if (next.has(project.id)) next.delete(project.id);
