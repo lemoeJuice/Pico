@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { PicoPlugin } from './host.js';
-import type { ProjectionInput, ToolInvocationInput } from '../runtime/stages.js';
-import type { Execution } from '../core/types.js';
+import { collaborationPlugin } from './collaboration.js';
+import { permissionPlugin } from './permissions.js';
+import type { ProjectionInput } from '../runtime/stages.js';
 
 export const workspacePlugin: PicoPlugin = {
   id: 'pico.workspace',
@@ -184,20 +185,10 @@ export const helpPlugin: PicoPlugin = {
   },
 };
 
-export const permissionPlugin: PicoPlugin = {
-  id: 'pico.permissions',
-  name: 'Invocation permissions',
-  version: '0.1.0',
-  activate({ pipelines }) {
-    pipelines.use<ToolInvocationInput, Execution>('toolInvocation', async (input, next) => {
-      if (input.policy === 'deny') return input.deny('Denied by the current permission policy.');
-      if (input.policy === 'ask') {
-        const approved = await input.requestApproval();
-        if (!approved) return input.deny('Denied by the user.');
-      }
-      return next(input);
-    });
-  },
-};
-
-export const builtinPlugins: PicoPlugin[] = [workspacePlugin, projectContextPlugin, helpPlugin, permissionPlugin];
+export const builtinPlugins: PicoPlugin[] = [
+  workspacePlugin,
+  projectContextPlugin,
+  helpPlugin,
+  collaborationPlugin,
+  permissionPlugin,
+];

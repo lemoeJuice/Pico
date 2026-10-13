@@ -21,6 +21,7 @@ export interface ProjectionInput {
   systemPrompt: string;
   turns: ModelPrompt['turns'];
   tools: ToolDefinition[];
+  toolSources?: Record<string, 'runtime' | 'executor'>;
 }
 
 export interface ModelStageInput {
@@ -39,15 +40,14 @@ export interface ToolBatchInput {
   execute(call: ToolCall): Promise<Execution>;
 }
 
-export type PermissionPolicy = 'allow' | 'deny' | 'ask';
-
 export interface ToolInvocationInput {
   thread: Thread;
   call: ToolCall;
   executionId: string;
-  policy: PermissionPolicy;
-  requestApproval(): Promise<boolean>;
-  deny(reason: string): Promise<Execution>;
+  signal: AbortSignal;
+  /** Null means the Runtime no longer has this tool locally (for example, a remote tool). */
+  toolSource: 'runtime' | 'executor' | null;
+  fail(reason: string, result?: unknown): Promise<Execution>;
   invoke(): Promise<Execution>;
 }
 

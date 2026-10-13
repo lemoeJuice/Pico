@@ -9,7 +9,6 @@ import type {
   ExecutorBinding,
   MessagePayload,
   ModelSettings,
-  PermissionRequest,
   Project,
   PublicSettings,
   RemoteExecutorConnectionView,
@@ -25,9 +24,11 @@ import { ContainerExecutor } from '../executor/container-executor.js';
 import { HostExecutor, type ExecutorAdapter } from '../executor/executor.js';
 import { RemoteHostExecutor, inspectRemoteExecutor, validateRemoteWorkspace } from '../executor/remote-executor.js';
 import { normalizeRemoteExecutorUrl } from '../executor/remote-protocol.js';
-import { createToolCatalog, type ToolContext } from '../executor/tools.js';
+import { loadExecutorPlugins } from '../executor/plugin-host.js';
+import { createToolCatalog, ToolCatalog, type ToolContext } from '../executor/tools.js';
 import { builtinPlugins } from '../plugins/builtin.js';
 import { CommandRegistry, PluginHost, type CommandResult } from '../plugins/host.js';
+import type { PluginServices } from '../plugins/services.js';
 import {
   OpenAiCompatibleAdapter,
   type ModelAdapter,
@@ -35,13 +36,7 @@ import {
   type ModelResponse,
   type PromptTurn,
 } from './model.js';
-import type {
-  ModelStageInput,
-  PermissionPolicy,
-  ProjectionInput,
-  ToolBatchInput,
-  ToolInvocationInput,
-} from './stages.js';
+import type { ModelStageInput, ProjectionInput, ToolBatchInput, ToolInvocationInput } from './stages.js';
 import type { PicoPlugin } from '../plugins/host.js';
 
 export interface RuntimeEvent {
@@ -53,7 +48,6 @@ export interface ThreadSnapshot {
   thread: Thread;
   records: CanonicalRecord[];
   executions: Execution[];
-  approvals: PermissionRequest[];
   children: Thread[];
   hasEarlierRecords: boolean;
   historyPageSize: number;
@@ -110,7 +104,7 @@ const defaultModelSettings: ModelSettings = {
   provider: 'openai-compatible',
 };
 
-const baseSystemPrompt = `You are Pico, an agent working in one durable Thread. Use the available tools when they help you inspect or change the selected workspace.\n\nTools in one model step may run concurrently. Their results arrive together before the next step. A tool result marked interrupted means its real-world side effects may be partial or unknown: inspect the environment before deciding whether to retry.\n\nA Thread stays bound to its displayed Executor for its lifetime. To work in parallel, spawn a child Thread; spawning returns immediately. Child Threads and their parent communicate with ordinary messages. A child can send a message to its parent Thread ID shown below. Do not wait for a child unless you have other useful work to do.\n\nNew user messages can arrive while you work. They will appear at the next model step; finish the current tool batch first.`;
+const baseSystemPrompt = `You are Pico, an agent working in one durable Thread. Use the available tools when they help you inspect or change the selected workspace.\n\nTools in one model step may run concurrently. Their results arrive together before the next step. A tool result marked interrupted means its real-world side effects may be partial or unknown: inspect the environment before deciding whether to retry.\n\nA Thread stays bound to its displayed Executor for its lifetime.\n\nNew user messages can arrive while you work. They will appear at the next model step; finish the current tool batch first.`;
 
 function deepFreeze<T>(value: T): T {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
@@ -153,11 +147,14 @@ export interface RuntimeOptions {
   model?: ModelAdapter;
   plugins?: PicoPlugin[];
   pluginDirectory?: string;
+  executorPluginDirectory?: string;
+  disabledBuiltinPlugins?: string[];
 }
 
 export class PicoRuntime {
   readonly store: PicoStore;
-  readonly tools = createToolCatalog();
+  readonly tools = new ToolCatalog();
+  private readonly executorTools = createToolCatalog();
   readonly pipelines = new ExecutionPipelines();
   readonly commands = new CommandRegistry();
   readonly plugins: PluginHost;
@@ -166,29 +163,118 @@ export class PicoRuntime {
   private readonly hostExecutor: HostExecutor;
   private readonly containerExecutor: ContainerExecutor;
   private readonly remoteHostExecutor: RemoteHostExecutor;
+  private readonly options: RuntimeOptions;
   private readonly listeners = new Set<(event: RuntimeEvent) => void>();
+  private readonly executionListeners = new Set<(execution: Execution) => void>();
+  private storeUnsubscribers: Array<() => void> = [];
   private readonly loops = new Map<string, Promise<void>>();
   private readonly modelSignals = new Map<string, AbortController>();
   private readonly runtimeToolRuns = new Map<string, { promise: Promise<Execution>; controller: AbortController }>();
-  private readonly approvalWaiters = new Map<string, Set<(allow: boolean) => void>>();
+  private readonly invocationRuns = new Map<
+    string,
+    { promise: Promise<Execution>; controller: AbortController; toolStarted: boolean }
+  >();
   private pluginLoadErrors: string[] = [];
+  private executorPluginLoadErrors: string[] = [];
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
 
   constructor(store = new PicoStore(), options: RuntimeOptions = {}) {
     this.store = store;
+    this.options = options;
     this.model = options.model ?? new OpenAiCompatibleAdapter();
     this.additionalPlugins = [...(options.plugins ?? [])];
-    this.hostExecutor = new HostExecutor(store, this.tools, (execution) => this.executionChanged(execution));
-    this.containerExecutor = new ContainerExecutor(store, this.tools, (execution) => this.executionChanged(execution));
+    this.hostExecutor = new HostExecutor(store, this.executorTools, (execution) => this.executionChanged(execution));
+    this.containerExecutor = new ContainerExecutor(
+      store,
+      this.executorTools,
+      (execution) => this.executionChanged(execution),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      options.executorPluginDirectory,
+    );
     this.remoteHostExecutor = new RemoteHostExecutor(store, (execution) => this.executionChanged(execution));
-    this.plugins = new PluginHost(store, this.tools, this.pipelines, this.commands, options.pluginDirectory);
-    this.registerControlTools();
+    const services: PluginServices = {
+      threads: {
+        get: (threadId) => this.store.getThread(threadId),
+        list: (projectId) => this.listThreads(projectId),
+        tools: async (threadId) => {
+          const thread = this.store.getThread(threadId);
+          if (!thread) throw new Error('Thread not found');
+          const surface = await this.toolSurfaceFor(thread);
+          return surface.tools.map((definition) => ({
+            ...definition,
+            source: (surface.sources[definition.name] ?? 'runtime') as 'runtime' | 'executor',
+          }));
+        },
+        createChild: (parentId, prompt, title, messageId) => {
+          const parent = this.store.getThread(parentId);
+          if (!parent) throw new Error('Parent Thread not found');
+          return this.createChildThread(parent, prompt, title, messageId);
+        },
+        send: (senderThreadId, targetId, content, messageId) => {
+          const sender = this.store.getThread(senderThreadId);
+          const target = this.store.getThread(targetId);
+          if (!sender || !target || sender.projectId !== target.projectId) {
+            throw new Error('Target Thread must belong to the same Project');
+          }
+          if (sender.id === target.id) throw new Error('Cannot send a message to the current Thread');
+          const payload: MessagePayload = {
+            role: 'user',
+            content,
+            source: sender.parentThreadId ? 'child' : 'agent',
+            senderThreadId: sender.id,
+            senderLabel: sender.title,
+          };
+          const result = this.postMessage(target, messageId, payload);
+          return { delivered: result.inserted, threadId: target.id, messageId: result.record.id };
+        },
+      },
+      executions: {
+        get: (executionId) => this.store.getExecution(executionId),
+        fail: (executionId, reason, result) => {
+          const current = this.store.getExecution(executionId);
+          if (!current) throw new Error('Execution not found');
+          if (terminalStatus(current.status)) return current;
+          const failed = this.store.transitionExecution(executionId, 'failed', { error: reason, result });
+          this.executionChanged(failed);
+          return failed;
+        },
+        subscribe: (listener) => {
+          this.executionListeners.add(listener);
+          return () => this.executionListeners.delete(listener);
+        },
+      },
+    };
+    this.plugins = new PluginHost(store, this.tools, this.pipelines, this.commands, options.pluginDirectory, services);
   }
 
   async initialize(): Promise<void> {
-    await this.plugins.load([...builtinPlugins, ...this.additionalPlugins]);
-    this.pluginLoadErrors = this.plugins.errors();
+    this.storeUnsubscribers.push(
+      this.store.subscribePluginState((pluginId) => this.publish({ type: 'plugin.updated', pluginId })),
+      this.store.subscribeCanonical((record) => {
+        if (record.kind === 'plugin') this.publishRecord(record);
+      }),
+    );
+    const disabled = new Set([
+      ...(process.env.PICO_DISABLED_PLUGINS ?? '')
+        .split(',')
+        .map((id) => id.trim())
+        .filter(Boolean),
+      ...(this.options.disabledBuiltinPlugins ?? []),
+    ]);
+    const executorPluginLoad = await loadExecutorPlugins(
+      this.executorTools,
+      this.options.executorPluginDirectory ? { pluginDirectory: this.options.executorPluginDirectory } : {},
+    );
+    this.executorPluginLoadErrors = executorPluginLoad.errors;
+    await this.plugins.load([
+      ...builtinPlugins.filter((plugin) => !disabled.has(plugin.id)),
+      ...this.additionalPlugins,
+    ]);
+    this.pluginLoadErrors = [...this.plugins.errors(), ...this.executorPluginLoadErrors];
     // A Runtime restart confirms its own unfinished model stream was lost. Tool state is
     // left untouched until the bound Executor can be queried.
     for (const thread of this.store.listThreads()) {
@@ -231,18 +317,23 @@ export class PicoRuntime {
       Promise.allSettled([...this.runtimeToolRuns.values()].map((active) => active.promise)),
     ]);
 
-    // Approval waits are durable and have no work to persist until the user decides.
-    // Leave those promises pending; every other loop must finish before its Store closes.
-    const approvalThreads = new Set(
-      [...this.approvalWaiters.entries()]
-        .filter(([, waiters]) => waiters.size > 0)
-        .map(([executionId]) => this.store.getExecution(executionId)?.threadId)
-        .filter((threadId): threadId is string => threadId !== undefined),
+    // A pending Tool may be waiting on a plugin workflow decision. Leave its loop
+    // suspended so the durable pending fact can be resumed by a fresh Runtime.
+    const pendingToolThreads = new Set(
+      this.store
+        .listThreads()
+        .filter((thread) =>
+          this.store
+            .listActiveExecutions(thread.id)
+            .some((execution) => execution.kind === 'tool' && execution.status === 'pending'),
+        )
+        .map((thread) => thread.id),
     );
     await Promise.allSettled(
-      [...this.loops.entries()].filter(([threadId]) => !approvalThreads.has(threadId)).map(([, loop]) => loop),
+      [...this.loops.entries()].filter(([threadId]) => !pendingToolThreads.has(threadId)).map(([, loop]) => loop),
     );
     await this.plugins.shutdown();
+    for (const unsubscribe of this.storeUnsubscribers.splice(0)) unsubscribe();
   }
 
   subscribe(listener: (event: RuntimeEvent) => void): () => void {
@@ -261,6 +352,7 @@ export class PicoRuntime {
   private executionChanged(execution: Execution): void {
     this.publish({ type: 'execution.updated', execution });
     this.publishThreadUpdate(execution.threadId);
+    for (const listener of this.executionListeners) listener(execution);
   }
 
   private publishThreadUpdate(threadId: string): void {
@@ -380,7 +472,6 @@ export class PicoRuntime {
       thread,
       records: page.records,
       executions: this.store.listSnapshotExecutions(threadId, page.records),
-      approvals: this.store.listSnapshotApprovals(threadId, page.records),
       children: this.listThreads(thread.projectId).filter((candidate) => candidate.parentThreadId === threadId),
       hasEarlierRecords: page.hasEarlierRecords,
       historyPageSize: THREAD_HISTORY_PAGE_SIZE,
@@ -534,37 +625,30 @@ export class PicoRuntime {
       const execution = this.store.getExecution(executionId);
       if (execution?.threadId === threadId) active.controller.abort();
     }
+    for (const [executionId, active] of this.invocationRuns) {
+      const execution = this.store.getExecution(executionId);
+      if (execution?.threadId === threadId) active.controller.abort();
+    }
     for (const execution of this.store.listActiveExecutions(threadId)) {
       if (execution.kind === 'model') continue;
-      const approval = this.store.getApproval(execution.id);
-      if (approval?.status === 'pending') {
-        const { cancelled, record } = this.store.transaction(() => {
-          const cancelled = this.store.interruptPendingApproval(execution.id);
-          const record = this.store.appendPluginRecord(threadId, 'pico.permissions', {
-            action: 'cancel',
-            executionId: execution.id,
-            toolName: cancelled.approval.toolName,
-            reason: 'user_interrupt',
-          });
-          return { cancelled, record };
-        });
-        this.publishRecord(record);
-        this.publish({ type: 'approval.updated', approval: cancelled.approval });
-        this.executionChanged(cancelled.execution);
-        this.ensureToolResult(threadId, cancelled.execution);
-        this.resolveApprovalWaiters(execution.id, false);
+      const tool = execution.toolName ? this.tools.get(execution.toolName) : undefined;
+      const invocation = this.invocationRuns.get(execution.id);
+      if (invocation && !invocation.toolStarted) {
+        const settled = await invocation.promise;
+        if (terminalStatus(settled.status)) this.ensureToolResult(threadId, settled);
         continue;
       }
-      const tool = execution.toolName ? this.tools.get(execution.toolName) : undefined;
-      if (tool?.source === 'runtime') {
-        const active = this.runtimeToolRuns.get(execution.id);
-        if (active) active.controller.abort();
-        else if (execution.status === 'pending' || execution.status === 'running') {
+      if (tool?.source === 'runtime' || thread.executorKind === 'runtime') {
+        if (invocation) {
+          const settled = await invocation.promise;
+          if (terminalStatus(settled.status)) this.ensureToolResult(threadId, settled);
+        } else if (execution.status === 'pending' || execution.status === 'running') {
           const interrupted = this.store.transitionExecution(execution.id, 'interrupted', {
             error: 'Runtime confirmed this control tool will not continue after the explicit Interrupt request.',
             detail: { userInterrupted: true },
           });
           this.executionChanged(interrupted);
+          this.ensureToolResult(threadId, interrupted);
         }
         continue;
       }
@@ -806,20 +890,18 @@ export class PicoRuntime {
     let latestDraft = '';
     try {
       const modelSettings = this.getModelSettings();
+      const toolSurface = await this.toolSurfaceFor(thread);
       const baseProjection: ProjectionInput = {
         thread,
         records: projectionRecords,
         through,
-        systemPrompt: `${baseSystemPrompt}\n\n${thread.executorKind === 'runtime' ? 'This Thread uses Chat mode. It has no project workspace, filesystem, shell, or external execution environment. Its available tools are limited to Runtime Thread coordination.' : ''}\n\nCurrent Thread ID: ${thread.id}\n${thread.parentThreadId ? `Parent Thread ID: ${thread.parentThreadId}` : 'This Thread has no parent.'}`,
+        systemPrompt: `${baseSystemPrompt}\n\n${thread.executorKind === 'runtime' ? 'This Thread uses Chat mode. It has no project workspace, filesystem, shell, or external execution environment. It can use tools provided by Runtime plugins.' : ''}\n\nCurrent Thread ID: ${thread.id}\n${thread.parentThreadId ? `Parent Thread ID: ${thread.parentThreadId}` : 'This Thread has no parent.'}`,
         turns: this.projectTurns(projectionRecords, thread),
-        tools: this.visibleToolDefinitions(thread),
+        tools: toolSurface.tools,
+        toolSources: toolSurface.sources,
       };
       const projected = await this.pipelines.run('projection', baseProjection, async (value) => value);
-      const runtimeToolNames = new Set(this.visibleToolDefinitions(thread).map((tool) => tool.name));
-      const projectedTools =
-        thread.executorKind === 'runtime'
-          ? projected.tools.filter((tool) => runtimeToolNames.has(tool.name))
-          : projected.tools;
+      const projectedTools = projected.tools;
       const prompt: ModelPrompt = {
         system: projected.systemPrompt,
         turns: projected.turns,
@@ -989,44 +1071,30 @@ export class PicoRuntime {
     return turns;
   }
 
-  private visibleToolDefinitions(thread: Thread): ToolDefinition[] {
-    const eligibleTools =
-      thread.executorKind === 'runtime'
-        ? this.tools
-            .listBySource('runtime')
-            .filter((tool) => tool.owner === 'pico.core')
-            .map((tool) => tool.definition)
-        : this.tools.list();
-    return eligibleTools.filter((definition) => this.permissionPolicy(thread, definition.name) !== 'deny');
-  }
+  private async toolSurfaceFor(thread: Thread): Promise<{
+    tools: ToolDefinition[];
+    sources: Record<string, 'runtime' | 'executor'>;
+  }> {
+    const runtimeTools = this.tools.listBySource('runtime').map((tool) => tool.definition);
+    const tools = new Map(runtimeTools.map((tool) => [tool.name, tool]));
+    const sources: Record<string, 'runtime' | 'executor'> = Object.fromEntries(
+      runtimeTools.map((tool) => [tool.name, 'runtime']),
+    );
+    if (thread.executorKind === 'runtime') return { tools: [...tools.values()], sources };
 
-  private permissionPolicy(thread: Thread, toolName: string): PermissionPolicy {
-    const rules = this.store.getSetting<Record<string, PermissionPolicy>>(`permissions:${thread.id}`, {});
-    const configured = rules[toolName];
-    if (configured === 'allow' || configured === 'deny' || configured === 'ask') return configured;
-    const tool = this.tools.get(toolName);
-    if (!tool || tool.source === 'runtime') return 'allow';
-    return thread.executorKind === 'host' ? 'ask' : 'allow';
-  }
-
-  toolPermissions(threadId: string): Array<{ name: string; description: string; policy: PermissionPolicy }> {
-    const thread = this.store.getThread(threadId);
-    if (!thread) throw new Error('Thread not found');
-    return this.visibleToolDefinitions(thread).map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      policy: this.permissionPolicy(thread, tool.name),
-    }));
-  }
-
-  setToolPermission(threadId: string, toolName: string, policy: PermissionPolicy): void {
-    if (!this.store.getThread(threadId)) throw new Error('Thread not found');
-    if (!this.tools.get(toolName)) throw new Error('Tool not found');
-    if (policy !== 'allow' && policy !== 'deny' && policy !== 'ask') throw new Error('Invalid permission policy');
-    const key = `permissions:${threadId}`;
-    const rules = this.store.getSetting<Record<string, PermissionPolicy>>(key, {});
-    this.store.setSetting(key, { ...rules, [toolName]: policy });
-    this.publish({ type: 'permissions.updated', threadId, permissions: this.toolPermissions(threadId) });
+    const binding = this.store.executorForThread(thread.id);
+    if (!binding) throw new Error('Executor binding is missing while discovering its Tools.');
+    const adapter = this.adapterFor(binding);
+    for (const definition of await adapter.listTools(binding)) {
+      if (tools.has(definition.name)) {
+        throw new Error(
+          `Tool name collision: ${definition.name} is registered by both Runtime and ${binding.label} Executor sources.`,
+        );
+      }
+      tools.set(definition.name, definition);
+      sources[definition.name] = 'executor';
+    }
+    return { tools: [...tools.values()], sources };
   }
 
   private async executeToolCall(thread: Thread, call: ToolCall): Promise<Execution> {
@@ -1040,121 +1108,69 @@ export class PicoRuntime {
       return execution;
     }
     const registered = this.tools.get(call.name);
-    const policy = this.permissionPolicy(thread, call.name);
+    const controller = new AbortController();
+    const run = { promise: Promise.resolve(execution), controller, toolStarted: false };
     const input: ToolInvocationInput = {
       thread,
       call,
       executionId,
-      policy,
-      requestApproval: () => this.requestApproval(executionId),
-      deny: async (reason) => {
-        const denied = this.store.transaction(() => {
-          const current = this.store.getExecution(executionId);
-          if (!current || terminalStatus(current.status)) return { execution: current, record: null };
-          const execution = this.store.transitionExecution(executionId, 'failed', {
-            error: reason,
-            result: { denied: true },
-          });
-          const record = this.store.appendPluginRecord(thread.id, 'pico.permissions', {
-            action: 'decision',
-            executionId,
-            toolName: call.name,
-            decision: 'deny',
-            reason,
-          });
-          return { execution, record };
+      signal: controller.signal,
+      toolSource: registered?.source ?? (thread.executorKind === 'runtime' ? 'runtime' : 'executor'),
+      fail: async (reason, result) => {
+        const current = this.store.getExecution(executionId);
+        if (!current) throw new Error(`Tool Execution ${executionId} disappeared before it could fail.`);
+        if (terminalStatus(current.status)) return current;
+        const failed = this.store.transitionExecution(executionId, 'failed', {
+          error: reason,
+          ...(result === undefined ? {} : { result }),
         });
-        execution = denied.execution ?? this.store.getExecution(executionId)!;
-        if (denied.record) {
-          execution = denied.execution!;
-          this.publishRecord(denied.record);
-          this.executionChanged(execution);
-        }
-        return this.store.getExecution(executionId)!;
+        if (!failed) throw new Error(`Tool Execution ${executionId} could not be failed.`);
+        this.executionChanged(failed);
+        return failed;
       },
-      invoke: () => this.invokeTool(thread, executionId, registered, call),
+      invoke: () => {
+        run.toolStarted = true;
+        return this.invokeTool(thread, executionId, registered, call, controller.signal);
+      },
     };
-    try {
-      execution = await this.pipelines.run('toolInvocation', input, async (value) => value.invoke());
-    } catch (error) {
-      const latest = this.store.getExecution(executionId);
-      if (!latest) throw error;
-      if (latest.status === 'pending' || latest.status === 'running') {
-        this.publish({
-          type: 'runtime.notice',
-          threadId: thread.id,
-          message: error instanceof Error ? error.message : String(error),
-        });
-        return latest;
+    const promise = (async (): Promise<Execution> => {
+      try {
+        execution = await this.pipelines.run('toolInvocation', input, async (value) => value.invoke());
+      } catch (error) {
+        const latest = this.store.getExecution(executionId);
+        if (!latest) throw error;
+        if (!terminalStatus(latest.status) && !run.toolStarted && controller.signal.aborted) {
+          if (!(error instanceof Error) || error.name !== 'AbortError') {
+            execution = latest;
+            throw error;
+          }
+          execution = this.store.transitionExecution(executionId, 'interrupted', {
+            error: error instanceof Error ? error.message : 'Tool invocation interrupted.',
+            detail: { userInterrupted: true },
+          });
+          this.executionChanged(execution);
+        } else if (!terminalStatus(latest.status) && !run.toolStarted) {
+          execution = this.store.transitionExecution(executionId, 'failed', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          this.executionChanged(execution);
+        } else {
+          execution = latest;
+          if (!terminalStatus(latest.status)) {
+            this.publish({
+              type: 'runtime.notice',
+              threadId: thread.id,
+              message: `Tool ${call.name} did not report a durable outcome. Its ${latest.status} Execution state was preserved for recovery.`,
+            });
+          }
+        }
       }
-      execution = latest;
-    }
-    if (terminalStatus(execution.status)) this.ensureToolResult(thread.id, execution);
-    return execution;
-  }
-
-  private async requestApproval(executionId: string): Promise<boolean> {
-    const approval = this.store.createApproval(executionId);
-    this.publish({ type: 'approval.updated', approval });
-    if (approval.status === 'allowed') return true;
-    if (approval.status === 'denied' || approval.status === 'cancelled') return false;
-    return new Promise<boolean>((resolvePromise) => {
-      const waiters = this.approvalWaiters.get(executionId) ?? new Set<(allow: boolean) => void>();
-      waiters.add(resolvePromise);
-      this.approvalWaiters.set(executionId, waiters);
-      const latest = this.store.getApproval(executionId);
-      if (latest && latest.status !== 'pending') this.resolveApprovalWaiters(executionId, latest.status === 'allowed');
-    });
-  }
-
-  resolveApproval(executionId: string, allow: boolean, rememberForThread = false): PermissionRequest {
-    const before = this.store.getApproval(executionId);
-    if (rememberForThread) {
-      if (!allow) throw new Error('A denied approval cannot create an allow rule');
-      if (!before) throw new Error('Approval request not found');
-      if (before.status === 'denied') throw new Error('Approval was already resolved');
-      if (before.status === 'cancelled') throw new Error('Approval was cancelled');
-      if (!this.tools.get(before.toolName)) throw new Error('Tool not found');
-    }
-    const { approval, record } = this.store.transaction(() => {
-      if (rememberForThread && before) {
-        const key = `permissions:${before.threadId}`;
-        const rules = this.store.getSetting<Record<string, PermissionPolicy>>(key, {});
-        this.store.setSetting(key, { ...rules, [before.toolName]: 'allow' });
-      }
-      const approval = this.store.resolveApproval(executionId, allow);
-      const record =
-        before?.status === 'pending'
-          ? this.store.appendPluginRecord(approval.threadId, 'pico.permissions', {
-              action: 'decision',
-              executionId,
-              toolName: approval.toolName,
-              decision: allow ? 'allow' : 'deny',
-              scope: rememberForThread ? 'thread' : 'once',
-            })
-          : null;
-      return { approval, record };
-    });
-    if (rememberForThread && before) {
-      this.publish({
-        type: 'permissions.updated',
-        threadId: before.threadId,
-        permissions: this.toolPermissions(before.threadId),
-      });
-    }
-    if (record) {
-      this.publishRecord(record);
-    }
-    this.resolveApprovalWaiters(executionId, allow);
-    this.publish({ type: 'approval.updated', approval });
-    return approval;
-  }
-
-  private resolveApprovalWaiters(executionId: string, allow: boolean): void {
-    const waiters = this.approvalWaiters.get(executionId);
-    if (!waiters) return;
-    this.approvalWaiters.delete(executionId);
-    for (const resolvePromise of waiters) resolvePromise(allow);
+      if (terminalStatus(execution.status)) this.ensureToolResult(thread.id, execution);
+      return execution;
+    })().finally(() => this.invocationRuns.delete(executionId));
+    run.promise = promise;
+    this.invocationRuns.set(executionId, run);
+    return promise;
   }
 
   private async invokeTool(
@@ -1162,11 +1178,12 @@ export class PicoRuntime {
     executionId: string,
     tool: ReturnType<typeof this.tools.get>,
     call: ToolCall,
+    signal: AbortSignal,
   ): Promise<Execution> {
     const current = this.store.getExecution(executionId);
     if (!current) throw new Error('Tool execution record is missing');
     if (terminalStatus(current.status)) return current;
-    if (tool?.source === 'executor') {
+    if (tool?.source === 'executor' || (!tool && thread.executorKind !== 'runtime')) {
       const binding = this.store.executorForThread(thread.id);
       if (!binding) throw new Error('Executor binding is missing');
       return this.adapterFor(binding).execute(executionId, binding);
@@ -1187,6 +1204,9 @@ export class PicoRuntime {
       return failed;
     }
     const controller = new AbortController();
+    const abortRuntimeTool = (): void => controller.abort();
+    signal.addEventListener('abort', abortRuntimeTool, { once: true });
+    if (signal.aborted) controller.abort();
     const started = this.store.transitionExecution(executionId, 'running');
     this.executionChanged(started);
     const context: ToolContext = {
@@ -1209,7 +1229,10 @@ export class PicoRuntime {
         this.executionChanged(failed);
         return failed;
       }
-    })().finally(() => this.runtimeToolRuns.delete(executionId));
+    })().finally(() => {
+      signal.removeEventListener('abort', abortRuntimeTool);
+      this.runtimeToolRuns.delete(executionId);
+    });
     this.runtimeToolRuns.set(executionId, { promise, controller });
     return promise;
   }
@@ -1242,72 +1265,14 @@ export class PicoRuntime {
     return binding.kind === 'container' ? this.containerExecutor : this.hostExecutor;
   }
 
-  private registerControlTools(): void {
-    this.tools.register({
-      owner: 'pico.core',
-      source: 'runtime',
-      definition: {
-        name: 'spawn_thread',
-        description:
-          'Create a child Thread in this Project, send it an initial message, and return immediately without waiting for it.',
-        parameters: {
-          type: 'object',
-          properties: { prompt: { type: 'string' }, title: { type: 'string' } },
-          required: ['prompt'],
-          additionalProperties: false,
-        },
-      },
-      execute: async (args, context) => {
-        const parent = context.thread;
-        if (!parent) throw new Error('Thread context is missing');
-        const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : '';
-        if (!prompt) throw new Error('Child Thread prompt is required');
-        return this.spawnChild(parent, prompt, typeof args.title === 'string' ? args.title : undefined);
-      },
-    });
-    this.tools.register({
-      owner: 'pico.core',
-      source: 'runtime',
-      definition: {
-        name: 'send_thread_message',
-        description:
-          'Send a normal message to another Thread in this Project. This does not wait for that Thread to finish.',
-        parameters: {
-          type: 'object',
-          properties: { thread_id: { type: 'string' }, message: { type: 'string' } },
-          required: ['thread_id', 'message'],
-          additionalProperties: false,
-        },
-      },
-      execute: async (args, context) => {
-        const sender = context.thread;
-        if (!sender) throw new Error('Thread context is missing');
-        const targetId = typeof args.thread_id === 'string' ? args.thread_id : '';
-        const message = typeof args.message === 'string' ? args.message.trim() : '';
-        if (!targetId || !message) throw new Error('thread_id and message are required');
-        const target = this.store.getThread(targetId);
-        if (!target || target.projectId !== sender.projectId)
-          throw new Error('Target Thread must belong to the same Project');
-        if (target.id === sender.id)
-          throw new Error('Use ordinary assistant text instead of sending a message to the current Thread');
-        const payload: MessagePayload = {
-          role: 'user',
-          content: message,
-          source: sender.parentThreadId ? 'child' : 'agent',
-          senderThreadId: sender.id,
-          senderLabel: sender.title,
-        };
-        const result = this.postMessage(target, randomUUID(), payload);
-        return { delivered: result.inserted, threadId: target.id, messageId: result.record.id };
-      },
-    });
-  }
-
-  private spawnChild(
+  private createChildThread(
     parent: Thread,
     prompt: string,
     requestedTitle?: string,
+    messageId: string = randomUUID(),
   ): { threadId: string; title: string; executor: string } {
+    const cleanedPrompt = prompt.trim();
+    if (!cleanedPrompt) throw new Error('Child Thread prompt is required');
     const title = requestedTitle?.trim() || prompt.slice(0, 72) || 'Child Thread';
     const parentBinding = this.store.executorForThread(parent.id);
     const child = this.store.createThread(parent.projectId, parent.executorKind, title, {
@@ -1317,9 +1282,9 @@ export class PicoRuntime {
       ...(parent.executorRemote ? { workspacePath: parent.workspacePath } : {}),
     });
     this.publish({ type: 'thread.created', thread: child });
-    this.postMessage(child, randomUUID(), {
+    this.postMessage(child, messageId, {
       role: 'user',
-      content: prompt,
+      content: cleanedPrompt,
       source: 'agent',
       senderThreadId: parent.id,
       senderLabel: parent.title,

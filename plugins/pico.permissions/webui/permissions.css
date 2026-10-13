@@ -1,0 +1,171 @@
+:root {
+  color-scheme: light dark;
+  font:
+    13px/1.45 system-ui,
+    sans-serif;
+  color: #27332b;
+  background: transparent;
+}
+
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+button,
+select {
+  font: inherit;
+}
+button,
+select {
+  border: 1px solid #cbd5cc;
+  border-radius: 8px;
+  padding: 6px 9px;
+  background: #fff;
+  color: inherit;
+}
+button {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+.panel {
+  padding: 10px 12px;
+  display: grid;
+  gap: 9px;
+}
+.heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+.heading strong {
+  font-size: 13px;
+}
+.muted,
+.empty {
+  color: #68766d;
+}
+.tools {
+  display: grid;
+  gap: 6px;
+}
+.tool {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  border-top: 1px solid #e4ebe5;
+  padding-top: 7px;
+}
+.tool-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: ui-monospace, monospace;
+}
+.tool-description {
+  color: #68766d;
+  font-size: 11px;
+}
+.card {
+  border: 1px solid #dce5de;
+  border-radius: 10px;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+  background: color-mix(in srgb, Canvas 94%, #7ea18a);
+}
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.status {
+  border-radius: 999px;
+  background: #e8eee9;
+  padding: 2px 8px;
+  font-size: 11px;
+}
+.status.pending {
+  background: #fff0ca;
+  color: #765100;
+}
+pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font:
+    11px/1.45 ui-monospace,
+    monospace;
+}
+details {
+  border-top: 1px solid #e4ebe5;
+  padding-top: 6px;
+}
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.allow {
+  background: #e8f4e9;
+  border-color: #9ab99f;
+}
+.deny {
+  background: #fff0ed;
+  border-color: #d8a39b;
+}
+label.remember {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: auto;
+}
+.error {
+  color: #a22;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color: #e6ede8;
+  }
+  button,
+  select {
+    background: #242c27;
+    border-color: #46534a;
+  }
+  .muted,
+  .empty,
+  .tool-description {
+    color: #a7b4aa;
+  }
+  .tool,
+  details {
+    border-color: #3a463e;
+  }
+  .card {
+    border-color: #3d4a41;
+    background: #202722;
+  }
+  .status {
+    background: #354139;
+  }
+  .status.pending {
+    color: #ffdc82;
+    background: #493c1e;
+  }
+  .allow {
+    background: #24392a;
+    border-color: #4c7655;
+  }
+  .deny {
+    background: #3b2926;
+    border-color: #81524a;
+  }
+}

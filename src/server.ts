@@ -16,7 +16,6 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { PicoRuntime } from './runtime/runtime.js';
 import { PicoStore } from './core/store.js';
 import type { ExecutorKind, ModelSettings } from './core/types.js';
-import type { PermissionPolicy } from './runtime/stages.js';
 
 function bodyObject(request: Request): Record<string, unknown> {
   if (!request.body || typeof request.body !== 'object' || Array.isArray(request.body)) {
@@ -252,26 +251,6 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   app.get('/api/threads/:threadId/executor', async (request, response) => {
     response.json(await runtime.executorStatus(request.params.threadId!));
   });
-  app.get('/api/threads/:threadId/permissions', (request, response) => {
-    response.json(runtime.toolPermissions(request.params.threadId!));
-  });
-  app.put('/api/threads/:threadId/permissions/:toolName', (request, response) => {
-    const body = bodyObject(request);
-    const policy = body.policy;
-    if (policy !== 'allow' && policy !== 'deny' && policy !== 'ask')
-      throw new Error('policy must be allow, ask, or deny');
-    runtime.setToolPermission(request.params.threadId!, request.params.toolName!, policy as PermissionPolicy);
-    response.json(runtime.toolPermissions(request.params.threadId!));
-  });
-  app.post('/api/approvals/:executionId', (request, response) => {
-    const body = bodyObject(request);
-    if (typeof body.allow !== 'boolean') throw new Error('allow must be a boolean');
-    if (body.rememberForThread !== undefined && typeof body.rememberForThread !== 'boolean') {
-      throw new Error('rememberForThread must be a boolean');
-    }
-    response.json(runtime.resolveApproval(request.params.executionId!, body.allow, body.rememberForThread === true));
-  });
-
   app.get('/api/settings/model', (_request, response) => response.json(runtime.publicModelSettings()));
   app.put('/api/settings/model', (request, response) => {
     const body = bodyObject(request);
@@ -284,6 +263,17 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     response.json(runtime.updateModelSettings(update));
   });
   app.get('/api/commands', (_request, response) => response.json(runtime.availableCommands()));
+  app.post('/api/commands/execute', async (request, response) => {
+    const body = bodyObject(request);
+    const pluginId = requiredText(body, 'pluginId');
+    const threadId = requiredText(body, 'threadId');
+    const id = requiredText(body, 'id');
+    const command = requiredText(body, 'command');
+    if (!runtime.commands.owns(pluginId, command)) {
+      return response.status(403).json({ error: 'Command is not owned by the requested plugin.' });
+    }
+    return response.json(await runtime.submit(threadId, id, command));
+  });
   app.get('/api/plugins', (_request, response) => response.json(runtime.pluginInfo()));
   app.use('/_pico/plugin-ui', async (request, response) => {
     await servePluginUiAsset(runtime, request, response);
