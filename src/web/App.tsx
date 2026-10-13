@@ -83,6 +83,7 @@ import {
 import {
   COMPOSER_STATE_STORAGE_KEY,
   acceptComposerMessage,
+  createRequestUuid,
   hasPendingMessageSubmission,
   messageSubmissionId,
   messageSubmissionFailureMessage,
@@ -1016,12 +1017,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     const clean = content.trim();
     const sentThreadId = threadId;
     if (!sentThreadId || !clean || busy || pendingSubmissionThreads.current.has(sentThreadId)) return;
-    followLatest.current = true;
-    markThreadSending(sentThreadId, true);
-    setError('');
-    const id = messageSubmissionId(pendingMessageIds.current, sentThreadId, clean, () => crypto.randomUUID());
-    persistComposerState(composerState.current!);
+    let id: string | undefined;
     try {
+      followLatest.current = true;
+      markThreadSending(sentThreadId, true);
+      setError('');
+      id = messageSubmissionId(pendingMessageIds.current, sentThreadId, clean, createRequestUuid);
+      persistComposerState(composerState.current!);
       const result = await api<{
         accepted: boolean;
         duplicate?: boolean;
@@ -1037,7 +1039,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     } catch (caught) {
       if (
         activeThreadId.current === sentThreadId &&
-        hasPendingMessageSubmission(pendingMessageIds.current, sentThreadId, id)
+        (id === undefined || hasPendingMessageSubmission(pendingMessageIds.current, sentThreadId, id))
       ) {
         setError(messageSubmissionFailureMessage(caught));
       }
@@ -1247,7 +1249,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       body: JSON.stringify({
         pluginId,
         threadId: targetThreadId,
-        id: crypto.randomUUID(),
+        id: createRequestUuid(),
         command,
       }),
     });

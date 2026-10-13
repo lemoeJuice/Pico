@@ -3,6 +3,31 @@ export type PendingMessageIds = Map<string, Map<string, string>>;
 export const MESSAGE_SUBMISSION_TIMEOUT_MS = 20_000;
 export const COMPOSER_STATE_STORAGE_KEY = 'pico.composer.v1';
 
+/** Generate a UUID in HTTP Web UIs where crypto.randomUUID is unavailable. */
+export function createRequestUuid(): string {
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi?.randomUUID === 'function') {
+    try {
+      return cryptoApi.randomUUID();
+    } catch {
+      // Fall back to getRandomValues when randomUUID is restricted by the page context.
+    }
+  }
+
+  const bytes = new Uint8Array(16);
+  try {
+    if (typeof cryptoApi?.getRandomValues === 'function') cryptoApi.getRandomValues(bytes);
+    else throw new Error('Web Crypto random values are unavailable');
+  } catch {
+    // Request IDs provide idempotency, not authentication; retain a fallback for older browsers.
+    for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
+  }
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export interface ComposerState {
   draftsByThread: Record<string, string>;
   pendingMessages: PendingMessageIds;
