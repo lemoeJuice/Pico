@@ -3,6 +3,7 @@ import type { ToolDefinition } from '../core/types.js';
 export type RemoteExecutionStatus = 'pending' | 'running' | 'completed' | 'failed' | 'interrupted';
 
 export interface RemoteExecutorInfo {
+  protocolVersion: 1;
   name: string;
   kind: 'host';
   workspaceRoot: string;

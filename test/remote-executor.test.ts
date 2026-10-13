@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { PicoStore } from '../src/core/store.js';
 import { startRemoteExecutorServer } from '../src/executor/remote-server.js';
+import { ToolCatalog } from '../src/executor/tools.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
-import { FakeModel, response, setupRuntime } from './helpers.js';
+import { FakeModel, response, setupRuntime, setToolPolicy } from './helpers.js';
 
 const token = 'pico-test-remote-executor-token-0123456789abcdef';
 
@@ -78,7 +79,7 @@ describe('Remote Host Executor', () => {
         headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
         body: JSON.stringify(request),
       });
-      expect(accepted.status).toBe(202);
+      expect(accepted.status, await accepted.clone().text()).toBe(202);
       expect((await accepted.json()).status).toBe('running');
       expect(await waitForExecution(baseUrl, executionId)).toMatchObject({ status: 'completed' });
 
@@ -107,6 +108,71 @@ describe('Remote Host Executor', () => {
         body: JSON.stringify(request),
       });
       expect((await afterRestart.json()).status).toBe('completed');
+    } finally {
+      await server.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('discovers and executes a custom Remote Executor tool with the versioned schema', async () => {
+    const directory = await import('node:fs/promises').then(({ mkdtemp }) =>
+      mkdtemp(join(tmpdir(), 'pico-remote-plugin-')),
+    );
+    const workspaceRoot = join(directory, 'workspaces');
+    const workspace = join(workspaceRoot, 'project');
+    const pluginDirectory = join(directory, 'executor-plugins');
+    await mkdir(workspace, { recursive: true });
+    await mkdir(pluginDirectory);
+    await writeFile(
+      join(pluginDirectory, 'custom.mjs'),
+      `import { writeFile } from 'node:fs/promises';
+       export default {
+         id: 'test.remote-marker', name: 'Remote marker', version: '1',
+         activateExecutor({ tools }) {
+           tools.register({ name: 'write_marker', description: 'Write a marker in this Remote Executor workspace.', parameters: { type: 'object', properties: { content: { type: 'string' } }, required: ['content'], additionalProperties: false } }, async (args, context) => {
+             await writeFile(context.workspacePath + '/remote-marker.txt', String(args.content));
+             return { executionId: context.executionId, workspacePath: context.workspacePath };
+           });
+         }
+       };
+      `,
+    );
+    const server = await startRemoteExecutorServer({
+      token,
+      workspaceRoot,
+      pluginDirectory,
+      tools: new ToolCatalog(),
+      databasePath: join(directory, 'executor.sqlite'),
+      port: 0,
+    });
+    const baseUrl = `http://127.0.0.1:${server.port}`;
+    try {
+      const info = await getJson<{
+        protocolVersion: number;
+        tools: Array<{ name: string; parameters: Record<string, unknown> }>;
+      }>(`${baseUrl}/api/info`, token);
+      expect(info.protocolVersion).toBe(1);
+      expect(info.tools.map((tool) => tool.name)).toEqual(['write_marker']);
+      expect(info.tools.find((tool) => tool.name === 'write_marker')?.parameters).toMatchObject({
+        type: 'object',
+        required: ['content'],
+      });
+      const executionId = 'remote-plugin-execution';
+      const accepted = await fetch(`${baseUrl}/api/executions/${executionId}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          toolName: 'write_marker',
+          arguments: { content: 'remote bundle works' },
+          workspacePath: workspace,
+        }),
+      });
+      expect(accepted.status).toBe(202);
+      expect(await waitForExecution(baseUrl, executionId)).toMatchObject({
+        status: 'completed',
+        result: { executionId, workspacePath: workspace },
+      });
+      expect(await readFile(join(workspace, 'remote-marker.txt'), 'utf8')).toBe('remote bundle works');
     } finally {
       await server.close();
       await rm(directory, { recursive: true, force: true });
@@ -158,7 +224,7 @@ describe('Remote Host Executor', () => {
       );
       expect(thread.executorRemote).toBe(true);
       expect(thread.workspacePath).toBe(remoteWorkspace);
-      env.runtime.setToolPermission(thread.id, 'read_file', 'allow');
+      setToolPolicy(env.store, thread.id, 'read_file', 'allow');
 
       await env.runtime.submit(thread.id, 'remote-user-message', 'Read the remote file.');
       await env.runtime.drain();
@@ -234,7 +300,7 @@ describe('Remote Host Executor', () => {
         remoteEndpointUrl: endpoint,
         workspacePath: remoteWorkspace,
       });
-      env.runtime.setToolPermission(thread.id, 'read_file', 'allow');
+      setToolPolicy(env.store, thread.id, 'read_file', 'allow');
 
       await env.runtime.submit(thread.id, 'before-rotation-message', 'Read the file before rotation.');
       await env.runtime.drain();
@@ -317,7 +383,7 @@ describe('Remote Host Executor', () => {
         token,
       );
       const thread = await env.runtime.createRemoteThread(env.project.id, connection.id, remoteWorkspace);
-      env.runtime.setToolPermission(thread.id, 'shell', 'allow');
+      setToolPolicy(env.store, thread.id, 'shell', 'allow');
       const modelExecution = env.store.createModelExecution('lost-remote-model', thread.id, 0);
       env.store.transitionExecution(modelExecution.id, 'running');
       const call = { id: 'lost-remote-call', name: 'shell', arguments: { command: 'touch should-not-run' } };
@@ -378,7 +444,7 @@ describe('Remote Host Executor', () => {
     try {
       const connection = await env.runtime.addRemoteExecutorConnection('Build host', endpoint, token);
       const thread = await env.runtime.createRemoteThread(env.project.id, connection.id, remoteWorkspace);
-      env.runtime.setToolPermission(thread.id, 'shell', 'allow');
+      setToolPolicy(env.store, thread.id, 'shell', 'allow');
 
       let acceptedRemoteSubmission = false;
       let submissionAttempts = 0;
@@ -468,7 +534,7 @@ describe('Remote Host Executor', () => {
       const project = await runtime.createProject('Runtime restart', projectWorkspace);
       const connection = await runtime.addRemoteExecutorConnection('Build host', endpoint, token);
       const thread = await runtime.createRemoteThread(project.id, connection.id, remoteWorkspace);
-      runtime.setToolPermission(thread.id, 'shell', 'allow');
+      setToolPolicy(store, thread.id, 'shell', 'allow');
       await runtime.submit(thread.id, 'runtime-restart-message', 'Run a command that outlives this Runtime.');
       await until(() =>
         store
@@ -533,7 +599,7 @@ describe('Remote Host Executor', () => {
       const project = await runtime.createProject('Paused Runtime restart', projectWorkspace);
       const connection = await runtime.addRemoteExecutorConnection('Build host', endpoint, token);
       const thread = await runtime.createRemoteThread(project.id, connection.id, remoteWorkspace);
-      runtime.setToolPermission(thread.id, 'shell', 'allow');
+      setToolPolicy(store, thread.id, 'shell', 'allow');
       await runtime.submit(thread.id, 'paused-runtime-restart-message', 'Run while the Runtime restarts.');
       await until(() =>
         store
@@ -600,7 +666,7 @@ describe('Remote Host Executor', () => {
         token,
       );
       const thread = await env.runtime.createRemoteThread(env.project.id, connection.id, remoteWorkspace);
-      env.runtime.setToolPermission(thread.id, 'shell', 'allow');
+      setToolPolicy(env.store, thread.id, 'shell', 'allow');
       await env.runtime.submit(thread.id, 'remote-interrupt-message', 'Start then interrupt a command.');
       await until(() =>
         env.store
@@ -648,7 +714,7 @@ describe('Remote Host Executor', () => {
     try {
       const connection = await env.runtime.addRemoteExecutorConnection('Build host', endpoint, token);
       const thread = await env.runtime.createRemoteThread(env.project.id, connection.id, remoteWorkspace);
-      env.runtime.setToolPermission(thread.id, 'shell', 'allow');
+      setToolPolicy(env.store, thread.id, 'shell', 'allow');
 
       let acceptedSubmissionResponseWasLost = false;
       globalThis.fetch = async (input, init) => {

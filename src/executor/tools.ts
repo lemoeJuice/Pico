@@ -522,8 +522,35 @@ export function builtinExecutorTools(): ToolImplementation[] {
   ];
 }
 
+export const defaultExecutorPlugin = {
+  id: 'pico.executor-tools',
+  name: 'Default executor tools',
+  version: '0.1.0',
+  activateExecutor(context: {
+    tools: {
+      register(
+        definition: ToolDefinition,
+        execute: (args: Record<string, unknown>, context: ToolContext) => Promise<unknown> | unknown,
+      ): void;
+    };
+  }): void {
+    for (const tool of builtinExecutorTools()) context.tools.register(tool.definition, tool.execute);
+  },
+};
+
 export function createToolCatalog(): ToolCatalog {
   const catalog = new ToolCatalog();
-  for (const tool of builtinExecutorTools()) catalog.register({ ...tool, owner: 'pico.core', source: 'executor' });
+  defaultExecutorPlugin.activateExecutor({
+    tools: {
+      register(definition, execute) {
+        catalog.register({
+          owner: defaultExecutorPlugin.id,
+          source: 'executor',
+          definition,
+          execute: async (args, context) => await execute(args, context),
+        });
+      },
+    },
+  });
   return catalog;
 }

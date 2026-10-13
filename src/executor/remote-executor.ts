@@ -1,9 +1,8 @@
-import type { Execution, ExecutorBinding } from '../core/types.js';
+import type { Execution, ExecutorBinding, ToolDefinition } from '../core/types.js';
 import { PicoStore } from '../core/store.js';
 import type { ExecutionListener, ExecutorAdapter } from './executor.js';
 import { remoteExecutorUrl, type RemoteExecutionState, type RemoteExecutorInfo } from './remote-protocol.js';
-
-const requiredTools = ['read_file', 'search_files', 'apply_patch', 'shell'];
+import { validateToolDefinitions } from './plugin-host.js';
 const requestTimeoutMs = 15_000;
 
 function connection(binding: ExecutorBinding): { endpointUrl: string; accessToken: string } {
@@ -82,16 +81,15 @@ export async function inspectRemoteExecutor(endpointUrl: string, accessToken: st
   const info = await requestJson<RemoteExecutorInfo>(endpointUrl, accessToken, '/api/info');
   if (
     !info ||
+    info.protocolVersion !== 1 ||
     info.kind !== 'host' ||
     typeof info.name !== 'string' ||
     typeof info.workspaceRoot !== 'string' ||
     !Array.isArray(info.tools)
   ) {
-    throw new Error('The endpoint did not identify itself as a compatible Pico Host Executor.');
+    throw new Error('The endpoint did not identify itself as a compatible Pico Executor (protocol version 1).');
   }
-  const available = new Set(info.tools.map((tool) => tool.name));
-  const missing = requiredTools.filter((name) => !available.has(name));
-  if (missing.length > 0) throw new Error(`Remote Executor is missing required tools: ${missing.join(', ')}.`);
+  info.tools = validateToolDefinitions(info.tools);
   return info;
 }
 
@@ -122,6 +120,11 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     private readonly store: PicoStore,
     private readonly onExecution: ExecutionListener = () => undefined,
   ) {}
+
+  async listTools(binding: ExecutorBinding): Promise<ToolDefinition[]> {
+    const { endpointUrl, accessToken } = connection(binding);
+    return (await inspectRemoteExecutor(endpointUrl, accessToken)).tools;
+  }
 
   async checkConnection(binding: ExecutorBinding): Promise<void> {
     const { endpointUrl, accessToken } = connection(binding);

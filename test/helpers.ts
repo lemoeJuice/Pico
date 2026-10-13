@@ -85,3 +85,15 @@ export function assistantPayload(overrides: Partial<AssistantPayload> = {}): Ass
     ...overrides,
   };
 }
+
+export function setToolPolicy(store: PicoStore, threadId: string, toolName: string, policy: 'allow' | 'ask' | 'deny') {
+  const rules = store.getPluginState<Record<string, Record<string, 'allow' | 'ask' | 'deny'>>>(
+    'pico.permissions',
+    'rules',
+    {},
+  );
+  store.setPluginState('pico.permissions', 'rules', {
+    ...rules,
+    [threadId]: { ...(rules[threadId] ?? {}), [toolName]: policy },
+  });
+}

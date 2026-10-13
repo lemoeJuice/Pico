@@ -1,9 +1,11 @@
 import type { Execution, ExecutorBinding, ExecutorKind } from '../core/types.js';
+import type { ToolDefinition } from '../core/types.js';
 import { PicoStore } from '../core/store.js';
 import { ToolCatalog } from './tools.js';
 
 export interface ExecutorAdapter {
   readonly kind: ExecutorKind;
+  listTools(binding: ExecutorBinding): Promise<ToolDefinition[]>;
   checkConnection(binding: ExecutorBinding): Promise<void>;
   execute(executionId: string, binding: ExecutorBinding, signal?: AbortSignal): Promise<Execution>;
   status(executionId: string, binding: ExecutorBinding): Promise<Execution | null>;
@@ -25,6 +27,10 @@ export class HostExecutor implements ExecutorAdapter {
 
   async checkConnection(_binding: ExecutorBinding): Promise<void> {
     return;
+  }
+
+  async listTools(_binding: ExecutorBinding): Promise<ToolDefinition[]> {
+    return this.tools.listBySource('executor').map(({ definition }) => definition);
   }
 
   async execute(executionId: string, binding: ExecutorBinding, externalSignal?: AbortSignal): Promise<Execution> {

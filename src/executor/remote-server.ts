@@ -5,6 +5,8 @@ import { isAbsolute, relative, resolve, sep, join } from 'node:path';
 import { hostname } from 'node:os';
 import express, { type ErrorRequestHandler, type Request } from 'express';
 import { createToolCatalog } from './tools.js';
+import { loadExecutorPlugins } from './plugin-host.js';
+import type { ToolCatalog } from './tools.js';
 import { RemoteExecutionLedger } from './remote-ledger.js';
 import type { RemoteExecutionRequest, RemoteExecutionState } from './remote-protocol.js';
 
@@ -20,6 +22,8 @@ export interface RemoteExecutorServerOptions {
   workspaceRoot: string;
   name?: string;
   databasePath?: string;
+  pluginDirectory?: string;
+  tools?: ToolCatalog;
 }
 
 export interface RunningRemoteExecutorServer {
@@ -61,7 +65,14 @@ export async function startRemoteExecutorServer(
   if (!(await stat(workspaceRoot)).isDirectory()) throw new Error('Executor workspace root must be a directory.');
   const databasePath = options.databasePath ?? join(process.cwd(), 'data', 'executor.sqlite');
   const ledger = new RemoteExecutionLedger(databasePath);
-  const tools = createToolCatalog();
+  const tools = options.tools ?? createToolCatalog();
+  const pluginLoad = await loadExecutorPlugins(tools, {
+    ...(options.pluginDirectory ? { pluginDirectory: options.pluginDirectory } : {}),
+  });
+  if (pluginLoad.errors.length > 0) {
+    // An invalid optional plugin must not prevent the remote executor from serving its valid catalog.
+    console.warn(`Remote Executor plugin load errors: ${pluginLoad.errors.join('; ')}`);
+  }
   const active = new Map<string, ActiveExecution>();
   const app = express();
   app.disable('x-powered-by');
@@ -133,6 +144,7 @@ export async function startRemoteExecutorServer(
 
   app.get('/api/info', (_request, response) => {
     response.json({
+      protocolVersion: 1,
       name: options.name?.trim() || hostname(),
       kind: 'host',
       workspaceRoot,
