@@ -334,6 +334,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [threads, setThreads] = useState<Thread[]>([]);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<ThreadSnapshot | null>(null);
+  const [bootstrapping, setBootstrapping] = useState(true);
   const [settings, setSettings] = useState<PublicSettings | null>(null);
   const [remoteConnections, setRemoteConnections] = useState<RemoteExecutorConnectionView[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -529,16 +530,23 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
   useEffect(() => {
     let alive = true;
-    void Promise.all([
-      api<Project[]>('/api/projects'),
-      api<PublicSettings>('/api/settings/model'),
-      api<Array<{ name: string; description: string }>>('/api/commands'),
-      api<PluginInfo>('/api/plugins'),
-      api<{ defaultWorkspace: string }>('/api/info'),
-      api<RemoteExecutorConnectionView[]>('/api/executor-connections'),
-    ])
-      .then(([projectList, modelSettings, commandList, pluginResult, info, connections]) => {
-        if (!alive) return;
+    void fetchStableSnapshot(
+      () =>
+        Promise.all([
+          api<Project[]>('/api/projects'),
+          api<PublicSettings>('/api/settings/model'),
+          api<Array<{ name: string; description: string }>>('/api/commands'),
+          api<PluginInfo>('/api/plugins'),
+          api<{ defaultWorkspace: string }>('/api/info'),
+          api<RemoteExecutorConnectionView[]>('/api/executor-connections'),
+        ]),
+      () => 0,
+      () => alive,
+    )
+      .then((bootstrap) => {
+        if (!alive || !bootstrap) return;
+        setBootstrapping(false);
+        const [projectList, modelSettings, commandList, pluginResult, info, connections] = bootstrap;
         setProjects(projectList);
         setSettings(modelSettings);
         setModelForm({ ...modelSettings, apiKey: '' });
@@ -554,7 +562,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         if (modelSettings.model.trim() === '') setSettingsOpen(false);
       })
       .catch((caught: unknown) => {
-        if (alive) setError(caught instanceof Error ? caught.message : String(caught));
+        if (alive) {
+          setBootstrapping(false);
+          setError(caught instanceof Error ? caught.message : String(caught));
+        }
       });
     return () => {
       alive = false;
@@ -1262,7 +1273,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             </select>
             <span className="select-chevron">⌄</span>
           </div>
-          <button className="sidebar-add-project" onClick={() => setNewProjectOpen(true)}>
+          <button
+            className="sidebar-add-project"
+            disabled={bootstrapping}
+            onClick={() => setNewProjectOpen(true)}
+            title={bootstrapping ? 'Loading workspace data…' : undefined}
+          >
             <span>＋</span> Add Project
           </button>
         </div>
@@ -1308,7 +1324,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           ) : null}
         </div>
         <div className="sidebar-bottom">
-          <button className="settings-link" onClick={() => setSettingsOpen(true)}>
+          <button className="settings-link" disabled={bootstrapping} onClick={() => setSettingsOpen(true)}>
             <span className="settings-icon">⚙</span>
             <span>Settings</span>
             {!settings?.model ? <span className="settings-needs-config">Set up</span> : null}
@@ -1346,9 +1362,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             </div>
           ) : (
             <div className="topbar-status">
-              <span className="connection-label">
+              <span className="connection-label" role="status">
                 <i className={socketConnected ? 'online' : 'offline'} />
-                {socketConnected ? 'Runtime connected' : 'Connecting…'}
+                {bootstrapping ? 'Loading workspace…' : socketConnected ? 'Runtime connected' : 'Connecting…'}
+                {bootstrapping ? <i className="tiny-spinner" aria-hidden="true" /> : null}
               </span>
               {authRequired ? (
                 <button className="session-logout" onClick={() => void onSignOut?.()} type="button">
@@ -1410,14 +1427,20 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               <em>good work.</em>
             </h1>
             <p className="welcome-copy">
-              Pico keeps your conversations and execution state close, so you can pick up where you left off.
+              {bootstrapping
+                ? 'Loading your Projects, Threads, and Runtime settings…'
+                : 'Pico keeps your conversations and execution state close, so you can pick up where you left off.'}
             </p>
             <div className="welcome-actions">
-              <button className="button button-primary" onClick={() => setNewProjectOpen(true)}>
+              <button
+                className="button button-primary"
+                disabled={bootstrapping}
+                onClick={() => setNewProjectOpen(true)}
+              >
                 Create a Project <span>↗</span>
               </button>
               {selectedProject ? (
-                <button className="button button-soft" onClick={() => setNewThreadOpen(true)}>
+                <button className="button button-soft" disabled={bootstrapping} onClick={() => setNewThreadOpen(true)}>
                   Start a Thread
                 </button>
               ) : null}
