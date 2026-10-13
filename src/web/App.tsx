@@ -1740,8 +1740,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     </div>
                     <h2>A fresh Thread</h2>
                     <p>
-                      Send a message to begin. This Thread stays bound to its {executorLabel(selectedThread)}
-                      environment.
+                      Send a message to begin. This Thread is bound to the {executorLabel(selectedThread)} environment.
                     </p>
                   </div>
                 ) : null}
