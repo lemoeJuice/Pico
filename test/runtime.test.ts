@@ -12,7 +12,74 @@ import type { ModelStageInput, ProjectionInput, StepInput, ToolBatchInput } from
 import { threadCanBeInterrupted } from '../src/web/thread-controls.js';
 import { assistantPayload, deferred, FakeModel, response, setupRuntime } from './helpers.js';
 
+interface PermissionApprovalForTest {
+  executionId: string;
+  threadId: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+  status: 'pending' | 'allowed' | 'denied' | 'cancelled';
+  createdAt: string;
+}
+
+interface PermissionViewForTest {
+  tools: Array<{ name: string; description: string; policy: 'allow' | 'ask' | 'deny' }>;
+  approvals: PermissionApprovalForTest[];
+}
+
+async function permissionRequest<T>(
+  runtime: PicoRuntime,
+  method: string,
+  path: string,
+  body?: unknown,
+  query?: URLSearchParams,
+): Promise<T> {
+  const route = runtime.pluginHttpRoute('pico.permissions', method, path);
+  if (!route) throw new Error(`Permission plugin route ${method} ${path} is not registered.`);
+  return (await route.handler({ body, query: query ?? new URLSearchParams(), origin: null })) as T;
+}
+
+function permissionView(runtime: PicoRuntime, threadId: string): Promise<PermissionViewForTest> {
+  return permissionRequest(runtime, 'GET', '/threads', undefined, new URLSearchParams({ threadId }));
+}
+
+async function setPermission(
+  runtime: PicoRuntime,
+  threadId: string,
+  toolName: string,
+  policy: 'allow' | 'ask' | 'deny',
+) {
+  return permissionRequest(runtime, 'PUT', '/rules', { threadId, toolName, policy });
+}
+
+async function decidePermission(runtime: PicoRuntime, executionId: string, allow: boolean, rememberForThread = false) {
+  return permissionRequest(runtime, 'POST', '/approvals', { executionId, allow, rememberForThread });
+}
+
 describe('durable Thread runtime invariants', () => {
+  it('can disable built-in workflow plugins through RuntimeOptions and the environment', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')), {
+      disabledBuiltinPlugins: ['pico.collaboration'],
+    });
+    const disabledByOption = env.runtime.pluginInfo().plugins.map((plugin) => plugin.id);
+    expect(disabledByOption).not.toContain('pico.collaboration');
+    expect(env.runtime.tools.list().map((tool) => tool.name)).not.toContain('spawn_thread');
+    await env.cleanup();
+
+    const previous = process.env.PICO_DISABLED_PLUGINS;
+    process.env.PICO_DISABLED_PLUGINS = ' pico.collaboration , pico.permissions ';
+    const envDisabled = await setupRuntime(new FakeModel(() => response('unused')));
+    try {
+      const pluginIds = envDisabled.runtime.pluginInfo().plugins.map((plugin) => plugin.id);
+      expect(pluginIds).not.toContain('pico.collaboration');
+      expect(pluginIds).not.toContain('pico.permissions');
+      expect(envDisabled.runtime.tools.list().map((tool) => tool.name)).not.toContain('spawn_thread');
+    } finally {
+      await envDisabled.cleanup();
+      if (previous === undefined) delete process.env.PICO_DISABLED_PLUGINS;
+      else process.env.PICO_DISABLED_PLUGINS = previous;
+    }
+  });
+
   it('loads the ChatGPT provider as a first-party plugin and keeps OAuth secrets private', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')), {
       pluginDirectory: resolve(process.cwd(), 'plugins'),
@@ -78,8 +145,13 @@ describe('durable Thread runtime invariants', () => {
 
       expect(thread.workspacePath).toBe('');
       expect(status).toEqual({ connected: true, kind: 'runtime', label: 'Chat' });
-      expect(model.prompts[0]?.tools.map((tool) => tool.name)).toEqual(['spawn_thread', 'send_thread_message']);
-      expect(env.runtime.toolPermissions(thread.id).map((tool) => tool.name)).toEqual([
+      expect(model.prompts[0]?.tools.map((tool) => tool.name)).toEqual([
+        'workspace_info',
+        'spawn_thread',
+        'send_thread_message',
+      ]);
+      expect((await permissionView(env.runtime, thread.id)).tools.map((tool) => tool.name)).toEqual([
+        'workspace_info',
         'spawn_thread',
         'send_thread_message',
       ]);
@@ -140,7 +212,9 @@ describe('durable Thread runtime invariants', () => {
     const thread = env.createThread('host');
     try {
       await env.runtime.submit(thread.id, 'paged-parent-message', 'Read facts.txt.');
-      await until(() => env.store.listApprovals(thread.id).some((approval) => approval.status === 'pending'));
+      await untilAsync(async () =>
+        (await permissionView(env.runtime, thread.id)).approvals.some((approval) => approval.status === 'pending'),
+      );
       for (let index = 0; index < 110; index += 1) {
         await env.runtime.submit(thread.id, `paused-follow-up-${index}`, `Follow-up ${index}`);
       }
@@ -148,10 +222,12 @@ describe('durable Thread runtime invariants', () => {
       const snapshot = env.runtime.getSnapshot(thread.id)!;
       expect(snapshot.records[0]?.kind).toBe('assistant');
       expect(snapshot.records[0]?.id).toMatch(/:assistant$/);
-      expect(snapshot.records).toHaveLength(111);
+      expect(snapshot.records).toHaveLength(112);
       expect(snapshot.records.filter((record) => record.kind === 'message')).toHaveLength(110);
       expect(snapshot.executions.find((execution) => execution.toolName === 'read_file')?.status).toBe('pending');
-      expect(snapshot.approvals.some((approval) => approval.status === 'pending')).toBe(true);
+      expect(
+        (await permissionView(env.runtime, thread.id)).approvals.some((approval) => approval.status === 'pending'),
+      ).toBe(true);
       expect(snapshot.hasEarlierRecords).toBe(true);
     } finally {
       await env.cleanup();
@@ -179,14 +255,19 @@ describe('durable Thread runtime invariants', () => {
     const thread = runtime.createThread(project.id, 'host');
     try {
       await runtime.submit(thread.id, 'approval-restart-message', 'Read the input file.');
-      await until(() => store.listApprovals(thread.id).some((approval) => approval.status === 'pending'));
-      const approval = store.listApprovals(thread.id)[0]!;
+      await untilAsync(async () =>
+        (await permissionView(runtime, thread.id)).approvals.some((approval) => approval.status === 'pending'),
+      );
+      const approval = (await permissionView(runtime, thread.id)).approvals[0]!;
       const executionBeforeShutdown = store.getExecution(approval.executionId);
 
       await runtime.shutdown();
       expect(executionBeforeShutdown?.status).toBe('pending');
       expect(store.getExecution(approval.executionId)?.status).toBe('pending');
-      expect(store.getApproval(approval.executionId)?.status).toBe('pending');
+      expect(
+        (await permissionView(runtime, thread.id)).approvals.find((item) => item.executionId === approval.executionId)
+          ?.status,
+      ).toBe('pending');
       store.close();
 
       store = new PicoStore(databasePath);
@@ -195,12 +276,15 @@ describe('durable Thread runtime invariants', () => {
         pluginDirectory: join(directory, 'empty-plugins'),
       });
       await runtime.initialize();
-      await until(() => runtime.getSnapshot(thread.id)?.approvals[0]?.status === 'pending');
-      runtime.resolveApproval(approval.executionId, true);
+      await untilAsync(async () => (await permissionView(runtime, thread.id)).approvals[0]?.status === 'pending');
+      await decidePermission(runtime, approval.executionId, true);
       await runtime.drain();
 
       expect(store.getExecution(approval.executionId)?.status).toBe('completed');
-      expect(store.getApproval(approval.executionId)?.status).toBe('allowed');
+      expect(
+        (await permissionView(runtime, thread.id)).approvals.find((item) => item.executionId === approval.executionId)
+          ?.status,
+      ).toBe('allowed');
       expect(store.listRecords(thread.id).filter((record) => record.kind === 'tool_result')).toHaveLength(1);
       expect(store.listRecords(thread.id).filter((record) => record.kind === 'assistant')).toHaveLength(2);
     } finally {
@@ -833,16 +917,26 @@ describe('durable Thread runtime invariants', () => {
     const thread = env.createThread('host');
     await writeFile(`${env.workspace}/facts.txt`, 'The durable fact.\n', 'utf8');
     try {
-      expect(env.runtime.toolPermissions(thread.id).find((tool) => tool.name === 'read_file')?.policy).toBe('ask');
+      expect(
+        (await permissionView(env.runtime, thread.id)).tools.find((tool) => tool.name === 'read_file')?.policy,
+      ).toBe('ask');
       await env.runtime.submit(thread.id, 'approval-message', 'Read facts.txt');
-      await until(() => env.store.listApprovals(thread.id).some((approval) => approval.status === 'pending'));
-      const approval = env.store.listApprovals(thread.id)[0]!;
+      await untilAsync(async () =>
+        (await permissionView(env.runtime, thread.id)).approvals.some((approval) => approval.status === 'pending'),
+      );
+      const approval = (await permissionView(env.runtime, thread.id)).approvals[0]!;
       expect(env.store.getExecution(approval.executionId)?.status).toBe('pending');
 
-      env.runtime.resolveApproval(approval.executionId, true);
+      await decidePermission(env.runtime, approval.executionId, true);
       await env.runtime.drain();
-      expect(env.store.getApproval(approval.executionId)?.status).toBe('allowed');
-      expect(env.runtime.toolPermissions(thread.id).find((tool) => tool.name === 'read_file')?.policy).toBe('ask');
+      expect(
+        (await permissionView(env.runtime, thread.id)).approvals.find(
+          (item) => item.executionId === approval.executionId,
+        )?.status,
+      ).toBe('allowed');
+      expect(
+        (await permissionView(env.runtime, thread.id)).tools.find((tool) => tool.name === 'read_file')?.policy,
+      ).toBe('ask');
       expect(env.store.getExecution(approval.executionId)?.status).toBe('completed');
       const toolResult = env.store.listRecords(thread.id).find((record) => record.kind === 'tool_result');
       expect(toolResult?.payload).toMatchObject({ toolCallId: 'read:file:one', toolName: 'read_file' });
@@ -873,32 +967,46 @@ describe('durable Thread runtime invariants', () => {
     await writeFile(`${env.workspace}/facts.txt`, 'transactional approval', 'utf8');
     try {
       await env.runtime.submit(thread.id, 'atomic-approval-message', 'Read facts.txt.');
-      await until(() => env.store.listApprovals(thread.id).some((approval) => approval.status === 'pending'));
-      const approval = env.store.listApprovals(thread.id)[0]!;
+      await untilAsync(async () =>
+        (await permissionView(env.runtime, thread.id)).approvals.some((approval) => approval.status === 'pending'),
+      );
+      const approval = (await permissionView(env.runtime, thread.id)).approvals[0]!;
       env.store.db.exec(`
         CREATE TRIGGER fail_permission_audit
         BEFORE INSERT ON canonical_records
         WHEN NEW.thread_id = '${thread.id}' AND NEW.kind = 'plugin'
-        BEGIN SELECT RAISE(ABORT, 'simulated permission audit failure'); END;
+        BEGIN SELECT RAISE(ABORT, 'simulated permission denial audit failure'); END;
       `);
 
-      expect(() => env.runtime.resolveApproval(approval.executionId, true, true)).toThrow(
-        /simulated permission audit failure/,
+      await expect(decidePermission(env.runtime, approval.executionId, true, true)).rejects.toThrow(
+        /simulated permission denial audit failure/,
       );
-      expect(env.store.getApproval(approval.executionId)?.status).toBe('pending');
-      expect(env.runtime.toolPermissions(thread.id).find((item) => item.name === 'read_file')?.policy).toBe('ask');
+      expect(
+        (await permissionView(env.runtime, thread.id)).approvals.find(
+          (item) => item.executionId === approval.executionId,
+        )?.status,
+      ).toBe('pending');
+      expect(
+        (await permissionView(env.runtime, thread.id)).tools.find((item) => item.name === 'read_file')?.policy,
+      ).toBe('ask');
       expect(
         env.store
           .listRecords(thread.id)
           .filter((record) => record.kind === 'plugin' && record.payload.pluginId === 'pico.permissions'),
-      ).toHaveLength(0);
+      ).toHaveLength(1);
 
       env.store.db.exec('DROP TRIGGER fail_permission_audit;');
-      env.runtime.resolveApproval(approval.executionId, true, true);
+      await decidePermission(env.runtime, approval.executionId, true, true);
       await env.runtime.drain();
 
-      expect(env.store.getApproval(approval.executionId)?.status).toBe('allowed');
-      expect(env.runtime.toolPermissions(thread.id).find((item) => item.name === 'read_file')?.policy).toBe('allow');
+      expect(
+        (await permissionView(env.runtime, thread.id)).approvals.find(
+          (item) => item.executionId === approval.executionId,
+        )?.status,
+      ).toBe('allowed');
+      expect(
+        (await permissionView(env.runtime, thread.id)).tools.find((item) => item.name === 'read_file')?.policy,
+      ).toBe('allow');
       expect(
         env.store
           .listRecords(thread.id)
@@ -916,7 +1024,7 @@ describe('durable Thread runtime invariants', () => {
     }
   });
 
-  it('rolls back a denied Tool Execution when its permission audit record cannot be committed', async () => {
+  it('fails closed when the permission audit record for a denied Tool cannot be committed', async () => {
     const model = new FakeModel((_prompt, callNumber) =>
       callNumber === 1
         ? response('', [{ id: 'atomic-denial', name: 'read_file', arguments: { path: 'facts.txt' } }])
@@ -925,7 +1033,7 @@ describe('durable Thread runtime invariants', () => {
     const env = await setupRuntime(model);
     const thread = env.createThread('host');
     await writeFile(`${env.workspace}/facts.txt`, 'transactional denial', 'utf8');
-    env.runtime.setToolPermission(thread.id, 'read_file', 'deny');
+    await setPermission(env.runtime, thread.id, 'read_file', 'deny');
     try {
       env.store.db.exec(`
         CREATE TRIGGER fail_permission_denial_audit
@@ -935,22 +1043,25 @@ describe('durable Thread runtime invariants', () => {
       `);
 
       await env.runtime.submit(thread.id, 'atomic-denial-message', 'Read facts.txt.');
-      await until(() => env.runtime.getThread(thread.id)?.pauseRequested === true);
+      await env.runtime.drain();
       const execution = env.store.listExecutions(thread.id).find((item) => item.toolName === 'read_file')!;
 
-      expect(env.store.getExecution(execution.id)?.status).toBe('pending');
+      expect(env.store.getExecution(execution.id)?.status).toBe('failed');
+      expect(env.store.getExecution(execution.id)?.error).toContain('simulated permission denial audit failure');
       expect(
         env.store
           .listRecords(thread.id)
-          .filter((record) => record.kind === 'plugin' && record.payload.pluginId === 'pico.permissions'),
+          .filter(
+            (record) =>
+              record.kind === 'plugin' &&
+              record.payload.pluginId === 'pico.permissions' &&
+              record.payload.action === 'decision',
+          ),
       ).toHaveLength(0);
-
-      env.store.db.exec('DROP TRIGGER fail_permission_denial_audit;');
-      env.runtime.setToolPermission(thread.id, 'read_file', 'allow');
-      env.runtime.continue(thread.id);
-      await env.runtime.drain();
-      expect(env.store.getExecution(execution.id)?.status).toBe('completed');
-      expect(env.store.listRecords(thread.id).filter((record) => record.kind === 'tool_result')).toHaveLength(1);
+      expect(env.store.getExecution(execution.id)?.result).toBeNull();
+      expect(env.store.listRecords(thread.id).filter((record) => record.kind === 'tool_result')).toMatchObject([
+        { payload: { status: 'failed' } },
+      ]);
     } finally {
       await env.cleanup();
     }
@@ -965,7 +1076,7 @@ describe('durable Thread runtime invariants', () => {
     const env = await setupRuntime(model);
     const thread = env.createThread('host');
     await writeFile(`${env.workspace}/pathological.txt`, `${'a'.repeat(28)}!`, 'utf8');
-    env.runtime.setToolPermission(thread.id, 'search_files', 'allow');
+    await setPermission(env.runtime, thread.id, 'search_files', 'allow');
     try {
       await env.runtime.submit(thread.id, 'regex-search-message', 'Search this workspace.');
       await until(() =>
@@ -997,19 +1108,12 @@ describe('durable Thread runtime invariants', () => {
     );
     const env = await setupRuntime(model);
     const thread = env.createThread('host');
-    let invocations = 0;
-    const readFileTool = env.runtime.tools.get('read_file')!;
-    env.runtime.tools.replace({
-      ...readFileTool,
-      execute: async () => {
-        invocations += 1;
-        return { contents: 'should not be read' };
-      },
-    });
     try {
       await env.runtime.submit(thread.id, 'cancel-approval-message', 'Read facts.txt');
-      await until(() => env.store.listApprovals(thread.id).some((approval) => approval.status === 'pending'));
-      const approval = env.store.listApprovals(thread.id)[0]!;
+      await untilAsync(async () =>
+        (await permissionView(env.runtime, thread.id)).approvals.some((approval) => approval.status === 'pending'),
+      );
+      const approval = (await permissionView(env.runtime, thread.id)).approvals[0]!;
 
       env.store.db.exec(`
         CREATE TRIGGER fail_permission_cancel_audit
@@ -1018,23 +1122,32 @@ describe('durable Thread runtime invariants', () => {
         BEGIN SELECT RAISE(ABORT, 'simulated permission cancellation audit failure'); END;
       `);
       await expect(env.runtime.interrupt(thread.id)).rejects.toThrow(/simulated permission cancellation audit failure/);
-      expect(env.store.getApproval(approval.executionId)?.status).toBe('pending');
+      expect(
+        (await permissionView(env.runtime, thread.id)).approvals.find(
+          (item) => item.executionId === approval.executionId,
+        )?.status,
+      ).toBe('pending');
       expect(env.store.getExecution(approval.executionId)?.status).toBe('pending');
       expect(
         env.store
           .listRecords(thread.id)
           .filter((record) => record.kind === 'plugin' && record.payload.pluginId === 'pico.permissions'),
-      ).toHaveLength(0);
+      ).toHaveLength(1);
       env.store.db.exec('DROP TRIGGER fail_permission_cancel_audit;');
 
       await env.runtime.interrupt(thread.id);
       await env.runtime.drain();
 
-      expect(env.store.getApproval(approval.executionId)?.status).toBe('cancelled');
+      expect(
+        (await permissionView(env.runtime, thread.id)).approvals.find(
+          (item) => item.executionId === approval.executionId,
+        )?.status,
+      ).toBe('cancelled');
       expect(env.store.getExecution(approval.executionId)?.status).toBe('interrupted');
-      expect(() => env.runtime.resolveApproval(approval.executionId, true, true)).toThrow(/cancelled/i);
-      expect(env.runtime.toolPermissions(thread.id).find((tool) => tool.name === 'read_file')?.policy).toBe('ask');
-      expect(invocations).toBe(0);
+      await expect(decidePermission(env.runtime, approval.executionId, true, true)).rejects.toThrow(/cancelled/i);
+      expect(
+        (await permissionView(env.runtime, thread.id)).tools.find((tool) => tool.name === 'read_file')?.policy,
+      ).toBe('ask');
       expect(model.calls).toBe(1);
       const permissionRecords = env.store
         .listRecords(thread.id)
@@ -1066,15 +1179,23 @@ describe('durable Thread runtime invariants', () => {
     await writeFile(`${env.workspace}/facts.txt`, 'The durable fact.\n', 'utf8');
     try {
       await env.runtime.submit(thread.id, 'thread-approval-message', 'Read the file twice');
-      await until(() => env.store.listApprovals(thread.id).some((approval) => approval.status === 'pending'));
-      const approval = env.store.listApprovals(thread.id)[0]!;
+      await untilAsync(async () =>
+        (await permissionView(env.runtime, thread.id)).approvals.some((approval) => approval.status === 'pending'),
+      );
+      const approval = (await permissionView(env.runtime, thread.id)).approvals[0]!;
 
-      env.runtime.resolveApproval(approval.executionId, true, true);
+      await decidePermission(env.runtime, approval.executionId, true, true);
       await env.runtime.drain();
 
-      expect(env.runtime.toolPermissions(thread.id).find((tool) => tool.name === 'read_file')?.policy).toBe('allow');
-      expect(env.store.listApprovals(thread.id)).toHaveLength(1);
-      expect(env.store.getApproval(approval.executionId)?.status).toBe('allowed');
+      expect(
+        (await permissionView(env.runtime, thread.id)).tools.find((tool) => tool.name === 'read_file')?.policy,
+      ).toBe('allow');
+      expect((await permissionView(env.runtime, thread.id)).approvals).toHaveLength(1);
+      expect(
+        (await permissionView(env.runtime, thread.id)).approvals.find(
+          (item) => item.executionId === approval.executionId,
+        )?.status,
+      ).toBe('allowed');
       expect(
         env.store
           .listRecords(thread.id)
@@ -1361,7 +1482,7 @@ describe('durable Thread runtime invariants', () => {
     const model = new FakeModel(() => response('Ready.'));
     const env = await setupRuntime(model);
     const sourceThread = env.createThread('host', 'Context editor');
-    const otherExecutorThread = env.runtime.createThread(env.project.id, 'container', 'Container continuation');
+    const otherExecutorThread = env.runtime.createThread(env.project.id, 'host', 'Host continuation');
     const isolatedProject = await env.runtime.createProject('Separate Project', env.workspace);
     const isolatedThread = env.runtime.createThread(isolatedProject.id, 'host', 'Isolated context');
     const contextText = 'Keep canonical history append-only.\nUse Project Context for decisions shared across Threads.';
@@ -1580,5 +1701,13 @@ async function until(predicate: () => boolean, timeoutMs = 3_000): Promise<void>
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error('Condition did not become true before timeout');
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
+}
+
+async function untilAsync(predicate: () => Promise<boolean>, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await predicate())) {
+    if (Date.now() >= deadline) throw new Error('Timed out waiting for an async condition.');
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
