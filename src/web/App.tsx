@@ -92,6 +92,16 @@ function executorLabel(thread: Thread): string {
   return thread.executorKind === 'container' ? 'Container' : 'Host';
 }
 
+class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'HttpError';
+  }
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -102,7 +112,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     if (response.status === 401) window.dispatchEvent(new Event('pico:auth-expired'));
     const message =
       body && typeof body === 'object' && 'error' in body ? String(body.error) : `Request failed (${response.status})`;
-    throw new Error(message);
+    throw new HttpError(response.status, message);
   }
   return body as T;
 }

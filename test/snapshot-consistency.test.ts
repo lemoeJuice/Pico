@@ -1,12 +1,76 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   fetchStableSnapshot,
+  isRetryableSnapshotError,
   snapshotForSelection,
   snapshotThreadIsSelected,
   updateSnapshotForThread,
 } from '../src/web/snapshot-consistency.js';
 
 describe('snapshot refresh consistency', () => {
+  it('retries transient network and server failures with capped backoff', async () => {
+    let requests = 0;
+    const delays: number[] = [];
+    const snapshot = await fetchStableSnapshot(
+      async () => {
+        requests += 1;
+        if (requests === 1) throw new TypeError('network unavailable');
+        if (requests < 4) throw Object.assign(new Error('temporary failure'), { status: 503 });
+        return { records: ['latest'] };
+      },
+      () => 0,
+      () => true,
+      { initialDelayMs: 4, maxDelayMs: 10, wait: async (delay) => void delays.push(delay) },
+    );
+
+    expect(snapshot).toEqual({ records: ['latest'] });
+    expect(requests).toBe(4);
+    expect(delays).toEqual([4, 8, 10]);
+  });
+
+  it('stops retrying when the selected resource changes during backoff', async () => {
+    let current = true;
+    let requests = 0;
+    const snapshot = await fetchStableSnapshot(
+      async () => {
+        requests += 1;
+        throw new TypeError('network unavailable');
+      },
+      () => 0,
+      () => current,
+      {
+        wait: async () => {
+          current = false;
+        },
+      },
+    );
+
+    expect(snapshot).toBeNull();
+    expect(requests).toBe(1);
+  });
+
+  it('does not retry permanent client errors', async () => {
+    let requests = 0;
+    const failure = Object.assign(new Error('not found'), { status: 404 });
+
+    await expect(
+      fetchStableSnapshot(
+        async () => {
+          requests += 1;
+          throw failure;
+        },
+        () => 0,
+        () => true,
+        { wait: async () => undefined },
+      ),
+    ).rejects.toBe(failure);
+
+    expect(requests).toBe(1);
+    expect(isRetryableSnapshotError(new TypeError('offline'))).toBe(true);
+    expect(isRetryableSnapshotError(Object.assign(new Error('unavailable'), { status: 503 }))).toBe(true);
+    expect(isRetryableSnapshotError(Object.assign(new Error('unauthorized'), { status: 401 }))).toBe(false);
+  });
+
   it('refreshes a Project thread list when creation races the request', async () => {
     let version = 0;
     let requests = 0;

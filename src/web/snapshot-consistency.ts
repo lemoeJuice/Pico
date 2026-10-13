@@ -1,13 +1,49 @@
+export type SnapshotRetryOptions = {
+  initialDelayMs?: number;
+  maxDelayMs?: number;
+  isRetryable?: (error: unknown) => boolean;
+  wait?: (delayMs: number) => Promise<void>;
+};
+
+function wait(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+export function isRetryableSnapshotError(error: unknown): boolean {
+  if (error instanceof TypeError) return true;
+  if (!error || typeof error !== 'object' || !('status' in error) || typeof error.status !== 'number') return false;
+  return error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
+}
+
 export async function fetchStableSnapshot<T>(
   fetchSnapshot: () => Promise<T>,
   revision: () => number,
   isCurrent: () => boolean,
+  options: SnapshotRetryOptions = {},
 ): Promise<T | null> {
+  const initialDelayMs = options.initialDelayMs ?? 250;
+  const maxDelayMs = options.maxDelayMs ?? 5_000;
+  const retry = options.isRetryable ?? isRetryableSnapshotError;
+  const pause = options.wait ?? wait;
+  let consecutiveFailures = 0;
+
   while (isCurrent()) {
     const startedAt = revision();
-    const snapshot = await fetchSnapshot();
+    let snapshot: T;
+    try {
+      snapshot = await fetchSnapshot();
+    } catch (error) {
+      if (!isCurrent()) return null;
+      if (!retry(error)) throw error;
+      if (revision() !== startedAt) consecutiveFailures = 0;
+      const delay = Math.min(initialDelayMs * 2 ** consecutiveFailures, maxDelayMs);
+      consecutiveFailures += 1;
+      await pause(delay);
+      continue;
+    }
     if (!isCurrent()) return null;
     if (revision() === startedAt) return snapshot;
+    consecutiveFailures = 0;
   }
   return null;
 }
