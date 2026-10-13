@@ -1,3 +1,4 @@
+import { unavailablePluginServices, type PluginServices } from './services.js';
 import { readdir } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { join, resolve } from 'node:path';
@@ -64,7 +65,7 @@ interface RegisteredPluginPage extends PluginPageContribution {
   pluginId: string;
 }
 
-export interface PluginContext {
+export interface PluginContext extends PluginServices {
   tools: {
     register(
       definition: ToolDefinition,
@@ -90,6 +91,8 @@ export interface PluginContext {
   state: {
     get<T>(key: string, fallback: T): T;
     set<T>(key: string, value: T): void;
+    transaction<T>(run: () => T): T;
+    subscribe(listener: () => void): () => void;
   };
   canonical: {
     append(threadId: string, payload: Record<string, unknown>): CanonicalRecord;
@@ -124,6 +127,11 @@ export class CommandRegistry {
     return [...this.commands.values()].map(({ command }) => ({ name: command.name, description: command.description }));
   }
 
+  owns(owner: string, text: string): boolean {
+    const name = text.trim().replace(/^\//, '').split(/\s/, 1)[0]?.toLowerCase() ?? '';
+    return text.trim().startsWith('/') && this.commands.get(name)?.owner === owner;
+  }
+
   async execute(text: string, context: CommandEnvironment): Promise<CommandResult | null> {
     if (!text.startsWith('/')) return null;
     const body = text.slice(1).trimStart();
@@ -156,6 +164,7 @@ export class PluginHost {
     private readonly pipelines: ExecutionPipelines,
     readonly commands: CommandRegistry,
     private readonly pluginDirectory = resolve(process.env.PICO_PLUGIN_DIR ?? join(process.cwd(), 'plugins')),
+    private readonly services: PluginServices = unavailablePluginServices,
   ) {}
 
   list(): LoadedPlugin[] {
@@ -269,6 +278,15 @@ export class PluginHost {
     };
     const subscriptions: Array<() => void> = [];
     const context: PluginContext = {
+      threads: this.services.threads,
+      executions: {
+        ...this.services.executions,
+        subscribe: (listener) => {
+          const unsubscribe = this.services.executions.subscribe(listener);
+          subscriptions.push(unsubscribe);
+          return unsubscribe;
+        },
+      },
       tools: {
         register: (definition, execute) =>
           this.tools.register({
@@ -294,7 +312,11 @@ export class PluginHost {
       commands: { register: (command) => this.commands.register(plugin.id, command) },
       ui: {
         contribute: (contribution) => {
-          if (!['thread.toolbar', 'composer.action', 'composer.model', 'sidebar.panel'].includes(contribution.slot)) {
+          if (
+            !['thread.toolbar', 'composer.action', 'composer.model', 'sidebar.panel', 'tool.renderer'].includes(
+              contribution.slot,
+            )
+          ) {
             throw new Error(`Unsupported UI semantic slot: ${contribution.slot}`);
           }
           if (
@@ -304,7 +326,10 @@ export class PluginHost {
           ) {
             throw new Error('UI component contributions must name a valid Web UI entry and component.');
           }
-          if (contribution.slot === 'composer.model' && (!contribution.entry || !contribution.component)) {
+          if (
+            (contribution.slot === 'composer.model' || contribution.slot === 'tool.renderer') &&
+            (!contribution.entry || !contribution.component)
+          ) {
             throw new Error('composer.model contributions must name a Web UI entry and component.');
           }
           this.contributions.push({ ...contribution, pluginId: plugin.id, id: `${plugin.id}:${contribution.id}` });
@@ -334,6 +359,14 @@ export class PluginHost {
       state: {
         get: (key, fallback) => this.store.getPluginState(plugin.id, key, fallback),
         set: (key, value) => this.store.setPluginState(plugin.id, key, value),
+        transaction: (run) => this.store.transaction(run),
+        subscribe: (listener) => {
+          const unsubscribe = this.store.subscribePluginState((owner) => {
+            if (owner === plugin.id) listener();
+          });
+          subscriptions.push(unsubscribe);
+          return unsubscribe;
+        },
       },
       canonical: {
         append: (threadId, payload) => this.store.appendPluginRecord(threadId, plugin.id, payload),

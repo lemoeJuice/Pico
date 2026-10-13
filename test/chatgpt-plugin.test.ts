@@ -1,3 +1,4 @@
+import { unavailablePluginServices } from '../src/plugins/services.js';
 import { describe, expect, it } from 'vitest';
 import { ExecutionPipelines } from '../src/core/pipeline.js';
 import type { Thread } from '../src/core/types.js';
@@ -17,6 +18,7 @@ describe('ChatGPT provider plugin', () => {
     const routes: string[] = [];
     const state = new Map<string, unknown>();
     const context: PluginContext = {
+      ...unavailablePluginServices,
       tools: { register: () => undefined },
       models: { registerProvider: (provider) => providers.push(provider) },
       pipelines: { use: (stage, interceptor) => pipelines.use(stage, plugin.id, interceptor) },
@@ -29,6 +31,8 @@ describe('ChatGPT provider plugin', () => {
       state: {
         get: (key, fallback) => (state.has(key) ? (state.get(key) as typeof fallback) : fallback),
         set: (key, value) => void state.set(key, value),
+        transaction: (run) => run(),
+        subscribe: () => () => undefined,
       },
       canonical: { append: () => ({}) as never, list: () => [], read: () => [], subscribe: () => () => undefined },
     };

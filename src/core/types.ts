@@ -143,7 +143,7 @@ export interface PermissionRequest {
 }
 
 export interface UiContribution {
-  slot: 'thread.toolbar' | 'composer.action' | 'composer.model' | 'sidebar.panel';
+  slot: 'thread.toolbar' | 'composer.action' | 'composer.model' | 'sidebar.panel' | 'tool.renderer';
   id: string;
   label: string;
   description?: string;
@@ -151,6 +151,7 @@ export interface UiContribution {
   pluginId?: string;
   entry?: string;
   component?: string;
+  toolNames?: string[];
 }
 
 export interface ModelProviderContribution {
