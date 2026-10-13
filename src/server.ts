@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { realpath, stat } from 'node:fs/promises';
+import { relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   isLoopbackHost,
@@ -32,6 +33,76 @@ function requiredText(body: Record<string, unknown>, key: string): string {
 
 function notFound(response: Response, message = 'Not found'): void {
   response.status(404).json({ error: message });
+}
+
+function pluginUiHeaders(response: Response): void {
+  response.set({
+    'cache-control': 'no-cache',
+    'content-security-policy':
+      "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'none'; form-action 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'",
+    'referrer-policy': 'no-referrer',
+    'x-content-type-options': 'nosniff',
+  });
+}
+
+function pluginUiUnavailable(response: Response): void {
+  pluginUiHeaders(response);
+  response
+    .status(200)
+    .type('html')
+    .send(
+      '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Plugin UI unavailable</title><style>body{margin:0;padding:18px;color:#617066;background:transparent;font:13px system-ui,sans-serif}p{padding:14px;background:#f5f8f4;border:1px solid #e4ebe2;border-radius:12px;line-height:1.6}</style><p>This plugin has no Web UI assets installed. Install its UI bundle next to the Runtime plugin and reload Pico.</p></html>',
+    );
+}
+
+async function servePluginUiAsset(runtime: PicoRuntime, request: Request, response: Response): Promise<void> {
+  const pathname = new URL(request.originalUrl, 'http://pico.invalid').pathname;
+  const match = /^\/_pico\/plugin-ui\/([a-z0-9][a-z0-9._-]*)\/([a-z0-9][a-z0-9._-]*)(?:\/(.*))?$/.exec(pathname);
+  if (!match) return notFound(response, 'Plugin UI asset not found');
+  const pluginId = match[1]!;
+  const entry = match[2]!;
+  const rawAsset = match[3] || 'index.html';
+  const segments: string[] = [];
+  try {
+    for (const rawSegment of rawAsset.split('/')) {
+      const segment = decodeURIComponent(rawSegment);
+      if (!segment || segment === '.' || segment === '..' || /[\\/\0]/.test(segment)) {
+        return notFound(response, 'Plugin UI asset not found');
+      }
+      segments.push(segment);
+    }
+  } catch {
+    return notFound(response, 'Plugin UI asset not found');
+  }
+  const location = runtime.plugins.webUiAssetLocation(pluginId, entry);
+  if (!location) return notFound(response, 'Plugin UI asset not found');
+
+  let safeRoot: string;
+  let safeFile: string;
+  try {
+    const [safePluginsRoot, safePackageRoot] = await Promise.all([
+      realpath(location.pluginsRoot),
+      realpath(location.packageRoot),
+    ]);
+    const packageFromPluginsRoot = relative(safePluginsRoot, safePackageRoot);
+    if (packageFromPluginsRoot !== pluginId) return notFound(response, 'Plugin UI asset not found');
+    safeRoot = await realpath(location.assetRoot);
+    if (relative(safePackageRoot, safeRoot) !== 'webui') return notFound(response, 'Plugin UI asset not found');
+    safeFile = await realpath(resolve(safeRoot, ...segments));
+    const pathFromRoot = relative(safeRoot, safeFile);
+    if (pathFromRoot === '..' || pathFromRoot.startsWith(`..${sep}`) || pathFromRoot.startsWith(sep)) {
+      return notFound(response, 'Plugin UI asset not found');
+    }
+    if (!(await stat(safeFile)).isFile()) return notFound(response, 'Plugin UI asset not found');
+  } catch {
+    if (segments.length === 1 && segments[0] === 'index.html') return pluginUiUnavailable(response);
+    return notFound(response, 'Plugin UI asset not found');
+  }
+
+  pluginUiHeaders(response);
+  response.sendFile(safeFile, (error) => {
+    if (error && !response.headersSent) notFound(response, 'Plugin UI asset not found');
+  });
 }
 
 export async function startServer(): Promise<{ close(): Promise<void>; runtime: PicoRuntime; port: number }> {
@@ -212,6 +283,9 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   });
   app.get('/api/commands', (_request, response) => response.json(runtime.availableCommands()));
   app.get('/api/plugins', (_request, response) => response.json(runtime.pluginInfo()));
+  app.use('/_pico/plugin-ui', async (request, response) => {
+    await servePluginUiAsset(runtime, request, response);
+  });
   app.use('/api/plugins/:pluginId', async (request, response) => {
     const route = runtime.pluginHttpRoute(request.params.pluginId!, request.method, request.path || '/');
     if (!route) return notFound(response, 'Plugin API route not found');

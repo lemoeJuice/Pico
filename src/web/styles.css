@@ -1419,6 +1419,17 @@ button:disabled {
   gap: 9px 14px;
   padding: 0 3px 8px;
 }
+.plugin-web-view {
+  display: block;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+}
+.composer-plugin-controls .plugin-web-view-component {
+  flex: 1 1 100%;
+  height: 82px;
+}
 .composer-plugin-controls .form-stack {
   flex: 1 1 220px;
   flex-direction: row;
@@ -1472,6 +1483,10 @@ button:disabled {
 .plugin-settings-page {
   min-height: 120px;
   padding: 2px 0 10px;
+}
+.plugin-settings-page .plugin-web-view-page {
+  height: 360px;
+  max-height: min(62dvh, 620px);
 }
 .composer-box {
   padding: 11px 12px 9px 14px;

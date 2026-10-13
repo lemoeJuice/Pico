@@ -43,7 +43,8 @@ import {
 } from './assistant-drafts.js';
 import { noticeForThread, withThreadNotice, withoutThreadNotice, type ThreadNotices } from './thread-notices.js';
 import { uiContributionsAt } from './ui-contributions.js';
-import { pluginComponent, pluginPageComponent, type PluginUiProps } from './plugin-ui.js';
+import type { PluginUiProps } from '../plugins/ui-protocol.js';
+import { PluginWebView } from './plugin-web-view.js';
 import { appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from './history-pages.js';
 import {
   ArrowRight,
@@ -1276,9 +1277,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         (page) => page.pluginId === pluginPageSelection.pluginId && page.id === pluginPageSelection.pageId,
       )
     : undefined;
-  const SelectedPluginPage = selectedPluginPage
-    ? pluginPageComponent(selectedPluginPage.pluginId, selectedPluginPage.entry, selectedPluginPage.id)
-    : undefined;
+  const isRegisteredPluginPage = (pluginId: string, pageId: string): boolean =>
+    Boolean(pluginInfo?.pages.some((page) => page.pluginId === pluginId && page.id === pageId));
 
   const clearApiKey = async (): Promise<void> => {
     try {
@@ -1802,15 +1802,19 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               {pluginUiContext && composerModelContributions.length > 0 ? (
                 <div className="composer-plugin-controls" aria-label="Model controls">
                   {composerModelContributions.map((item) => {
-                    const Component =
-                      item.pluginId && item.entry && item.component
-                        ? pluginComponent(item.pluginId, item.entry, item.component)
-                        : undefined;
-                    return Component ? (
-                      <Component key={item.id} {...pluginUiContext} />
+                    return item.pluginId && item.entry && item.component ? (
+                      <PluginWebView
+                        key={item.id}
+                        pluginId={item.pluginId}
+                        entry={item.entry}
+                        viewType="component"
+                        viewId={item.component}
+                        {...pluginUiContext}
+                        isRegisteredPage={isRegisteredPluginPage}
+                      />
                     ) : (
                       <span className="field-note" key={item.id}>
-                        {item.label} is contributed by a plugin without a bundled Web UI entry.
+                        {item.label} requires a plugin Web UI entry.
                       </span>
                     );
                   })}
@@ -1920,12 +1924,20 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           ) : null}
           {pluginPageSelection ? (
             <section className="plugin-settings-page">
-              {selectedPluginPage && SelectedPluginPage && pluginUiContext ? (
-                <SelectedPluginPage {...pluginUiContext} />
+              {selectedPluginPage && pluginUiContext ? (
+                <PluginWebView
+                  key={`${selectedPluginPage.pluginId}:${selectedPluginPage.entry}:${selectedPluginPage.id}`}
+                  pluginId={selectedPluginPage.pluginId}
+                  entry={selectedPluginPage.entry}
+                  viewType="page"
+                  viewId={selectedPluginPage.id}
+                  {...pluginUiContext}
+                  isRegisteredPage={isRegisteredPluginPage}
+                />
               ) : (
                 <p className="field-note">
                   This plugin page is registered by {selectedPluginPage?.pluginId ?? pluginPageSelection.pluginId}, but
-                  its Web UI entry is not bundled with this Pico build.
+                  its Web UI entry is not available.
                 </p>
               )}
             </section>

@@ -167,6 +167,23 @@ export class PluginHost {
     return [...this.pages];
   }
 
+  webUiAssetLocation(
+    pluginId: string,
+    entry: string,
+  ): { pluginsRoot: string; packageRoot: string; assetRoot: string } | undefined {
+    if (!/^[a-z0-9][a-z0-9._-]*$/.test(pluginId) || !/^[a-z0-9][a-z0-9._-]*$/.test(entry)) return undefined;
+    if (!this.loaded.some((plugin) => plugin.id === pluginId)) return undefined;
+    const registered =
+      this.pages.some((page) => page.pluginId === pluginId && page.entry === entry) ||
+      this.contributions.some((contribution) => contribution.pluginId === pluginId && contribution.entry === entry);
+    if (!registered) return undefined;
+    return {
+      pluginsRoot: this.pluginDirectory,
+      packageRoot: join(this.pluginDirectory, pluginId),
+      assetRoot: join(this.pluginDirectory, pluginId, 'webui'),
+    };
+  }
+
   modelProviders(): ModelProviderContribution[] {
     return this.providers.map(({ id, label, description }) => ({ id, label, ...(description ? { description } : {}) }));
   }
@@ -227,7 +244,12 @@ export class PluginHost {
   }
 
   private async activate(plugin: PicoPlugin, source: string): Promise<void> {
-    if (!plugin.id || !plugin.name || !plugin.version || typeof plugin.activate !== 'function') {
+    if (
+      !/^[a-z0-9][a-z0-9._-]*$/.test(plugin.id) ||
+      !plugin.name ||
+      !plugin.version ||
+      typeof plugin.activate !== 'function'
+    ) {
       throw new Error(`Invalid plugin manifest in ${source}`);
     }
     if (this.loaded.some((item) => item.id === plugin.id)) throw new Error(`Duplicate plugin ID: ${plugin.id}`);
@@ -268,6 +290,13 @@ export class PluginHost {
         contribute: (contribution) => {
           if (!['thread.toolbar', 'composer.action', 'composer.model', 'sidebar.panel'].includes(contribution.slot)) {
             throw new Error(`Unsupported UI semantic slot: ${contribution.slot}`);
+          }
+          if (
+            (contribution.entry !== undefined && !/^[a-z0-9][a-z0-9._-]*$/.test(contribution.entry)) ||
+            (contribution.component !== undefined && !/^[A-Za-z][A-Za-z0-9]*$/.test(contribution.component)) ||
+            (contribution.component !== undefined && contribution.entry === undefined)
+          ) {
+            throw new Error('UI component contributions must name a valid Web UI entry and component.');
           }
           if (contribution.slot === 'composer.model' && (!contribution.entry || !contribution.component)) {
             throw new Error('composer.model contributions must name a Web UI entry and component.');

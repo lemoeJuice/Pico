@@ -94,6 +94,16 @@ describe('Pico server access boundary', () => {
       const wsUrl = `ws://127.0.0.1:${server.port}/api/events`;
       const origin = base;
 
+      const pluginPage = await fetch(`${base}/_pico/plugin-ui/pico.chatgpt-plan/webui/index.html`);
+      expect(pluginPage.status).toBe(200);
+      expect(pluginPage.headers.get('content-security-policy')).toContain("frame-ancestors 'self'");
+      expect(await pluginPage.text()).toContain('./build/webui.js');
+      const pluginBundle = await fetch(`${base}/_pico/plugin-ui/pico.chatgpt-plan/webui/build/webui.js`);
+      expect(pluginBundle.status).toBe(200);
+      expect(pluginBundle.headers.get('content-type')).toContain('javascript');
+      expect((await fetch(`${base}/_pico/plugin-ui/unknown.plugin/webui/index.html`)).status).toBe(404);
+      expect((await fetch(`${base}/_pico/plugin-ui/pico.chatgpt-plan/runtime.mjs/index.html`)).status).toBe(404);
+
       const status = await fetch(`${base}/api/auth/status`).then((response) => response.json());
       expect(status).toEqual({ authRequired: true, authenticated: false });
       const health = await fetch(`${base}/api/health`);

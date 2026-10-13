@@ -55,12 +55,7 @@ function escapeHtml(value: string): string {
   });
 }
 
-function pluginAuthResultHtml(
-  uiOrigin: string,
-  operationId: string,
-  status: 'connected' | 'failed',
-  message: string,
-): string {
+function pluginAuthResultHtml(operationId: string, status: 'connected' | 'failed', message: string): string {
   const payload = JSON.stringify({
     type: 'pico:plugin-auth',
     pluginId: 'pico.chatgpt-plan',
@@ -71,8 +66,10 @@ function pluginAuthResultHtml(
     .replace(/</g, '\\u003c')
     .replace(/>/g, '\\u003e')
     .replace(/&/g, '\\u0026');
-  const target = JSON.stringify(uiOrigin).replace(/</g, '\\u003c');
-  return `<!doctype html><meta charset="utf-8"><title>ChatGPT sign-in</title><p>${escapeHtml(message)}</p><p>You can close this tab and return to Pico.</p><script>if(window.opener){window.opener.postMessage(${payload},${target});window.close();}</script>`;
+  // Sandboxed plugin UI frames have an opaque origin, so the popup cannot target the
+  // host page's origin. The plugin frame validates callback origin, popup source, and
+  // one-time operation ID before accepting this result.
+  return `<!doctype html><meta charset="utf-8"><title>ChatGPT sign-in</title><p>${escapeHtml(message)}</p><p>You can close this tab and return to Pico.</p><script>if(window.opener){window.opener.postMessage(${payload},'*');window.close();}</script>`;
 }
 
 /** ChatGPT support is a normal first-party plugin: provider routing, account state, UI, and API live here. */
@@ -143,7 +140,6 @@ export function createChatGptPlanPlugin(): PicoPlugin {
       context.http.register('POST', '/sign-in', async (request: PluginHttpRequest) => {
         const uiOrigin = request.origin;
         if (!uiOrigin) throw new Error('ChatGPT sign-in must be started from the Pico Web UI.');
-        const trustedUiOrigin = new URL(uiOrigin).origin;
         const operationId = randomUUID();
         let handlingCallback = false;
         let server: Server;
@@ -175,7 +171,7 @@ export function createChatGptPlanPlugin(): PicoPlugin {
                 'referrer-policy': 'no-referrer',
                 'x-content-type-options': 'nosniff',
               });
-              callbackResponse.end(pluginAuthResultHtml(trustedUiOrigin, operationId, result.status, result.message));
+              callbackResponse.end(pluginAuthResultHtml(operationId, result.status, result.message));
               await closeCallbackServer(server);
             });
         });

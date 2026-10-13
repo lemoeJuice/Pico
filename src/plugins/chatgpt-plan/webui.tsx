@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
-import type { PluginUiProps, PluginWebUiModule } from '../../web/plugin-ui.js';
+import type { PluginUiProps } from '../ui-protocol.js';
 import type { ChatGptModelChoice, ChatGptReasoningEffort } from './types.js';
 
 const apiRoot = '/api/plugins/pico.chatgpt-plan';
@@ -333,14 +333,7 @@ function ChatGptPlanComposerModel({
   );
 }
 
-const webUi: PluginWebUiModule = {
-  pluginId: 'pico.chatgpt-plan',
-  entries: {
-    webui: {
-      pages: { account: AccountPage },
-      components: { ChatGptPlanComposerModel },
-    },
-  },
+export const pluginWebUi = {
+  pages: { account: AccountPage },
+  components: { ChatGptPlanComposerModel },
 };
-
-export default webUi;
