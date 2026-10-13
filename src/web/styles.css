@@ -27,6 +27,7 @@
 
 * {
   box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
 }
 body {
   margin: 0;
@@ -44,15 +45,61 @@ button {
   color: inherit;
 }
 button:focus-visible,
+a:focus-visible,
+summary:focus-visible,
+[role='button']:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
   outline: 3px solid rgba(102, 145, 118, 0.25);
   outline-offset: 2px;
 }
+:focus:not(:focus-visible) {
+  outline: none;
+}
 button:disabled {
   cursor: not-allowed;
   opacity: 0.58;
+}
+:where(
+  button:not(:disabled),
+  a[href],
+  summary,
+  [role='button'],
+  select,
+  input[type='button'],
+  input[type='submit'],
+  input[type='reset']
+) {
+  transition:
+    transform 0.12s ease,
+    filter 0.12s ease;
+}
+@media (hover: hover) {
+  :where(
+    button:not(:disabled),
+    a[href],
+    summary,
+    [role='button'],
+    select,
+    input[type='button'],
+    input[type='submit'],
+    input[type='reset']
+  ):hover {
+    filter: brightness(0.97);
+  }
+}
+:where(
+  button:not(:disabled),
+  a[href],
+  summary,
+  [role='button'],
+  select,
+  input[type='button'],
+  input[type='submit'],
+  input[type='reset']
+):active {
+  transform: scale(0.98);
 }
 
 .app-shell {
@@ -121,9 +168,6 @@ button:disabled {
   font-weight: 700;
   letter-spacing: -0.07em;
 }
-.brand-name span {
-  color: #83a18a;
-}
 .eyebrow {
   margin: 0;
   color: #a0aaa3;
@@ -135,7 +179,7 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 7px 7px 11px;
+  padding: 0 5px 7px 11px;
 }
 .project-section-heading .eyebrow {
   margin: 0;
@@ -201,7 +245,7 @@ button:disabled {
   transform: rotate(90deg);
 }
 .project-new-thread {
-  flex: 0 0 27px;
+  flex: 0 0 25px;
   color: #87968b;
   border-color: transparent !important;
 }
@@ -267,7 +311,9 @@ button:disabled {
   cursor: pointer;
   transition:
     background 0.16s,
-    color 0.16s;
+    color 0.16s,
+    transform 0.12s ease,
+    filter 0.12s ease;
 }
 .thread-list-item:hover {
   color: #3b5544;
@@ -391,8 +437,13 @@ button:disabled {
   color: #a4aea5;
   cursor: default;
 }
+.runtime-status-row {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 13px 10px;
+}
 .sidebar-bottom {
-  padding: 12px 4px 0;
+  padding: 10px 4px 0;
   border-top: 1px solid #e2e8e2;
 }
 .settings-link {
@@ -423,7 +474,7 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 7px;
-  margin: 10px 9px 2px;
+  margin: 0;
   color: #9ba59e;
   font-size: 10px;
 }
@@ -549,7 +600,7 @@ button:disabled {
   align-items: center;
   justify-content: flex-start;
   width: 100%;
-  min-height: 35px;
+  min-height: 38px;
   gap: 8px;
   padding: 6px 9px;
   color: #829087;
@@ -557,7 +608,7 @@ button:disabled {
   border: 1px solid #e8ede6;
   border-radius: 9px;
   font: inherit;
-  font-size: 10px;
+  font-size: 12px;
   white-space: nowrap;
   cursor: pointer;
 }
@@ -796,7 +847,7 @@ button:disabled {
     border 0.15s;
 }
 .button:active {
-  transform: translateY(1px);
+  transform: scale(0.98);
 }
 .button-primary {
   color: white;
@@ -958,7 +1009,9 @@ button:disabled {
   cursor: pointer;
   transition:
     background 150ms ease,
-    border-color 150ms ease;
+    border-color 150ms ease,
+    transform 120ms ease,
+    filter 120ms ease;
 }
 .history-load-more:hover:not(:disabled) {
   background: #f1f6f1;
@@ -1497,7 +1550,6 @@ button:disabled {
 }
 .send-button:hover:not(:disabled) {
   background: #4f7458;
-  transform: translateY(-1px);
 }
 .send-button:disabled {
   color: #a8b5aa;

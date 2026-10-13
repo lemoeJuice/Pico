@@ -48,6 +48,7 @@ import {
   ArrowUpRight,
   Box,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Cloud,
   GitBranch,
@@ -1401,15 +1402,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           <div className="brand-mark">
             <Sparkles size={17} aria-hidden="true" />
           </div>
-          <div className="brand-name">
-            pico<span>·</span>
-          </div>
+          <div className="brand-name">pico</div>
           <button
             className="icon-button mobile-close"
-            aria-label="Close sidebar"
+            aria-label="Collapse sidebar"
             onClick={() => setMobileSidebarOpen(false)}
           >
-            <X size={17} aria-hidden="true" />
+            <ChevronLeft size={18} aria-hidden="true" />
           </button>
         </div>
         <div className="project-section-heading">
@@ -1502,10 +1501,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             </section>
           ) : null}
         </div>
+        <div className="runtime-status-row">
+          <div className="runtime-foot">
+            <i className={socketConnected ? 'online' : 'offline'} />
+            <span>Runtime {socketConnected ? 'connected' : 'reconnecting'}</span>
+          </div>
+        </div>
         <div className="sidebar-bottom">
           <button className="settings-link" disabled={bootstrapping} onClick={() => setSettingsOpen(true)}>
             <Settings size={15} aria-hidden="true" />
-            <span>{settings?.model ? 'Settings' : 'Set up'}</span>
+            <span>Settings</span>
           </button>
           {authRequired ? (
             <button className="session-logout" onClick={() => void onSignOut?.()} type="button">
@@ -1513,10 +1518,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               Sign out
             </button>
           ) : null}
-          <div className="runtime-foot">
-            <i className={socketConnected ? 'online' : 'offline'} />
-            Runtime {socketConnected ? 'connected' : 'reconnecting'}
-          </div>
         </div>
       </aside>
 
