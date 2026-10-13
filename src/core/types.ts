@@ -1,4 +1,4 @@
-export type ExecutorKind = 'container' | 'host';
+export type ExecutorKind = 'container' | 'host' | 'runtime';
 export type ThreadState = 'idle' | 'running' | 'pausing' | 'paused';
 export type ExecutionKind = 'model' | 'tool';
 export type ExecutionStatus = 'pending' | 'running' | 'completed' | 'failed' | 'interrupted';

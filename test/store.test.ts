@@ -7,6 +7,49 @@ import { PicoStore } from '../src/core/store.js';
 import { assistantPayload } from './helpers.js';
 
 describe('PicoStore migrations', () => {
+  it('adds Runtime Chat bindings while preserving existing Executor bindings', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-runtime-executor-migration-'));
+    const databasePath = join(directory, 'runtime.sqlite');
+    let store: PicoStore | null = new PicoStore(databasePath);
+    const project = store.createProject('Runtime executor migration', directory);
+    const existingThread = store.createThread(project.id, 'host', 'Existing Host Thread');
+    const existingBinding = store.executorForThread(existingThread.id)!;
+    store.close();
+    store = null;
+
+    const legacy = new DatabaseSync(databasePath);
+    legacy.exec('PRAGMA foreign_keys = OFF;');
+    legacy.exec(`
+      DROP TABLE executors;
+      CREATE TABLE executors (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind IN ('container', 'host')),
+        label TEXT NOT NULL,
+        workspace_path TEXT NOT NULL,
+        remote_connection_id TEXT REFERENCES remote_executor_connections(id),
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO executors (id, kind, label, workspace_path, remote_connection_id, created_at)
+        VALUES ('${existingBinding.id}', 'host', '${existingBinding.label}', '${existingBinding.workspacePath}', NULL, '${existingBinding.createdAt}');
+    `);
+    legacy.close();
+
+    try {
+      store = new PicoStore(databasePath);
+      expect(store.getThread(existingThread.id)?.executorKind).toBe('host');
+      const chatThread = store.createThread(project.id, 'runtime', 'Chat Thread');
+      expect(chatThread).toMatchObject({
+        executorKind: 'runtime',
+        workspacePath: '',
+        executorLabel: 'Chat · Runtime executor migration',
+      });
+      expect(store.executorForThread(chatThread.id)?.kind).toBe('runtime');
+    } finally {
+      store?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('adds cancelled approval status while preserving existing approval decisions', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pico-approval-migration-'));
     const databasePath = join(directory, 'runtime.sqlite');

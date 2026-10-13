@@ -33,7 +33,10 @@ export const workspacePlugin: PicoPlugin = {
     >('projection', async (input, next) =>
       next({
         ...input,
-        systemPrompt: `${input.systemPrompt}\nThe selected workspace is ${input.thread.workspacePath}. The executor type is ${input.thread.executorKind}.`,
+        systemPrompt:
+          input.thread.executorKind === 'runtime'
+            ? input.systemPrompt
+            : `${input.systemPrompt}\nThe selected workspace is ${input.thread.workspacePath}. The executor type is ${input.thread.executorKind}.`,
       }),
     );
 
@@ -42,6 +45,7 @@ export const workspacePlugin: PicoPlugin = {
       description: 'Show the selected workspace and executor.',
       execute(_args, context) {
         if (!context.thread) return { text: 'Choose a thread first.' };
+        if (context.thread.executorKind === 'runtime') return { text: 'This Chat Thread has no attached workspace.' };
         canonical.append(context.thread.id, { action: 'workspace-inspected', executor: context.thread.executorKind });
         return { text: `Workspace: ${context.thread.workspacePath}\nExecutor: ${context.thread.executorLabel}` };
       },

@@ -99,7 +99,7 @@ export class PicoStore {
       );
       CREATE TABLE IF NOT EXISTS executors (
         id TEXT PRIMARY KEY,
-        kind TEXT NOT NULL CHECK (kind IN ('container', 'host')),
+        kind TEXT NOT NULL CHECK (kind IN ('container', 'host', 'runtime')),
         label TEXT NOT NULL,
         workspace_path TEXT NOT NULL,
         remote_connection_id TEXT REFERENCES remote_executor_connections(id),
@@ -186,6 +186,7 @@ export class PicoStore {
       );
     `);
     this.migrateRemoteExecutorBindings();
+    this.migrateRuntimeExecutorKind();
     this.migrateApprovalStatus();
   }
 
@@ -195,6 +196,37 @@ export class PicoStore {
     this.db.exec(
       'ALTER TABLE executors ADD COLUMN remote_connection_id TEXT REFERENCES remote_executor_connections(id);',
     );
+  }
+
+  private migrateRuntimeExecutorKind(): void {
+    const schema = this.db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'executors'")
+      .get() as SqlRow | undefined;
+    if (typeof schema?.sql !== 'string' || schema.sql.includes("'runtime'")) return;
+
+    this.db.exec('PRAGMA foreign_keys = OFF;');
+    try {
+      this.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE executors_new (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL CHECK (kind IN ('container', 'host', 'runtime')),
+            label TEXT NOT NULL,
+            workspace_path TEXT NOT NULL,
+            remote_connection_id TEXT REFERENCES remote_executor_connections(id),
+            created_at TEXT NOT NULL
+          );
+          INSERT INTO executors_new (id, kind, label, workspace_path, remote_connection_id, created_at)
+            SELECT id, kind, label, workspace_path, remote_connection_id, created_at FROM executors;
+          DROP TABLE executors;
+          ALTER TABLE executors_new RENAME TO executors;
+        `);
+      });
+    } finally {
+      this.db.exec('PRAGMA foreign_keys = ON;');
+    }
+    const violations = this.db.prepare('PRAGMA foreign_key_check').all();
+    if (violations.length > 0) throw new Error('Executor migration left foreign-key violations.');
   }
 
   private migrateApprovalStatus(): void {
@@ -293,12 +325,14 @@ export class PicoStore {
     const id = randomUUID();
     const executorId = randomUUID();
     const createdAt = isoNow();
-    const workspacePath = options.workspacePath ?? project.workspacePath;
+    const workspacePath = executorKind === 'runtime' ? '' : (options.workspacePath ?? project.workspacePath);
     const kindLabel = remoteConnection
       ? `Remote Host · ${remoteConnection.name}`
       : executorKind === 'container'
         ? 'Container'
-        : 'Host';
+        : executorKind === 'runtime'
+          ? 'Chat'
+          : 'Host';
     const label = `${kindLabel} · ${project.name}`;
     this.transaction(() => {
       this.db

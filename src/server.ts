@@ -170,7 +170,9 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   app.post('/api/projects/:projectId/threads', async (request, response) => {
     const body = bodyObject(request);
     const kind = body.executorKind;
-    if (kind !== 'container' && kind !== 'host') throw new Error('executorKind must be container or host');
+    if (kind !== 'container' && kind !== 'host' && kind !== 'runtime') {
+      throw new Error('executorKind must be container, host, or runtime');
+    }
     if (body.remoteConnectionId !== undefined && (typeof body.remoteConnectionId !== 'string' || kind !== 'host')) {
       throw new Error('Remote Executor Threads must use Host execution kind.');
     }

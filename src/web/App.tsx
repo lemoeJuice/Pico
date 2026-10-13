@@ -121,6 +121,7 @@ function persistComposerState(state: ComposerState): void {
 
 function executorLabel(thread: Thread): string {
   if (thread.executorRemote) return 'Remote';
+  if (thread.executorKind === 'runtime') return 'Chat';
   return thread.executorKind === 'container' ? 'Container' : 'Local';
 }
 
@@ -170,7 +171,13 @@ function ExecutorPill({
   connected: boolean | null;
   error: string | null;
 }) {
-  const ExecutorIcon = thread.executorRemote ? Cloud : thread.executorKind === 'container' ? Box : Monitor;
+  const ExecutorIcon = thread.executorRemote
+    ? Cloud
+    : thread.executorKind === 'runtime'
+      ? MessageSquare
+      : thread.executorKind === 'container'
+        ? Box
+        : Monitor;
   const accessibleStatus =
     connected === null ? (error ? 'status unknown' : 'checking connection') : connected ? 'connected' : 'disconnected';
   return (
@@ -2175,7 +2182,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           onDismissError={() => setError('')}
         >
           <form className="form-stack" onSubmit={(event) => void createThread(event)}>
-            <p className="form-intro">Choose the execution environment now. A Thread stays bound to this Executor.</p>
+            <p className="form-intro">Choose how this Thread runs. Its execution mode stays fixed for its lifetime.</p>
             <label>
               Thread name <span className="field-note">Optional</span>
               <input
@@ -2185,6 +2192,18 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               />
             </label>
             <div className="executor-choice-grid">
+              <button
+                type="button"
+                className={`executor-choice ${newThreadExecutor === 'runtime' ? 'chosen' : ''}`}
+                onClick={() => setNewThreadExecutor('runtime')}
+              >
+                <span className="choice-icon">
+                  <MessageSquare size={15} aria-hidden="true" />
+                </span>
+                <strong>Chat</strong>
+                <small>Runtime thread tools, without a workspace or shell</small>
+                <i>{newThreadExecutor === 'runtime' ? 'Selected' : 'Choose'}</i>
+              </button>
               <button
                 type="button"
                 className={`executor-choice ${newThreadExecutor === 'container' ? 'chosen' : ''}`}
@@ -2266,9 +2285,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             ) : null}
             <div className="form-actions">
               <span className="field-note">
-                {newThreadExecutor === 'container'
-                  ? 'Container is the default and runs tools inside the selected workspace.'
-                  : 'Host Executor tools ask before running.'}
+                {newThreadExecutor === 'runtime'
+                  ? 'Chat mode can coordinate Threads but cannot access project files or run shell commands.'
+                  : newThreadExecutor === 'container'
+                    ? 'Container is the default and runs tools inside the selected workspace.'
+                    : 'Host Executor tools ask before running.'}
               </span>
               <button
                 className="button button-primary"

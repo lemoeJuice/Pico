@@ -67,6 +67,71 @@ describe('durable Thread runtime invariants', () => {
     }
   });
 
+  it('runs Chat Threads on Runtime coordination tools without attaching a workspace Executor', async () => {
+    const model = new FakeModel(() => response('Ready for a conversation.'));
+    const env = await setupRuntime(model);
+    const thread = env.runtime.createThread(env.project.id, 'runtime', 'Chat');
+    try {
+      const status = await env.runtime.executorStatus(thread.id);
+      await env.runtime.submit(thread.id, 'chat-mode-message', 'Hello');
+      await env.runtime.drain();
+
+      expect(thread.workspacePath).toBe('');
+      expect(status).toEqual({ connected: true, kind: 'runtime', label: 'Chat' });
+      expect(model.prompts[0]?.tools.map((tool) => tool.name)).toEqual(['spawn_thread', 'send_thread_message']);
+      expect(env.runtime.toolPermissions(thread.id).map((tool) => tool.name)).toEqual([
+        'spawn_thread',
+        'send_thread_message',
+      ]);
+      expect(env.runtime.getSnapshot(thread.id)?.executions.map((execution) => execution.status)).toEqual([
+        'completed',
+      ]);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('uses Runtime tools for ordinary Thread-to-Thread Messages in Chat mode', async () => {
+    let recipientId = '';
+    const model = new FakeModel((_prompt, callNumber) =>
+      callNumber === 1
+        ? response('', [
+            {
+              id: 'chat-send-message',
+              name: 'send_thread_message',
+              arguments: { thread_id: recipientId, message: 'A note from the Chat Thread.' },
+            },
+          ])
+        : response('Received.'),
+    );
+    const env = await setupRuntime(model);
+    const sender = env.runtime.createThread(env.project.id, 'runtime', 'Chat sender');
+    const recipient = env.runtime.createThread(env.project.id, 'runtime', 'Chat recipient');
+    recipientId = recipient.id;
+    try {
+      await env.runtime.submit(sender.id, 'chat-tool-message', 'Send a message to the other Thread.');
+      await env.runtime.drain();
+
+      expect(
+        env.store
+          .listRecords(recipient.id)
+          .some(
+            (record) =>
+              record.kind === 'message' &&
+              record.payload.content === 'A note from the Chat Thread.' &&
+              record.payload.senderThreadId === sender.id,
+          ),
+      ).toBe(true);
+      expect(
+        env.store
+          .listExecutions(sender.id)
+          .some((execution) => execution.toolName === 'send_thread_message' && execution.status === 'completed'),
+      ).toBe(true);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it('keeps an active Tool Batch visible when its parent is older than the latest history page', async () => {
     const model = new FakeModel(() =>
       response('', [{ id: 'paged-pending-read', name: 'read_file', arguments: { path: 'facts.txt' } }]),

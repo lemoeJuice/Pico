@@ -810,15 +810,20 @@ export class PicoRuntime {
         thread,
         records: projectionRecords,
         through,
-        systemPrompt: `${baseSystemPrompt}\n\nCurrent Thread ID: ${thread.id}\n${thread.parentThreadId ? `Parent Thread ID: ${thread.parentThreadId}` : 'This Thread has no parent.'}`,
+        systemPrompt: `${baseSystemPrompt}\n\n${thread.executorKind === 'runtime' ? 'This Thread uses Chat mode. It has no project workspace, filesystem, shell, or external execution environment. Its available tools are limited to Runtime Thread coordination.' : ''}\n\nCurrent Thread ID: ${thread.id}\n${thread.parentThreadId ? `Parent Thread ID: ${thread.parentThreadId}` : 'This Thread has no parent.'}`,
         turns: this.projectTurns(projectionRecords, thread),
         tools: this.visibleToolDefinitions(thread),
       };
       const projected = await this.pipelines.run('projection', baseProjection, async (value) => value);
+      const runtimeToolNames = new Set(this.visibleToolDefinitions(thread).map((tool) => tool.name));
+      const projectedTools =
+        thread.executorKind === 'runtime'
+          ? projected.tools.filter((tool) => runtimeToolNames.has(tool.name))
+          : projected.tools;
       const prompt: ModelPrompt = {
         system: projected.systemPrompt,
         turns: projected.turns,
-        tools: projected.tools,
+        tools: projectedTools,
         model: modelSettings.model,
         temperature: modelSettings.temperature,
       };
@@ -862,6 +867,15 @@ export class PicoRuntime {
             error: error instanceof Error ? error.message : String(error),
           });
         throw error;
+      }
+      if (thread.executorKind === 'runtime') {
+        const exposedTools = new Set(projectedTools.map((tool) => tool.name));
+        const unavailableCalls = response.toolCalls.filter((call) => !exposedTools.has(call.name));
+        if (unavailableCalls.length > 0) {
+          throw new Error(
+            `Chat mode cannot run unavailable tools: ${unavailableCalls.map((call) => call.name).join(', ')}.`,
+          );
+        }
       }
       const hitOutputLimit = response.finishReason === 'length';
       const seenCallIds = new Set<string>();
@@ -976,7 +990,14 @@ export class PicoRuntime {
   }
 
   private visibleToolDefinitions(thread: Thread): ToolDefinition[] {
-    return this.tools.list().filter((definition) => this.permissionPolicy(thread, definition.name) !== 'deny');
+    const eligibleTools =
+      thread.executorKind === 'runtime'
+        ? this.tools
+            .listBySource('runtime')
+            .filter((tool) => tool.owner === 'pico.core')
+            .map((tool) => tool.definition)
+        : this.tools.list();
+    return eligibleTools.filter((definition) => this.permissionPolicy(thread, definition.name) !== 'deny');
   }
 
   private permissionPolicy(thread: Thread, toolName: string): PermissionPolicy {
@@ -991,7 +1012,7 @@ export class PicoRuntime {
   toolPermissions(threadId: string): Array<{ name: string; description: string; policy: PermissionPolicy }> {
     const thread = this.store.getThread(threadId);
     if (!thread) throw new Error('Thread not found');
-    return this.tools.list().map((tool) => ({
+    return this.visibleToolDefinitions(thread).map((tool) => ({
       name: tool.name,
       description: tool.description,
       policy: this.permissionPolicy(thread, tool.name),
@@ -1217,6 +1238,7 @@ export class PicoRuntime {
 
   private adapterFor(binding: ExecutorBinding): ExecutorAdapter {
     if (binding.remoteConnectionId) return this.remoteHostExecutor;
+    if (binding.kind === 'runtime') throw new Error('Chat mode does not submit work to an external Executor.');
     return binding.kind === 'container' ? this.containerExecutor : this.hostExecutor;
   }
 
@@ -1379,6 +1401,7 @@ export class PicoRuntime {
   async executorStatus(threadId: string): Promise<{ connected: boolean; kind: string; label: string; error?: string }> {
     const binding = this.store.executorForThread(threadId);
     if (!binding) throw new Error('Executor binding is missing');
+    if (binding.kind === 'runtime') return { connected: true, kind: 'runtime', label: 'Chat' };
     try {
       await this.adapterFor(binding).checkConnection(binding);
       return {
