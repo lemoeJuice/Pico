@@ -56,6 +56,36 @@ async function decidePermission(runtime: PicoRuntime, executionId: string, allow
 }
 
 describe('durable Thread runtime invariants', () => {
+  it('keeps model selections separate across provider switches, including existing saved settings', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')), {
+      pluginDirectory: resolve(process.cwd(), 'plugins'),
+    });
+    try {
+      // Simulate a pre-existing connection before provider model history was introduced.
+      const legacy = { ...env.runtime.getModelSettings(), model: 'custom-api-model', apiKey: 'saved-api-key' };
+      env.store.setSetting('model', legacy);
+      expect(env.runtime.updateModelSettings({ provider: 'chatgpt-plan' }).model).toBe('');
+      env.runtime.updateModelSettings({ model: 'account-model' });
+      expect(env.runtime.updateModelSettings({ provider: 'openai-compatible' }).model).toBe('custom-api-model');
+      expect(env.runtime.getModelSettings().apiKey).toBe('saved-api-key');
+      env.runtime.updateModelSettings({ model: 'other-api-model' });
+      expect(env.runtime.updateModelSettings({ provider: 'chatgpt-plan' }).model).toBe('account-model');
+      expect(env.runtime.publicModelSettings().modelsByProvider).toEqual({
+        'openai-compatible': 'other-api-model',
+        'chatgpt-plan': 'account-model',
+      });
+      expect(() => env.runtime.updateModelSettings({ provider: 'unknown' })).toThrow('not registered');
+      expect(env.runtime.publicModelSettings().model).toBe('account-model');
+      expect(
+        env.runtime.updateModelSettings({ provider: 'openai-compatible', model: 'explicit-api-model' }).model,
+      ).toBe('explicit-api-model');
+      expect(env.runtime.updateModelSettings({ provider: 'chatgpt-plan' }).model).toBe('account-model');
+      expect(env.runtime.updateModelSettings({ provider: 'openai-compatible' }).model).toBe('explicit-api-model');
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it('can disable built-in workflow plugins through RuntimeOptions and the environment', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')), {
       disabledBuiltinPlugins: ['pico.collaboration'],

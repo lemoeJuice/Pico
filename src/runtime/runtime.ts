@@ -1283,12 +1283,22 @@ export class PicoRuntime {
       temperature: settings.temperature,
       provider: settings.provider,
       hasApiKey: Boolean(settings.apiKey),
+      modelsByProvider: {
+        ...this.store.getSetting<Record<string, string>>('provider-models', {}),
+        [settings.provider]: settings.model,
+      },
     };
   }
 
   updateModelSettings(update: Partial<ModelSettings>): PublicSettings {
     const current = this.getModelSettings();
-    const next = { ...current, ...update };
+    const provider = update.provider ?? current.provider;
+    const providerModels = this.store.getSetting<Record<string, string>>('provider-models', {});
+    const next = {
+      ...current,
+      ...(provider !== current.provider ? { model: providerModels[provider] ?? '' } : {}),
+      ...update,
+    };
     if (!this.plugins.modelProviders().some((provider) => provider.id === next.provider)) {
       throw new Error(`Model provider ${next.provider} is not registered.`);
     }
@@ -1304,7 +1314,14 @@ export class PicoRuntime {
     if (!Number.isFinite(next.temperature) || next.temperature < 0 || next.temperature > 2) {
       throw new Error('Temperature must be between 0 and 2');
     }
-    this.store.setSetting('model', next);
+    this.store.transaction(() => {
+      this.store.setSetting('provider-models', {
+        ...providerModels,
+        [current.provider]: current.model,
+        [next.provider]: next.model,
+      });
+      this.store.setSetting('model', next);
+    });
     this.publish({ type: 'settings.updated', settings: this.publicModelSettings() });
     return this.publicModelSettings();
   }

@@ -143,6 +143,7 @@ export interface UiContribution {
   entry?: string;
   component?: string;
   toolNames?: string[];
+  providers?: ModelProvider[];
   supportsPopover?: boolean;
 }
 
@@ -158,4 +159,5 @@ export interface PublicSettings {
   temperature: number;
   provider: ModelProvider;
   hasApiKey: boolean;
+  modelsByProvider?: Record<ModelProvider, string>;
 }

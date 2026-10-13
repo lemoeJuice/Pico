@@ -609,7 +609,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const uiContributions = pluginInfo?.ui ?? [];
   const toolbarContributions = uiContributionsAt(uiContributions, 'thread.toolbar');
   const composerActions = uiContributionsAt(uiContributions, 'composer.action');
-  const composerModelContributions = uiContributionsAt(uiContributions, 'composer.model');
+  const composerModelContributions = uiContributionsAt(uiContributions, 'composer.model', settings?.provider);
   const sidebarPanels = uiContributionsAt(uiContributions, 'sidebar.panel');
   const toolRenderers = uiContributionsAt(uiContributions, 'tool.renderer');
 
@@ -1206,10 +1206,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     setError('');
     const body: Partial<ModelSettings> = {
       baseUrl: modelForm.baseUrl,
-      model: modelForm.model,
       temperature: Number(modelForm.temperature),
       provider: modelForm.provider,
     };
+    // Switching providers must not carry the previous provider's model into its saved selection.
+    if (modelForm.provider === 'openai-compatible') {
+      body.model = modelForm.model;
+    }
     if (modelForm.apiKey) body.apiKey = modelForm.apiKey;
     try {
       const saved = await api<PublicSettings>('/api/settings/model', { method: 'PUT', body: JSON.stringify(body) });
@@ -1948,7 +1951,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 className={`button ${pluginPageSelection ? 'button-quiet' : 'button-soft'}`}
                 onClick={() => setPluginPageSelection(null)}
               >
-                Model connection
+                Default
               </button>
               {pluginInfo.pages.map((page) => (
                 <button
@@ -1992,7 +1995,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   <select
                     value={modelForm.provider}
                     onChange={(event) =>
-                      setModelForm((form) => ({ ...form, provider: event.target.value as ModelSettings['provider'] }))
+                      setModelForm((form) => ({
+                        ...form,
+                        provider: event.target.value,
+                        model: settings?.modelsByProvider?.[event.target.value] ?? '',
+                      }))
                     }
                   >
                     {pluginInfo?.providers.map((provider) => (

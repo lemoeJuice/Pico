@@ -133,6 +133,7 @@ export function createChatGptPlanPlugin(): PicoPlugin {
         description: 'Choose the ChatGPT model, reasoning effort, and Fast mode for this provider.',
         entry: 'webui',
         component: 'ChatGptPlanComposerModel',
+        providers: ['chatgpt-plan'],
       });
 
       context.http.register('GET', '/status', () => auth!.status());

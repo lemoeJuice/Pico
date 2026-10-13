@@ -208,7 +208,7 @@ function ChatGptPlanComposerModel({
   updateModelSettings,
   openPage,
   onError,
-}: PluginUiProps): ReactElement {
+}: PluginUiProps): ReactElement | null {
   const [status, setStatus] = useState<AccountStatus | null>(null);
   const [models, setModels] = useState<ChatGptModelChoice[]>([]);
   const [preferences, setPreferences] = useState<Preferences>(defaultPreferences);
@@ -279,19 +279,7 @@ function ChatGptPlanComposerModel({
   };
 
   if (settings.provider !== 'chatgpt-plan') {
-    return (
-      <button
-        type="button"
-        className="button button-quiet"
-        onClick={() =>
-          void updateModelSettings({ provider: 'chatgpt-plan' }).catch((caught: unknown) =>
-            onError(errorMessage(caught)),
-          )
-        }
-      >
-        Use ChatGPT account
-      </button>
-    );
+    return null;
   }
 
   if (!status?.connected) {
@@ -313,17 +301,14 @@ function ChatGptPlanComposerModel({
       <select
         className="chatgpt-model-select"
         aria-label="Model"
-        value={settings.model}
+        value={models.some((choice) => choice.slug === settings.model) ? settings.model : ''}
         onChange={(event) => void selectModel(event.target.value)}
         disabled={loading}
       >
-        {!settings.model ? (
+        {!models.some((choice) => choice.slug === settings.model) ? (
           <option value="" disabled>
             {loading ? 'Loading models…' : 'Choose model'}
           </option>
-        ) : null}
-        {settings.model && !models.some((choice) => choice.slug === settings.model) ? (
-          <option value={settings.model}>{settings.model} · saved</option>
         ) : null}
         {models.map((model) => (
           <option key={model.slug} value={model.slug}>

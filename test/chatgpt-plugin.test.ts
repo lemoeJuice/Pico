@@ -41,7 +41,12 @@ describe('ChatGPT provider plugin', () => {
     expect(providers).toContainEqual(expect.objectContaining({ id: 'chatgpt-plan' }));
     expect(pages).toContainEqual(expect.objectContaining({ id: 'account', entry: 'webui' }));
     expect(contributions).toContainEqual(
-      expect.objectContaining({ slot: 'composer.model', component: 'ChatGptPlanComposerModel', entry: 'webui' }),
+      expect.objectContaining({
+        slot: 'composer.model',
+        component: 'ChatGptPlanComposerModel',
+        entry: 'webui',
+        providers: ['chatgpt-plan'],
+      }),
     );
     expect(routes).toEqual(
       expect.arrayContaining([

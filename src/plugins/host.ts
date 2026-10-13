@@ -340,6 +340,16 @@ export class PluginHost {
             throw new Error('composer.model contributions must name a Web UI entry and component.');
           }
           if (
+            contribution.providers !== undefined &&
+            (contribution.slot !== 'composer.model' ||
+              !Array.isArray(contribution.providers) ||
+              contribution.providers.some(
+                (provider) => typeof provider !== 'string' || !/^[a-z0-9][a-z0-9._-]*$/.test(provider),
+              ))
+          ) {
+            throw new Error('Provider filters require valid provider IDs in the composer.model slot.');
+          }
+          if (
             (contribution.supportsPopover !== undefined && typeof contribution.supportsPopover !== 'boolean') ||
             (contribution.supportsPopover &&
               (contribution.slot !== 'thread.toolbar' || !contribution.entry || !contribution.component))
