@@ -109,6 +109,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
         model: prompt.model,
         temperature: prompt.temperature,
         stream: true,
+        stream_options: { include_usage: true },
         messages: toWireMessages(prompt),
         tools: prompt.tools.map((tool) => ({
           type: 'function',

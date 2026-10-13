@@ -41,10 +41,8 @@ describe('OpenAI-compatible streaming adapter', () => {
               { delta: { tool_calls: [{ index: 0, function: { arguments: '"note.txt"}' } }] }, finish_reason: null },
             ],
           },
-          {
-            choices: [{ delta: {}, finish_reason: 'tool_calls' }],
-            usage: { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 },
-          },
+          { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+          { choices: [], usage: { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 } },
         ];
         for (const frame of frames) response.write(`data: ${JSON.stringify(frame)}\n\n`);
         response.end('data: [DONE]\n\n');
@@ -82,6 +80,7 @@ describe('OpenAI-compatible streaming adapter', () => {
     );
 
     expect(requestBody?.stream).toBe(true);
+    expect(requestBody?.stream_options).toEqual({ include_usage: true });
     expect(requestBody?.parallel_tool_calls).toBe(true);
     expect(requestBody?.model).toBe('configured-model');
     expect((requestBody?.messages as Array<{ role: string }>)[1]?.role).toBe('user');
