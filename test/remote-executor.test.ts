@@ -496,6 +496,73 @@ describe('Remote Host Executor', () => {
     }
   });
 
+  it('reconciles a paused Thread’s active Remote Tool after Runtime restart without continuing the Model', async () => {
+    const directory = await import('node:fs/promises').then(({ mkdtemp }) =>
+      mkdtemp(join(tmpdir(), 'pico-remote-paused-restart-')),
+    );
+    const workspaceRoot = join(directory, 'remote-root');
+    const remoteWorkspace = join(workspaceRoot, 'repo');
+    const projectWorkspace = join(directory, 'project-workspace');
+    const databasePath = join(directory, 'runtime.sqlite');
+    await mkdir(remoteWorkspace, { recursive: true });
+    await mkdir(projectWorkspace);
+    const remote = await startRemoteExecutorServer({
+      token,
+      workspaceRoot,
+      databasePath: join(directory, 'executor.sqlite'),
+      port: 0,
+    });
+    const endpoint = `http://127.0.0.1:${remote.port}`;
+    const command = "node -e \"setTimeout(() => require('node:fs').appendFileSync('runs.log', 'x'), 1500)\"";
+    const firstModel = new FakeModel(() =>
+      response('', [{ id: 'paused-restart-call', name: 'shell', arguments: { command } }]),
+    );
+    let store = new PicoStore(databasePath);
+    let runtime = new PicoRuntime(store, { model: firstModel, pluginDirectory: join(directory, 'empty-plugins') });
+    try {
+      await runtime.initialize();
+      const project = await runtime.createProject('Paused Runtime restart', projectWorkspace);
+      const connection = await runtime.addRemoteExecutorConnection('Build host', endpoint, token);
+      const thread = await runtime.createRemoteThread(project.id, connection.id, remoteWorkspace);
+      runtime.setToolPermission(thread.id, 'shell', 'allow');
+      await runtime.submit(thread.id, 'paused-runtime-restart-message', 'Run while the Runtime restarts.');
+      await until(() =>
+        store
+          .listExecutions(thread.id)
+          .some((execution) => execution.kind === 'tool' && execution.status === 'running'),
+      );
+      const execution = store.listExecutions(thread.id).find((item) => item.kind === 'tool');
+      expect(execution).toBeDefined();
+
+      runtime.pause(thread.id);
+      await runtime.shutdown();
+      expect(store.getThread(thread.id)?.pauseRequested).toBe(true);
+      expect(store.getExecution(execution!.id)?.status).toBe('running');
+      store.close();
+
+      store = new PicoStore(databasePath);
+      const resumedModel = new FakeModel(() => response('Continued after explicit Continue.'));
+      runtime = new PicoRuntime(store, { model: resumedModel, pluginDirectory: join(directory, 'empty-plugins') });
+      await runtime.initialize();
+      await runtime.drain();
+
+      expect(store.getExecution(execution!.id)?.status).toBe('completed');
+      expect(runtime.getThread(thread.id)?.state).toBe('paused');
+      expect(resumedModel.calls).toBe(0);
+      expect(await readFile(join(remoteWorkspace, 'runs.log'), 'utf8')).toBe('x');
+
+      runtime.continue(thread.id);
+      await runtime.drain();
+      expect(resumedModel.calls).toBe(1);
+      expect(runtime.getThread(thread.id)?.state).toBe('idle');
+    } finally {
+      await runtime.shutdown();
+      store.close();
+      await remote.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('sends explicit Interrupt to the connected Executor and records the settled result', async () => {
     const directory = await import('node:fs/promises').then(({ mkdtemp }) =>
       mkdtemp(join(tmpdir(), 'pico-remote-interrupt-')),

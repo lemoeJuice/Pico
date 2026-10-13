@@ -204,7 +204,7 @@ export class PicoRuntime {
     // A disconnected Executor may leave its execution running and pause the Thread;
     // a confirmed-lost Host execution becomes interrupted before the next Model Step.
     for (const thread of this.store.listThreads()) {
-      if (!thread.pauseRequested) this.startLoop(thread.id);
+      if (!thread.pauseRequested || this.latestActiveBatch(thread.id)) this.startLoop(thread.id);
     }
   }
 
@@ -596,7 +596,7 @@ export class PicoRuntime {
   private startLoop(threadId: string): void {
     if (this.shuttingDown || this.loops.has(threadId)) return;
     const thread = this.store.getThread(threadId);
-    if (!thread || thread.pauseRequested) return;
+    if (!thread || (thread.pauseRequested && !this.latestActiveBatch(threadId))) return;
     const task = Promise.resolve()
       .then(() => this.driveThread(threadId))
       .catch((error: unknown) => {
