@@ -1,5 +1,5 @@
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   font:
     13px/1.45 system-ui,
     sans-serif;
@@ -151,41 +151,16 @@ label.remember {
   white-space: pre-wrap;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #e6ede8;
-  }
-  button,
-  select {
-    background: #242c27;
-    border-color: #46534a;
-  }
-  .muted,
-  .empty,
-  .tool-description {
-    color: #a7b4aa;
-  }
-  .tool,
-  details {
-    border-color: #3a463e;
-  }
-  .card {
-    border-color: #3d4a41;
-    background: #202722;
-  }
-  .status {
-    background: #354139;
-  }
-  .status.pending {
-    color: #ffdc82;
-    background: #493c1e;
-  }
-  .allow {
-    background: #24392a;
-    border-color: #4c7655;
-  }
-  .deny {
-    background: #3b2926;
-    border-color: #81524a;
-  }
+.toolbar-panel {
+  padding: 3px 8px;
+}
+.toolbar-panel .tool-list-disclosure {
+  border-top: 0;
+  padding-top: 0;
+}
+.toolbar-panel summary {
+  padding: 6px 0;
+}
+.toolbar-panel .heading {
+  padding: 8px 0;
 }

@@ -91,11 +91,11 @@
       </div>`,
       )
       .join('');
-    return `<section class="panel">
-      <div class="heading"><strong>Tool permissions · ${escape(context.thread.title)}</strong><span class="muted">${pendingCount} pending</span></div>
+    return `<section class="panel toolbar-panel">
       ${error ? `<div class="error">${escape(error)}</div>` : ''}
       <details class="tool-list-disclosure" ${toolsExpanded ? 'open' : ''}>
-        <summary>Tools ${data.tools.length}</summary>
+        <summary>Tools ${data.tools.length}${pendingCount ? ` · ${pendingCount} pending` : ''}</summary>
+        <div class="heading"><strong>Tool permissions</strong><span class="muted">${escape(context.thread.title)}</span></div>
         <div class="tools-scroll"><div class="tools">${rows || '<div class="empty">No tools are available for this Thread.</div>'}</div></div>
       </details>
     </section>`;
