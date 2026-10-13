@@ -961,6 +961,28 @@ button:disabled {
   margin: 0 auto;
   padding: 16px 20px 38px;
 }
+.history-load-more {
+  align-self: center;
+  min-height: 36px;
+  padding: 0 14px;
+  color: #718176;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid #e1e9e1;
+  border-radius: 999px;
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease;
+}
+.history-load-more:hover:not(:disabled) {
+  background: #f1f6f1;
+  border-color: #ccd9cd;
+}
+.history-load-more:disabled {
+  color: #a1aca2;
+  cursor: wait;
+}
 .user-message,
 .assistant-message {
   display: flex;
@@ -2028,6 +2050,10 @@ button:disabled {
   .timeline {
     gap: 22px;
     padding: 11px 10px 28px;
+  }
+  .history-load-more {
+    min-height: 40px;
+    font-size: 12px;
   }
   .message-body {
     max-width: calc(100% - 36px);

@@ -55,7 +55,11 @@ export interface ThreadSnapshot {
   executions: Execution[];
   approvals: PermissionRequest[];
   children: Thread[];
+  hasEarlierRecords: boolean;
+  historyPageSize: number;
 }
+
+export const THREAD_HISTORY_PAGE_SIZE = 100;
 
 export interface SubmitResult {
   accepted: boolean;
@@ -336,15 +340,21 @@ export class PicoRuntime {
     return this.store.listThreads(projectId).map((thread) => this.getThread(thread.id) ?? thread);
   }
 
-  getSnapshot(threadId: string): ThreadSnapshot | null {
+  getSnapshot(threadId: string, beforeSeq?: number): ThreadSnapshot | null {
+    if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 1)) {
+      throw new Error('beforeSeq must be a positive safe integer.');
+    }
     const thread = this.getThread(threadId);
     if (!thread) return null;
+    const page = this.store.listRecordPage(threadId, beforeSeq, THREAD_HISTORY_PAGE_SIZE);
     return {
       thread,
-      records: this.store.listRecords(threadId),
-      executions: this.store.listExecutions(threadId),
-      approvals: this.store.listApprovals(threadId),
+      records: page.records,
+      executions: this.store.listSnapshotExecutions(threadId, page.records),
+      approvals: this.store.listSnapshotApprovals(threadId, page.records),
       children: this.listThreads(thread.projectId).filter((candidate) => candidate.parentThreadId === threadId),
+      hasEarlierRecords: page.hasEarlierRecords,
+      historyPageSize: THREAD_HISTORY_PAGE_SIZE,
     };
   }
 

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { WebSocket } from 'ws';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startServer } from '../src/server.js';
+import type { ThreadSnapshot } from '../src/runtime/runtime.js';
 import { assistantPayload } from './helpers.js';
 
 const envKeys = ['PICO_HOST', 'PICO_PORT', 'PICO_DB_PATH', 'PICO_ACCESS_TOKEN'] as const;
@@ -195,6 +196,47 @@ describe('Pico server access boundary', () => {
         401,
       );
       expect(await upgradeStatus(wsUrl, cookieHeaders)).toBe(401);
+    } finally {
+      await server?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('serves canonical Thread history in bounded pages with a stable sequence cursor', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-history-pages-'));
+    let server: Awaited<ReturnType<typeof startServer>> | undefined;
+    try {
+      process.env.PICO_HOST = '127.0.0.1';
+      process.env.PICO_PORT = '0';
+      process.env.PICO_DB_PATH = join(directory, 'pico.sqlite');
+      delete process.env.PICO_ACCESS_TOKEN;
+      server = await startServer();
+      const project = await server.runtime.createProject('History pages', directory);
+      const thread = server.runtime.createThread(project.id, 'host');
+      for (let index = 0; index < 235; index += 1) {
+        server.runtime.store.appendMessage(thread.id, `api-history-${index}`, {
+          role: 'user',
+          content: `Message ${index}`,
+          source: 'user',
+        });
+      }
+
+      const base = `http://127.0.0.1:${server.port}`;
+      const latestResponse = await fetch(`${base}/api/threads/${thread.id}`);
+      expect(latestResponse.status).toBe(200);
+      const latest = (await latestResponse.json()) as ThreadSnapshot;
+      expect(latest.records).toHaveLength(100);
+      expect(latest.records[0]?.id).toBe('api-history-135');
+      expect(latest.hasEarlierRecords).toBe(true);
+
+      const olderResponse = await fetch(`${base}/api/threads/${thread.id}?beforeSeq=${latest.records[0]!.seq}`);
+      const older = (await olderResponse.json()) as ThreadSnapshot;
+      expect(older.records).toHaveLength(100);
+      expect(older.records.at(-1)?.id).toBe('api-history-134');
+      expect(older.hasEarlierRecords).toBe(true);
+
+      const invalidCursor = await fetch(`${base}/api/threads/${thread.id}?beforeSeq=not-a-number`);
+      expect(invalidCursor.status).toBe(400);
     } finally {
       await server?.close();
       await rm(directory, { recursive: true, force: true });

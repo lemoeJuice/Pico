@@ -145,7 +145,12 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     response.json(runtime.listThreads(projectId));
   });
   app.get('/api/threads/:threadId', (request, response) => {
-    const snapshot = runtime.getSnapshot(request.params.threadId!);
+    const beforeSeqValue = request.query.beforeSeq;
+    if (beforeSeqValue !== undefined && typeof beforeSeqValue !== 'string') {
+      throw new Error('beforeSeq must be a positive safe integer.');
+    }
+    const beforeSeq = beforeSeqValue === undefined ? undefined : Number(beforeSeqValue);
+    const snapshot = runtime.getSnapshot(request.params.threadId!, beforeSeq);
     if (!snapshot) return notFound(response, 'Thread not found');
     response.json(snapshot);
   });

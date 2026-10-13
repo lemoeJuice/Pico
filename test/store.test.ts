@@ -97,3 +97,41 @@ describe('PicoStore execution transactions', () => {
     }
   });
 });
+
+describe('canonical history pages', () => {
+  it('pages append-only records newest-first without gaps or overlap', () => {
+    const store = new PicoStore(':memory:');
+    try {
+      const project = store.createProject('History pages', '/');
+      const thread = store.createThread(project.id, 'host');
+      for (let index = 0; index < 235; index += 1) {
+        store.appendMessage(thread.id, `history-${index}`, {
+          role: 'user',
+          content: `Message ${index}`,
+          source: 'user',
+        });
+      }
+
+      const latest = store.listRecordPage(thread.id, undefined, 100);
+      expect(latest.records).toHaveLength(100);
+      expect(latest.records[0]?.id).toBe('history-135');
+      expect(latest.records.at(-1)?.id).toBe('history-234');
+      expect(latest.hasEarlierRecords).toBe(true);
+
+      const earlier = store.listRecordPage(thread.id, latest.records[0]!.seq, 100);
+      expect(earlier.records).toHaveLength(100);
+      expect(earlier.records[0]?.id).toBe('history-35');
+      expect(earlier.records.at(-1)?.id).toBe('history-134');
+      expect(earlier.records.at(-1)?.seq).toBeLessThan(latest.records[0]!.seq);
+      expect(earlier.hasEarlierRecords).toBe(true);
+
+      const oldest = store.listRecordPage(thread.id, earlier.records[0]!.seq, 100);
+      expect(oldest.records.map((record) => record.id)).toEqual(
+        Array.from({ length: 35 }, (_value, index) => `history-${index}`),
+      );
+      expect(oldest.hasEarlierRecords).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+});

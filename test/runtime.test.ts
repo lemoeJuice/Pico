@@ -31,6 +31,32 @@ describe('durable Thread runtime invariants', () => {
     }
   });
 
+  it('keeps an active Tool Batch visible when its parent is older than the latest history page', async () => {
+    const model = new FakeModel(() =>
+      response('', [{ id: 'paged-pending-read', name: 'read_file', arguments: { path: 'facts.txt' } }]),
+    );
+    const env = await setupRuntime(model);
+    const thread = env.createThread('host');
+    try {
+      await env.runtime.submit(thread.id, 'paged-parent-message', 'Read facts.txt.');
+      await until(() => env.store.listApprovals(thread.id).some((approval) => approval.status === 'pending'));
+      for (let index = 0; index < 110; index += 1) {
+        await env.runtime.submit(thread.id, `paused-follow-up-${index}`, `Follow-up ${index}`);
+      }
+
+      const snapshot = env.runtime.getSnapshot(thread.id)!;
+      expect(snapshot.records[0]?.kind).toBe('assistant');
+      expect(snapshot.records[0]?.id).toMatch(/:assistant$/);
+      expect(snapshot.records).toHaveLength(111);
+      expect(snapshot.records.filter((record) => record.kind === 'message')).toHaveLength(110);
+      expect(snapshot.executions.find((execution) => execution.toolName === 'read_file')?.status).toBe('pending');
+      expect(snapshot.approvals.some((approval) => approval.status === 'pending')).toBe(true);
+      expect(snapshot.hasEarlierRecords).toBe(true);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it('closes with a pending approval intact and restores it after Runtime restart', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pico-approval-restart-'));
     const workspace = join(directory, 'workspace');

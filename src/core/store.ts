@@ -49,6 +49,11 @@ export interface ExecutionLogEntry {
   createdAt: string;
 }
 
+export interface CanonicalRecordPage {
+  records: CanonicalRecord[];
+  hasEarlierRecords: boolean;
+}
+
 export interface CommitStepInput {
   assistantRecordId: string;
   modelExecutionId: string;
@@ -478,6 +483,122 @@ export class PicoStore {
     return (
       this.db.prepare('SELECT * FROM canonical_records WHERE thread_id = ? ORDER BY seq').all(threadId) as SqlRow[]
     ).map((row) => this.recordFromRow(row));
+  }
+
+  listRecordPage(threadId: string, beforeSeq?: number, limit = 100): CanonicalRecordPage {
+    const pageSize = Math.max(1, Math.min(Math.floor(limit), 500));
+    const rows = (
+      beforeSeq === undefined
+        ? this.db
+            .prepare('SELECT * FROM canonical_records WHERE thread_id = ? ORDER BY seq DESC LIMIT ?')
+            .all(threadId, pageSize)
+        : this.db
+            .prepare('SELECT * FROM canonical_records WHERE thread_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?')
+            .all(threadId, beforeSeq, pageSize)
+    ) as SqlRow[];
+    let records = rows.reverse().map((row) => this.recordFromRow(row));
+
+    // Keep the parent Model Step visible when an old Tool Batch is still active.
+    // The range remains contiguous so the UI can continue paging from its first record.
+    if (beforeSeq === undefined && records.length > 0) {
+      const activeBatches = this.db
+        .prepare(
+          `SELECT DISTINCT batch_id FROM executions
+           WHERE thread_id = ? AND kind = 'tool' AND status IN ('pending', 'running') AND batch_id IS NOT NULL`,
+        )
+        .all(threadId) as SqlRow[];
+      const assistantIds = activeBatches
+        .map((row) => String(row.batch_id).replace(/:batch$/, '') + ':assistant')
+        .filter((id) => !records.some((record) => record.id === id));
+      if (assistantIds.length > 0) {
+        const placeholders = assistantIds.map(() => '?').join(', ');
+        const parentRows = this.db
+          .prepare(`SELECT * FROM canonical_records WHERE thread_id = ? AND id IN (${placeholders})`)
+          .all(threadId, ...assistantIds) as SqlRow[];
+        const firstPageSeq = records[0]!.seq;
+        const olderParents = parentRows
+          .map((row) => this.recordFromRow(row))
+          .filter((record) => record.seq < firstPageSeq);
+        if (olderParents.length > 0) {
+          const firstRequiredSeq = Math.min(...olderParents.map((record) => record.seq));
+          const contiguousRows = this.db
+            .prepare('SELECT * FROM canonical_records WHERE thread_id = ? AND seq >= ? ORDER BY seq')
+            .all(threadId, firstRequiredSeq) as SqlRow[];
+          records = contiguousRows.map((row) => this.recordFromRow(row));
+        }
+      }
+    }
+
+    const firstSeq = records[0]?.seq;
+    const hasEarlierRecords =
+      firstSeq !== undefined &&
+      Boolean(
+        this.db
+          .prepare('SELECT 1 FROM canonical_records WHERE thread_id = ? AND seq < ? LIMIT 1')
+          .get(threadId, firstSeq),
+      );
+    return { records, hasEarlierRecords };
+  }
+
+  listSnapshotExecutions(threadId: string, records: readonly CanonicalRecord[]): Execution[] {
+    const assistantRecords = records.filter((record) => record.kind === 'assistant');
+    const modelIds = assistantRecords.map((record) => record.id.replace(/:assistant$/, ''));
+    const batchIds = assistantRecords
+      .map((record) => (record.payload as unknown as AssistantPayload).batchId)
+      .filter((batchId): batchId is string => Boolean(batchId));
+    const clauses = ["e.status IN ('pending', 'running')"];
+    const params: Array<string | number> = [threadId];
+    if (modelIds.length > 0) {
+      clauses.push(`e.id IN (${modelIds.map(() => '?').join(', ')})`);
+      params.push(...modelIds);
+    }
+    if (batchIds.length > 0) {
+      clauses.push(`e.batch_id IN (${batchIds.map(() => '?').join(', ')})`);
+      params.push(...batchIds);
+    }
+    clauses.push(`e.id IN (
+      SELECT candidate.id FROM executions candidate
+      WHERE candidate.thread_id = ? AND candidate.kind = 'model'
+        AND candidate.status IN ('failed', 'interrupted')
+        AND NOT EXISTS (
+          SELECT 1 FROM canonical_records committed
+          WHERE committed.thread_id = candidate.thread_id
+            AND committed.id = candidate.id || ':assistant'
+        )
+      ORDER BY candidate.created_at DESC, candidate.id DESC LIMIT 50
+    )`);
+    params.push(threadId);
+    return (
+      this.db
+        .prepare(
+          `SELECT e.* FROM executions e WHERE e.thread_id = ? AND (${clauses.join(' OR ')}) ORDER BY e.created_at, e.id`,
+        )
+        .all(...params) as SqlRow[]
+    ).map((row) => this.executionFromRow(row));
+  }
+
+  listSnapshotApprovals(threadId: string, records: readonly CanonicalRecord[]): PermissionRequest[] {
+    const batchIds = records
+      .filter((record) => record.kind === 'assistant')
+      .map((record) => (record.payload as unknown as AssistantPayload).batchId)
+      .filter((batchId): batchId is string => Boolean(batchId));
+    const batchClause = batchIds.length > 0 ? ` OR e.batch_id IN (${batchIds.map(() => '?').join(', ')})` : '';
+    const rows = this.db
+      .prepare(
+        `SELECT a.*, e.thread_id, e.tool_name, e.arguments_json
+         FROM approvals a JOIN executions e ON e.id = a.execution_id
+         WHERE e.thread_id = ? AND (a.status = 'pending'${batchClause})
+         ORDER BY a.created_at, a.execution_id`,
+      )
+      .all(threadId, ...batchIds) as SqlRow[];
+    return rows.map((row) => ({
+      executionId: String(row.execution_id),
+      threadId: String(row.thread_id),
+      toolName: String(row.tool_name),
+      arguments: json(row.arguments_json, {}),
+      status: row.status as PermissionRequest['status'],
+      createdAt: String(row.created_at),
+    }));
   }
 
   commitModelStep(input: CommitStepInput): CanonicalRecord<AssistantPayload> {

@@ -41,6 +41,7 @@ import {
 } from './assistant-drafts.js';
 import { noticeForThread, withThreadNotice, withoutThreadNotice, type ThreadNotices } from './thread-notices.js';
 import { uiContributionsAt } from './ui-contributions.js';
+import { appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from './history-pages.js';
 import {
   clearAcceptedMessageDraft,
   hasPendingMessageSubmission,
@@ -313,6 +314,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [unavailableModelExecutionIds, setUnavailableModelExecutionIds] = useState<Set<string>>(new Set());
   const [notice, setNotice] = useState('');
   const [threadNotices, setThreadNotices] = useState<ThreadNotices>({});
+  const [loadingEarlierThreadIds, setLoadingEarlierThreadIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
@@ -346,6 +348,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const activeModelExecutions = useRef<AssistantStreamExecutions>(new Map());
   const unavailableModelExecutions = useRef<AssistantStreamExecutions>(new Map());
   const observedModelExecutions = useRef(new Set<string>());
+  const historyExpandedThreads = useRef(new Set<string>());
   const draft = threadId ? (draftsByThread[threadId] ?? '') : '';
   const draftRef = useRef({ threadId, value: draft });
   activeProjectId.current = projectId;
@@ -440,7 +443,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             clearAcceptedDraft(id, record.payload.content);
           }
         }
-        setSnapshot(value);
+        setSnapshot((current) => mergeLatestSnapshot(current, value));
       }
     },
     [observeModelExecutions],
@@ -670,7 +673,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 current.records.some((item) => item.id === record.id)
               )
                 return current;
-              return { ...current, records: [...current.records, record].sort((a, b) => a.seq - b.seq) };
+              return appendSnapshotRecord(
+                current,
+                record,
+                Boolean(record.threadId && historyExpandedThreads.current.has(record.threadId)),
+              );
             });
           }
           const recordThreadId = record?.threadId;
@@ -1085,6 +1092,43 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     if (threadId) setThreadNotices((current) => withoutThreadNotice(current, threadId));
   };
 
+  const loadEarlierRecords = async (): Promise<void> => {
+    const targetThreadId = threadId;
+    const beforeSeq = activeSnapshot?.records[0]?.seq;
+    if (!targetThreadId || beforeSeq === undefined || !activeSnapshot?.hasEarlierRecords) return;
+    setLoadingEarlierThreadIds((current) => new Set(current).add(targetThreadId));
+    followLatest.current = false;
+    const scroll = listRef.current;
+    const previousScrollTop = scroll?.scrollTop ?? 0;
+    const previousScrollHeight = scroll?.scrollHeight ?? 0;
+    try {
+      const page = await api<ThreadSnapshot>(
+        `/api/threads/${encodeURIComponent(targetThreadId)}?beforeSeq=${beforeSeq}`,
+      );
+      if (activeThreadId.current !== targetThreadId) return;
+      historyExpandedThreads.current.add(targetThreadId);
+      setSnapshot((current) =>
+        current && current.thread.id === targetThreadId ? mergeEarlierSnapshot(current, page) : current,
+      );
+      window.requestAnimationFrame(() => {
+        const currentScroll = listRef.current;
+        if (activeThreadId.current === targetThreadId && currentScroll) {
+          currentScroll.scrollTop = previousScrollTop + (currentScroll.scrollHeight - previousScrollHeight);
+        }
+      });
+    } catch (caught) {
+      if (activeThreadId.current === targetThreadId) {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      }
+    } finally {
+      setLoadingEarlierThreadIds((current) => {
+        const next = new Set(current);
+        next.delete(targetThreadId);
+        return next;
+      });
+    }
+  };
+
   const records = activeSnapshot?.records ?? [];
   const executions = activeSnapshot?.executions ?? [];
   const approvals = activeSnapshot?.approvals ?? [];
@@ -1429,6 +1473,18 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               }}
             >
               <div className="timeline">
+                {activeSnapshot?.hasEarlierRecords ? (
+                  <button
+                    className="history-load-more"
+                    type="button"
+                    disabled={loadingEarlierThreadIds.has(selectedThread.id)}
+                    onClick={() => void loadEarlierRecords()}
+                  >
+                    {loadingEarlierThreadIds.has(selectedThread.id)
+                      ? 'Loading earlier messages…'
+                      : 'Load earlier history'}
+                  </button>
+                ) : null}
                 {timeline.map((item) =>
                   item.type === 'model-execution' ? (
                     <ModelExecutionNotice
