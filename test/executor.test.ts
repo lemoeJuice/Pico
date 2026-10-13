@@ -708,6 +708,15 @@ describe('Executor execution identity and recovery', () => {
         return { stdout: 'container-id', stderr: '' };
       }
       if (args[0] === 'exec') {
+        if (args.includes(CONTAINER_RUNNER) && args[args.indexOf('-e') + 2] === 'tools') {
+          return {
+            stdout: JSON.stringify({
+              status: 'completed',
+              tools: [{ name: 'shell', description: 'test shell', parameters: { type: 'object' } }],
+            }),
+            stderr: '',
+          };
+        }
         return {
           stdout: JSON.stringify({ status: 'completed', result: { exitCode: 0, stdout: '', stderr: '' } }),
           stderr: '',
@@ -981,6 +990,15 @@ describe('Executor execution identity and recovery', () => {
         return { stdout: 'container-id', stderr: '' };
       }
       if (args[0] === 'exec') {
+        if (args.includes(CONTAINER_RUNNER) && args[args.indexOf('-e') + 2] === 'tools') {
+          return {
+            stdout: JSON.stringify({
+              status: 'completed',
+              tools: [{ name: 'shell', description: 'test shell', parameters: { type: 'object' } }],
+            }),
+            stderr: '',
+          };
+        }
         return {
           stdout: JSON.stringify({ status: 'completed', result: { exitCode: 0, stdout: 'ok', stderr: '' } }),
           stderr: '',
@@ -1052,6 +1070,19 @@ describe('Executor execution identity and recovery', () => {
       if (args[0] === 'start') return { stdout: 'container-id', stderr: '' };
       if (args[0] === 'exec') {
         if (!args.includes(CONTAINER_RUNNER)) return { stdout: '', stderr: '' };
+        if (args[args.indexOf('-e') + 2] === 'tools') {
+          return {
+            stdout: JSON.stringify({
+              status: 'completed',
+              tools: ['read_file', 'search_files'].map((name) => ({
+                name,
+                description: `test ${name}`,
+                parameters: { type: 'object' },
+              })),
+            }),
+            stderr: '',
+          };
+        }
         const toolName = args.find((value) => value === 'read_file' || value === 'search_files') ?? 'unknown';
         startedToolCalls.push(toolName);
         activeToolCalls += 1;

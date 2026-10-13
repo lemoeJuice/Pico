@@ -27,13 +27,18 @@ describe('Container Executor plugin runner', () => {
     const directory = await mkdtemp(join(tmpdir(), 'pico-container-adapter-tools-'));
     const workspace = join(directory, 'workspace');
     const pluginDirectory = join(directory, 'executor-plugins');
+    const executions = join(directory, 'executions');
     await Promise.all([mkdir(workspace), mkdir(pluginDirectory)]);
     await writeFile(
       join(pluginDirectory, 'custom.mjs'),
-      `export default {
+      `import { writeFile } from 'node:fs/promises';
+       export default {
          id: 'test.container-discovery', name: 'Container discovery', version: '1',
          activateExecutor({ tools }) {
-           tools.register({ name: 'container_custom', description: 'Container-only tool.', parameters: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] } }, async () => 'ok');
+           tools.register({ name: 'container_custom', description: 'Container-only tool.', parameters: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] } }, async (args, context) => {
+             await writeFile(context.workspacePath + '/container-plugin-result.txt', String(args.value));
+             return { executionId: context.executionId, value: args.value };
+           });
          }
        };
       `,
@@ -43,8 +48,9 @@ describe('Container Executor plugin runner', () => {
     const thread = store.createThread(project.id, 'container');
     const binding = store.executorForThread(thread.id)!;
     let containerCreated = false;
+    let runSubmissions = 0;
     const copied: string[] = [];
-    const podman = async (args: string[]) => {
+    const podman = async (args: string[], input?: string) => {
       if (args[0] === 'info') return { stdout: '5.0.0', stderr: '' };
       if (args[0] === 'inspect') {
         if (containerCreated) return { stdout: '{}', stderr: '' };
@@ -61,10 +67,17 @@ describe('Container Executor plugin runner', () => {
       if (args[0] === 'exec' && args.includes(CONTAINER_RUNNER)) {
         const sourceIndex = args.indexOf(CONTAINER_RUNNER);
         const nodeArguments = args.slice(sourceIndex + 1);
+        const mode = nodeArguments[0];
+        if (mode === 'run') {
+          runSubmissions += 1;
+          nodeArguments[3] = executions;
+        }
+        nodeArguments[4] = workspace;
         nodeArguments[5] = pluginDirectory;
         const result = spawnSync(process.execPath, ['-e', CONTAINER_RUNNER, ...nodeArguments], {
           encoding: 'utf8',
           timeout: 10_000,
+          input,
         });
         if (result.error) throw result.error;
         if (result.status !== 0) throw new Error(result.stderr);
@@ -88,6 +101,52 @@ describe('Container Executor plugin runner', () => {
       expect(tools.map((tool) => tool.name)).toContain('container_custom');
       expect(tools.map((tool) => tool.name)).toContain('read_file');
       expect(copied).toEqual([join(pluginDirectory, 'custom.mjs')]);
+
+      const modelExecution = store.createModelExecution('container-plugin-model', thread.id, 0);
+      store.transitionExecution(modelExecution.id, 'running');
+      const call = { id: 'container-plugin-call', name: 'container_custom', arguments: { value: 'ran in container' } };
+      store.commitModelStep({
+        assistantRecordId: 'container-plugin-model:assistant',
+        modelExecutionId: modelExecution.id,
+        threadId: thread.id,
+        payload: {
+          content: '',
+          toolCalls: [call],
+          batchId: 'container-plugin-model:batch',
+          projectionThrough: 0,
+          usage: null,
+          model: 'test-model',
+        },
+        toolCalls: [{ call, executionId: 'container-plugin-execution' }],
+      });
+      const execution = await executor.execute('container-plugin-execution', binding);
+      expect(execution).toMatchObject({
+        status: 'completed',
+        result: { executionId: 'container-plugin-execution', value: 'ran in container' },
+      });
+      expect(await readFile(join(workspace, 'container-plugin-result.txt'), 'utf8')).toBe('ran in container');
+
+      const unknownModelExecution = store.createModelExecution('unknown-container-tool-model', thread.id, 0);
+      store.transitionExecution(unknownModelExecution.id, 'running');
+      const unknownCall = { id: 'unknown-container-tool-call', name: 'not_discovered', arguments: {} };
+      store.commitModelStep({
+        assistantRecordId: 'unknown-container-tool-model:assistant',
+        modelExecutionId: unknownModelExecution.id,
+        threadId: thread.id,
+        payload: {
+          content: '',
+          toolCalls: [unknownCall],
+          batchId: 'unknown-container-tool-model:batch',
+          projectionThrough: 0,
+          usage: null,
+          model: 'test-model',
+        },
+        toolCalls: [{ call: unknownCall, executionId: 'unknown-container-execution' }],
+      });
+      const unknownExecution = await executor.execute('unknown-container-execution', binding);
+      expect(unknownExecution.status).toBe('failed');
+      expect(unknownExecution.error).toMatch(/not registered/);
+      expect(runSubmissions).toBe(1);
     } finally {
       await executor.shutdown();
       store.close();

@@ -135,7 +135,7 @@ export class ContainerExecutor implements ExecutorAdapter {
 
   constructor(
     private readonly store: PicoStore,
-    private readonly tools: ToolCatalog,
+    _tools: ToolCatalog,
     private readonly onExecution: ExecutionListener = () => undefined,
     private readonly image = configuredContainerImage(),
     private readonly runPodmanCommand: PodmanRunner = podman,
@@ -144,12 +144,19 @@ export class ContainerExecutor implements ExecutorAdapter {
     private readonly pluginDirectory = executorPluginDirectory(),
   ) {}
 
-  async listTools(binding: ExecutorBinding): Promise<ToolDefinition[]> {
+  async listTools(binding: ExecutorBinding, signal?: AbortSignal): Promise<ToolDefinition[]> {
     const fingerprint = await this.pluginFingerprint();
     const cached = this.discoveredToolCatalogs.get(binding.id);
     if (cached?.fingerprint === fingerprint) return cached.tools;
-    await this.ensureContainer(binding);
-    const response = await this.callRunner(this.containerName(binding.id), 'tools', 'tool-catalog');
+    await this.ensureContainer(binding, signal);
+    const response = await this.callRunner(
+      this.containerName(binding.id),
+      'tools',
+      'tool-catalog',
+      undefined,
+      undefined,
+      signal,
+    );
     const tools = validateToolDefinitions(response.tools);
     this.discoveredToolCatalogs.set(binding.id, { fingerprint, tools });
     return tools;
@@ -208,18 +215,19 @@ export class ContainerExecutor implements ExecutorAdapter {
     const active = this.inFlight.get(executionId);
     if (active) return active.promise;
     if (current.status === 'running') return this.resumeExisting(executionId, binding, externalSignal);
-    const tool = current.toolName ? this.tools.get(current.toolName) : undefined;
-    if (!tool || tool.source !== 'executor') {
-      return this.store.transitionExecution(executionId, 'failed', {
-        error: `Container tool “${current.toolName ?? 'unknown'}” is not registered.`,
-      });
-    }
     const controller = new AbortController();
     const relayAbort = (): void => controller.abort();
     externalSignal?.addEventListener('abort', relayAbort, { once: true });
     if (externalSignal?.aborted) controller.abort();
     const promise = (async () => {
-      await this.ensureContainer(binding, controller.signal);
+      const discovered = await this.listTools(binding, controller.signal);
+      if (!current.toolName || !discovered.some((tool) => tool.name === current.toolName)) {
+        const failed = this.store.transitionExecution(executionId, 'failed', {
+          error: `Container tool “${current.toolName ?? 'unknown'}” is not registered in the Container Executor.`,
+        });
+        this.onExecution(failed);
+        return failed;
+      }
       const running = this.store.transitionExecution(executionId, 'running');
       this.onExecution(running);
       return this.runRemote(executionId, current.toolName!, current.arguments ?? {}, binding, controller.signal);
@@ -366,7 +374,7 @@ export class ContainerExecutor implements ExecutorAdapter {
   ): Promise<Execution> {
     const name = this.containerName(binding.id);
     const key = this.executionKey(executionId);
-    const response = await this.callRunner(name, 'run', key, toolName, args, signal);
+    const response = await this.callRunner(name, 'run', key, toolName, args, signal, executionId);
     if (response.status === 'running') return this.poll(executionId, binding, signal);
     return this.acceptRunnerResponse(executionId, response);
   }
@@ -403,6 +411,7 @@ export class ContainerExecutor implements ExecutorAdapter {
     toolName?: string,
     args?: Record<string, unknown>,
     signal?: AbortSignal,
+    runnerExecutionId = key,
   ): Promise<ToolRunnerResponse> {
     const command = [
       'exec',
@@ -417,7 +426,7 @@ export class ContainerExecutor implements ExecutorAdapter {
       '/tmp/pico-executions',
       '/workspace',
       '/opt/pico/executor-plugins',
-      key,
+      runnerExecutionId,
     ];
     const { stdout } = await this.callPodman(command, args ? JSON.stringify(args) : undefined, signal);
     try {
