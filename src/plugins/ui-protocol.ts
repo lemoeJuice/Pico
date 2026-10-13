@@ -12,6 +12,25 @@ export const PLUGIN_UI_PROTOCOL_VERSION = 1;
 export const PLUGIN_COMPOSER_CONTROL_HEIGHT_PX = 32;
 export type PluginUiSlot = UiContribution['slot'];
 export type PluginUiEvent = { type: string; [key: string]: unknown };
+export interface PluginUiPopoverMessage {
+  type: 'pico:plugin-ui:popover';
+  open: boolean;
+  width: number;
+  height: number;
+}
+
+export function isPluginUiPopoverMessage(value: unknown): value is PluginUiPopoverMessage {
+  if (!value || typeof value !== 'object') return false;
+  const message = value as Record<string, unknown>;
+  return (
+    message.type === 'pico:plugin-ui:popover' &&
+    typeof message.open === 'boolean' &&
+    typeof message.width === 'number' &&
+    Number.isFinite(message.width) &&
+    typeof message.height === 'number' &&
+    Number.isFinite(message.height)
+  );
+}
 
 export interface PluginUiContext {
   thread: Thread | null;

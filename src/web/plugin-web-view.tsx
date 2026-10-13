@@ -1,8 +1,10 @@
-import { useEffect, useRef, type ReactElement } from 'react';
+import { createPortal } from 'react-dom';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactElement } from 'react';
 import type { PublicSettings } from '../core/types.js';
 import {
   isPluginApiPath,
   isPluginModelSettingsUpdate,
+  isPluginUiPopoverMessage,
   isPluginUiRequest,
   pluginUiLayoutForSlot,
   pluginUiEventMatchesPlugin,
@@ -24,6 +26,9 @@ type PluginWebViewProps = {
   viewType: PluginUiInitMessage['viewType'];
   viewId: string;
   uiSlot?: PluginUiSlot;
+  controlWidthPx?: number | undefined;
+  controlHeightPx?: number | undefined;
+  supportsPopover?: boolean | undefined;
   context: PluginUiContext;
   events?: Array<{ sequence: number; event: PluginUiEvent }>;
   settings: PublicSettings;
@@ -57,15 +62,66 @@ function serializedInit(value: PluginApiInit | undefined): PluginApiInit | undef
 
 export function PluginWebView(props: PluginWebViewProps): ReactElement {
   const frame = useRef<HTMLIFrameElement>(null);
+  const toolbarAnchor = useRef<HTMLSpanElement>(null);
   const portRef = useRef<MessagePort | null>(null);
   const connected = useRef(false);
   const deliveredEventSequence = useRef(props.events?.at(-1)?.sequence ?? 0);
   const deliveredContext = useRef(props.context);
   const current = useRef(props);
   current.current = props;
+  const [anchorPosition, setAnchorPosition] = useState<{ left: number; top: number } | null>(null);
+  const [popover, setPopover] = useState<{ width: number; height: number } | null>(null);
 
   const src = pluginUiUrl(props.pluginId, props.entry, props.viewType, props.viewId);
   const layout = pluginUiLayoutForSlot(props.uiSlot);
+  const toolbarPopover =
+    props.viewType === 'component' &&
+    props.uiSlot === 'thread.toolbar' &&
+    props.supportsPopover === true &&
+    props.controlWidthPx !== undefined &&
+    props.controlHeightPx !== undefined;
+
+  useLayoutEffect(() => {
+    if (!toolbarPopover) return;
+    const updateAnchor = (): void => {
+      const rect = toolbarAnchor.current?.getBoundingClientRect();
+      if (!rect) return;
+      setAnchorPosition((previous) =>
+        previous?.left === rect.left && previous.top === rect.top ? previous : { left: rect.left, top: rect.top },
+      );
+    };
+    updateAnchor();
+    const observer = new ResizeObserver(updateAnchor);
+    if (toolbarAnchor.current) observer.observe(toolbarAnchor.current);
+    window.addEventListener('resize', updateAnchor);
+    window.addEventListener('scroll', updateAnchor, true);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updateAnchor);
+      window.removeEventListener('scroll', updateAnchor, true);
+    };
+  }, [toolbarPopover, props.controlWidthPx, props.controlHeightPx]);
+
+  useEffect(() => {
+    if (!toolbarPopover || !popover) return;
+    const dismiss = (): void => {
+      setPopover(null);
+      portRef.current?.postMessage({ type: 'pico:plugin-ui:popover-dismiss' });
+    };
+    const onPointerDown = (event: PointerEvent): void => {
+      if (event.target === frame.current || toolbarAnchor.current?.contains(event.target as Node)) return;
+      dismiss();
+    };
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') dismiss();
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [toolbarPopover, popover]);
 
   useEffect(() => {
     portRef.current?.postMessage({ type: 'pico:plugin-ui:settings', settings: props.settings });
@@ -108,8 +164,22 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
     portRef.current = hostPort;
 
     hostPort.onmessage = (event: MessageEvent<unknown>): void => {
+      const popoverMessage = event.data;
       const message = event.data as { type?: unknown; height?: unknown } | null;
+      if (isPluginUiPopoverMessage(popoverMessage)) {
+        if (!toolbarPopover) return;
+        setPopover(
+          popoverMessage.open
+            ? {
+                width: Math.max(280, Math.min(420, popoverMessage.width)),
+                height: Math.max(160, Math.min(520, popoverMessage.height)),
+              }
+            : null,
+        );
+        return;
+      }
       if (message?.type === 'pico:plugin-ui:resize' && typeof message.height === 'number') {
+        if (toolbarPopover) return;
         const fixedHeight = pluginUiLayoutForSlot(current.current.uiSlot).controlHeightPx;
         if (fixedHeight !== undefined) {
           if (frame.current) frame.current.style.height = `${fixedHeight}px`;
@@ -192,16 +262,62 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
     return null;
   };
 
-  return (
+  const iframe = (
     <iframe
       ref={frame}
       className={`plugin-web-view plugin-web-view-${props.viewType}`}
-      style={layout.controlHeightPx === undefined ? undefined : { height: `${layout.controlHeightPx}px` }}
+      style={
+        toolbarPopover
+          ? (() => {
+              const anchor = anchorPosition ?? { left: -1000, top: -1000 };
+              const width = popover
+                ? Math.min(popover.width, Math.max(120, window.innerWidth - 24))
+                : props.controlWidthPx!;
+              const height = popover
+                ? Math.min(
+                    popover.height + props.controlHeightPx! + 8,
+                    Math.max(80, window.innerHeight - anchor.top - 8),
+                  )
+                : props.controlHeightPx!;
+              const left = popover ? Math.max(12, Math.min(anchor.left, window.innerWidth - width - 12)) : anchor.left;
+              const top = anchor.top;
+              return {
+                position: 'fixed' as const,
+                left,
+                top,
+                width,
+                height,
+                zIndex: popover ? 30 : 7,
+              };
+            })()
+          : layout.controlHeightPx === undefined
+            ? undefined
+            : { height: `${layout.controlHeightPx}px` }
+      }
       title={`${props.pluginId} ${props.viewType} ${props.viewId}`}
       src={src}
       sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
       referrerPolicy="no-referrer"
       onLoad={connectFrame}
     />
+  );
+
+  if (!toolbarPopover) return iframe;
+  return (
+    <>
+      <span
+        ref={toolbarAnchor}
+        className="plugin-web-view-toolbar-anchor"
+        style={{
+          display: 'block',
+          flex: '0 0 auto',
+          width: `${props.controlWidthPx}px`,
+          height: `${props.controlHeightPx}px`,
+          alignSelf: 'center',
+        }}
+        aria-hidden="true"
+      />
+      {createPortal(iframe, document.body, `${props.pluginId}:${props.viewId}`)}
+    </>
   );
 }

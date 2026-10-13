@@ -79,27 +79,43 @@
   function toolbar() {
     if (!context.thread)
       return '<section class="panel"><strong>Tool permissions</strong><div class="empty">Choose a Thread to review its tools.</div></section>';
-    const pendingCount = data.approvals.filter((approval) => approval.status === 'pending').length;
     const rows = data.tools
       .map(
         (tool) => `
-      <div class="tool">
-        <div><div class="tool-name">${escape(tool.name)}</div><div class="tool-description">${escape(tool.description)}</div></div>
+      <label class="permission-row">
+        <span><strong>${escape(tool.name)}</strong><small>${escape(tool.description)}</small></span>
         <select data-tool="${escape(tool.name)}" aria-label="${escape(tool.name)} permission">
-          ${['allow', 'ask', 'deny'].map((policy) => `<option value="${policy}" ${tool.policy === policy ? 'selected' : ''}>${policy}</option>`).join('')}
+          ${['allow', 'ask', 'deny'].map((policy) => `<option value="${policy}" ${tool.policy === policy ? 'selected' : ''}>${policy[0].toUpperCase()}${policy.slice(1)}</option>`).join('')}
         </select>
-      </div>`,
+      </label>`,
       )
       .join('');
     return `<section class="panel toolbar-panel">
-      ${error ? `<div class="error">${escape(error)}</div>` : ''}
-      <details class="tool-list-disclosure" ${toolsExpanded ? 'open' : ''}>
-        <summary>Tools ${data.tools.length}${pendingCount ? ` · ${pendingCount} pending` : ''}</summary>
-        <div class="heading"><strong>Tool permissions</strong><span class="muted">${escape(context.thread.title)}</span></div>
-        <div class="tools-scroll"><div class="tools">${rows || '<div class="empty">No tools are available for this Thread.</div>'}</div></div>
+      <details class="permission-menu" ${toolsExpanded ? 'open' : ''}>
+        <summary class="tools-trigger">Tools <span class="permission-count">${data.tools.length}</span></summary>
+        <div class="permission-popover">
+          <div class="popover-heading"><strong>Tool permissions</strong><span>Saved for this Thread</span></div>
+          ${error ? `<div class="error">${escape(error)}</div>` : ''}
+          <div class="tools">${rows || '<div class="empty">Tool definitions will appear after the next Model projection.</div>'}</div>
+        </div>
       </details>
     </section>`;
   }
+
+  function setPopover(open) {
+    port?.postMessage({
+      type: 'pico:plugin-ui:popover',
+      open,
+      width: 390,
+      height: Math.min(480, Math.max(100, 61 + data.tools.length * 56 + (error ? 140 : 0))),
+    });
+  }
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || !toolsExpanded) return;
+    toolsExpanded = false;
+    draw();
+  });
 
   function renderer() {
     const execution = context.execution;
@@ -127,10 +143,10 @@
   function draw() {
     root.innerHTML = init?.viewId === 'ToolPermissions' ? toolbar() : renderer();
     if (init?.viewId === 'ToolPermissions') {
-      const disclosure = root.querySelector('.tool-list-disclosure');
+      const disclosure = root.querySelector('.permission-menu');
       disclosure?.addEventListener('toggle', () => {
         toolsExpanded = disclosure.open;
-        resizeToContent();
+        setPopover(toolsExpanded);
       });
       root.querySelectorAll('select[data-tool]').forEach((select) => {
         select.addEventListener('change', async () => {
@@ -195,10 +211,17 @@
       else handler.reject(new Error(message.error));
     } else if (message.type === 'pico:plugin-ui:context') {
       const nextThreadId = message.context?.thread?.id ?? null;
-      if (nextThreadId !== renderedThreadId) toolsExpanded = false;
+      if (nextThreadId !== renderedThreadId) {
+        toolsExpanded = false;
+        setPopover(false);
+      }
       renderedThreadId = nextThreadId;
       context = message.context ?? { thread: null };
       void refresh();
+    } else if (message.type === 'pico:plugin-ui:popover-dismiss') {
+      toolsExpanded = false;
+      const disclosure = root.querySelector('.permission-menu');
+      if (disclosure) disclosure.open = false;
     } else if (message.type === 'pico:plugin-ui:event') {
       if (message.event?.type === 'plugin.updated' && message.event.pluginId === pluginId) void refresh();
     }

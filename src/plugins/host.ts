@@ -339,6 +339,23 @@ export class PluginHost {
           ) {
             throw new Error('composer.model contributions must name a Web UI entry and component.');
           }
+          if (
+            (contribution.controlWidthPx !== undefined &&
+              (!Number.isFinite(contribution.controlWidthPx) ||
+                contribution.controlWidthPx < 24 ||
+                contribution.controlWidthPx > 420)) ||
+            (contribution.controlHeightPx !== undefined &&
+              (!Number.isFinite(contribution.controlHeightPx) ||
+                contribution.controlHeightPx < 24 ||
+                contribution.controlHeightPx > 64)) ||
+            (contribution.supportsPopover !== undefined && typeof contribution.supportsPopover !== 'boolean') ||
+            (contribution.supportsPopover &&
+              (contribution.slot !== 'thread.toolbar' ||
+                contribution.controlWidthPx === undefined ||
+                contribution.controlHeightPx === undefined))
+          ) {
+            throw new Error('Toolbar popovers require valid control dimensions and the thread.toolbar slot.');
+          }
           this.contributions.push({ ...contribution, pluginId: plugin.id, id: `${plugin.id}:${contribution.id}` });
         },
         registerPage: (page) => {

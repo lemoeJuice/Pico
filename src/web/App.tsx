@@ -364,6 +364,9 @@ function PluginContributionView({
         viewType="component"
         viewId={item.component}
         uiSlot={item.slot}
+        controlWidthPx={item.controlWidthPx}
+        controlHeightPx={item.controlHeightPx}
+        supportsPopover={item.supportsPopover}
         events={events}
         {...pluginProps}
         isRegisteredPage={isRegisteredPage}

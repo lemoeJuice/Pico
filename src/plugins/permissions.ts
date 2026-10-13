@@ -59,6 +59,7 @@ const permissionsUi = (slot: 'thread.toolbar' | 'tool.renderer', id: string, com
         : 'Inspect a Tool execution and resolve a pending permission request.',
     entry: 'webui',
     component,
+    ...(slot === 'thread.toolbar' ? { controlWidthPx: 68, controlHeightPx: 29, supportsPopover: true } : {}),
     ...(slot === 'tool.renderer' ? {} : { command: '/permissions' }),
   }) as unknown as UiContribution;
 
@@ -214,14 +215,18 @@ export const permissionPlugin: PicoPlugin = {
     ): Promise<Array<{ name: string; description: string; policy: PermissionPolicy }>> => {
       const thread = threads.get(threadId);
       if (!thread) throw new Error('Thread not found');
-      const discovered = await threads.tools(threadId);
+      const known = objectValue<PermissionTools>(state.get('availableTools', {}))[threadId];
+      const binding = threads.binding(threadId);
+      const available =
+        known ??
+        (thread.executorKind === 'container' || binding?.remoteConnectionId
+          ? []
+          : (await threads.tools(threadId)).map((tool) => ({
+              name: tool.name,
+              description: tool.description,
+              policy: tool.source === 'runtime' ? 'allow' : thread.executorKind === 'host' ? 'ask' : 'allow',
+            })));
       const rules = readRules()[threadId] ?? {};
-      const available = discovered.map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        policy:
-          rules[tool.name] ?? (tool.source === 'runtime' ? 'allow' : thread.executorKind === 'host' ? 'ask' : 'allow'),
-      }));
       return available.map((tool) => ({ ...tool, policy: rules[tool.name] ?? tool.policy }));
     };
 
