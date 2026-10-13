@@ -99,6 +99,20 @@ function stringifyToolResult(payload: ToolResultPayload): string {
   }
 }
 
+function projectMessageContent(message: MessagePayload, thread: Thread): string {
+  if (message.source === 'user') return message.content;
+  const source =
+    message.senderThreadId && message.senderThreadId === thread.parentThreadId
+      ? 'Parent Thread'
+      : message.source === 'child'
+        ? 'Child Thread'
+        : 'Agent Thread';
+  const label = message.senderLabel?.trim();
+  const senderLabel = label ? ` ${JSON.stringify(label)}` : '';
+  const senderId = message.senderThreadId ? ` (Thread ID: ${JSON.stringify(message.senderThreadId)})` : '';
+  return `[Message from ${source}${senderLabel}${senderId}]\n${message.content}`;
+}
+
 function terminalStatus(status: ExecutionStatus): status is 'completed' | 'failed' | 'interrupted' {
   return status === 'completed' || status === 'failed' || status === 'interrupted';
 }
@@ -721,7 +735,7 @@ export class PicoRuntime {
         records: projectionRecords,
         through,
         systemPrompt: `${baseSystemPrompt}\n\nCurrent Thread ID: ${thread.id}\n${thread.parentThreadId ? `Parent Thread ID: ${thread.parentThreadId}` : 'This Thread has no parent.'}`,
-        turns: this.projectTurns(projectionRecords),
+        turns: this.projectTurns(projectionRecords, thread),
         tools: this.visibleToolDefinitions(thread),
       };
       const projected = await this.pipelines.run('projection', baseProjection, async (value) => value);
@@ -825,7 +839,7 @@ export class PicoRuntime {
     }
   }
 
-  private projectTurns(records: readonly CanonicalRecord[]): PromptTurn[] {
+  private projectTurns(records: readonly CanonicalRecord[], thread: Thread): PromptTurn[] {
     const results = new Map<string, ToolResultPayload>();
     for (const record of records) {
       if (record.kind === 'tool_result') {
@@ -838,7 +852,7 @@ export class PicoRuntime {
     for (const record of records) {
       if (record.kind === 'message') {
         const message = record.payload as unknown as MessagePayload;
-        turns.push({ kind: 'message', role: 'user', content: message.content });
+        turns.push({ kind: 'message', role: 'user', content: projectMessageContent(message, thread) });
       } else if (record.kind === 'assistant') {
         const assistant = record.payload as unknown as AssistantPayload;
         if (assistant.toolCalls.length > 0) {
@@ -1149,7 +1163,7 @@ export class PicoRuntime {
         const payload: MessagePayload = {
           role: 'user',
           content: message,
-          source: 'child',
+          source: sender.parentThreadId ? 'child' : 'agent',
           senderThreadId: sender.id,
           senderLabel: sender.title,
         };

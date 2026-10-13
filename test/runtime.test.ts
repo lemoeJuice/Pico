@@ -939,7 +939,7 @@ describe('durable Thread runtime invariants', () => {
       ).toBe(true);
       expect(
         childMessages.some(
-          (record) => record.payload.source === 'child' && record.payload.content === 'Please check the detail.',
+          (record) => record.payload.source === 'agent' && record.payload.content === 'Please check the detail.',
         ),
       ).toBe(true);
       expect(parentCalls).toBeGreaterThanOrEqual(3);
@@ -948,14 +948,24 @@ describe('durable Thread runtime invariants', () => {
         model.prompts.some(
           (prompt) =>
             prompt.system.includes(`Current Thread ID: ${parent.id}`) &&
-            prompt.turns.some((turn) => turn.kind === 'message' && turn.content === 'The detail is confirmed.'),
+            prompt.turns.some(
+              (turn) =>
+                turn.kind === 'message' &&
+                turn.content ===
+                  `[Message from Child Thread "Research child" (Thread ID: "${childId}")]\nThe detail is confirmed.`,
+            ),
         ),
       ).toBe(true);
       expect(
         model.prompts.some(
           (prompt) =>
             prompt.system.includes(`Current Thread ID: ${childId}`) &&
-            prompt.turns.some((turn) => turn.kind === 'message' && turn.content === 'Please check the detail.'),
+            prompt.turns.some(
+              (turn) =>
+                turn.kind === 'message' &&
+                turn.content ===
+                  `[Message from Parent Thread "Main thread" (Thread ID: "${parent.id}")]\nPlease check the detail.`,
+            ),
         ),
       ).toBe(true);
     } finally {

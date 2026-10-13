@@ -1438,7 +1438,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       outputUnavailable={unavailableModelExecutionIds.has(item.execution.id)}
                     />
                   ) : item.record.kind === 'message' ? (
-                    <MessageBubble key={item.record.id} record={item.record} onOpenThread={chooseThread} />
+                    <MessageBubble
+                      key={item.record.id}
+                      record={item.record}
+                      thread={selectedThread}
+                      onOpenThread={chooseThread}
+                    />
                   ) : (
                     <AssistantBubble
                       key={item.record.id}
@@ -1858,17 +1863,30 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   );
 }
 
-function MessageBubble({ record, onOpenThread }: { record: CanonicalRecord; onOpenThread(id: string): void }) {
+function MessageBubble({
+  record,
+  thread,
+  onOpenThread,
+}: {
+  record: CanonicalRecord;
+  thread: Thread;
+  onOpenThread(id: string): void;
+}) {
   const message = recordPayload<MessagePayload>(record);
   const incoming = message.source !== 'user';
+  const messageSource =
+    thread.parentThreadId && message.senderThreadId === thread.parentThreadId
+      ? 'Parent Thread'
+      : message.source === 'child'
+        ? 'Child Thread'
+        : 'Agent';
   return (
     <div className={`user-message ${incoming ? 'incoming-message' : ''}`}>
       <div className="message-body">
         <div className="message-author">
           {incoming ? (
             <>
-              {message.source === 'child' ? 'Child Thread' : 'Agent'} <span>·</span>{' '}
-              {message.senderLabel ?? 'another Thread'}
+              {messageSource} <span>·</span> {message.senderLabel ?? 'another Thread'}
             </>
           ) : (
             'You'
