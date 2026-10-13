@@ -695,6 +695,20 @@ export class PicoStore {
     return this.transaction(() => this.transitionExecutionInternal(id, status, data));
   }
 
+  recordRetryableExecutionFailure(id: string, error: string): Execution {
+    return this.transaction(() => {
+      const current = this.getExecution(id);
+      if (!current) throw new Error(`Execution ${id} not found`);
+      if (current.kind !== 'tool' || current.status !== 'pending') {
+        throw new Error(`Execution ${id} is not a pending Tool Execution`);
+      }
+      const now = isoNow();
+      this.db.prepare('UPDATE executions SET error = ?, updated_at = ? WHERE id = ?').run(error, now, id);
+      this.logExecution(id, 'retryable-setup-failure', { error }, now);
+      return this.getExecution(id)!;
+    });
+  }
+
   private transitionExecutionInternal(
     id: string,
     status: ExecutionStatus,

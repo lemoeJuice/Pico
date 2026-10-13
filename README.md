@@ -56,6 +56,7 @@ The browser asks for the token once and receives a revocable, `HttpOnly`, `SameS
 
 - Each Thread stays bound to the Executor selected at creation. Create another Thread in the same Project to use a different Executor.
 - Container Executor uses Podman and `node:22-bookworm-slim`. It mounts only the selected workspace at `/workspace`, runs as root inside the container, and does not mount the host home directory, SSH keys, or Podman socket. Each Thread gets its own persistent container.
+- A transient Container setup failure, such as a registry disconnect while pulling the image, keeps the Tool Execution pending and shows the error. Continue retries the same Execution ID after connectivity returns.
 - Remote Host Executor runs the same basic tools on a separately started Pico Executor service. The Runtime stores its token locally and does not return it through the API. Remote execution IDs are durably deduplicated on the Executor so retrying after a lost response does not start a second command.
 - Host Executor runs shell commands with the host environment. File tools stay within the selected workspace. Host tool calls ask for approval by default; each approval can allow once or save an allow rule for that Tool in the current Thread. Container tool calls are allowed by default because they run in the isolated container. Permission can be changed per Thread.
 - `read_file`, `search_files`, `apply_patch`, and `shell` are available to the model. Tool output and execution status are visible in the Thread.

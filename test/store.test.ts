@@ -96,6 +96,45 @@ describe('PicoStore execution transactions', () => {
       store.close();
     }
   });
+
+  it('persists retryable setup diagnostics atomically without changing the Execution state', () => {
+    const store = new PicoStore(':memory:');
+    try {
+      const project = store.createProject('Retryable execution diagnostic', '/');
+      const thread = store.createThread(project.id, 'container');
+      const modelExecution = store.createModelExecution('retryable-model', thread.id, 0);
+      store.transitionExecution(modelExecution.id, 'running');
+      const call = { id: 'retryable-call', name: 'shell', arguments: { command: 'true' } };
+      store.commitModelStep({
+        assistantRecordId: 'retryable-model:assistant',
+        modelExecutionId: modelExecution.id,
+        threadId: thread.id,
+        payload: assistantPayload({ batchId: 'retryable-model:batch', toolCalls: [call] }),
+        toolCalls: [{ call, executionId: 'retryable-tool' }],
+      });
+      store.db.exec(`
+        CREATE TRIGGER fail_retryable_setup_log
+        BEFORE INSERT ON execution_log
+        WHEN NEW.execution_id = 'retryable-tool' AND NEW.kind = 'retryable-setup-failure'
+        BEGIN SELECT RAISE(ABORT, 'simulated retryable diagnostic log failure'); END;
+      `);
+
+      expect(() =>
+        store.recordRetryableExecutionFailure('retryable-tool', 'Registry connection ended with EOF'),
+      ).toThrow(/simulated retryable diagnostic log failure/);
+      expect(store.getExecution('retryable-tool')).toMatchObject({ status: 'pending', error: null });
+      expect(store.listExecutionLog('retryable-tool', 'retryable-setup-failure')).toHaveLength(0);
+
+      store.db.exec('DROP TRIGGER fail_retryable_setup_log;');
+      const updated = store.recordRetryableExecutionFailure('retryable-tool', 'Registry connection ended with EOF');
+      expect(updated).toMatchObject({ status: 'pending', error: 'Registry connection ended with EOF' });
+      expect(store.listExecutionLog('retryable-tool', 'retryable-setup-failure')).toMatchObject([
+        { detail: { error: 'Registry connection ended with EOF' } },
+      ]);
+    } finally {
+      store.close();
+    }
+  });
 });
 
 describe('canonical history pages', () => {

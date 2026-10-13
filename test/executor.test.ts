@@ -671,6 +671,67 @@ describe('Executor execution identity and recovery', () => {
     }
   });
 
+  it('keeps Container setup retryable when the image registry drops the pull response', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.createThread('container');
+    const modelExecution = env.store.createModelExecution('registry-eof-model', thread.id, 0);
+    env.store.transitionExecution(modelExecution.id, 'running');
+    const call = { id: 'registry-eof-call', name: 'shell', arguments: { command: 'true' } };
+    env.store.commitModelStep({
+      assistantRecordId: 'registry-eof-model:assistant',
+      modelExecutionId: modelExecution.id,
+      threadId: thread.id,
+      payload: assistantPayload({ batchId: 'registry-eof-model:batch', toolCalls: [call] }),
+      toolCalls: [{ call, executionId: 'registry-eof-tool' }],
+    });
+
+    let registryAvailable = false;
+    let containerSetupAttempts = 0;
+    const runner = async (args: string[]) => {
+      if (args[0] === 'info') return { stdout: '5.0.0', stderr: '' };
+      if (args[0] === 'inspect') throw new Error('no such container');
+      if (args[0] === 'run') {
+        containerSetupAttempts += 1;
+        if (!registryAvailable) {
+          throw new Error(
+            'copying system image from manifest: fetching manifest in docker.io/library/node: pinging registry: EOF',
+          );
+        }
+        return { stdout: 'container-id', stderr: '' };
+      }
+      if (args[0] === 'exec') {
+        return {
+          stdout: JSON.stringify({ status: 'completed', result: { exitCode: 0, stdout: '', stderr: '' } }),
+          stderr: '',
+        };
+      }
+      throw new Error(`Unexpected Podman command: ${args[0] ?? 'empty'}`);
+    };
+    const catalog = new ToolCatalog();
+    catalog.register({
+      owner: 'test',
+      source: 'executor',
+      definition: { name: 'shell', description: 'test shell', parameters: { type: 'object' } },
+      execute: async () => ({ exitCode: 0 }),
+    });
+    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, runner);
+    try {
+      const binding = env.store.executorForThread(thread.id)!;
+      expect((await executor.execute('registry-eof-tool', binding)).status).toBe('pending');
+      expect(env.store.getExecution('registry-eof-tool')).toMatchObject({
+        status: 'pending',
+        error: expect.stringMatching(/registry.*EOF/i),
+      });
+
+      registryAvailable = true;
+      expect((await executor.execute('registry-eof-tool', binding)).status).toBe('completed');
+      expect(env.store.getExecution('registry-eof-tool')?.error).toBeNull();
+      expect(containerSetupAttempts).toBe(2);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it('keeps a Container tool running after a lost submission response until missing state is confirmed', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.createThread('container');

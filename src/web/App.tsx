@@ -252,11 +252,16 @@ function ToolCard({
         ? (result.error ?? 'Tool failed.')
         : result
           ? toJson(result.result)
-          : execution?.status === 'running'
-            ? 'Running in the selected Executor…'
-            : 'Waiting for the Executor…';
+          : execution?.status === 'pending' && execution.error
+            ? `${execution.error}\n\nContinue this Thread to retry the same Execution.`
+            : execution?.status === 'running'
+              ? 'Running in the selected Executor…'
+              : 'Waiting for the Executor…';
   return (
-    <details className={`tool-card tool-${execution?.status ?? 'pending'}`}>
+    <details
+      className={`tool-card tool-${execution?.status ?? 'pending'}`}
+      open={execution?.status === 'pending' && Boolean(execution.error)}
+    >
       <summary>
         <span className="tool-chevron">⌄</span>
         <span className="tool-name">{call.name}</span>

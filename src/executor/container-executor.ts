@@ -56,6 +56,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isRetryableContainerSetupFailure(error: unknown): boolean {
+  return /connection|refused|permission denied|read-only|\bEOF\b|network is unreachable|no route to host|temporary failure in name resolution|timed? out|context deadline exceeded|i\/o timeout/i.test(
+    errorMessage(error),
+  );
+}
+
 function podman(args: string[], input?: string, signal?: AbortSignal): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolvePromise, reject) => {
     if (signal?.aborted) return reject(new DOMException('Execution interrupted', 'AbortError'));
@@ -192,11 +198,12 @@ export class ContainerExecutor implements ExecutorAdapter {
         // Once submitted, a lost Podman response cannot prove whether the tool started or finished.
         if (latest.status === 'running') return latest;
         // Before submission, transient setup failures leave the durable execution available for retry.
-        if (
-          latest.status === 'pending' &&
-          /connection|refused|permission denied|read-only/i.test(error instanceof Error ? error.message : String(error))
-        )
-          return latest;
+        if (latest.status === 'pending' && isRetryableContainerSetupFailure(error)) {
+          const diagnostic = errorMessage(error).slice(0, 2000);
+          const retryable = this.store.recordRetryableExecutionFailure(executionId, diagnostic);
+          this.onExecution(retryable);
+          return retryable;
+        }
         return this.store.transitionExecution(executionId, latest.status === 'pending' ? 'failed' : 'interrupted', {
           error: error instanceof Error ? error.message : String(error),
         });
