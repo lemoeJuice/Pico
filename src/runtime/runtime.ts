@@ -566,20 +566,34 @@ export class PicoRuntime {
         }
         continue;
       }
-      if (execution.status === 'pending') {
-        const interrupted = this.store.transitionExecution(execution.id, 'interrupted', {
-          error: 'The execution had not started when the user explicitly interrupted it.',
-          detail: { userInterrupted: true },
-        });
-        this.executionChanged(interrupted);
+      const binding = this.store.executorForThread(threadId);
+      if (!binding) {
+        if (execution.status === 'pending') {
+          const interrupted = this.store.transitionExecution(execution.id, 'interrupted', {
+            error: 'No Executor was bound when the user explicitly interrupted this pending execution.',
+            detail: { userInterrupted: true, confirmedMissing: true },
+          });
+          this.executionChanged(interrupted);
+          this.ensureToolResult(threadId, interrupted);
+        }
         continue;
       }
-      const binding = this.store.executorForThread(threadId);
-      if (!binding) continue;
       try {
         const adapter = this.adapterFor(binding);
         const updated = await adapter.interrupt(execution.id, binding);
-        if (updated) this.executionChanged(updated);
+        if (updated) {
+          this.executionChanged(updated);
+          if (terminalStatus(updated.status)) this.ensureToolResult(threadId, updated);
+        }
+        const latest = this.store.getExecution(execution.id);
+        if (execution.status === 'pending' && latest?.status === 'pending') {
+          const interrupted = this.store.transitionExecution(execution.id, 'interrupted', {
+            error: 'The Executor confirmed this execution had not started when the user explicitly interrupted it.',
+            detail: { userInterrupted: true, confirmedMissing: true },
+          });
+          this.executionChanged(interrupted);
+          this.ensureToolResult(threadId, interrupted);
+        }
       } catch (error) {
         // A disconnected Executor leaves its last durable state untouched.
         this.publish({

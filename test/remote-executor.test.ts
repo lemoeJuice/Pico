@@ -613,4 +613,81 @@ describe('Remote Host Executor', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it('interrupts a Remote Tool whose accepted submission response was lost', async () => {
+    const directory = await import('node:fs/promises').then(({ mkdtemp }) =>
+      mkdtemp(join(tmpdir(), 'pico-remote-interrupt-pending-')),
+    );
+    const workspaceRoot = join(directory, 'remote-root');
+    const remoteWorkspace = join(workspaceRoot, 'repo');
+    await mkdir(remoteWorkspace, { recursive: true });
+    const remote = await startRemoteExecutorServer({
+      token,
+      workspaceRoot,
+      databasePath: join(directory, 'executor.sqlite'),
+      port: 0,
+    });
+    const endpoint = `http://127.0.0.1:${remote.port}`;
+    const command = "node -e \"setTimeout(() => require('node:fs').appendFileSync('runs.log', 'x'), 1200)\"";
+    const model = new FakeModel((_prompt, callNumber) =>
+      callNumber === 1
+        ? response('', [{ id: 'lost-ack-interrupt-call', name: 'shell', arguments: { command } }])
+        : response('The interrupted command did not continue.'),
+    );
+    const env = await setupRuntime(model);
+    const originalFetch = globalThis.fetch;
+    try {
+      const connection = await env.runtime.addRemoteExecutorConnection('Build host', endpoint, token);
+      const thread = await env.runtime.createRemoteThread(env.project.id, connection.id, remoteWorkspace);
+      env.runtime.setToolPermission(thread.id, 'shell', 'allow');
+
+      let acceptedSubmissionResponseWasLost = false;
+      globalThis.fetch = async (input, init) => {
+        const requestUrl = input instanceof URL ? input : new URL(typeof input === 'string' ? input : input.url);
+        if (
+          requestUrl.origin === endpoint &&
+          /^\/api\/executions\/[^/]+$/.test(requestUrl.pathname) &&
+          init?.method === 'POST'
+        ) {
+          await originalFetch(input, init);
+          acceptedSubmissionResponseWasLost = true;
+          throw new TypeError('Simulated lost response after Remote Executor accepted the execution.');
+        }
+        return originalFetch(input, init);
+      };
+
+      await env.runtime.submit(thread.id, 'lost-ack-interrupt-message', 'Start then interrupt the command.');
+      await until(() => {
+        const execution = env.store.listExecutions(thread.id).find((item) => item.kind === 'tool');
+        return (
+          acceptedSubmissionResponseWasLost &&
+          execution?.status === 'pending' &&
+          env.runtime.getThread(thread.id)?.state === 'paused'
+        );
+      });
+      const execution = env.store.listExecutions(thread.id).find((item) => item.kind === 'tool')!;
+      expect(await getJson<{ status: string }>(`${endpoint}/api/executions/${execution.id}`, token)).toMatchObject({
+        status: 'running',
+      });
+
+      await env.runtime.interrupt(thread.id);
+      await env.runtime.drain();
+
+      expect(env.store.getExecution(execution.id)?.status).toBe('interrupted');
+      expect(await getJson<{ status: string }>(`${endpoint}/api/executions/${execution.id}`, token)).toMatchObject({
+        status: 'interrupted',
+      });
+      expect(env.store.listRecords(thread.id).find((record) => record.kind === 'tool_result')).toMatchObject({
+        payload: { status: 'interrupted' },
+      });
+      expect(model.calls).toBe(1);
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 1400));
+      await expect(readFile(join(remoteWorkspace, 'runs.log'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      globalThis.fetch = originalFetch;
+      await env.cleanup();
+      await remote.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 5000);
 });

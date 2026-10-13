@@ -143,7 +143,7 @@ export class RemoteHostExecutor implements ExecutorAdapter {
 
   async interrupt(executionId: string, binding: ExecutorBinding): Promise<Execution | null> {
     const current = this.store.getExecution(executionId);
-    if (!current || current.status !== 'running') return current;
+    if (!current || ['completed', 'failed', 'interrupted'].includes(current.status)) return current;
     const active = this.inFlight.get(executionId);
     if (active) active.controller.abort();
     const { endpointUrl, accessToken } = connection(binding);
