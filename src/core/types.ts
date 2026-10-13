@@ -117,11 +117,17 @@ export interface TokenUsage {
   totalTokens?: number;
 }
 
+export type ModelProvider = 'openai-compatible' | 'chatgpt-plan';
+export type ReasoningEffort = 'auto' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 export interface ModelSettings {
   baseUrl: string;
   apiKey: string;
   model: string;
   temperature: number;
+  provider: ModelProvider;
+  reasoningEffort: ReasoningEffort;
+  fastMode: boolean;
 }
 
 export interface ToolDefinition {
@@ -151,5 +157,15 @@ export interface PublicSettings {
   baseUrl: string;
   model: string;
   temperature: number;
+  provider: ModelProvider;
+  reasoningEffort: ReasoningEffort;
+  fastMode: boolean;
   hasApiKey: boolean;
+  chatGptConnected: boolean;
+  chatGptAccountLabel: string | null;
+}
+
+export interface ChatGptModelChoice {
+  slug: string;
+  displayName: string;
 }

@@ -1,4 +1,4 @@
-import type { ModelSettings, TokenUsage, ToolCall, ToolDefinition } from '../core/types.js';
+import type { ModelSettings, ReasoningEffort, TokenUsage, ToolCall, ToolDefinition } from '../core/types.js';
 
 export type PromptTurn =
   | { kind: 'message'; role: 'user' | 'assistant'; content: string }
@@ -11,6 +11,8 @@ export interface ModelPrompt {
   tools: ToolDefinition[];
   model: string;
   temperature: number;
+  reasoningEffort?: ReasoningEffort;
+  fastMode?: boolean;
 }
 
 export interface ModelResponse {

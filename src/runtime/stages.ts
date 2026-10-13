@@ -1,4 +1,12 @@
-import type { AssistantPayload, CanonicalRecord, Execution, Thread, ToolCall, ToolDefinition } from '../core/types.js';
+import type {
+  AssistantPayload,
+  CanonicalRecord,
+  Execution,
+  ModelProvider,
+  Thread,
+  ToolCall,
+  ToolDefinition,
+} from '../core/types.js';
 import type { ModelPrompt } from './model.js';
 
 export interface StepInput {
@@ -17,9 +25,11 @@ export interface ProjectionInput {
 
 export interface ModelStageInput {
   thread: Thread;
+  provider: ModelProvider;
   prompt: ModelPrompt;
   signal: AbortSignal;
   onText(delta: string): void;
+  recordModelInput(prompt: ModelPrompt, provider: ModelProvider): void;
 }
 
 export interface ToolBatchInput {

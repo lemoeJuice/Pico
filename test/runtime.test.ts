@@ -13,6 +13,36 @@ import { threadCanBeInterrupted } from '../src/web/thread-controls.js';
 import { assistantPayload, deferred, FakeModel, response, setupRuntime } from './helpers.js';
 
 describe('durable Thread runtime invariants', () => {
+  it('routes ChatGPT model calls through the reserved model Pipeline and keeps OAuth secrets private', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    try {
+      expect(env.runtime.pluginInfo().pipelines).toContainEqual({
+        stage: 'model',
+        pluginId: 'pico.chatgpt-plan',
+        order: 0,
+      });
+      expect(() => env.runtime.updateModelSettings({ provider: 'chatgpt-plan' })).toThrow('Connect a ChatGPT account');
+
+      env.store.setSetting('chatgpt.oauth', {
+        hostId: 'urn:uuid:pico-test',
+        clientId: 'oaiapp_pico_test',
+        subject: 'chatgpt-user-1',
+        email: 'pico-user@example.test',
+        idToken: 'id-token-secret',
+        accessToken: 'access-token-secret',
+        refreshToken: 'refresh-token-secret',
+        expiresAt: Date.now() + 3_600_000,
+        scopes: ['openid', 'offline_access', 'resource.invoke', 'chatgpt.tokens.use.direct'],
+      });
+      const publicSettings = env.runtime.publicModelSettings();
+      expect(publicSettings.chatGptConnected).toBe(true);
+      expect(publicSettings.chatGptAccountLabel).toBe('pico-user@example.test');
+      expect(JSON.stringify(publicSettings)).not.toContain('token-secret');
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it('deduplicates Messages by ID and starts an idle Thread once', async () => {
     const model = new FakeModel(() => response('Ready.'));
     const env = await setupRuntime(model);
