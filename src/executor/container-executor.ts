@@ -1,17 +1,21 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { accessSync, constants } from 'node:fs';
+import { readFile, readdir } from 'node:fs/promises';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import type { Execution, ExecutorBinding } from '../core/types.js';
 import { PicoStore } from '../core/store.js';
 import { CONTAINER_RUNNER } from './container-runner.js';
 import { ToolCatalog } from './tools.js';
 import type { ExecutionListener, ExecutorAdapter } from './executor.js';
+import type { ToolDefinition } from '../core/types.js';
+import { executorPluginDirectory, validateToolDefinitions } from './plugin-host.js';
 
 interface ToolRunnerResponse {
   status: 'running' | 'completed' | 'failed' | 'interrupted';
   result?: unknown;
   error?: string;
+  tools?: unknown;
 }
 
 type PodmanRunner = typeof podman;
@@ -124,6 +128,8 @@ export class ContainerExecutor implements ExecutorAdapter {
   private readonly inFlight = new Map<string, { promise: Promise<Execution>; controller: AbortController }>();
   private readonly detaching = new Set<string>();
   private readonly containerIds = new Map<string, string>();
+  private readonly containerPluginFingerprints = new Map<string, string>();
+  private readonly discoveredToolCatalogs = new Map<string, { fingerprint: string; tools: ToolDefinition[] }>();
   private readonly containerSetupTails = new Map<string, Promise<void>>();
   private podmanStorageArgs: string[] | null = null;
 
@@ -135,7 +141,19 @@ export class ContainerExecutor implements ExecutorAdapter {
     private readonly runPodmanCommand: PodmanRunner = podman,
     private readonly overlayMountProgram = findOverlayMountProgram(),
     private readonly vfsStorageRoot = defaultVfsStorageRoot(),
+    private readonly pluginDirectory = executorPluginDirectory(),
   ) {}
+
+  async listTools(binding: ExecutorBinding): Promise<ToolDefinition[]> {
+    const fingerprint = await this.pluginFingerprint();
+    const cached = this.discoveredToolCatalogs.get(binding.id);
+    if (cached?.fingerprint === fingerprint) return cached.tools;
+    await this.ensureContainer(binding);
+    const response = await this.callRunner(this.containerName(binding.id), 'tools', 'tool-catalog');
+    const tools = validateToolDefinitions(response.tools);
+    this.discoveredToolCatalogs.set(binding.id, { fingerprint, tools });
+    return tools;
+  }
 
   async checkConnection(_binding: ExecutorBinding, signal?: AbortSignal): Promise<void> {
     await this.callPodman(['info', '--format', '{{.Version.Version}}'], undefined, signal);
@@ -380,13 +398,27 @@ export class ContainerExecutor implements ExecutorAdapter {
 
   private async callRunner(
     name: string,
-    mode: 'run' | 'status' | 'interrupt',
+    mode: 'run' | 'status' | 'interrupt' | 'tools',
     key: string,
     toolName?: string,
     args?: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<ToolRunnerResponse> {
-    const command = ['exec', '-i', name, 'node', '-e', CONTAINER_RUNNER, mode, key, ...(toolName ? [toolName] : [])];
+    const command = [
+      'exec',
+      '-i',
+      name,
+      'node',
+      '-e',
+      CONTAINER_RUNNER,
+      mode,
+      key,
+      toolName ?? '',
+      '/tmp/pico-executions',
+      '/workspace',
+      '/opt/pico/executor-plugins',
+      key,
+    ];
     const { stdout } = await this.callPodman(command, args ? JSON.stringify(args) : undefined, signal);
     try {
       return JSON.parse(stdout) as ToolRunnerResponse;
@@ -420,8 +452,11 @@ export class ContainerExecutor implements ExecutorAdapter {
     const name = this.containerName(binding.id);
     if (await this.containerExists(name, signal)) {
       await this.startContainer(name, signal);
+      await this.installPluginBundles(name, signal);
       return;
     }
+    this.containerPluginFingerprints.delete(name);
+    this.discoveredToolCatalogs.delete(binding.id);
     const volume = `${binding.workspacePath}:/workspace:rw`;
     try {
       await this.callPodman(
@@ -448,6 +483,57 @@ export class ContainerExecutor implements ExecutorAdapter {
       throw error;
     }
     this.containerIds.set(binding.id, name);
+    await this.installPluginBundles(name, signal);
+  }
+
+  private async installPluginBundles(name: string, signal?: AbortSignal): Promise<void> {
+    const { files, fingerprint } = await this.executorPluginBundles();
+    if (this.containerPluginFingerprints.get(name) === fingerprint) return;
+    await this.callPodman(
+      ['exec', name, 'sh', '-c', 'mkdir -p /opt/pico/executor-plugins && rm -f /opt/pico/executor-plugins/*.mjs'],
+      undefined,
+      signal,
+    );
+    for (const { filename } of files) {
+      await this.callPodman(
+        ['cp', join(this.pluginDirectory, filename), `${name}:/opt/pico/executor-plugins/${filename}`],
+        undefined,
+        signal,
+      );
+    }
+    this.containerPluginFingerprints.set(name, fingerprint);
+    for (const [bindingId, containerName] of this.containerIds) {
+      if (containerName === name) this.discoveredToolCatalogs.delete(bindingId);
+    }
+  }
+
+  private async pluginFingerprint(): Promise<string> {
+    return (await this.executorPluginBundles()).fingerprint;
+  }
+
+  private async executorPluginBundles(): Promise<{
+    files: Array<{ filename: string; content: Buffer }>;
+    fingerprint: string;
+  }> {
+    let filenames: string[];
+    try {
+      filenames = (await readdir(this.pluginDirectory, { withFileTypes: true }))
+        .filter((entry) => entry.isFile() && entry.name.endsWith('.mjs'))
+        .map((entry) => entry.name)
+        .sort();
+    } catch (error) {
+      if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+        filenames = [];
+      } else {
+        throw error;
+      }
+    }
+    const files = await Promise.all(
+      filenames.map(async (filename) => ({ filename, content: await readFile(join(this.pluginDirectory, filename)) })),
+    );
+    const hash = createHash('sha256');
+    for (const file of files) hash.update(file.filename).update('\0').update(file.content).update('\0');
+    return { files, fingerprint: hash.digest('hex') };
   }
 
   private async containerExists(name: string, signal?: AbortSignal): Promise<boolean> {

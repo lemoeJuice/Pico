@@ -2,6 +2,7 @@ import { readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ToolDefinition } from '../core/types.js';
+import type { PicoPlugin } from '../plugins/host.js';
 import type { ToolCatalog, ToolContext } from './tools.js';
 
 export interface ExecutorPluginContext {
@@ -13,13 +14,7 @@ export interface ExecutorPluginContext {
   };
 }
 
-export interface ExecutorPluginManifest {
-  id: string;
-  name: string;
-  version: string;
-  activateExecutor?: (context: ExecutorPluginContext) => Promise<void> | void;
-  activate?: (context: unknown) => Promise<void> | void;
-}
+export type ExecutorPluginManifest = PicoPlugin;
 
 export interface LoadedExecutorPlugin {
   id: string;

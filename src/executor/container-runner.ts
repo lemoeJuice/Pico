@@ -7,9 +7,11 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
-const [mode, key, toolName, configuredFolder, configuredWorkspace] = process.argv.slice(1);
+const { pathToFileURL } = require('node:url');
+const [mode, key, toolName, configuredFolder, configuredWorkspace, configuredPluginDirectory, executionId] = process.argv.slice(1);
 const folder = configuredFolder || '/tmp/pico-executions';
 const workspace = configuredWorkspace || '/workspace';
+const pluginDirectory = configuredPluginDirectory || '/opt/pico/executor-plugins';
 const resultFile = path.join(folder, key + '.json');
 const pidFile = path.join(folder, key + '.pid');
 const childPidFile = path.join(folder, key + '.child.pid');
@@ -256,8 +258,177 @@ async function writeResult(value) {
   await fsp.rename(resultFile + '.tmp', resultFile);
   try { await fsp.unlink(childPidFile); } catch {}
 }
+const toolRegistry = new Map();
+function validateDefinition(definition) {
+  if (!definition || typeof definition !== 'object' || !/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(definition.name)) {
+    throw new Error('Invalid executor tool name');
+  }
+  if (typeof definition.description !== 'string' || !definition.description.trim()) {
+    throw new Error('Tool ' + definition.name + ' needs a description');
+  }
+  const visit = (schema, label) => {
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) throw new Error(label + ' must be a schema object');
+    const types = ['object', 'array', 'string', 'number', 'integer', 'boolean', 'null'];
+    if (schema.type !== undefined && (typeof schema.type !== 'string' || !types.includes(schema.type))) {
+      throw new Error(label + ' has an unsupported type');
+    }
+    if (schema.properties !== undefined) {
+      if (!schema.properties || typeof schema.properties !== 'object' || Array.isArray(schema.properties)) {
+        throw new Error(label + ' properties must be an object');
+      }
+      for (const [name, child] of Object.entries(schema.properties)) visit(child, label + '.' + name);
+    }
+    if (schema.required !== undefined) {
+      if (!Array.isArray(schema.required) || schema.required.some(name => typeof name !== 'string')) {
+        throw new Error(label + ' required must be strings');
+      }
+      if (schema.required.some(name => !schema.properties || !Object.hasOwn(schema.properties, name))) {
+        throw new Error(label + ' required names must be properties');
+      }
+    }
+    if (schema.items !== undefined) visit(schema.items, label + '[]');
+    if (schema.additionalProperties !== undefined && typeof schema.additionalProperties !== 'boolean') {
+      visit(schema.additionalProperties, label + ' additional properties');
+    }
+  };
+  if (!definition.parameters || typeof definition.parameters !== 'object' || Array.isArray(definition.parameters) || definition.parameters.type !== 'object') {
+    throw new Error('Tool ' + definition.name + ' parameters must be an object schema');
+  }
+  visit(definition.parameters, 'Tool ' + definition.name + ' parameters');
+  return definition;
+}
+function register(definition, execute) {
+  if (!definition || typeof definition.name !== 'string' || typeof execute !== 'function') {
+    throw new Error('Invalid executor tool registration');
+  }
+  validateDefinition(definition);
+  if (toolRegistry.has(definition.name)) throw new Error('Duplicate executor tool: ' + definition.name);
+  toolRegistry.set(definition.name, { definition, execute });
+}
+function createPluginTools() {
+  const staged = new Map();
+  return {
+    staged,
+    tools: {
+      register(definition, execute) {
+        if (!definition || typeof definition.name !== 'string' || typeof execute !== 'function') {
+          throw new Error('Invalid executor tool registration');
+        }
+        validateDefinition(definition);
+        if (staged.has(definition.name) || toolRegistry.has(definition.name)) {
+          throw new Error('Duplicate executor tool: ' + definition.name);
+        }
+        staged.set(definition.name, { definition, execute });
+      },
+    },
+  };
+}
+async function loadPlugins() {
+  let files = [];
+  try {
+    files = (await fsp.readdir(pluginDirectory, { withFileTypes: true }))
+      .filter(entry => entry.isFile() && entry.name.endsWith('.mjs'))
+      .map(entry => entry.name).sort();
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    return;
+  }
+  const pluginIds = new Set();
+  for (const filename of files) {
+    try {
+      const imported = await import(pathToFileURL(path.join(pluginDirectory, filename)).href);
+      const plugin = imported.default || imported.plugin;
+      if (typeof plugin?.activateExecutor !== 'function') continue;
+      if (!/^[a-z0-9][a-z0-9._-]*$/.test(plugin.id) || pluginIds.has(plugin.id)) {
+        throw new Error('Invalid or duplicate executor plugin ID');
+      }
+      const activation = createPluginTools();
+      await plugin.activateExecutor({ tools: activation.tools });
+      for (const [name, tool] of activation.staged) toolRegistry.set(name, tool);
+      pluginIds.add(plugin.id);
+    } catch (error) {
+      // A malformed user bundle does not invalidate unrelated tools. It simply contributes no definitions.
+    }
+  }
+}
+const defaultExecutorPlugin = {
+  id: 'pico.executor-tools',
+  name: 'Default executor tools',
+  version: '0.1.0',
+  activateExecutor({ tools }) {
+    tools.register({
+      name: 'read_file',
+      description: 'Read a UTF-8 text file inside the selected workspace. Paths are relative to the workspace; output is capped at 60,000 characters and returns truncated when more remains.',
+      parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false },
+    }, async args => {
+      const file = await pathInside(args.path);
+      const handle = await fsp.open(file, 'r');
+      let size = 0;
+      let bytesRead = 0;
+      let buffer;
+      try {
+        size = (await handle.stat()).size;
+        buffer = Buffer.alloc(Math.min(size, readFileLimits.maxBytes));
+        while (bytesRead < buffer.length) {
+          const read = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+          if (read.bytesRead === 0) break;
+          bytesRead += read.bytesRead;
+        }
+      } finally { await handle.close(); }
+      const decoded = buffer.subarray(0, bytesRead).toString('utf8');
+      if (decoded.includes('\0')) throw new Error('File contains binary data; read_file supports UTF-8 text files.');
+      return { path: path.relative(workspace, file), contents: decoded.slice(0, readFileLimits.maxCharacters),
+        truncated: size > bytesRead || decoded.length > readFileLimits.maxCharacters };
+    });
+    tools.register({
+      name: 'search_files',
+      description: 'Search text files under the workspace using a regular expression. Skips dependency and build folders; output is capped at 200 matches and 30,000 characters, and truncated indicates incomplete coverage.',
+      parameters: { type: 'object', properties: { pattern: { type: 'string' } }, required: ['pattern'], additionalProperties: false },
+    }, args => search(workspace, args.pattern));
+    tools.register({
+      name: 'apply_patch',
+      description: 'Apply a unified diff patch to files in the selected workspace. Paths must be relative and may not escape the workspace.',
+      parameters: { type: 'object', properties: { patch: { type: 'string' } }, required: ['patch'], additionalProperties: false },
+    }, async args => ({ changed: await patch(args.patch) }));
+    tools.register({
+      name: 'shell',
+      description: 'Run a shell command in the selected executor workspace and return its output and exit code.',
+      parameters: { type: 'object', properties: { command: { type: 'string' }, timeout_ms: { type: 'integer', minimum: 1000, maximum: 600000 } }, required: ['command'], additionalProperties: false },
+    }, async (args, context) => {
+  const command = spawn('/bin/sh', ['-lc', args.command], { cwd: workspace, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  context.setChild(command.pid);
+  const identity = processInfo(command.pid);
+  fs.writeFileSync(childPidFile, JSON.stringify({ pid: command.pid, startTime: identity?.startTime ?? null }));
+  let stdout = ''; let stderr = '';
+  command.stdout.setEncoding('utf8').on('data', chunk => { stdout = (stdout + chunk).slice(-40000); });
+  command.stderr.setEncoding('utf8').on('data', chunk => { stderr = (stderr + chunk).slice(-40000); });
+  const timeoutMs = Math.min(Math.max(Number(args.timeout_ms) || 120000, 1000), 600000);
+  let timedOut = false;
+  let killTimer;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    try { process.kill(-command.pid, 'SIGTERM'); } catch {}
+    killTimer = setTimeout(() => { try { process.kill(-command.pid, 'SIGKILL'); } catch {} }, 1500);
+  }, timeoutMs);
+  const exit = await new Promise((resolve, reject) => {
+    command.once('error', reject);
+    command.once('close', (value, signal) => resolve({ code: value == null ? 1 : value, signal }));
+  });
+  clearTimeout(timeout);
+  if (killTimer) clearTimeout(killTimer);
+  if (timedOut) throw new Error('Command timed out after ' + timeoutMs + 'ms');
+  if (exit.signal) throw new DOMException('Tool process received an explicit interrupt request.', 'AbortError');
+  return { exitCode: exit.code, stdout, stderr };
+    });
+  },
+};
+defaultExecutorPlugin.activateExecutor({ tools: { register } });
 async function run() {
   await fsp.mkdir(folder, { recursive: true });
+  if (mode === 'tools') {
+    await loadPlugins();
+    return send({ status: 'completed', tools: [...toolRegistry.values()].map(tool => tool.definition) });
+  }
   if (mode === 'status') {
     if (fs.existsSync(resultFile)) return send(await readStoredResult());
     return send({ status: alive() ? 'running' : 'interrupted' });
@@ -297,85 +468,39 @@ async function run() {
   }
   if (mode !== 'run') throw new Error('Unsupported runner action');
   if (fs.existsSync(resultFile)) return send(await readStoredResult());
+  await loadPlugins();
   if (!claim()) {
     if (fs.existsSync(resultFile)) return send(await readStoredResult());
     // A stale claim is an uncertain prior attempt, so the same execution key must not run again.
     return send({ status: alive() ? 'running' : 'interrupted' });
   }
   const toolChild = { pid: null };
+  const controller = new AbortController();
   process.on('SIGTERM', () => {
+    controller.abort();
     if (toolChild.pid) { try { process.kill(-toolChild.pid, 'SIGTERM'); } catch {} }
   });
   try {
     const args = await readInput();
-    let result;
-    if (toolName === 'read_file') {
-      const file = await pathInside(args.path);
-      const handle = await fsp.open(file, 'r');
-      let size = 0;
-      let bytesRead = 0;
-      let buffer;
-      try {
-        size = (await handle.stat()).size;
-        buffer = Buffer.alloc(Math.min(size, readFileLimits.maxBytes));
-        while (bytesRead < buffer.length) {
-          const read = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
-          if (read.bytesRead === 0) break;
-          bytesRead += read.bytesRead;
-        }
-      } finally {
-        await handle.close();
-      }
-      const decoded = buffer.subarray(0, bytesRead).toString('utf8');
-      if (decoded.includes('\0')) throw new Error('File contains binary data; read_file supports UTF-8 text files.');
-      result = {
-        path: path.relative(workspace, file),
-        contents: decoded.slice(0, readFileLimits.maxCharacters),
-        truncated: size > bytesRead || decoded.length > readFileLimits.maxCharacters,
-      };
-    } else if (toolName === 'search_files') result = await search(workspace, args.pattern);
-    else if (toolName === 'apply_patch') result = { changed: await patch(args.patch) };
-    else if (toolName === 'shell') {
-      const command = spawn('/bin/sh', ['-lc', args.command], { cwd: workspace, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
-      toolChild.pid = command.pid;
-      const identity = processInfo(command.pid);
-      fs.writeFileSync(childPidFile, JSON.stringify({ pid: command.pid, startTime: identity?.startTime ?? null }));
-      let stdout = ''; let stderr = '';
-      command.stdout.setEncoding('utf8').on('data', chunk => { stdout = (stdout + chunk).slice(-40000); });
-      command.stderr.setEncoding('utf8').on('data', chunk => { stderr = (stderr + chunk).slice(-40000); });
-      const timeoutMs = Math.min(Math.max(Number(args.timeout_ms) || 120000, 1000), 600000);
-      let timedOut = false;
-      let killTimer;
-      const timeout = setTimeout(() => {
-        timedOut = true;
-        try { process.kill(-command.pid, 'SIGTERM'); } catch {}
-        killTimer = setTimeout(() => { try { process.kill(-command.pid, 'SIGKILL'); } catch {} }, 1500);
-      }, timeoutMs);
-      const exit = await new Promise((resolve, reject) => {
-        command.once('error', reject);
-        command.once('close', (value, signal) => resolve({ code: value == null ? 1 : value, signal }));
-      });
-      clearTimeout(timeout);
-      if (killTimer) clearTimeout(killTimer);
-      if (timedOut) {
-        const failed = { status: 'failed', error: 'Command timed out after ' + timeoutMs + 'ms' };
-        await writeResult(failed);
-        return send(failed);
-      }
-      if (exit.signal) {
-        const interrupted = { status: 'interrupted', error: 'Tool process received an explicit interrupt request.' };
-        await writeResult(interrupted);
-        return send(interrupted);
-      }
-      result = { exitCode: exit.code, stdout, stderr };
-    } else throw new Error('Unknown executor tool: ' + toolName);
+    const registered = toolRegistry.get(toolName);
+    if (!registered) throw new Error('Unknown executor tool: ' + toolName);
+    const result = await registered.execute(args, {
+      workspacePath: workspace,
+      executionId: executionId || key,
+      signal: controller.signal,
+      setChild: pid => { toolChild.pid = pid; },
+    });
     const completed = { status: 'completed', result };
     await writeResult(completed);
     return send(completed);
   } catch (error) {
-    const failed = { status: 'failed', error: error instanceof Error ? error.message : String(error) };
-    await writeResult(failed);
-    return send(failed);
+    const interrupted = controller.signal.aborted || (error instanceof Error && error.name === 'AbortError');
+    const settled = {
+      status: interrupted ? 'interrupted' : 'failed',
+      error: error instanceof Error ? error.message : String(error),
+    };
+    await writeResult(settled);
+    return send(settled);
   }
 }
 run().catch(error => { send({ status: 'failed', error: error instanceof Error ? error.message : String(error) }); process.exitCode = 1; });

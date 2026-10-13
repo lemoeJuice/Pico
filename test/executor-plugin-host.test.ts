@@ -20,10 +20,22 @@ describe('Executor tool plugins', () => {
       };
       `,
     );
+    await writeFile(
+      join(pluginDirectory, 'broken.mjs'),
+      `export default {
+        id: 'test.broken', name: 'Broken plugin', version: '1',
+        activateExecutor({ tools }) {
+          tools.register({ name: 'partial_tool', description: 'Must not be visible.', parameters: { type: 'object' } }, () => 'partial');
+          throw new Error('activation failed after registration');
+        }
+      };
+      `,
+    );
     try {
       const catalog = new ToolCatalog();
       const result = await loadExecutorPlugins(catalog, { pluginDirectory });
-      expect(result).toMatchObject({ loaded: [{ id: 'test.custom' }], errors: [] });
+      expect(result.loaded).toEqual([expect.objectContaining({ id: 'test.custom' })]);
+      expect(result.errors).toEqual([expect.stringContaining('activation failed after registration')]);
       expect(catalog.listBySource('executor').map((tool) => tool.definition.name)).toEqual(['workspace_marker']);
       const tool = catalog.get('workspace_marker');
       expect(

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CONTAINER_RUNNER } from '../src/executor/container-runner.js';
 import { PicoStore } from '../src/core/store.js';
-import { assistantPayload } from './helpers.js';
+import { assistantPayload, setToolPolicy } from './helpers.js';
 import { ToolCatalog } from '../src/executor/tools.js';
 import { HostExecutor } from '../src/executor/executor.js';
 import { ContainerExecutor } from '../src/executor/container-executor.js';
@@ -543,8 +543,16 @@ describe('Executor execution identity and recovery', () => {
       ],
     });
     store.transitionExecution(lostToolId, 'running');
-    store.createApproval(lostToolId);
-    store.resolveApproval(lostToolId, true);
+    store.setPluginState('pico.permissions', 'approvals', {
+      [lostToolId]: {
+        executionId: lostToolId,
+        threadId: thread.id,
+        toolName: 'read_file',
+        arguments: { path: 'input.txt' },
+        status: 'allowed',
+        createdAt: new Date().toISOString(),
+      },
+    });
     store.close();
 
     store = new PicoStore(databasePath);
@@ -762,7 +770,17 @@ describe('Executor execution identity and recovery', () => {
       }
       if (args[0] === 'start') return { stdout: 'container-id', stderr: '' };
       if (args[0] === 'exec') {
+        if (!args.includes(CONTAINER_RUNNER)) return { stdout: '', stderr: '' };
         const mode = args[args.indexOf('-e') + 2];
+        if (mode === 'tools') {
+          return {
+            stdout: JSON.stringify({
+              status: 'completed',
+              tools: [{ name: 'read_file', description: 'test read', parameters: { type: 'object' } }],
+            }),
+            stderr: '',
+          };
+        }
         if (mode === 'run') throw new Error('unexpected EOF while reading Podman response');
         if (mode === 'status') return { stdout: JSON.stringify({ status: 'running' }), stderr: '' };
       }
@@ -1033,7 +1051,8 @@ describe('Executor execution identity and recovery', () => {
       }
       if (args[0] === 'start') return { stdout: 'container-id', stderr: '' };
       if (args[0] === 'exec') {
-        const toolName = args.at(-1) ?? 'unknown';
+        if (!args.includes(CONTAINER_RUNNER)) return { stdout: '', stderr: '' };
+        const toolName = args.find((value) => value === 'read_file' || value === 'search_files') ?? 'unknown';
         startedToolCalls.push(toolName);
         activeToolCalls += 1;
         maxConcurrentToolCalls = Math.max(maxConcurrentToolCalls, activeToolCalls);
@@ -1179,7 +1198,7 @@ describe('Executor execution identity and recovery', () => {
       );
       const env = await setupRuntime(model);
       const thread = env.createThread('host');
-      env.runtime.setToolPermission(thread.id, 'shell', 'allow');
+      setToolPolicy(env.store, thread.id, 'shell', 'allow');
       try {
         await env.runtime.submit(thread.id, 'shell-control-message', 'Run a long task');
         await until(() =>
