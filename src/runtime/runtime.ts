@@ -480,12 +480,15 @@ export class PicoRuntime {
       if (execution.kind === 'model') continue;
       const approval = this.store.getApproval(execution.id);
       if (approval?.status === 'pending') {
-        const cancelled = this.store.interruptPendingApproval(execution.id);
-        const record = this.store.appendPluginRecord(threadId, 'pico.permissions', {
-          action: 'cancel',
-          executionId: execution.id,
-          toolName: cancelled.approval.toolName,
-          reason: 'user_interrupt',
+        const { cancelled, record } = this.store.transaction(() => {
+          const cancelled = this.store.interruptPendingApproval(execution.id);
+          const record = this.store.appendPluginRecord(threadId, 'pico.permissions', {
+            action: 'cancel',
+            executionId: execution.id,
+            toolName: cancelled.approval.toolName,
+            reason: 'user_interrupt',
+          });
+          return { cancelled, record };
         });
         this.publishRecord(record);
         this.publish({ type: 'approval.updated', approval: cancelled.approval });
@@ -943,9 +946,10 @@ export class PicoRuntime {
       policy,
       requestApproval: () => this.requestApproval(executionId),
       deny: async (reason) => {
-        const current = this.store.getExecution(executionId);
-        if (current && !terminalStatus(current.status)) {
-          execution = this.store.transitionExecution(executionId, 'failed', {
+        const denied = this.store.transaction(() => {
+          const current = this.store.getExecution(executionId);
+          if (!current || terminalStatus(current.status)) return { execution: current, record: null };
+          const execution = this.store.transitionExecution(executionId, 'failed', {
             error: reason,
             result: { denied: true },
           });
@@ -956,7 +960,12 @@ export class PicoRuntime {
             decision: 'deny',
             reason,
           });
-          this.publishRecord(record);
+          return { execution, record };
+        });
+        execution = denied.execution ?? this.store.getExecution(executionId)!;
+        if (denied.record) {
+          execution = denied.execution!;
+          this.publishRecord(denied.record);
           this.executionChanged(execution);
         }
         return this.store.getExecution(executionId)!;
@@ -1003,17 +1012,35 @@ export class PicoRuntime {
       if (!before) throw new Error('Approval request not found');
       if (before.status === 'denied') throw new Error('Approval was already resolved');
       if (before.status === 'cancelled') throw new Error('Approval was cancelled');
-      this.setToolPermission(before.threadId, before.toolName, 'allow');
+      if (!this.tools.get(before.toolName)) throw new Error('Tool not found');
     }
-    const approval = this.store.resolveApproval(executionId, allow);
-    if (before?.status === 'pending') {
-      const record = this.store.appendPluginRecord(approval.threadId, 'pico.permissions', {
-        action: 'decision',
-        executionId,
-        toolName: approval.toolName,
-        decision: allow ? 'allow' : 'deny',
-        scope: rememberForThread ? 'thread' : 'once',
+    const { approval, record } = this.store.transaction(() => {
+      if (rememberForThread && before) {
+        const key = `permissions:${before.threadId}`;
+        const rules = this.store.getSetting<Record<string, PermissionPolicy>>(key, {});
+        this.store.setSetting(key, { ...rules, [before.toolName]: 'allow' });
+      }
+      const approval = this.store.resolveApproval(executionId, allow);
+      const record =
+        before?.status === 'pending'
+          ? this.store.appendPluginRecord(approval.threadId, 'pico.permissions', {
+              action: 'decision',
+              executionId,
+              toolName: approval.toolName,
+              decision: allow ? 'allow' : 'deny',
+              scope: rememberForThread ? 'thread' : 'once',
+            })
+          : null;
+      return { approval, record };
+    });
+    if (rememberForThread && before) {
+      this.publish({
+        type: 'permissions.updated',
+        threadId: before.threadId,
+        permissions: this.toolPermissions(before.threadId),
       });
+    }
+    if (record) {
       this.publishRecord(record);
     }
     this.resolveApprovalWaiters(executionId, allow);

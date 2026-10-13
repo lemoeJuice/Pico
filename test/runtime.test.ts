@@ -657,6 +657,100 @@ describe('durable Thread runtime invariants', () => {
     }
   });
 
+  it('commits approval status, remembered permission, and audit record together', async () => {
+    const model = new FakeModel((_prompt, callNumber) =>
+      callNumber === 1
+        ? response('', [{ id: 'atomic-approval', name: 'read_file', arguments: { path: 'facts.txt' } }])
+        : response('The approval was recorded.'),
+    );
+    const env = await setupRuntime(model);
+    const thread = env.createThread('host');
+    await writeFile(`${env.workspace}/facts.txt`, 'transactional approval', 'utf8');
+    try {
+      await env.runtime.submit(thread.id, 'atomic-approval-message', 'Read facts.txt.');
+      await until(() => env.store.listApprovals(thread.id).some((approval) => approval.status === 'pending'));
+      const approval = env.store.listApprovals(thread.id)[0]!;
+      env.store.db.exec(`
+        CREATE TRIGGER fail_permission_audit
+        BEFORE INSERT ON canonical_records
+        WHEN NEW.thread_id = '${thread.id}' AND NEW.kind = 'plugin'
+        BEGIN SELECT RAISE(ABORT, 'simulated permission audit failure'); END;
+      `);
+
+      expect(() => env.runtime.resolveApproval(approval.executionId, true, true)).toThrow(
+        /simulated permission audit failure/,
+      );
+      expect(env.store.getApproval(approval.executionId)?.status).toBe('pending');
+      expect(env.runtime.toolPermissions(thread.id).find((item) => item.name === 'read_file')?.policy).toBe('ask');
+      expect(
+        env.store
+          .listRecords(thread.id)
+          .filter((record) => record.kind === 'plugin' && record.payload.pluginId === 'pico.permissions'),
+      ).toHaveLength(0);
+
+      env.store.db.exec('DROP TRIGGER fail_permission_audit;');
+      env.runtime.resolveApproval(approval.executionId, true, true);
+      await env.runtime.drain();
+
+      expect(env.store.getApproval(approval.executionId)?.status).toBe('allowed');
+      expect(env.runtime.toolPermissions(thread.id).find((item) => item.name === 'read_file')?.policy).toBe('allow');
+      expect(
+        env.store
+          .listRecords(thread.id)
+          .some(
+            (record) =>
+              record.kind === 'plugin' &&
+              record.payload.pluginId === 'pico.permissions' &&
+              record.payload.executionId === approval.executionId &&
+              record.payload.scope === 'thread',
+          ),
+      ).toBe(true);
+      expect(env.store.getExecution(approval.executionId)?.status).toBe('completed');
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('rolls back a denied Tool Execution when its permission audit record cannot be committed', async () => {
+    const model = new FakeModel((_prompt, callNumber) =>
+      callNumber === 1
+        ? response('', [{ id: 'atomic-denial', name: 'read_file', arguments: { path: 'facts.txt' } }])
+        : response('The file was read after the permission decision could be recorded.'),
+    );
+    const env = await setupRuntime(model);
+    const thread = env.createThread('host');
+    await writeFile(`${env.workspace}/facts.txt`, 'transactional denial', 'utf8');
+    env.runtime.setToolPermission(thread.id, 'read_file', 'deny');
+    try {
+      env.store.db.exec(`
+        CREATE TRIGGER fail_permission_denial_audit
+        BEFORE INSERT ON canonical_records
+        WHEN NEW.thread_id = '${thread.id}' AND NEW.kind = 'plugin'
+        BEGIN SELECT RAISE(ABORT, 'simulated permission denial audit failure'); END;
+      `);
+
+      await env.runtime.submit(thread.id, 'atomic-denial-message', 'Read facts.txt.');
+      await until(() => env.runtime.getThread(thread.id)?.pauseRequested === true);
+      const execution = env.store.listExecutions(thread.id).find((item) => item.toolName === 'read_file')!;
+
+      expect(env.store.getExecution(execution.id)?.status).toBe('pending');
+      expect(
+        env.store
+          .listRecords(thread.id)
+          .filter((record) => record.kind === 'plugin' && record.payload.pluginId === 'pico.permissions'),
+      ).toHaveLength(0);
+
+      env.store.db.exec('DROP TRIGGER fail_permission_denial_audit;');
+      env.runtime.setToolPermission(thread.id, 'read_file', 'allow');
+      env.runtime.continue(thread.id);
+      await env.runtime.drain();
+      expect(env.store.getExecution(execution.id)?.status).toBe('completed');
+      expect(env.store.listRecords(thread.id).filter((record) => record.kind === 'tool_result')).toHaveLength(1);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it('Interrupt stops a pathological Host search while the Runtime remains responsive', async () => {
     const model = new FakeModel((_prompt, callNumber) =>
       callNumber === 1
@@ -711,6 +805,22 @@ describe('durable Thread runtime invariants', () => {
       await env.runtime.submit(thread.id, 'cancel-approval-message', 'Read facts.txt');
       await until(() => env.store.listApprovals(thread.id).some((approval) => approval.status === 'pending'));
       const approval = env.store.listApprovals(thread.id)[0]!;
+
+      env.store.db.exec(`
+        CREATE TRIGGER fail_permission_cancel_audit
+        BEFORE INSERT ON canonical_records
+        WHEN NEW.thread_id = '${thread.id}' AND NEW.kind = 'plugin'
+        BEGIN SELECT RAISE(ABORT, 'simulated permission cancellation audit failure'); END;
+      `);
+      await expect(env.runtime.interrupt(thread.id)).rejects.toThrow(/simulated permission cancellation audit failure/);
+      expect(env.store.getApproval(approval.executionId)?.status).toBe('pending');
+      expect(env.store.getExecution(approval.executionId)?.status).toBe('pending');
+      expect(
+        env.store
+          .listRecords(thread.id)
+          .filter((record) => record.kind === 'plugin' && record.payload.pluginId === 'pico.permissions'),
+      ).toHaveLength(0);
+      env.store.db.exec('DROP TRIGGER fail_permission_cancel_audit;');
 
       await env.runtime.interrupt(thread.id);
       await env.runtime.drain();

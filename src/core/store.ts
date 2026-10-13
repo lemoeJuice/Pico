@@ -60,6 +60,8 @@ export interface CommitStepInput {
 
 export class PicoStore {
   readonly db: DatabaseSync;
+  private transactionDepth = 0;
+  private savepointSequence = 0;
 
   constructor(filename = process.env.PICO_DB_PATH ?? join(process.cwd(), 'data', 'pico.sqlite')) {
     if (filename !== ':memory:') {
@@ -214,14 +216,23 @@ export class PicoStore {
     this.db.close();
   }
 
-  private transaction<T>(run: () => T): T {
-    this.db.exec('BEGIN IMMEDIATE;');
+  transaction<T>(run: () => T): T {
+    const outermost = this.transactionDepth === 0;
+    const savepoint = `pico_savepoint_${++this.savepointSequence}`;
+    this.db.exec(outermost ? 'BEGIN IMMEDIATE;' : `SAVEPOINT ${savepoint};`);
+    this.transactionDepth += 1;
     try {
       const value = run();
-      this.db.exec('COMMIT;');
+      this.db.exec(outermost ? 'COMMIT;' : `RELEASE SAVEPOINT ${savepoint};`);
+      this.transactionDepth -= 1;
       return value;
     } catch (error) {
-      this.db.exec('ROLLBACK;');
+      this.transactionDepth -= 1;
+      try {
+        this.db.exec(outermost ? 'ROLLBACK;' : `ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint};`);
+      } catch {
+        // Preserve the original failure; an outer transaction can still roll back its full unit of work.
+      }
       throw error;
     }
   }
@@ -755,17 +766,19 @@ export class PicoStore {
   }
 
   resolveApproval(executionId: string, allow: boolean): PermissionRequest {
-    const current = this.getApproval(executionId);
-    if (!current) throw new Error('Approval request not found');
-    const status = allow ? 'allowed' : 'denied';
-    if (current.status !== 'pending') {
-      if (current.status !== status) throw new Error('Approval was already resolved');
-      return current;
-    }
-    this.db
-      .prepare('UPDATE approvals SET status = ?, decided_at = ? WHERE execution_id = ?')
-      .run(status, isoNow(), executionId);
-    return { ...current, status };
+    return this.transaction(() => {
+      const current = this.getApproval(executionId);
+      if (!current) throw new Error('Approval request not found');
+      const status = allow ? 'allowed' : 'denied';
+      if (current.status !== 'pending') {
+        if (current.status !== status) throw new Error('Approval was already resolved');
+        return current;
+      }
+      this.db
+        .prepare('UPDATE approvals SET status = ?, decided_at = ? WHERE execution_id = ?')
+        .run(status, isoNow(), executionId);
+      return { ...current, status };
+    });
   }
 
   interruptPendingApproval(executionId: string): { approval: PermissionRequest; execution: Execution } {
