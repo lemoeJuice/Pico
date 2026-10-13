@@ -56,6 +56,25 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function safeErrorMessage(error: unknown): string {
+  return errorMessage(error)
+    .replace(/https?:\/\/[^\s"'<>]+/gi, (value) => {
+      try {
+        const url = new URL(value);
+        const hasCredentials = Boolean(url.username || url.password);
+        const hasSearch = Boolean(url.search || url.hash);
+        url.username = '';
+        url.password = '';
+        url.search = '';
+        url.hash = '';
+        return `${url.origin}${url.pathname}${hasSearch ? '?<redacted>' : ''}${hasCredentials ? '[credentials redacted]' : ''}`;
+      } catch {
+        return value.replace(/[?#].*$/, '?<redacted>');
+      }
+    })
+    .slice(0, 2_000);
+}
+
 function isRetryableContainerSetupFailure(error: unknown): boolean {
   return /connection|refused|permission denied|read-only|\bEOF\b|network is unreachable|no route to host|temporary failure in name resolution|timed? out|context deadline exceeded|i\/o timeout/i.test(
     errorMessage(error),
@@ -199,13 +218,13 @@ export class ContainerExecutor implements ExecutorAdapter {
         if (latest.status === 'running') return latest;
         // Before submission, transient setup failures leave the durable execution available for retry.
         if (latest.status === 'pending' && isRetryableContainerSetupFailure(error)) {
-          const diagnostic = errorMessage(error).slice(0, 2000);
+          const diagnostic = safeErrorMessage(error);
           const retryable = this.store.recordRetryableExecutionFailure(executionId, diagnostic);
           this.onExecution(retryable);
           return retryable;
         }
         return this.store.transitionExecution(executionId, latest.status === 'pending' ? 'failed' : 'interrupted', {
-          error: error instanceof Error ? error.message : String(error),
+          error: safeErrorMessage(error),
         });
       })
       .finally(() => {

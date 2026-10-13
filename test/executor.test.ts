@@ -694,7 +694,7 @@ describe('Executor execution identity and recovery', () => {
         containerSetupAttempts += 1;
         if (!registryAvailable) {
           throw new Error(
-            'copying system image from manifest: fetching manifest in docker.io/library/node: pinging registry: EOF',
+            'copying system image from manifest: Get "https://cdn.example.test/v2/blob?Expires=123&Signature=temporary-secret&Key-Pair-Id=key-1": EOF',
           );
         }
         return { stdout: 'container-id', stderr: '' };
@@ -718,10 +718,13 @@ describe('Executor execution identity and recovery', () => {
     try {
       const binding = env.store.executorForThread(thread.id)!;
       expect((await executor.execute('registry-eof-tool', binding)).status).toBe('pending');
-      expect(env.store.getExecution('registry-eof-tool')).toMatchObject({
+      const retryableExecution = env.store.getExecution('registry-eof-tool');
+      expect(retryableExecution).toMatchObject({
         status: 'pending',
-        error: expect.stringMatching(/registry.*EOF/i),
+        error: expect.stringMatching(/EOF/i),
       });
+      expect(retryableExecution?.error).toContain('https://cdn.example.test/v2/blob?<redacted>');
+      expect(retryableExecution?.error).not.toContain('temporary-secret');
 
       registryAvailable = true;
       expect((await executor.execute('registry-eof-tool', binding)).status).toBe('completed');
