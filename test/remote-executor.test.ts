@@ -225,6 +225,15 @@ describe('Remote Host Executor', () => {
         'Existing work',
       );
       const originalBinding = env.store.executorForThread(thread.id)!;
+      await expect(
+        env.runtime.updateRemoteExecutorConnection(connection.id, connection.name, 'http://127.0.0.1:1', token),
+      ).rejects.toThrow(/Add a new connection and create a new Thread/);
+      expect(env.store.executorForThread(thread.id)).toMatchObject({
+        id: originalBinding.id,
+        remoteConnectionId: connection.id,
+        remoteEndpointUrl: endpoint,
+        workspacePath: remoteWorkspace,
+      });
       env.runtime.setToolPermission(thread.id, 'read_file', 'allow');
 
       await env.runtime.submit(thread.id, 'before-rotation-message', 'Read the file before rotation.');

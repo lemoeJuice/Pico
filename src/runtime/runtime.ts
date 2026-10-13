@@ -281,6 +281,11 @@ export class PicoRuntime {
     const cleanedName = name.trim();
     if (!cleanedName) throw new Error('Remote Executor name is required.');
     const normalizedUrl = normalizeRemoteExecutorUrl(endpointUrl);
+    if (normalizedUrl !== current.endpointUrl) {
+      throw new Error(
+        'Remote Executor endpoints cannot be changed on an existing connection. Add a new connection and create a new Thread to use another Executor.',
+      );
+    }
     const token = accessToken?.trim() || current.accessToken;
     const info = await inspectRemoteExecutor(normalizedUrl, token);
     return this.store.updateRemoteExecutorConnection(id, cleanedName, normalizedUrl, token, info.workspaceRoot);
