@@ -1604,22 +1604,30 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 ? 'Loading your Projects, Threads, and Runtime settings…'
                 : 'Pico keeps your conversations and execution state close, so you can pick up where you left off.'}
             </p>
-            <div className="welcome-actions">
-              <button
-                className="button button-primary"
-                disabled={bootstrapping}
-                onClick={() => setNewProjectOpen(true)}
-              >
-                Create a Project <ArrowUpRight size={14} aria-hidden="true" />
-              </button>
-              {selectedProject ? (
-                <button className="button button-soft" disabled={bootstrapping} onClick={() => setNewThreadOpen(true)}>
-                  Start a Thread
-                </button>
-              ) : null}
-            </div>
+            {settings?.model || selectedProject ? (
+              <div className="welcome-actions">
+                {settings?.model && !selectedProject ? (
+                  <button
+                    className="button button-primary"
+                    disabled={bootstrapping}
+                    onClick={() => setNewProjectOpen(true)}
+                  >
+                    Create a Project <ArrowUpRight size={14} aria-hidden="true" />
+                  </button>
+                ) : null}
+                {selectedProject ? (
+                  <button
+                    className="button button-soft"
+                    disabled={bootstrapping}
+                    onClick={() => setNewThreadOpen(true)}
+                  >
+                    Start a Thread
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             {!settings?.model ? (
-              <button className="welcome-settings button button-soft" onClick={() => setSettingsOpen(true)}>
+              <button className="welcome-settings button button-primary" onClick={() => setSettingsOpen(true)}>
                 <Settings size={14} aria-hidden="true" /> Configure a model connection
               </button>
             ) : null}
