@@ -1932,7 +1932,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 </form>
               </div>
             ))}
-            <form className="form-stack" onSubmit={(event) => void addRemoteExecutorConnection(event)}>
+            <form
+              className="form-stack remote-connection-add-form"
+              onSubmit={(event) => void addRemoteExecutorConnection(event)}
+            >
               <label>
                 Connection name
                 <input
@@ -1959,8 +1962,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   autoComplete="new-password"
                 />
               </label>
-              <div className="form-actions">
-                <span className="field-note">Remote workspaces are limited to the Executor’s configured root.</span>
+              <div className="form-actions remote-executor-form-actions">
+                <span className="field-note remote-executor-footnote">
+                  Remote workspaces are limited to the Executor’s configured root.
+                </span>
                 <button className="button button-primary" disabled={remoteConnectionSaving}>
                   {remoteConnectionSaving ? 'Connecting…' : 'Connect Executor'}
                 </button>

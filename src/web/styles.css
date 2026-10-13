@@ -1776,13 +1776,32 @@ button:disabled {
   gap: 9px;
 }
 .remote-connections-section {
+  gap: 16px;
   border-top: 1px solid var(--line);
-  margin-top: 1.5rem;
-  padding-top: 1.35rem;
+  margin-top: 28px;
+  padding-top: 22px;
+}
+.remote-connections-section > div:first-child {
+  display: grid;
+  gap: 8px;
+}
+.remote-connections-section > div:first-child .form-intro {
+  max-width: 660px;
+  margin: 0;
+}
+.remote-connection-add-form {
+  gap: 14px;
+  margin-top: 4px;
+}
+.remote-executor-footnote {
+  max-width: 320px;
+  padding-top: 11px;
+  border-top: 1px solid #e9ede8;
+  line-height: 1.55;
 }
 .remote-connection-item {
   display: grid;
-  gap: 0.25rem;
+  gap: 0.45rem;
   border: 1px solid var(--line);
   border-radius: 14px;
   background: #f8faf7;
