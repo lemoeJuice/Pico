@@ -25,7 +25,7 @@ import type {
   ToolResultPayload,
   UiContribution,
 } from '../core/types.js';
-import type { ModelInputAttempt, ThreadSnapshot } from '../runtime/runtime.js';
+import type { ModelInputAttempt, ThreadSnapshot, ThreadToolView } from '../runtime/runtime.js';
 import { isSessionExpired } from './session.js';
 import { visiblePauseReason } from './pause-reason.js';
 import { shouldSubmitOnEnter } from './composer-keys.js';
@@ -464,6 +464,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [desktopSidebarCollapsed, setDesktopSidebarCollapsed] = useState(false);
   const [defaultWorkspace, setDefaultWorkspace] = useState('');
   const [pluginInfo, setPluginInfo] = useState<PluginInfo | null>(null);
+  const [threadTools, setThreadTools] = useState<ThreadToolView[]>([]);
+  const [threadToolsLoading, setThreadToolsLoading] = useState(false);
+  const [threadToolsError, setThreadToolsError] = useState('');
+  const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
+  const [savingToolName, setSavingToolName] = useState<string | null>(null);
   const [pluginEvents, setPluginEvents] = useState<Array<{ sequence: number; event: PluginUiEvent }>>([]);
   const [commands, setCommands] = useState<Array<{ name: string; description: string }>>([]);
   const [executorConnected, setExecutorConnected] = useState<boolean | null>(null);
@@ -501,6 +506,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   });
   const listRef = useRef<HTMLDivElement>(null);
   const messageTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const toolsMenuRef = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
   const snapshotRequest = useRef(0);
   const projectThreadVersions = useRef(new Map<string, number>());
@@ -598,6 +604,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     activeSnapshot?.thread ??
     threads.find((thread) => thread.id === threadId && thread.projectId === projectId) ??
     null;
+  const selectedThreadId = selectedThread?.id ?? null;
   const selectedThreadSending = selectedThread ? sendingThreadIds.has(selectedThread.id) : false;
   const activeNotice = noticeForThread(threadId, threadNotices, notice);
   const assistantDraft = assistantDraftForThread(assistantDrafts, threadId);
@@ -612,6 +619,68 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const composerModelContributions = uiContributionsAt(uiContributions, 'composer.model', settings?.provider);
   const sidebarPanels = uiContributionsAt(uiContributions, 'sidebar.panel');
   const toolRenderers = uiContributionsAt(uiContributions, 'tool.renderer');
+
+  const loadThreadTools = useCallback(async (targetThreadId: string): Promise<void> => {
+    setThreadToolsLoading(true);
+    setThreadToolsError('');
+    try {
+      const result = await api<{ tools: ThreadToolView[] }>(`/api/threads/${encodeURIComponent(targetThreadId)}/tools`);
+      if (activeThreadId.current === targetThreadId) setThreadTools(result.tools);
+    } catch (caught) {
+      if (activeThreadId.current === targetThreadId) {
+        setThreadToolsError(caught instanceof Error ? caught.message : 'Could not load Thread tools.');
+      }
+    } finally {
+      if (activeThreadId.current === targetThreadId) setThreadToolsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!selectedThreadId) {
+      setThreadTools([]);
+      setThreadToolsLoading(false);
+      setThreadToolsError('');
+      setToolsMenuOpen(false);
+      return;
+    }
+    setThreadTools([]);
+    setThreadToolsError('');
+    setToolsMenuOpen(false);
+    void loadThreadTools(selectedThreadId);
+  }, [loadThreadTools, selectedThreadId]);
+
+  useEffect(() => {
+    if (!toolsMenuOpen) return;
+    const dismissOutside = (event: PointerEvent): void => {
+      if (event.target instanceof Node && !toolsMenuRef.current?.contains(event.target)) setToolsMenuOpen(false);
+    };
+    const dismissEscape = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setToolsMenuOpen(false);
+    };
+    window.addEventListener('pointerdown', dismissOutside);
+    window.addEventListener('keydown', dismissEscape);
+    return () => {
+      window.removeEventListener('pointerdown', dismissOutside);
+      window.removeEventListener('keydown', dismissEscape);
+    };
+  }, [toolsMenuOpen]);
+
+  const toggleThreadTool = async (tool: ThreadToolView): Promise<void> => {
+    if (!selectedThread || savingToolName) return;
+    setSavingToolName(tool.name);
+    setThreadToolsError('');
+    try {
+      const result = await api<{ tools: ThreadToolView[] }>(
+        `/api/threads/${encodeURIComponent(selectedThread.id)}/tools`,
+        { method: 'PUT', body: JSON.stringify({ name: tool.name, enabled: !tool.enabled }) },
+      );
+      setThreadTools(result.tools);
+    } catch (caught) {
+      setThreadToolsError(caught instanceof Error ? caught.message : 'Could not update this Tool.');
+    } finally {
+      setSavingToolName(null);
+    }
+  };
 
   const loadSnapshot = useCallback(
     async (id: string) => {
@@ -1735,6 +1804,78 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           <>
             <div className="conversation-header">
               <div className="conversation-actions">
+                <div className="native-tools-anchor" ref={toolsMenuRef}>
+                  <button
+                    type="button"
+                    className="button button-quiet plugin-action native-tools-button"
+                    aria-haspopup="dialog"
+                    aria-expanded={toolsMenuOpen}
+                    aria-label={`Tools, ${threadTools.filter((tool) => tool.enabled).length} enabled`}
+                    onClick={() => {
+                      const opening = !toolsMenuOpen;
+                      setToolsMenuOpen(opening);
+                      if (opening && selectedThreadId) void loadThreadTools(selectedThreadId);
+                    }}
+                  >
+                    <span>Tools</span>
+                    <span className="toolbar-count-badge" aria-hidden="true">
+                      {threadTools.filter((tool) => tool.enabled).length}
+                    </span>
+                  </button>
+                  {toolsMenuOpen ? (
+                    <div className="native-tools-popover" role="dialog" aria-label="Thread tools">
+                      <div className="native-tools-heading">
+                        <div>
+                          <strong>Available tools</strong>
+                          <span>Choose which tools this Thread can use.</span>
+                        </div>
+                        <button
+                          type="button"
+                          className="native-tools-refresh"
+                          disabled={threadToolsLoading}
+                          onClick={() => selectedThreadId && void loadThreadTools(selectedThreadId)}
+                        >
+                          {threadToolsLoading ? 'Loading…' : 'Refresh'}
+                        </button>
+                      </div>
+                      {threadToolsError ? (
+                        <p className="native-tools-error" role="status">
+                          {threadToolsError}
+                        </p>
+                      ) : null}
+                      {threadToolsLoading && threadTools.length === 0 ? (
+                        <p className="native-tools-empty">Loading Thread tools…</p>
+                      ) : threadTools.length === 0 ? (
+                        <p className="native-tools-empty">No tools are available in this Thread.</p>
+                      ) : (
+                        <div className="native-tools-list">
+                          {threadTools.map((tool) => (
+                            <div className="native-tool-row" key={tool.name}>
+                              <div className="native-tool-copy">
+                                <div className="native-tool-title">
+                                  <strong>{tool.name}</strong>
+                                  <span>{tool.source === 'runtime' ? 'Runtime' : 'Executor'}</span>
+                                </div>
+                                <p>{tool.description}</p>
+                              </div>
+                              <button
+                                type="button"
+                                className={`native-tool-switch ${tool.enabled ? 'is-enabled' : ''}`}
+                                role="switch"
+                                aria-checked={tool.enabled}
+                                aria-label={`${tool.enabled ? 'Disable' : 'Enable'} ${tool.name}`}
+                                disabled={savingToolName !== null}
+                                onClick={() => void toggleThreadTool(tool)}
+                              >
+                                <span />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
                 {toolbarContributions.map((item) => (
                   <PluginContributionView
                     key={item.id}

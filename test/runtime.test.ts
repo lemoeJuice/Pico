@@ -193,6 +193,77 @@ describe('durable Thread runtime invariants', () => {
     }
   });
 
+  it('lists native Thread tools without preparing a Container and filters disabled tools from model input', async () => {
+    let invocations = 0;
+    const nativeTool: PicoPlugin = {
+      id: 'test.native-tool-toggle',
+      name: 'Native Tool Toggle',
+      version: '1',
+      activate({ tools }) {
+        tools.register(
+          { name: 'optional_runtime_tool', description: 'An optional Runtime tool.', parameters: { type: 'object' } },
+          async () => {
+            invocations += 1;
+            return 'done';
+          },
+        );
+      },
+    };
+    const model = new FakeModel((_prompt, callNumber) =>
+      callNumber === 1
+        ? response('', [{ id: 'disabled-tool-call', name: 'optional_runtime_tool', arguments: {} }])
+        : response('Ready.'),
+    );
+    const env = await setupRuntime(model, { plugins: [nativeTool] });
+    const hostThread = env.createThread('host');
+    const containerThread = env.runtime.createThread(env.project.id, 'container', 'Container thread');
+    try {
+      const containerTools = await env.runtime.listThreadTools(containerThread.id);
+      expect(containerTools.map((tool) => tool.name)).toContain('optional_runtime_tool');
+      expect(containerTools.find((tool) => tool.name === 'read_file')).toMatchObject({
+        source: 'executor',
+        enabled: true,
+      });
+      expect(
+        env.runtime
+          .pluginInfo()
+          .ui.filter((item) => item.pluginId === 'pico.permissions')
+          .map((item) => item.slot),
+      ).toEqual(['tool.renderer']);
+
+      expect(
+        (await env.runtime.listThreadTools(hostThread.id)).find((tool) => tool.name === 'optional_runtime_tool')
+          ?.enabled,
+      ).toBe(true);
+      const disabled = await env.runtime.setThreadToolEnabled(hostThread.id, 'optional_runtime_tool', false);
+      expect(disabled.find((tool) => tool.name === 'optional_runtime_tool')?.enabled).toBe(false);
+
+      await env.runtime.submit(hostThread.id, 'tool-toggle-message', 'Continue without the optional tool.');
+      await env.runtime.drain();
+      expect(model.prompts[0]?.tools.some((tool) => tool.name === 'optional_runtime_tool')).toBe(false);
+      expect(invocations).toBe(0);
+      expect(env.store.listExecutions(hostThread.id).find((execution) => execution.kind === 'tool')).toMatchObject({
+        status: 'failed',
+        error: 'Tool “optional_runtime_tool” is disabled in this Thread.',
+      });
+      expect(
+        (await env.runtime.listThreadTools(hostThread.id)).find((tool) => tool.name === 'optional_runtime_tool')
+          ?.enabled,
+      ).toBe(false);
+      expect(
+        (await env.runtime.listThreadTools(containerThread.id)).find((tool) => tool.name === 'optional_runtime_tool')
+          ?.enabled,
+      ).toBe(true);
+      const enabled = await env.runtime.setThreadToolEnabled(hostThread.id, 'optional_runtime_tool', true);
+      expect(enabled.find((tool) => tool.name === 'optional_runtime_tool')?.enabled).toBe(true);
+      await env.runtime.submit(hostThread.id, 'tool-toggle-message-enabled', 'Continue with the optional tool.');
+      await env.runtime.drain();
+      expect(model.prompts[2]?.tools.some((tool) => tool.name === 'optional_runtime_tool')).toBe(true);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it('uses Runtime tools for ordinary Thread-to-Thread Messages in Chat mode', async () => {
     let recipientId = '';
     const model = new FakeModel((_prompt, callNumber) =>

@@ -225,6 +225,17 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     if (!snapshot) return notFound(response, 'Thread not found');
     response.json(snapshot);
   });
+  app.get('/api/threads/:threadId/tools', async (request, response) => {
+    response.json({ tools: await runtime.listThreadTools(request.params.threadId!) });
+  });
+  app.put('/api/threads/:threadId/tools', async (request, response) => {
+    const body = bodyObject(request);
+    const toolName = requiredText(body, 'name');
+    if (typeof body.enabled !== 'boolean') throw new Error('enabled must be a boolean');
+    response.json({
+      tools: await runtime.setThreadToolEnabled(request.params.threadId!, toolName, body.enabled),
+    });
+  });
   app.get('/api/threads/:threadId/executions/:executionId/model-input', (request, response) => {
     const attempts = runtime.getModelInputAttempts(request.params.threadId!, request.params.executionId!);
     if (!attempts) return notFound(response, 'Model Execution not found in this Thread');

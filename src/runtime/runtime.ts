@@ -53,6 +53,21 @@ export interface ThreadSnapshot {
   historyPageSize: number;
 }
 
+export interface ThreadToolView {
+  name: string;
+  description: string;
+  source: 'runtime' | 'executor';
+  enabled: boolean;
+}
+
+interface StoredThreadToolSurface {
+  tools: ToolDefinition[];
+  sources: Record<string, 'runtime' | 'executor'>;
+}
+
+const THREAD_TOOL_SURFACES_SETTING = 'thread-tool-surfaces';
+const DISABLED_THREAD_TOOLS_SETTING = 'disabled-thread-tools';
+
 export const THREAD_HISTORY_PAGE_SIZE = 100;
 
 export interface SubmitResult {
@@ -482,6 +497,59 @@ export class PicoRuntime {
     };
   }
 
+  async listThreadTools(threadId: string): Promise<ThreadToolView[]> {
+    const thread = this.store.getThread(threadId);
+    if (!thread) throw new Error('Thread not found');
+
+    const runtimeTools = this.tools.listBySource('runtime').map(({ definition }) => definition);
+    const binding = thread.executorKind === 'runtime' ? null : this.store.executorForThread(threadId);
+    const cachedSurface = this.readCachedThreadToolSurface(threadId);
+    let executorTools: ToolDefinition[] = [];
+
+    if (thread.executorKind !== 'runtime') {
+      if (binding?.remoteConnectionId) {
+        executorTools = cachedSurface?.tools.filter((tool) => cachedSurface.sources[tool.name] === 'executor') ?? [];
+      } else if (thread.executorKind === 'container') {
+        executorTools = this.executorTools.listBySource('executor').map(({ definition }) => definition);
+      } else if (binding) {
+        // Host discovery reads the in-process catalog. Container schemas are loaded in
+        // Runtime from the same bundles installed into containers; remote discovery can
+        // make a network request, so the toolbar only uses its last successful projection.
+        executorTools = await this.hostExecutor.listTools(binding);
+      }
+    }
+
+    const known = new Map<string, { definition: ToolDefinition; source: 'runtime' | 'executor' }>();
+    for (const definition of runtimeTools) known.set(definition.name, { definition, source: 'runtime' });
+    for (const definition of executorTools) {
+      if (!known.has(definition.name)) known.set(definition.name, { definition, source: 'executor' });
+    }
+    const disabled = new Set(this.disabledThreadToolNames(threadId));
+    return [...known.values()].map(({ definition, source }) => ({
+      name: definition.name,
+      description: definition.description,
+      source,
+      enabled: !disabled.has(definition.name),
+    }));
+  }
+
+  async setThreadToolEnabled(threadId: string, toolName: string, enabled: boolean): Promise<ThreadToolView[]> {
+    if (!toolName.trim()) throw new Error('Tool name is required');
+    if (typeof enabled !== 'boolean') throw new Error('enabled must be a boolean');
+    const tools = await this.listThreadTools(threadId);
+    if (!tools.some((tool) => tool.name === toolName)) throw new Error('Tool is not available in this Thread');
+
+    const disabled = new Set(this.disabledThreadToolNames(threadId));
+    if (enabled) disabled.delete(toolName);
+    else disabled.add(toolName);
+    const allDisabled = this.allDisabledThreadTools();
+    this.store.setSetting(DISABLED_THREAD_TOOLS_SETTING, {
+      ...allDisabled,
+      [threadId]: [...disabled],
+    });
+    return this.listThreadTools(threadId);
+  }
+
   getModelInputAttempts(threadId: string, executionId: string): ModelInputAttempt[] | null {
     const execution = this.store.getExecution(executionId);
     if (!execution || execution.threadId !== threadId || execution.kind !== 'model') return null;
@@ -862,6 +930,64 @@ export class PicoRuntime {
     return needsRepair || active ? { batchId: payload.batchId, calls: payload.toolCalls } : null;
   }
 
+  private disabledThreadToolNames(threadId: string): string[] {
+    return this.allDisabledThreadTools()[threadId] ?? [];
+  }
+
+  private allDisabledThreadTools(): Record<string, string[]> {
+    const stored = this.store.getSetting<unknown>(DISABLED_THREAD_TOOLS_SETTING, {});
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return {};
+    return Object.fromEntries(
+      Object.entries(stored as Record<string, unknown>).flatMap(([threadId, names]) =>
+        Array.isArray(names)
+          ? [[threadId, [...new Set(names.filter((name): name is string => typeof name === 'string'))]]]
+          : [],
+      ),
+    );
+  }
+
+  private readCachedThreadToolSurface(threadId: string): StoredThreadToolSurface | null {
+    const stored = this.store.getSetting<unknown>(THREAD_TOOL_SURFACES_SETTING, {});
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return null;
+    const cached = (stored as Record<string, unknown>)[threadId];
+    if (!cached || typeof cached !== 'object' || Array.isArray(cached)) return null;
+    const value = cached as Record<string, unknown>;
+    if (
+      !Array.isArray(value.tools) ||
+      !value.sources ||
+      typeof value.sources !== 'object' ||
+      Array.isArray(value.sources)
+    )
+      return null;
+    const tools = value.tools.filter((tool): tool is ToolDefinition => {
+      if (!tool || typeof tool !== 'object' || Array.isArray(tool)) return false;
+      const definition = tool as Partial<ToolDefinition>;
+      return (
+        typeof definition.name === 'string' &&
+        typeof definition.description === 'string' &&
+        Boolean(
+          definition.parameters && typeof definition.parameters === 'object' && !Array.isArray(definition.parameters),
+        )
+      );
+    });
+    const sourceEntries = Object.entries(value.sources as Record<string, unknown>).filter(
+      (entry): entry is [string, 'runtime' | 'executor'] => entry[1] === 'runtime' || entry[1] === 'executor',
+    );
+    return { tools, sources: Object.fromEntries(sourceEntries) };
+  }
+
+  private cacheThreadToolSurface(
+    threadId: string,
+    surface: { tools: ToolDefinition[]; sources: Record<string, 'runtime' | 'executor'> },
+  ): void {
+    const stored = this.store.getSetting<unknown>(THREAD_TOOL_SURFACES_SETTING, {});
+    const cache = stored && typeof stored === 'object' && !Array.isArray(stored) ? stored : {};
+    this.store.setSetting(THREAD_TOOL_SURFACES_SETTING, {
+      ...(cache as Record<string, unknown>),
+      [threadId]: structuredClone(surface),
+    });
+  }
+
   private needsModelStep(threadId: string): boolean {
     const latestAssistant = this.store.modelOutputForThread(threadId);
     if (!latestAssistant) return this.store.hasMessage(threadId);
@@ -892,14 +1018,19 @@ export class PicoRuntime {
     try {
       const modelSettings = this.getModelSettings();
       const toolSurface = await this.toolSurfaceFor(thread);
+      const disabledTools = new Set(this.disabledThreadToolNames(thread.id));
+      const enabledTools = toolSurface.tools.filter((tool) => !disabledTools.has(tool.name));
+      const enabledToolSources = Object.fromEntries(
+        enabledTools.map((tool) => [tool.name, toolSurface.sources[tool.name]!]),
+      );
       const baseProjection: ProjectionInput = {
         thread,
         records: projectionRecords,
         through,
         systemPrompt: `${baseSystemPrompt}\n\n${thread.executorKind === 'runtime' ? 'This Thread uses Chat mode. It has no project workspace, filesystem, shell, or external execution environment. It can use tools provided by Runtime plugins.' : ''}\n\nCurrent Thread ID: ${thread.id}\n${thread.parentThreadId ? `Parent Thread ID: ${thread.parentThreadId}` : 'This Thread has no parent.'}`,
         turns: this.projectTurns(projectionRecords, thread),
-        tools: toolSurface.tools,
-        toolSources: toolSurface.sources,
+        tools: enabledTools,
+        toolSources: enabledToolSources,
       };
       const projected = await this.pipelines.run('projection', baseProjection, async (value) => value);
       const projectedTools = projected.tools;
@@ -1080,7 +1211,11 @@ export class PicoRuntime {
     const sources: Record<string, 'runtime' | 'executor'> = Object.fromEntries(
       runtimeTools.map((tool) => [tool.name, 'runtime']),
     );
-    if (thread.executorKind === 'runtime') return { tools: [...tools.values()], sources };
+    if (thread.executorKind === 'runtime') {
+      const surface = { tools: [...tools.values()], sources };
+      this.cacheThreadToolSurface(thread.id, surface);
+      return surface;
+    }
 
     const binding = this.store.executorForThread(thread.id);
     if (!binding) throw new Error('Executor binding is missing while discovering its Tools.');
@@ -1094,7 +1229,9 @@ export class PicoRuntime {
       tools.set(definition.name, definition);
       sources[definition.name] = 'executor';
     }
-    return { tools: [...tools.values()], sources };
+    const surface = { tools: [...tools.values()], sources };
+    this.cacheThreadToolSurface(thread.id, surface);
+    return surface;
   }
 
   private async executeToolCall(thread: Thread, call: ToolCall): Promise<Execution> {
@@ -1135,7 +1272,9 @@ export class PicoRuntime {
     };
     const promise = (async (): Promise<Execution> => {
       try {
-        execution = await this.pipelines.run('toolInvocation', input, async (value) => value.invoke());
+        execution = this.disabledThreadToolNames(thread.id).includes(call.name)
+          ? await input.fail(`Tool “${call.name}” is disabled in this Thread.`, { disabled: true })
+          : await this.pipelines.run('toolInvocation', input, async (value) => value.invoke());
       } catch (error) {
         const latest = this.store.getExecution(executionId);
         if (!latest) throw error;

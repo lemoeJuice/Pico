@@ -48,20 +48,14 @@ function isPolicy(value: unknown): value is PermissionPolicy {
   return value === 'allow' || value === 'deny' || value === 'ask';
 }
 
-const permissionsUi = (slot: 'thread.toolbar' | 'tool.renderer', id: string, component: string) =>
-  ({
-    slot,
-    id,
-    label: slot === 'thread.toolbar' ? 'Tools' : 'Tool execution',
-    description:
-      slot === 'thread.toolbar'
-        ? 'Review and change this Thread’s tool permission rules.'
-        : 'Inspect a Tool execution and resolve a pending permission request.',
-    entry: 'webui',
-    component,
-    ...(slot === 'thread.toolbar' ? { supportsPopover: true } : {}),
-    ...(slot === 'tool.renderer' ? {} : { command: '/permissions' }),
-  }) as unknown as UiContribution;
+const permissionRendererUi = (id: string, component: string): UiContribution => ({
+  slot: 'tool.renderer',
+  id,
+  label: 'Tool execution',
+  description: 'Inspect a Tool execution and resolve a pending permission request.',
+  entry: 'webui',
+  component,
+});
 
 export const permissionPlugin: PicoPlugin = {
   id: 'pico.permissions',
@@ -69,7 +63,7 @@ export const permissionPlugin: PicoPlugin = {
   version: '0.1.0',
   activate(pluginContext) {
     const context = pluginContext as PermissionContext;
-    const { pipelines, state, canonical, commands, ui, http, executions, threads } = context;
+    const { pipelines, state, canonical, ui, http, executions, threads } = context;
     const decisionWaiters = new Map<string, Set<(allow: boolean) => void>>();
 
     const readRules = (): PermissionRules => objectValue<PermissionRules>(state.get('rules', {}));
@@ -277,17 +271,7 @@ export const permissionPlugin: PicoPlugin = {
       return next(input);
     });
 
-    commands.register({
-      name: 'permissions',
-      description: 'Open the tool permission controls for this Thread.',
-      execute(_args, commandContext) {
-        return commandContext.thread
-          ? { text: 'Open the Tool permissions control in the Thread toolbar.' }
-          : { text: 'Choose a Thread to review its tool permission rules.' };
-      },
-    });
-    ui.contribute(permissionsUi('thread.toolbar', 'permissions', 'ToolPermissions'));
-    ui.contribute(permissionsUi('tool.renderer', 'permission-tool', 'PermissionTool'));
+    ui.contribute(permissionRendererUi('permission-tool', 'PermissionTool'));
 
     http.register('GET', '/threads', async ({ query }) => {
       const threadId = permissionPath(query.get('threadId'), 'threadId');
