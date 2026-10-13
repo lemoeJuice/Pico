@@ -189,16 +189,44 @@ describe('Pico server access boundary', () => {
           { headers: cookieHeaders },
         ).then((response) => response.status),
       ).toBe(404);
-      server.runtime.store.createApproval(toolExecutionId);
-      const rememberResponse = await fetch(`${base}/api/approvals/${encodeURIComponent(toolExecutionId)}`, {
+      server.runtime.store.setPluginState('pico.permissions', 'approvals', {
+        [toolExecutionId]: {
+          executionId: toolExecutionId,
+          threadId: thread.id,
+          toolName: call.name,
+          arguments: call.arguments,
+          status: 'pending',
+          createdAt: new Date().toISOString(),
+        },
+      });
+      const rememberResponse = await fetch(`${base}/api/plugins/pico.permissions/approvals`, {
         method: 'POST',
         headers: { ...cookieHeaders, 'content-type': 'application/json' },
-        body: JSON.stringify({ allow: true, rememberForThread: true }),
+        body: JSON.stringify({ executionId: toolExecutionId, allow: true, rememberForThread: true }),
       });
       expect(rememberResponse.status).toBe(200);
       expect(
-        await server.runtime.store.getSetting<Record<string, string>>(`permissions:${thread.id}`, {}),
+        server.runtime.store.getPluginState<Record<string, Record<string, string>>>('pico.permissions', 'rules', {})[
+          thread.id
+        ],
       ).toMatchObject({ read_file: 'allow' });
+      const commandRequest = {
+        pluginId: 'pico.workspace',
+        threadId: thread.id,
+        id: 'plugin-command-1',
+        command: '/workspace',
+      };
+      const executeCommand = (body: object) =>
+        fetch(`${base}/api/commands/execute`, {
+          method: 'POST',
+          headers: { ...cookieHeaders, 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      expect((await executeCommand(commandRequest)).status).toBe(200);
+      expect(await (await executeCommand(commandRequest)).json()).toMatchObject({ duplicate: true });
+      expect(
+        (await executeCommand({ ...commandRequest, pluginId: 'pico.permissions', id: 'wrong-owner' })).status,
+      ).toBe(403);
 
       const logout = await fetch(`${base}/api/auth/session`, { method: 'DELETE', headers: { cookie } });
       expect(logout.status).toBe(200);

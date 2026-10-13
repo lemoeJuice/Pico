@@ -1,3 +1,4 @@
+import { migrateLegacyPermissions } from './migrations/legacy-permissions.js';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -12,7 +13,6 @@ import type {
   ExecutorBinding,
   ExecutorKind,
   MessagePayload,
-  PermissionRequest,
   Project,
   RemoteExecutorConnection,
   RemoteExecutorConnectionView,
@@ -193,12 +193,6 @@ export class PicoStore {
       BEFORE DELETE ON execution_log BEGIN
         SELECT RAISE(ABORT, 'execution log is append-only');
       END;
-      CREATE TABLE IF NOT EXISTS approvals (
-        execution_id TEXT PRIMARY KEY REFERENCES executions(id),
-        status TEXT NOT NULL CHECK (status IN ('pending', 'allowed', 'denied', 'cancelled')),
-        created_at TEXT NOT NULL,
-        decided_at TEXT
-      );
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value_json TEXT NOT NULL,
@@ -214,7 +208,7 @@ export class PicoStore {
     `);
     this.migrateRemoteExecutorBindings();
     this.migrateRuntimeExecutorKind();
-    this.migrateApprovalStatus();
+    migrateLegacyPermissions(this.db);
   }
 
   private migrateRemoteExecutorBindings(): void {
@@ -254,27 +248,6 @@ export class PicoStore {
     }
     const violations = this.db.prepare('PRAGMA foreign_key_check').all();
     if (violations.length > 0) throw new Error('Executor migration left foreign-key violations.');
-  }
-
-  private migrateApprovalStatus(): void {
-    const schema = this.db
-      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'approvals'")
-      .get() as SqlRow | undefined;
-    if (typeof schema?.sql !== 'string' || schema.sql.includes("'cancelled'")) return;
-    this.transaction(() => {
-      this.db.exec('ALTER TABLE approvals RENAME TO approvals_legacy;');
-      this.db.exec(`
-        CREATE TABLE approvals (
-          execution_id TEXT PRIMARY KEY REFERENCES executions(id),
-          status TEXT NOT NULL CHECK (status IN ('pending', 'allowed', 'denied', 'cancelled')),
-          created_at TEXT NOT NULL,
-          decided_at TEXT
-        );
-        INSERT INTO approvals (execution_id, status, created_at, decided_at)
-          SELECT execution_id, status, created_at, decided_at FROM approvals_legacy;
-        DROP TABLE approvals_legacy;
-      `);
-    });
   }
 
   close(): void {
@@ -680,30 +653,6 @@ export class PicoStore {
     ).map((row) => this.executionFromRow(row));
   }
 
-  listSnapshotApprovals(threadId: string, records: readonly CanonicalRecord[]): PermissionRequest[] {
-    const batchIds = records
-      .filter((record) => record.kind === 'assistant')
-      .map((record) => (record.payload as unknown as AssistantPayload).batchId)
-      .filter((batchId): batchId is string => Boolean(batchId));
-    const batchClause = batchIds.length > 0 ? ` OR e.batch_id IN (${batchIds.map(() => '?').join(', ')})` : '';
-    const rows = this.db
-      .prepare(
-        `SELECT a.*, e.thread_id, e.tool_name, e.arguments_json
-         FROM approvals a JOIN executions e ON e.id = a.execution_id
-         WHERE e.thread_id = ? AND (a.status = 'pending'${batchClause})
-         ORDER BY a.created_at, a.execution_id`,
-      )
-      .all(threadId, ...batchIds) as SqlRow[];
-    return rows.map((row) => ({
-      executionId: String(row.execution_id),
-      threadId: String(row.thread_id),
-      toolName: String(row.tool_name),
-      arguments: json(row.arguments_json, {}),
-      status: row.status as PermissionRequest['status'],
-      createdAt: String(row.created_at),
-    }));
-  }
-
   commitModelStep(input: CommitStepInput): CanonicalRecord<AssistantPayload> {
     const createdAt = input.createdAt ?? isoNow();
     return this.transaction(() => {
@@ -928,119 +877,6 @@ export class PicoStore {
     return this.appendCanonical(threadId, id, 'tool_result', payload).record;
   }
 
-  createApproval(executionId: string): PermissionRequest {
-    const execution = this.getExecution(executionId);
-    if (!execution || execution.kind !== 'tool' || !execution.toolName || !execution.arguments) {
-      throw new Error('Tool execution not found');
-    }
-    const existing = this.getApproval(executionId);
-    if (existing) return existing;
-    const createdAt = isoNow();
-    this.db
-      .prepare("INSERT INTO approvals (execution_id, status, created_at, decided_at) VALUES (?, 'pending', ?, NULL)")
-      .run(executionId, createdAt);
-    return {
-      executionId,
-      threadId: execution.threadId,
-      toolName: execution.toolName,
-      arguments: execution.arguments,
-      status: 'pending',
-      createdAt,
-    };
-  }
-
-  getApproval(executionId: string): PermissionRequest | null {
-    const row = this.db
-      .prepare(
-        `
-      SELECT a.*, e.thread_id, e.tool_name, e.arguments_json
-      FROM approvals a JOIN executions e ON e.id = a.execution_id
-      WHERE a.execution_id = ?
-    `,
-      )
-      .get(executionId) as SqlRow | undefined;
-    return row
-      ? {
-          executionId: String(row.execution_id),
-          threadId: String(row.thread_id),
-          toolName: String(row.tool_name),
-          arguments: json(row.arguments_json, {}),
-          status: row.status as PermissionRequest['status'],
-          createdAt: String(row.created_at),
-        }
-      : null;
-  }
-
-  listApprovals(threadId?: string): PermissionRequest[] {
-    const rows = (
-      threadId
-        ? this.db
-            .prepare(
-              `
-          SELECT a.*, e.thread_id, e.tool_name, e.arguments_json
-          FROM approvals a JOIN executions e ON e.id = a.execution_id
-          WHERE e.thread_id = ? ORDER BY a.created_at
-        `,
-            )
-            .all(threadId)
-        : this.db
-            .prepare(
-              `
-          SELECT a.*, e.thread_id, e.tool_name, e.arguments_json
-          FROM approvals a JOIN executions e ON e.id = a.execution_id
-          ORDER BY a.created_at
-        `,
-            )
-            .all()
-    ) as SqlRow[];
-    return rows.map((row) => ({
-      executionId: String(row.execution_id),
-      threadId: String(row.thread_id),
-      toolName: String(row.tool_name),
-      arguments: json(row.arguments_json, {}),
-      status: row.status as PermissionRequest['status'],
-      createdAt: String(row.created_at),
-    }));
-  }
-
-  resolveApproval(executionId: string, allow: boolean): PermissionRequest {
-    return this.transaction(() => {
-      const current = this.getApproval(executionId);
-      if (!current) throw new Error('Approval request not found');
-      const status = allow ? 'allowed' : 'denied';
-      if (current.status !== 'pending') {
-        if (current.status !== status) throw new Error('Approval was already resolved');
-        return current;
-      }
-      this.db
-        .prepare('UPDATE approvals SET status = ?, decided_at = ? WHERE execution_id = ?')
-        .run(status, isoNow(), executionId);
-      return { ...current, status };
-    });
-  }
-
-  interruptPendingApproval(executionId: string): { approval: PermissionRequest; execution: Execution } {
-    return this.transaction(() => {
-      const approval = this.getApproval(executionId);
-      if (!approval) throw new Error('Approval request not found');
-      if (approval.status !== 'pending') throw new Error('Approval was already resolved');
-      const execution = this.getExecution(executionId);
-      if (!execution || (execution.status !== 'pending' && execution.status !== 'running')) {
-        throw new Error('Tool execution is already settled');
-      }
-      this.db
-        .prepare(
-          "UPDATE approvals SET status = 'cancelled', decided_at = ? WHERE execution_id = ? AND status = 'pending'",
-        )
-        .run(isoNow(), executionId);
-      const interrupted = this.transitionExecutionInternal(executionId, 'interrupted', {
-        error: 'Interrupted while waiting for tool approval.',
-        detail: { userInterrupted: true, beforeApproval: true },
-      });
-      return { approval: this.getApproval(executionId)!, execution: interrupted };
-    });
-  }
-
   getSetting<T>(key: string, fallback: T): T {
     const row = this.db.prepare('SELECT value_json FROM settings WHERE key = ?').get(key) as SqlRow | undefined;
     return row ? json(row.value_json, fallback) : fallback;
@@ -1065,6 +901,12 @@ export class PicoStore {
   }
 
   setPluginState<T>(pluginId: string, key: string, value: T): void {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) throw new Error('Plugin State must be JSON serializable');
+    const previous = this.db
+      .prepare('SELECT value_json FROM plugin_state WHERE plugin_id = ? AND key = ?')
+      .get(pluginId, key) as SqlRow | undefined;
+    if (previous?.value_json === serialized) return;
     this.db
       .prepare(
         `
@@ -1073,7 +915,7 @@ export class PicoStore {
         SET value_json = excluded.value_json, updated_at = excluded.updated_at
     `,
       )
-      .run(pluginId, key, JSON.stringify(value), isoNow());
+      .run(pluginId, key, serialized, isoNow());
     this.notifyAfterCommit(() => {
       for (const listener of this.stateListeners) this.dispatchNotification(() => listener(pluginId));
     });

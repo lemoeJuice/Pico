@@ -850,7 +850,16 @@ describe('Executor execution identity and recovery', () => {
       }
       if (args[0] === 'start') return { stdout: 'container-id', stderr: '' };
       if (args[0] === 'exec') {
+        if (args[2] === 'sh') return { stdout: '', stderr: '' };
         const mode = args[args.indexOf('-e') + 2];
+        if (mode === 'tools')
+          return {
+            stdout: JSON.stringify({
+              status: 'completed',
+              tools: [{ name: 'read_file', description: 'test read', parameters: { type: 'object' } }],
+            }),
+            stderr: '',
+          };
         if (mode === 'run') {
           submissions += 1;
           return { stdout: JSON.stringify({ status: 'running' }), stderr: '' };

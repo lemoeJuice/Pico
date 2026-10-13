@@ -133,15 +133,6 @@ export interface ToolDefinition {
   parameters: Record<string, unknown>;
 }
 
-export interface PermissionRequest {
-  executionId: string;
-  threadId: string;
-  toolName: string;
-  arguments: Record<string, unknown>;
-  status: 'pending' | 'allowed' | 'denied' | 'cancelled';
-  createdAt: string;
-}
-
 export interface UiContribution {
   slot: 'thread.toolbar' | 'composer.action' | 'composer.model' | 'sidebar.panel' | 'tool.renderer';
   id: string;
