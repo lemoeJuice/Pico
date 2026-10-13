@@ -30,7 +30,7 @@ describe('ChatGPT provider plugin', () => {
         get: (key, fallback) => (state.has(key) ? (state.get(key) as typeof fallback) : fallback),
         set: (key, value) => void state.set(key, value),
       },
-      canonical: { append: () => ({}) as never, list: () => [] },
+      canonical: { append: () => ({}) as never, list: () => [], read: () => [], subscribe: () => () => undefined },
     };
     await plugin.activate(context);
 

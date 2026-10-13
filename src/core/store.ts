@@ -67,6 +67,33 @@ export class PicoStore {
   readonly db: DatabaseSync;
   private transactionDepth = 0;
   private savepointSequence = 0;
+  private readonly canonicalListeners = new Set<(record: CanonicalRecord) => void>();
+  private readonly stateListeners = new Set<(pluginId: string) => void>();
+  private pendingNotifications: Array<() => void> = [];
+
+  subscribeCanonical(listener: (record: CanonicalRecord) => void): () => void {
+    this.canonicalListeners.add(listener);
+    return () => this.canonicalListeners.delete(listener);
+  }
+
+  subscribePluginState(listener: (pluginId: string) => void): () => void {
+    this.stateListeners.add(listener);
+    return () => this.stateListeners.delete(listener);
+  }
+
+  private notifyAfterCommit(notification: () => void): void {
+    if (this.transactionDepth > 0) this.pendingNotifications.push(notification);
+    else notification();
+  }
+
+  private dispatchNotification(notification: () => void): void {
+    try {
+      notification();
+    } catch (error) {
+      // Observers cannot turn a committed fact into an apparent write failure.
+      console.error('Pico Store observer failed:', error);
+    }
+  }
 
   constructor(filename = process.env.PICO_DB_PATH ?? join(process.cwd(), 'data', 'pico.sqlite')) {
     if (filename !== ':memory:') {
@@ -257,22 +284,29 @@ export class PicoStore {
   transaction<T>(run: () => T): T {
     const outermost = this.transactionDepth === 0;
     const savepoint = `pico_savepoint_${++this.savepointSequence}`;
+    const notificationStart = this.pendingNotifications.length;
     this.db.exec(outermost ? 'BEGIN IMMEDIATE;' : `SAVEPOINT ${savepoint};`);
     this.transactionDepth += 1;
+    let value: T;
     try {
-      const value = run();
+      value = run();
       this.db.exec(outermost ? 'COMMIT;' : `RELEASE SAVEPOINT ${savepoint};`);
-      this.transactionDepth -= 1;
-      return value;
     } catch (error) {
-      this.transactionDepth -= 1;
+      this.pendingNotifications.splice(notificationStart);
       try {
         this.db.exec(outermost ? 'ROLLBACK;' : `ROLLBACK TO SAVEPOINT ${savepoint}; RELEASE SAVEPOINT ${savepoint};`);
       } catch {
-        // Preserve the original failure; an outer transaction can still roll back its full unit of work.
+        // Preserve the original failure; the outer transaction may still roll back.
       }
       throw error;
+    } finally {
+      this.transactionDepth -= 1;
     }
+    if (outermost) {
+      const notifications = this.pendingNotifications.splice(0);
+      for (const notification of notifications) this.dispatchNotification(notification);
+    }
+    return value;
   }
 
   createProject(name: string, workspacePath: string, id = randomUUID()): Project {
@@ -451,7 +485,7 @@ export class PicoStore {
     threadId: string,
     pluginId: string,
     payload: Record<string, unknown>,
-    id = randomUUID(),
+    id: string = randomUUID(),
   ): CanonicalRecord {
     return this.appendCanonical(threadId, id, 'plugin', { ...payload, pluginId }).record;
   }
@@ -497,10 +531,14 @@ export class PicoStore {
     `,
       )
       .run(id, threadId, seq, kind, JSON.stringify(payload), createdAt);
-    return {
-      record: { id, threadId, seq, kind, payload, createdAt },
-      inserted: true,
-    };
+    const record = { id, threadId, seq, kind, payload, createdAt };
+    const snapshot = structuredClone(record) as CanonicalRecord;
+    this.notifyAfterCommit(() => {
+      for (const listener of this.canonicalListeners) {
+        this.dispatchNotification(() => listener(structuredClone(snapshot)));
+      }
+    });
+    return { record, inserted: true };
   }
 
   private recordFromRow(row: SqlRow): CanonicalRecord {
@@ -517,6 +555,17 @@ export class PicoStore {
   listRecords(threadId: string): CanonicalRecord[] {
     return (
       this.db.prepare('SELECT * FROM canonical_records WHERE thread_id = ? ORDER BY seq').all(threadId) as SqlRow[]
+    ).map((row) => this.recordFromRow(row));
+  }
+
+  readCanonical(threadId: string, afterSeq = 0, limit = 100): CanonicalRecord[] {
+    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error('Invalid canonical cursor');
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000)
+      throw new Error('Canonical page limit must be 1..1000');
+    return (
+      this.db
+        .prepare('SELECT * FROM canonical_records WHERE thread_id = ? AND seq > ? ORDER BY seq LIMIT ?')
+        .all(threadId, afterSeq, limit) as SqlRow[]
     ).map((row) => this.recordFromRow(row));
   }
 
@@ -1025,6 +1074,9 @@ export class PicoStore {
     `,
       )
       .run(pluginId, key, JSON.stringify(value), isoNow());
+    this.notifyAfterCommit(() => {
+      for (const listener of this.stateListeners) this.dispatchNotification(() => listener(pluginId));
+    });
   }
 
   currentSequence(threadId: string): number {

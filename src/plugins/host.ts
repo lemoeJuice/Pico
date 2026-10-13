@@ -94,6 +94,8 @@ export interface PluginContext {
   canonical: {
     append(threadId: string, payload: Record<string, unknown>): CanonicalRecord;
     list(threadId: string): CanonicalRecord[];
+    read(threadId: string, options?: { afterSeq?: number; limit?: number }): CanonicalRecord[];
+    subscribe(threadId: string, listener: (record: CanonicalRecord) => void): () => void;
   };
 }
 
@@ -145,6 +147,7 @@ export class PluginHost {
   ];
   private readonly routes: RegisteredPluginHttpRoute[] = [];
   private readonly activePlugins: PicoPlugin[] = [];
+  private readonly subscriptions = new Map<string, Array<() => void>>();
   private readonly loadErrors: string[] = [];
 
   constructor(
@@ -202,6 +205,8 @@ export class PluginHost {
 
   async shutdown(): Promise<void> {
     for (const plugin of this.activePlugins.splice(0).reverse()) {
+      for (const unsubscribe of this.subscriptions.get(plugin.id) ?? []) unsubscribe();
+      this.subscriptions.delete(plugin.id);
       try {
         await plugin.deactivate?.();
       } catch (error) {
@@ -262,6 +267,7 @@ export class PluginHost {
         throw new Error(`${label} must be an absolute, static path.`);
       }
     };
+    const subscriptions: Array<() => void> = [];
     const context: PluginContext = {
       tools: {
         register: (definition, execute) =>
@@ -331,17 +337,24 @@ export class PluginHost {
       },
       canonical: {
         append: (threadId, payload) => this.store.appendPluginRecord(threadId, plugin.id, payload),
-        list: (threadId) =>
-          this.store
-            .listRecords(threadId)
-            .filter((record) => record.kind === 'plugin' && record.payload.pluginId === plugin.id),
+        list: (threadId) => this.store.listRecords(threadId).map((record) => record),
+        read: (threadId, options = {}) => this.store.readCanonical(threadId, options.afterSeq, options.limit),
+        subscribe: (threadId, listener) => {
+          const unsubscribe = this.store.subscribeCanonical((record) => {
+            if (record.threadId === threadId) listener(record);
+          });
+          subscriptions.push(unsubscribe);
+          return unsubscribe;
+        },
       },
     };
     try {
       await plugin.activate(context);
       this.loaded.push({ id: plugin.id, name: plugin.name, version: plugin.version, source });
       this.activePlugins.push(plugin);
+      this.subscriptions.set(plugin.id, subscriptions);
     } catch (error) {
+      for (const unsubscribe of subscriptions) unsubscribe();
       this.tools.removeOwner(plugin.id);
       this.pipelines.removePlugin(plugin.id);
       this.commands.removeOwner(plugin.id);
