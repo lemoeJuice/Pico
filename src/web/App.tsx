@@ -261,12 +261,14 @@ function ThreadStateControl({
 
 function Modal({
   title,
+  contextLabel = 'PICO · SETTINGS',
   onClose,
   children,
   error,
   onDismissError,
 }: {
   title: string;
+  contextLabel?: string;
   onClose(): void;
   children: ReactNode;
   error: string;
@@ -283,7 +285,7 @@ function Modal({
       <section className="modal" role="dialog" aria-modal="true" aria-label={title}>
         <div className="modal-heading">
           <div>
-            <p className="eyebrow">PICO · SETTINGS</p>
+            <p className="eyebrow">{contextLabel}</p>
             <h2>{title}</h2>
           </div>
           <button className="icon-button" aria-label="Close dialog" onClick={onClose}>
@@ -1127,9 +1129,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         body: JSON.stringify(remoteForm),
       });
       setRemoteConnections((items) => [connection, ...items]);
+      setNewThreadRemoteConnectionId(connection.id);
+      setNewThreadRemoteWorkspacePath(connection.workspaceRoot);
+      setNewThreadExecutor('remote');
       setRemoteForm({ name: '', endpointUrl: '', accessToken: '' });
       setRemoteConnectionNotice(`Connected to ${connection.name}.`);
-      setNotice(`Connected to ${connection.name}. Choose it when starting a new Thread.`);
+      setNotice(`Connected to ${connection.name}.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -1926,7 +1931,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
       {settingsOpen ? (
         <Modal
-          title="Model and Executor connections"
+          title="Model connections"
           onClose={() => {
             setSettingsOpen(false);
             setPluginPageSelection(null);
@@ -2067,96 +2072,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   </button>
                 </div>
               </form>
-              <section className="form-stack remote-connections-section">
-                <div>
-                  <p className="eyebrow">REMOTE HOST EXECUTORS</p>
-                  <p className="form-intro">
-                    Start a Pico Executor on the machine that owns the workspace, then connect it here. Tokens stay in
-                    Pico’s local data file and are never returned by the API.
-                  </p>
-                </div>
-                {remoteConnectionNotice ? (
-                  <p className="remote-connection-notice" role="status">
-                    {remoteConnectionNotice}
-                  </p>
-                ) : null}
-                {remoteConnections.map((connection) => (
-                  <div className="remote-connection-item" key={connection.id}>
-                    <strong>{connection.name}</strong>
-                    <span>{connection.endpointUrl}</span>
-                    <code>{connection.workspaceRoot}</code>
-                    <form
-                      className="remote-token-form"
-                      onSubmit={(event) => void updateRemoteExecutorToken(event, connection.id)}
-                    >
-                      <label>
-                        Replace access token
-                        <input
-                          type="password"
-                          autoComplete="new-password"
-                          placeholder="New access token"
-                          value={remoteTokenEdits[connection.id] ?? ''}
-                          onChange={(event) => {
-                            setRemoteTokenEdits((items) => ({ ...items, [connection.id]: event.target.value }));
-                            setRemoteConnectionNotice('');
-                          }}
-                        />
-                      </label>
-                      <button
-                        className="button button-soft"
-                        disabled={remoteConnectionSaving || !remoteTokenEdits[connection.id]?.trim()}
-                      >
-                        {remoteConnectionSaving ? 'Checking…' : 'Replace token'}
-                      </button>
-                      <p className="field-note">
-                        Pico checks the token before saving it. Existing Threads keep this Executor binding.
-                      </p>
-                    </form>
-                  </div>
-                ))}
-                <form
-                  className="form-stack remote-connection-add-form"
-                  onSubmit={(event) => void addRemoteExecutorConnection(event)}
-                >
-                  <label>
-                    Connection name
-                    <input
-                      value={remoteForm.name}
-                      onChange={(event) => setRemoteForm((form) => ({ ...form, name: event.target.value }))}
-                      placeholder="Build machine"
-                    />
-                  </label>
-                  <label>
-                    Executor URL
-                    <input
-                      value={remoteForm.endpointUrl}
-                      onChange={(event) => setRemoteForm((form) => ({ ...form, endpointUrl: event.target.value }))}
-                      placeholder="https://build.example.test:4174"
-                      autoComplete="url"
-                    />
-                    <span className="field-note">
-                      Use an address reachable from the Pico Runtime, not the Web UI address.
-                    </span>
-                  </label>
-                  <label>
-                    Access token <span className="field-note">Generated on the Executor machine</span>
-                    <input
-                      value={remoteForm.accessToken}
-                      onChange={(event) => setRemoteForm((form) => ({ ...form, accessToken: event.target.value }))}
-                      type="password"
-                      autoComplete="new-password"
-                    />
-                  </label>
-                  <div className="form-actions remote-executor-form-actions">
-                    <span className="field-note remote-executor-footnote">
-                      Remote workspaces are limited to the Executor’s configured root.
-                    </span>
-                    <button className="button button-primary" disabled={remoteConnectionSaving}>
-                      {remoteConnectionSaving ? 'Connecting…' : 'Connect Executor'}
-                    </button>
-                  </div>
-                </form>
-              </section>
             </>
           )}
         </Modal>
@@ -2205,6 +2120,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       {newThreadOpen ? (
         <Modal
           title="Start a Thread"
+          contextLabel="PICO · NEW THREAD"
           onClose={() => setNewThreadOpen(false)}
           error={error}
           onDismissError={() => setError('')}
@@ -2268,13 +2184,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     setNewThreadRemoteWorkspacePath(connection.workspaceRoot);
                   }
                 }}
-                disabled={remoteConnections.length === 0}
               >
                 <span className="choice-icon">
                   <Cloud size={15} aria-hidden="true" />
                 </span>
                 <strong>Remote</strong>
-                <small>Run tools on a connected machine</small>
+                <small>Configure a machine and run tools there</small>
                 <i>{newThreadExecutor === 'remote' ? 'Selected' : 'Choose'}</i>
               </button>
             </div>
@@ -2308,7 +2223,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   </label>
                 </>
               ) : (
-                <p className="form-intro">Add a Remote Host in Settings before creating a Thread.</p>
+                <p className="form-intro">Connect a Remote Executor below to use it for this Thread.</p>
               )
             ) : null}
             <div className="form-actions">
@@ -2317,7 +2232,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   ? 'Chat mode can coordinate Threads but cannot access project files or run shell commands.'
                   : newThreadExecutor === 'container'
                     ? 'Container is the default and runs tools inside the selected workspace.'
-                    : 'Host Executor tools ask before running.'}
+                    : newThreadExecutor === 'remote'
+                      ? 'Tools run on the selected Remote Executor and use a workspace under its configured root.'
+                      : 'Host Executor tools ask before running.'}
               </span>
               <button
                 className="button button-primary"
@@ -2331,6 +2248,98 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               </button>
             </div>
           </form>
+          {newThreadExecutor === 'remote' ? (
+            <section className="form-stack remote-connections-section">
+              <div>
+                <p className="eyebrow">REMOTE EXECUTOR</p>
+                <p className="form-intro">
+                  Start a Pico Executor on the machine that owns the workspace, then connect it here. Tokens stay in
+                  Pico’s local data file and are never returned by the API.
+                </p>
+              </div>
+              {remoteConnectionNotice ? (
+                <p className="remote-connection-notice" role="status">
+                  {remoteConnectionNotice}
+                </p>
+              ) : null}
+              {remoteConnections.map((connection) => (
+                <div className="remote-connection-item" key={connection.id}>
+                  <strong>{connection.name}</strong>
+                  <span>{connection.endpointUrl}</span>
+                  <code>{connection.workspaceRoot}</code>
+                  <form
+                    className="remote-token-form"
+                    onSubmit={(event) => void updateRemoteExecutorToken(event, connection.id)}
+                  >
+                    <label>
+                      Replace access token
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        placeholder="New access token"
+                        value={remoteTokenEdits[connection.id] ?? ''}
+                        onChange={(event) => {
+                          setRemoteTokenEdits((items) => ({ ...items, [connection.id]: event.target.value }));
+                          setRemoteConnectionNotice('');
+                        }}
+                      />
+                    </label>
+                    <button
+                      className="button button-soft"
+                      disabled={remoteConnectionSaving || !remoteTokenEdits[connection.id]?.trim()}
+                    >
+                      {remoteConnectionSaving ? 'Checking…' : 'Replace token'}
+                    </button>
+                    <p className="field-note">
+                      Pico checks the token before saving it. Existing Threads keep this Executor binding.
+                    </p>
+                  </form>
+                </div>
+              ))}
+              <form
+                className="form-stack remote-connection-add-form"
+                onSubmit={(event) => void addRemoteExecutorConnection(event)}
+              >
+                <label>
+                  Connection name
+                  <input
+                    value={remoteForm.name}
+                    onChange={(event) => setRemoteForm((form) => ({ ...form, name: event.target.value }))}
+                    placeholder="Build machine"
+                  />
+                </label>
+                <label>
+                  Executor URL
+                  <input
+                    value={remoteForm.endpointUrl}
+                    onChange={(event) => setRemoteForm((form) => ({ ...form, endpointUrl: event.target.value }))}
+                    placeholder="https://build.example.test:4174"
+                    autoComplete="url"
+                  />
+                  <span className="field-note">
+                    Use an address reachable from the Pico Runtime, not the Web UI address.
+                  </span>
+                </label>
+                <label>
+                  Access token <span className="field-note">Generated on the Executor machine</span>
+                  <input
+                    value={remoteForm.accessToken}
+                    onChange={(event) => setRemoteForm((form) => ({ ...form, accessToken: event.target.value }))}
+                    type="password"
+                    autoComplete="new-password"
+                  />
+                </label>
+                <div className="form-actions remote-executor-form-actions">
+                  <span className="field-note remote-executor-footnote">
+                    Remote workspaces are limited to the Executor’s configured root.
+                  </span>
+                  <button className="button button-primary" disabled={remoteConnectionSaving}>
+                    {remoteConnectionSaving ? 'Connecting…' : 'Connect Executor'}
+                  </button>
+                </div>
+              </form>
+            </section>
+          ) : null}
         </Modal>
       ) : null}
 
