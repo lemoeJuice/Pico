@@ -17,7 +17,7 @@ type Preferences = { reasoningEffort: ChatGptReasoningEffort; fastMode: boolean 
 
 const defaultPreferences: Preferences = { reasoningEffort: 'auto', fastMode: false };
 const reasoningEffortLabels: Record<ChatGptReasoningEffort, string> = {
-  auto: 'Model default',
+  auto: 'Default',
   none: 'None',
   minimal: 'Minimal',
   low: 'Low',

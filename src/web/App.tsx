@@ -1817,27 +1817,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 </div>
               ) : null}
               <div className="composer-entry-row">
-                {pluginUiContext && composerModelContributions.length > 0 ? (
-                  <div className="composer-plugin-controls" aria-label="Model controls">
-                    {composerModelContributions.map((item) => {
-                      return item.pluginId && item.entry && item.component ? (
-                        <PluginWebView
-                          key={item.id}
-                          pluginId={item.pluginId}
-                          entry={item.entry}
-                          viewType="component"
-                          viewId={item.component}
-                          {...pluginUiContext}
-                          isRegisteredPage={isRegisteredPluginPage}
-                        />
-                      ) : (
-                        <span className="field-note" key={item.id}>
-                          {item.label} requires a plugin Web UI entry.
-                        </span>
-                      );
-                    })}
-                  </div>
-                ) : null}
                 <div className="composer-box">
                   <textarea
                     value={draft}
@@ -1855,6 +1834,27 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     aria-label="Message"
                   />
                   <div className="composer-footer">
+                    {pluginUiContext && composerModelContributions.length > 0 ? (
+                      <div className="composer-plugin-controls" aria-label="Model controls">
+                        {composerModelContributions.map((item) => {
+                          return item.pluginId && item.entry && item.component ? (
+                            <PluginWebView
+                              key={item.id}
+                              pluginId={item.pluginId}
+                              entry={item.entry}
+                              viewType="component"
+                              viewId={item.component}
+                              {...pluginUiContext}
+                              isRegisteredPage={isRegisteredPluginPage}
+                            />
+                          ) : (
+                            <span className="field-note" key={item.id}>
+                              {item.label} requires a plugin Web UI entry.
+                            </span>
+                          );
+                        })}
+                      </div>
+                    ) : null}
                     <div className="composer-footer-actions">
                       {composerActions.map((item) => (
                         <button
@@ -1867,6 +1867,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                           {item.label}
                         </button>
                       ))}
+                      <ThreadStateControl
+                        state={currentState}
+                        canInterrupt={threadCanBeInterrupted(currentState, executions)}
+                        onAction={(action) => void controlThread(action)}
+                      />
                       <button
                         className="send-button"
                         aria-label="Send message"
@@ -1879,11 +1884,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     </div>
                   </div>
                 </div>
-                <ThreadStateControl
-                  state={currentState}
-                  canInterrupt={threadCanBeInterrupted(currentState, executions)}
-                  onAction={(action) => void controlThread(action)}
-                />
               </div>
               {settings?.model ? (
                 <div className="composer-caption">

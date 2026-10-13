@@ -1421,7 +1421,7 @@ button:disabled {
 }
 .composer-plugin-controls {
   display: flex;
-  flex: 0 1 470px;
+  flex: 1 1 470px;
   min-width: 0;
   align-items: center;
   gap: 8px;
@@ -1436,7 +1436,7 @@ button:disabled {
 .composer-plugin-controls .plugin-web-view-component {
   flex: 1 1 100%;
   min-width: 0;
-  height: 48px;
+  height: 36px;
 }
 .composer-plugin-controls .form-stack {
   flex: 1 1 220px;
@@ -1532,8 +1532,9 @@ button:disabled {
 .composer-footer {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .composer-footer-actions {
   display: flex;
@@ -2326,7 +2327,7 @@ button:disabled {
     flex: 1 1 100%;
   }
   .composer-plugin-controls .plugin-web-view-component {
-    height: 48px;
+    height: 36px;
   }
   .composer-box {
     flex: 1 1 0;

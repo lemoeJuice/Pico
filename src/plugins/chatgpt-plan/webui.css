@@ -185,6 +185,17 @@ select {
   cursor: pointer;
 }
 
+.chatgpt-composer-controls .chatgpt-fast-control {
+  width: 122px;
+  flex: 0 0 122px;
+  box-sizing: border-box;
+}
+
+.chatgpt-composer-controls .chatgpt-fast-control span {
+  flex: 0 0 64px;
+  white-space: nowrap;
+}
+
 .chatgpt-fast-control i {
   position: relative;
   width: 27px;
