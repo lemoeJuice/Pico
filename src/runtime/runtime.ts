@@ -858,6 +858,7 @@ export class PicoRuntime {
   }
 
   private projectTurns(records: readonly CanonicalRecord[], thread: Thread): PromptTurn[] {
+    const recordIds = new Set(records.map((record) => record.id));
     const results = new Map<string, ToolResultPayload>();
     for (const record of records) {
       if (record.kind === 'tool_result') {
@@ -878,8 +879,8 @@ export class PicoRuntime {
           for (const call of assistant.toolCalls) {
             const result = assistant.batchId ? results.get(`${assistant.batchId}:${call.id}`) : undefined;
             if (result) {
-              const resultRecord = records.find((candidate) => candidate.id === `${result.executionId}:result`);
-              if (resultRecord) consumedResults.add(resultRecord.id);
+              const resultRecordId = `${result.executionId}:result`;
+              if (recordIds.has(resultRecordId)) consumedResults.add(resultRecordId);
               turns.push({
                 kind: 'tool_result',
                 callId: call.id,
@@ -1124,22 +1125,17 @@ export class PicoRuntime {
 
   private ensureToolResult(threadId: string, execution: Execution): void {
     if (!terminalStatus(execution.status) || this.store.hasToolResult(execution.id)) return;
-    const call = this.store
-      .listRecords(threadId)
-      .filter((record) => record.kind === 'assistant')
-      .map((record) => record.payload as unknown as AssistantPayload)
-      .flatMap((payload) => payload.toolCalls.map((toolCall) => ({ payload, toolCall })))
-      .find(
-        ({ payload, toolCall }) =>
-          payload.batchId === execution.batchId &&
-          `${threadId}:${payload.batchId?.replace(/:batch$/, '')}:${toolCall.id}` === execution.id,
-      );
-    const toolCallId = call?.toolCall.id ?? execution.id;
+    const modelExecutionId = execution.batchId?.replace(/:batch$/, '');
+    const executionPrefix = modelExecutionId ? `${threadId}:${modelExecutionId}:` : '';
+    const toolCallId =
+      executionPrefix && execution.id.startsWith(executionPrefix)
+        ? execution.id.slice(executionPrefix.length)
+        : execution.id;
     const payload: ToolResultPayload = {
       executionId: execution.id,
       toolCallId,
       batchId: execution.batchId ?? '',
-      toolName: execution.toolName ?? call?.toolCall.name ?? 'unknown',
+      toolName: execution.toolName ?? 'unknown',
       status: execution.status,
       ...(execution.status === 'completed'
         ? { result: execution.result }

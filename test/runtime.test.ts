@@ -9,7 +9,7 @@ import type { ModelResponse } from '../src/runtime/model.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
 import type { ModelStageInput, ProjectionInput, StepInput, ToolBatchInput } from '../src/runtime/stages.js';
 import { threadCanBeInterrupted } from '../src/web/thread-controls.js';
-import { deferred, FakeModel, response, setupRuntime } from './helpers.js';
+import { assistantPayload, deferred, FakeModel, response, setupRuntime } from './helpers.js';
 
 describe('durable Thread runtime invariants', () => {
   it('deduplicates Messages by ID and starts an idle Thread once', async () => {
@@ -650,7 +650,7 @@ describe('durable Thread runtime invariants', () => {
   it('asks before a Host Executor tool call, then records the allowed result', async () => {
     const model = new FakeModel((_prompt, callNumber) =>
       callNumber === 1
-        ? response('', [{ id: 'read-call', name: 'read_file', arguments: { path: 'facts.txt' } }])
+        ? response('', [{ id: 'read:file:one', name: 'read_file', arguments: { path: 'facts.txt' } }])
         : response('I read the file.'),
     );
     const env = await setupRuntime(model);
@@ -668,6 +668,8 @@ describe('durable Thread runtime invariants', () => {
       expect(env.store.getApproval(approval.executionId)?.status).toBe('allowed');
       expect(env.runtime.toolPermissions(thread.id).find((tool) => tool.name === 'read_file')?.policy).toBe('ask');
       expect(env.store.getExecution(approval.executionId)?.status).toBe('completed');
+      const toolResult = env.store.listRecords(thread.id).find((record) => record.kind === 'tool_result');
+      expect(toolResult?.payload).toMatchObject({ toolCallId: 'read:file:one', toolName: 'read_file' });
       expect(
         env.store
           .listRecords(thread.id)
@@ -678,6 +680,7 @@ describe('durable Thread runtime invariants', () => {
           (turn) => turn.kind === 'tool_result' && turn.content.includes('The durable fact.'),
         ),
       ).toBe(true);
+      expect(model.prompts[1]?.turns.filter((turn) => turn.kind === 'tool_result')).toHaveLength(1);
     } finally {
       await env.cleanup();
     }
@@ -1006,6 +1009,66 @@ describe('durable Thread runtime invariants', () => {
         pauseReason: expect.stringContaining('output token limit'),
       });
       expect(model.calls).toBe(1);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('keeps the full long Thread history in the Model projection with each Tool Result once', async () => {
+    const model = new FakeModel(() => response('Long history preserved.'));
+    const env = await setupRuntime(model);
+    const thread = env.createThread('host');
+    const historySteps = 120;
+    try {
+      for (let index = 0; index < historySteps; index += 1) {
+        env.store.appendMessage(thread.id, `projection-message-${index}`, {
+          role: 'user',
+          content: `User fact ${index}`,
+          source: 'user',
+        });
+        const modelExecutionId = `projection-model-${index}`;
+        const modelExecution = env.store.createModelExecution(modelExecutionId, thread.id, index);
+        env.store.transitionExecution(modelExecution.id, 'running');
+        const call = {
+          id: `projection:call:${index}`,
+          name: 'read_file',
+          arguments: { path: `facts-${index}.txt` },
+        };
+        const batchId = `${modelExecutionId}:batch`;
+        const executionId = `${thread.id}:${modelExecutionId}:${call.id}`;
+        env.store.commitModelStep({
+          assistantRecordId: `${modelExecutionId}:assistant`,
+          modelExecutionId,
+          threadId: thread.id,
+          payload: assistantPayload({
+            content: `Step ${index}`,
+            toolCalls: [call],
+            batchId,
+            projectionThrough: index,
+          }),
+          toolCalls: [{ call, executionId }],
+        });
+        env.store.transitionExecution(executionId, 'completed', { result: { entry: index } });
+        env.store.appendToolResult(thread.id, {
+          executionId,
+          toolCallId: call.id,
+          batchId,
+          toolName: call.name,
+          status: 'completed',
+          result: { entry: index },
+        });
+      }
+
+      await env.runtime.submit(thread.id, 'projection-latest-message', 'Use the complete project history.');
+      await env.runtime.drain();
+
+      const turns = model.prompts[0]?.turns ?? [];
+      expect(turns).toHaveLength(historySteps * 3 + 1);
+      expect(turns[0]).toMatchObject({ kind: 'message', content: 'User fact 0' });
+      expect(turns.filter((turn) => turn.kind === 'assistant_tools')).toHaveLength(historySteps);
+      expect(turns.filter((turn) => turn.kind === 'tool_result')).toHaveLength(historySteps);
+      expect(turns.at(-1)).toMatchObject({ kind: 'message', content: 'Use the complete project history.' });
+      expect(turns.some((turn) => turn.kind === 'tool_result' && turn.content.includes('"entry":119'))).toBe(true);
     } finally {
       await env.cleanup();
     }
