@@ -353,7 +353,7 @@ describe('Remote Host Executor', () => {
     }
   });
 
-  it('keeps a Remote execution running through a dropped status connection and resumes the same ID', async () => {
+  it('automatically recovers a Remote execution after transient status disconnects and truncated replies', async () => {
     const directory = await import('node:fs/promises').then(({ mkdtemp }) =>
       mkdtemp(join(tmpdir(), 'pico-remote-reconnect-')),
     );
@@ -381,6 +381,8 @@ describe('Remote Host Executor', () => {
       env.runtime.setToolPermission(thread.id, 'shell', 'allow');
 
       let acceptedRemoteSubmission = false;
+      let submissionAttempts = 0;
+      let statusConnectionFailures = 0;
       globalThis.fetch = async (input, init) => {
         const requestUrl = input instanceof URL ? input : new URL(typeof input === 'string' ? input : input.url);
         if (
@@ -391,36 +393,43 @@ describe('Remote Host Executor', () => {
         ) {
           const result = await originalFetch(input, init);
           acceptedRemoteSubmission = true;
+          submissionAttempts += 1;
+          if (submissionAttempts === 1) {
+            throw new TypeError('Simulated lost response after Remote Executor accepted the execution.');
+          }
           return result;
         }
         if (
           acceptedRemoteSubmission &&
           requestUrl.origin === endpoint &&
-          requestUrl.pathname.startsWith('/api/executions/')
+          requestUrl.pathname.startsWith('/api/executions/') &&
+          init?.method !== 'POST' &&
+          statusConnectionFailures < 2
         ) {
-          throw new TypeError('Simulated temporary Remote Executor connection loss.');
+          statusConnectionFailures += 1;
+          if (statusConnectionFailures === 1) {
+            throw new TypeError('Simulated temporary Remote Executor connection loss.');
+          }
+          return new Response('{', { status: 200, headers: { 'content-type': 'application/json' } });
         }
         return originalFetch(input, init);
       };
 
       await env.runtime.submit(thread.id, 'remote-reconnect-message', 'Run and recover the remote command.');
-      await env.runtime.drain();
-      await until(() => {
-        const execution = env.store.listExecutions(thread.id).find((item) => item.kind === 'tool');
-        return env.runtime.getThread(thread.id)?.state === 'paused' && execution?.status === 'running';
-      });
+      await until(() => statusConnectionFailures > 0);
       const toolExecution = env.store.listExecutions(thread.id).find((item) => item.kind === 'tool');
       expect(toolExecution?.status).toBe('running');
-      expect(env.runtime.getThread(thread.id)?.pauseReason).toContain('Tool Batch returned');
+      expect(env.runtime.getThread(thread.id)?.state).toBe('running');
 
-      globalThis.fetch = originalFetch;
-      env.runtime.continue(thread.id);
       await env.runtime.drain();
 
+      expect(submissionAttempts).toBe(2);
+      expect(statusConnectionFailures).toBe(2);
       expect(env.store.getExecution(toolExecution!.id)?.status).toBe('completed');
       expect(await readFile(join(remoteWorkspace, 'runs.log'), 'utf8')).toBe('x');
       expect(model.calls).toBe(2);
       expect(env.store.listRecords(thread.id).filter((record) => record.kind === 'message')).toHaveLength(1);
+      expect(env.runtime.getThread(thread.id)?.state).toBe('idle');
     } finally {
       globalThis.fetch = originalFetch;
       await env.cleanup();
@@ -649,9 +658,12 @@ describe('Remote Host Executor', () => {
           /^\/api\/executions\/[^/]+$/.test(requestUrl.pathname) &&
           init?.method === 'POST'
         ) {
-          await originalFetch(input, init);
-          acceptedSubmissionResponseWasLost = true;
-          throw new TypeError('Simulated lost response after Remote Executor accepted the execution.');
+          const result = await originalFetch(input, init);
+          if (!acceptedSubmissionResponseWasLost) {
+            acceptedSubmissionResponseWasLost = true;
+            throw new TypeError('Simulated lost response after Remote Executor accepted the execution.');
+          }
+          return result;
         }
         return originalFetch(input, init);
       };
@@ -659,11 +671,7 @@ describe('Remote Host Executor', () => {
       await env.runtime.submit(thread.id, 'lost-ack-interrupt-message', 'Start then interrupt the command.');
       await until(() => {
         const execution = env.store.listExecutions(thread.id).find((item) => item.kind === 'tool');
-        return (
-          acceptedSubmissionResponseWasLost &&
-          execution?.status === 'pending' &&
-          env.runtime.getThread(thread.id)?.state === 'paused'
-        );
+        return acceptedSubmissionResponseWasLost && execution?.status === 'pending';
       });
       const execution = env.store.listExecutions(thread.id).find((item) => item.kind === 'tool')!;
       expect(await getJson<{ status: string }>(`${endpoint}/api/executions/${execution.id}`, token)).toMatchObject({

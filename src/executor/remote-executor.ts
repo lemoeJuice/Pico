@@ -40,7 +40,15 @@ async function requestJson<T>(
       cause: error,
     });
   }
-  const payload: unknown = await response.json().catch(() => null);
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    if (response.ok) {
+      throw new Error('Remote Executor request failed: response body was not valid JSON.', { cause: error });
+    }
+    payload = null;
+  }
   if (!response.ok) {
     const message =
       payload && typeof payload === 'object' && 'error' in payload
@@ -51,6 +59,22 @@ async function requestJson<T>(
     throw error;
   }
   return payload as T;
+}
+
+function waitForRetry(milliseconds: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    if (signal.aborted) return reject(new DOMException('Remote Executor request interrupted locally.', 'AbortError'));
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      reject(new DOMException('Remote Executor request interrupted locally.', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolvePromise();
+    }, milliseconds);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 export async function inspectRemoteExecutor(endpointUrl: string, accessToken: string): Promise<RemoteExecutorInfo> {
@@ -181,23 +205,27 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     const { endpointUrl, accessToken } = connection(binding);
     let remote: RemoteExecutionState;
     if (current.status === 'pending') {
-      remote = await requestJson<RemoteExecutionState>(
-        endpointUrl,
-        accessToken,
-        `/api/executions/${encodeURIComponent(executionId)}`,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            toolName: current.toolName,
-            arguments: current.arguments ?? {},
-            workspacePath: binding.workspacePath,
-          }),
-        },
-        signal,
+      remote = await this.retryTransientRequest(signal, () =>
+        requestJson<RemoteExecutionState>(
+          endpointUrl,
+          accessToken,
+          `/api/executions/${encodeURIComponent(executionId)}`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              toolName: current.toolName,
+              arguments: current.arguments ?? {},
+              workspacePath: binding.workspacePath,
+            }),
+          },
+          signal,
+        ),
       );
     } else {
       try {
-        remote = await this.getState(endpointUrl, accessToken, executionId, signal);
+        remote = await this.retryTransientRequest(signal, () =>
+          this.getState(endpointUrl, accessToken, executionId, signal),
+        );
       } catch (error) {
         if (this.httpStatus(error) === 404) {
           return this.transition(executionId, 'interrupted', {
@@ -213,7 +241,9 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     while (settled.status === 'running' && !signal.aborted) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 700));
       if (signal.aborted) break;
-      remote = await this.getState(endpointUrl, accessToken, executionId, signal);
+      remote = await this.retryTransientRequest(signal, () =>
+        this.getState(endpointUrl, accessToken, executionId, signal),
+      );
       settled = this.acceptState(executionId, remote);
     }
     return this.store.getExecution(executionId) ?? settled;
@@ -258,6 +288,26 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     const updated = this.store.transitionExecution(executionId, status, data);
     this.onExecution(updated);
     return updated;
+  }
+
+  private async retryTransientRequest<T>(signal: AbortSignal, request: () => Promise<T>): Promise<T> {
+    let attempt = 0;
+    while (true) {
+      try {
+        return await request();
+      } catch (error) {
+        if (signal.aborted || !this.isRetryableRequestFailure(error)) throw error;
+        const delay = Math.min(500 * 2 ** Math.min(attempt, 4), 8_000);
+        attempt += 1;
+        await waitForRetry(delay, signal);
+      }
+    }
+  }
+
+  private isRetryableRequestFailure(error: unknown): boolean {
+    const status = this.httpStatus(error);
+    if (status !== null) return status === 408 || status === 425 || status === 429 || status >= 500;
+    return error instanceof Error && error.message.startsWith('Remote Executor request failed:');
   }
 
   private httpStatus(error: unknown): number | null {
