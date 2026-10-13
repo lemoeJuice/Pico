@@ -1960,6 +1960,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   placeholder="https://build.example.test:4174"
                   autoComplete="url"
                 />
+                <span className="field-note">Use an address reachable from the Pico Runtime, not the Web UI address.</span>
               </label>
               <label>
                 Access token <span className="field-note">Generated on the Executor machine</span>

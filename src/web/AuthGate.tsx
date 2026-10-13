@@ -125,7 +125,7 @@ export function AuthGate({
                   autoComplete="off"
                   autoFocus
                   onChange={(event) => setToken(event.target.value)}
-                  placeholder="Paste PICO_ACCESS_TOKEN"
+                  placeholder="PICO_ACCESS_TOKEN"
                   required
                   type="password"
                   value={token}
