@@ -719,7 +719,13 @@ export class PicoStore {
     });
   }
 
-  createModelExecution(id: string, threadId: string, projectionThrough: number): Execution {
+  createModelExecution(
+    id: string,
+    threadId: string,
+    projectionThrough: number,
+    retryOf?: string,
+    model?: string,
+  ): Execution {
     const now = isoNow();
     return this.transaction(() => {
       const existing = this.getExecution(id);
@@ -733,8 +739,45 @@ export class PicoStore {
       ) VALUES (?, ?, NULL, 'model', NULL, ?, 'pending', NULL, NULL, ?, ?)
     `,
         )
-        .run(id, threadId, JSON.stringify({ projectionThrough }), now, now);
-      this.logExecution(id, 'created', { status: 'pending', projectionThrough }, now);
+        .run(
+          id,
+          threadId,
+          JSON.stringify({
+            projectionThrough,
+            ...(retryOf ? { retryOf } : {}),
+            ...(model?.trim() ? { model: model.trim() } : {}),
+          }),
+          now,
+          now,
+        );
+      this.logExecution(
+        id,
+        'created',
+        {
+          status: 'pending',
+          projectionThrough,
+          ...(retryOf ? { retryOf } : {}),
+          ...(model?.trim() ? { model: model.trim() } : {}),
+        },
+        now,
+      );
+      return this.getExecution(id)!;
+    });
+  }
+
+  setModelExecutionModel(id: string, model: string): Execution {
+    const cleanedModel = model.trim();
+    return this.transaction(() => {
+      const current = this.getExecution(id);
+      if (!current || current.kind !== 'model') throw new Error(`Model Execution ${id} not found`);
+      if (!cleanedModel) return current;
+      const args = current.arguments && typeof current.arguments === 'object' ? current.arguments : {};
+      if (args.model === cleanedModel) return current;
+      const now = isoNow();
+      this.db
+        .prepare('UPDATE executions SET arguments_json = ?, updated_at = ? WHERE id = ?')
+        .run(JSON.stringify({ ...args, model: cleanedModel }), now, id);
+      this.logExecution(id, 'model-selected', { model: cleanedModel }, now);
       return this.getExecution(id)!;
     });
   }

@@ -73,6 +73,7 @@ import {
   Pause,
   Play,
   Plus,
+  RotateCcw,
   Send,
   Settings,
   Sparkles,
@@ -188,9 +189,33 @@ interface ModelExecutionGroup {
   variants: ModelExecutionVariant[];
 }
 
+function assistantRecordHasVisibleResult(record: CanonicalRecord | null): boolean {
+  if (!record) return false;
+  const payload = recordPayload<AssistantPayload>(record);
+  return (
+    (typeof payload.content === 'string' && payload.content.trim().length > 0) ||
+    (Array.isArray(payload.toolCalls) && payload.toolCalls.length > 0)
+  );
+}
+
+function modelExecutionCanRetry(variant: ModelExecutionVariant): boolean {
+  if (variant.execution.status === 'failed' || variant.execution.status === 'interrupted') return true;
+  return variant.execution.status === 'completed' && Boolean(variant.assistantRecord) && !assistantRecordHasVisibleResult(variant.assistantRecord);
+}
+
 function modelExecutionProjectionThrough(execution: Execution): number | null {
   const projectionThrough = execution.arguments?.projectionThrough;
   return typeof projectionThrough === 'number' && Number.isSafeInteger(projectionThrough) ? projectionThrough : null;
+}
+
+function modelExecutionModelId(execution: Execution): string | null {
+  const argumentModel = execution.arguments?.model;
+  if (typeof argumentModel === 'string' && argumentModel.trim()) return argumentModel;
+  if (execution.result && typeof execution.result === 'object' && !Array.isArray(execution.result)) {
+    const resultModel = (execution.result as Record<string, unknown>).model;
+    if (typeof resultModel === 'string' && resultModel.trim()) return resultModel;
+  }
+  return null;
 }
 
 function messageIdAtProjection(records: readonly CanonicalRecord[], projectionThrough: number): string | null {
@@ -1395,6 +1420,33 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     }
   };
 
+  const retryModelExecution = async (targetThreadId: string, sourceExecutionId: string): Promise<Execution> => {
+    const updateVersion = threadUpdateVersions.current.get(targetThreadId) ?? 0;
+    const result = await api<{ execution: Execution; thread: Thread }>(
+      `/api/threads/${encodeURIComponent(targetThreadId)}/executions/${encodeURIComponent(sourceExecutionId)}/retry`,
+      { method: 'POST', body: '{}' },
+    );
+    if (activeThreadId.current === targetThreadId && (threadUpdateVersions.current.get(targetThreadId) ?? 0) === updateVersion) {
+      setSnapshot((current) =>
+        current?.thread.id === targetThreadId
+          ? {
+              ...current,
+              thread: result.thread,
+              executions: [result.execution, ...current.executions.filter((item) => item.id !== result.execution.id)],
+            }
+          : current,
+      );
+      setThreads((items) => items.map((item) => (item.id === result.thread.id ? result.thread : item)));
+      setThreadsByProject((current) => ({
+        ...current,
+        [result.thread.projectId]: (current[result.thread.projectId] ?? []).map((item) =>
+          item.id === result.thread.id ? result.thread : item,
+        ),
+      }));
+    }
+    return result.execution;
+  };
+
   const saveModelSettings = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
     setSettingsSaving(true);
@@ -1638,7 +1690,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           left.execution.createdAt.localeCompare(right.execution.createdAt) ||
           left.execution.id.localeCompare(right.execution.id),
       );
-      if (!variants.some((variant) => variant.execution.status !== 'completed')) continue;
+      const needsAttemptGroup =
+        variants.length > 1 || variants.some((variant) => variant.execution.status !== 'completed' || modelExecutionCanRetry(variant));
+      if (!needsAttemptGroup) continue;
       groups.push({ projectionThrough, variants });
       for (const variant of variants) {
         if (variant.assistantRecord) groupedAssistantRecordIds.add(variant.assistantRecord.id);
@@ -2099,6 +2153,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       records={records}
                       renderTool={renderToolView}
                       onOpenThread={chooseThread}
+                      onRetryModelExecution={retryModelExecution}
+                      retryDisabled={currentState === 'running' || currentState === 'pausing'}
                     />
                   ) : (
                     <AssistantBubble
@@ -2766,6 +2822,8 @@ function MessageBubble({
   records,
   renderTool,
   onOpenThread,
+  onRetryModelExecution,
+  retryDisabled,
 }: {
   record: CanonicalRecord;
   thread: Thread;
@@ -2776,6 +2834,8 @@ function MessageBubble({
   records: CanonicalRecord[];
   renderTool(call: ToolCall, execution: Execution | undefined, result: ToolResultPayload | undefined): ReactNode;
   onOpenThread(id: string): void;
+  onRetryModelExecution(threadId: string, executionId: string): Promise<Execution>;
+  retryDisabled: boolean;
 }) {
   const message = recordPayload<MessagePayload>(record);
   const incoming = message.source !== 'user';
@@ -2786,7 +2846,11 @@ function MessageBubble({
         ? 'Child Thread'
         : 'Agent';
   return (
-    <div className={`user-message ${incoming ? 'incoming-message' : ''}`}>
+    <div
+      className={`user-message ${incoming ? 'incoming-message' : ''} ${
+        modelExecutionGroups.length > 0 ? 'has-model-execution-groups' : ''
+      }`}
+    >
       <div className="message-body">
         <div className="message-author">
           {incoming ? (
@@ -2812,6 +2876,8 @@ function MessageBubble({
             executions={executions}
             records={records}
             renderTool={renderTool}
+            onRetryModelExecution={onRetryModelExecution}
+            retryDisabled={retryDisabled}
           />
         ))}
       </div>
@@ -2829,6 +2895,8 @@ function ModelExecutionBranchGroup({
   executions,
   records,
   renderTool,
+  onRetryModelExecution,
+  retryDisabled,
 }: {
   group: ModelExecutionGroup;
   threadId: string;
@@ -2836,55 +2904,104 @@ function ModelExecutionBranchGroup({
   executions: Execution[];
   records: CanonicalRecord[];
   renderTool(call: ToolCall, execution: Execution | undefined, result: ToolResultPayload | undefined): ReactNode;
+  onRetryModelExecution(threadId: string, executionId: string): Promise<Execution>;
+  retryDisabled: boolean;
 }) {
   const [selectedExecutionId, setSelectedExecutionId] = useState<string | null>(null);
+  const [retryingExecutionId, setRetryingExecutionId] = useState<string | null>(null);
+  const [retryError, setRetryError] = useState('');
   const selectedIndex = selectedExecutionId
     ? group.variants.findIndex((variant) => variant.execution.id === selectedExecutionId)
     : -1;
   const currentIndex = selectedIndex >= 0 ? selectedIndex : group.variants.length - 1;
   const variant = group.variants[currentIndex];
   if (!variant) return null;
-
-  return (
-    <div className="model-execution-branch-group">
-      <ModelExecutionVariantView
-        key={variant.execution.id}
-        variant={variant}
-        threadId={threadId}
-        outputUnavailable={unavailableModelExecutionIds.has(variant.execution.id)}
-        executions={executions}
-        records={records}
-        renderTool={renderTool}
-      />
+  const retryable =
+    modelExecutionCanRetry(variant) &&
+    !records.some((record) => record.kind === 'message' && record.seq > group.projectionThrough) &&
+    !executions.some((execution) => {
+      const laterProjection = modelExecutionProjectionThrough(execution);
+      return execution.kind === 'model' && laterProjection !== null && laterProjection > group.projectionThrough;
+    });
+  const handleRetry = async (): Promise<void> => {
+    setRetryingExecutionId(variant.execution.id);
+    setRetryError('');
+    try {
+      const nextExecution = await onRetryModelExecution(threadId, variant.execution.id);
+      setSelectedExecutionId(nextExecution.id);
+    } catch (caught) {
+      setRetryError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setRetryingExecutionId(null);
+    }
+  };
+  const attemptActions = (
+    <div className="model-attempt-actions">
       {group.variants.length > 1 ? (
         <div className="model-attempt-switcher" role="group" aria-label="Generation attempts">
           <button
             type="button"
             aria-label="Previous generation attempt"
             title="Previous generation attempt"
-            disabled={currentIndex === 0}
+            disabled={currentIndex === 0 || retryingExecutionId !== null}
             onClick={() => setSelectedExecutionId(group.variants[currentIndex - 1]!.execution.id)}
           >
             <ChevronLeft size={14} aria-hidden="true" />
           </button>
-          <span>Attempt {currentIndex + 1} of {group.variants.length}</span>
+          <span>{currentIndex + 1}/{group.variants.length}</span>
           <button
             type="button"
             aria-label="Next generation attempt"
             title="Next generation attempt"
-            disabled={currentIndex === group.variants.length - 1}
+            disabled={currentIndex === group.variants.length - 1 || retryingExecutionId !== null}
             onClick={() => setSelectedExecutionId(group.variants[currentIndex + 1]!.execution.id)}
           >
             <ChevronRight size={14} aria-hidden="true" />
           </button>
         </div>
       ) : null}
+      {retryable ? (
+        <button
+          type="button"
+          className="model-retry-button"
+          aria-label="Retry this model step"
+          title="Start a new attempt for this Model Step"
+          disabled={retryDisabled || retryingExecutionId !== null}
+          onClick={() => void handleRetry()}
+        >
+          <RotateCcw size={12} aria-hidden="true" />
+          <span>{retryingExecutionId === variant.execution.id ? 'Retrying…' : 'Retry'}</span>
+        </button>
+      ) : null}
+      {retryError ? <span className="model-retry-error" role="alert">{retryError}</span> : null}
+    </div>
+  );
+
+  return (
+    <div className="model-execution-branch-group">
+      <ModelExecutionVariantView
+        key={variant.execution.id}
+        variant={variant}
+        attemptActions={attemptActions}
+        emptyOutput={
+          variant.execution.status === 'completed' &&
+          Boolean(variant.assistantRecord) &&
+          !assistantRecordHasVisibleResult(variant.assistantRecord)
+        }
+        threadId={threadId}
+        outputUnavailable={unavailableModelExecutionIds.has(variant.execution.id)}
+        executions={executions}
+        records={records}
+        renderTool={renderTool}
+      />
     </div>
   );
 }
 
 function ModelExecutionVariantView({
   variant,
+  attemptActions,
+  emptyOutput,
   threadId,
   outputUnavailable,
   executions,
@@ -2892,6 +3009,8 @@ function ModelExecutionVariantView({
   renderTool,
 }: {
   variant: ModelExecutionVariant;
+  attemptActions: ReactNode;
+  emptyOutput: boolean;
   threadId: string;
   outputUnavailable: boolean;
   executions: Execution[];
@@ -2900,57 +3019,37 @@ function ModelExecutionVariantView({
 }) {
   const record = variant.assistantRecord;
   if (!record) {
-    return <ModelExecutionRecord execution={variant.execution} threadId={threadId} outputUnavailable={outputUnavailable} />;
+    return (
+      <ModelExecutionRecord
+        execution={variant.execution}
+        threadId={threadId}
+        outputUnavailable={outputUnavailable}
+        attemptActions={attemptActions}
+      />
+    );
   }
-
-  const assistant = recordPayload<AssistantPayload>(record);
-  const calls = assistant.toolCalls ?? [];
-  const usage = assistant.usage;
-  const usageLabel =
-    usage && Object.keys(usage).length > 0
-      ? [
-          usage.inputTokens === undefined ? null : `${usage.inputTokens.toLocaleString()} in`,
-          usage.outputTokens === undefined ? null : `${usage.outputTokens.toLocaleString()} out`,
-          usage.totalTokens === undefined ? null : `${usage.totalTokens.toLocaleString()} total`,
-        ]
-          .filter(Boolean)
-          .join(' / ')
-      : null;
-
   return (
-    <div className="model-execution-record model-execution-success execution-completed">
-      <div className="model-execution-heading">
-        <strong>Response committed</strong>
-        <span className="tool-status status-completed">completed</span>
-        {assistant.model ? <span className="model-label">· {assistant.model}</span> : null}
-        {usageLabel ? <span className="usage-label">· {usageLabel} tokens</span> : null}
-        <time>{new Date(record.createdAt).toLocaleTimeString()}</time>
-      </div>
-      {assistant.content ? <div className="markdown-like">{assistant.content}</div> : null}
-      {assistant.finishReason === 'length' ? <p className="completion-label">Output limit reached</p> : null}
-      {calls.length > 0 ? (
-        <div className="tool-group">
-          <div className="tool-group-label">
-            <Sparkles size={12} aria-hidden="true" /> {calls.length} tool {calls.length === 1 ? 'call' : 'calls'} ·
-            parallel batch
-          </div>
-          {calls.map((call) => {
-            const executionId = `${threadId}:${variant.execution.id}:${call.id}`;
-            const execution = executions.find((item) => item.id === executionId);
-            const resultRecord = records.find(
-              (item) => item.kind === 'tool_result' && recordPayload<ToolResultPayload>(item).executionId === executionId,
-            );
-            const result = resultRecord ? recordPayload<ToolResultPayload>(resultRecord) : undefined;
-            return renderTool(call, execution, result);
-          })}
-        </div>
-      ) : null}
-      <ModelInputDisclosure threadId={threadId} executionId={variant.execution.id} />
-    </div>
+    <AssistantBubble
+      record={record}
+      executions={executions}
+      records={records}
+      threadId={threadId}
+      renderTool={renderTool}
+      attemptActions={attemptActions}
+      emptyOutput={emptyOutput}
+    />
   );
 }
 
-function ModelInputDisclosure({ threadId, executionId }: { threadId: string; executionId: string }) {
+function ModelInputDisclosure({
+  threadId,
+  executionId,
+  executionStatus,
+}: {
+  threadId: string;
+  executionId: string;
+  executionStatus: Execution['status'];
+}) {
   const [modelInputs, setModelInputs] = useState<ModelInputAttempt[] | null>(null);
   const [modelInputsLoading, setModelInputsLoading] = useState(false);
   const [modelInputsError, setModelInputsError] = useState('');
@@ -2976,7 +3075,13 @@ function ModelInputDisclosure({ threadId, executionId }: { threadId: string; exe
       {modelInputsLoading ? <p className="projection-state">Loading model input…</p> : null}
       {modelInputsError ? <p className="projection-error">{modelInputsError}</p> : null}
       {modelInputs?.length === 0 ? (
-        <p className="projection-state">The model pipeline completed this step without calling the adapter.</p>
+        <p className="projection-state">
+          {executionStatus === 'pending' || executionStatus === 'running'
+            ? 'Model input has not been recorded yet.'
+            : executionStatus === 'completed'
+              ? 'The model pipeline completed this step without calling the adapter.'
+              : 'The model adapter was not called before this step ended.'}
+        </p>
       ) : null}
       {modelInputs?.map((attempt, index) => (
         <details className="projection-attempt" key={attempt.id}>
@@ -2996,37 +3101,51 @@ function ModelExecutionRecord({
   execution,
   threadId,
   outputUnavailable = false,
+  attemptActions,
 }: {
   execution: Execution;
   threadId: string;
   outputUnavailable?: boolean;
+  attemptActions: ReactNode;
 }) {
-  const statusLabel =
-    execution.status === 'failed'
-      ? 'Generation failed'
-      : execution.status === 'interrupted'
-        ? 'Generation interrupted'
-        : execution.status === 'running'
-          ? 'Generating response'
-          : 'Waiting for generation';
-  const detail =
-    execution.error ??
-    (outputUnavailable
-      ? 'The UI connection dropped during this attempt. Partial text was not committed.'
-      : execution.status === 'running'
-        ? 'The model is generating a response.'
-        : execution.status === 'pending'
-          ? 'This model attempt is waiting to start.'
-          : 'This model attempt did not commit an assistant message.');
   return (
-    <div className={`model-execution-record execution-${execution.status}`}>
-      <div className="model-execution-heading">
-        <strong>{statusLabel}</strong>
-        <span className={`tool-status status-${execution.status}`}>{execution.status}</span>
-        <time>{new Date(execution.updatedAt).toLocaleTimeString()}</time>
+    <div className="assistant-message model-execution-notice">
+      <div className="assistant-avatar">
+        <Sparkles size={13} aria-hidden="true" />
       </div>
-      <p className={execution.error ? 'model-execution-reason' : 'model-execution-detail'}>{detail}</p>
-      <ModelInputDisclosure threadId={threadId} executionId={execution.id} />
+      <div className="message-body">
+        <div className="message-author">
+          Pico <span className="model-label">· {modelExecutionModelId(execution) ?? 'Model step'}</span>
+          <span className="subtle-inline">· {new Date(execution.updatedAt).toLocaleTimeString()}</span>
+          <span className={`tool-status status-${execution.status}`}>{execution.status}</span>
+        </div>
+        {execution.error ? (
+          <details className="model-execution-error">
+            <summary>
+              <ChevronRight className="projection-chevron" size={13} aria-hidden="true" />
+              <span>Failure details</span>
+            </summary>
+            <p>{execution.error}</p>
+          </details>
+        ) : outputUnavailable ? (
+          <p className="projection-state">
+            The connection dropped during this Model Step. Partial text is unavailable; the final reply will appear when
+            the step commits.
+          </p>
+        ) : execution.status === 'pending' || execution.status === 'running' ? (
+          <p className="model-execution-status-note">Starting a new attempt…</p>
+        ) : (
+          <p className="projection-state">This Model Step has not committed an assistant message.</p>
+        )}
+        <div className="model-input-attempt-controls">
+          <ModelInputDisclosure
+            threadId={threadId}
+            executionId={execution.id}
+            executionStatus={execution.status}
+          />
+          {attemptActions}
+        </div>
+      </div>
     </div>
   );
 }
@@ -3037,12 +3156,16 @@ function AssistantBubble({
   records,
   threadId,
   renderTool,
+  attemptActions,
+  emptyOutput = false,
 }: {
   record: CanonicalRecord;
   executions: Execution[];
   records: CanonicalRecord[];
   threadId: string;
   renderTool(call: ToolCall, execution: Execution | undefined, result: ToolResultPayload | undefined): ReactNode;
+  attemptActions?: ReactNode;
+  emptyOutput?: boolean;
 }) {
   const assistant = recordPayload<AssistantPayload>(record);
   const calls = assistant.toolCalls ?? [];
@@ -3067,9 +3190,13 @@ function AssistantBubble({
       <div className="message-body">
         <div className="message-author">
           Pico {assistant.model ? <span className="model-label">· {assistant.model}</span> : null}
+          <span className="subtle-inline">· {new Date(record.createdAt).toLocaleTimeString()}</span>
           {usageLabel ? <span className="usage-label">· {usageLabel} tokens</span> : null}
           {completionNote ? <span className="completion-label">{completionNote}</span> : null}
         </div>
+        {emptyOutput ? (
+          <p className="model-execution-empty-output">This Model Step completed without a visible response.</p>
+        ) : null}
         {assistant.content ? <div className="markdown-like">{assistant.content}</div> : null}
         {calls.length > 0 ? (
           <div className="tool-group">
@@ -3090,7 +3217,14 @@ function AssistantBubble({
             })}
           </div>
         ) : null}
-        <ModelInputDisclosure threadId={threadId} executionId={executionId} />
+        <div className="model-input-attempt-controls">
+          <ModelInputDisclosure
+            threadId={threadId}
+            executionId={executionId}
+            executionStatus={executions.find((execution) => execution.id === executionId)?.status ?? 'completed'}
+          />
+          {attemptActions}
+        </div>
       </div>
     </div>
   );

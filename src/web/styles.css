@@ -1174,10 +1174,14 @@ button:disabled {
   min-width: 0;
   max-width: min(690px, calc(100% - 42px));
 }
-.user-message .message-body {
+.user-message > .message-body {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
+}
+.user-message.has-model-execution-groups:not(.incoming-message) > .message-body {
+  flex: 1;
+  max-width: none;
 }
 .message-author {
   display: flex;
@@ -1223,6 +1227,9 @@ button:disabled {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.user-message.has-model-execution-groups:not(.incoming-message) > .message-body > .user-bubble {
+  max-width: min(100%, 690px);
+}
 .incoming-message {
   justify-content: flex-start;
 }
@@ -1232,7 +1239,7 @@ button:disabled {
   background: #eff1ed;
   border-color: #e4e8e1;
 }
-.incoming-message .message-body {
+.incoming-message > .message-body {
   align-items: flex-start;
 }
 .incoming-message .user-bubble {
@@ -1425,65 +1432,59 @@ button:disabled {
 .projection-error {
   color: #a06f60;
 }
-.model-execution-record {
-  width: min(100%, 440px);
-  margin-top: 8px;
-  padding: 10px 11px;
-  color: #765d52;
-  background: #fbf7f4;
-  border: 1px solid #eee2db;
-  border-radius: 10px;
-  font-size: 11px;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-}
 .model-execution-branch-group {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
   gap: 3px;
   width: min(100%, 560px);
-  margin-top: 8px;
+  margin-top: 27px;
 }
-.model-execution-branch-group .model-execution-record {
+.model-execution-branch-group > .assistant-message {
   width: 100%;
-  margin-top: 0;
 }
-.model-execution-success {
-  color: #556457;
-  background: #f5f8f4;
-  border-color: #e5ece3;
+.model-execution-branch-group > .assistant-message > .message-body > .message-author {
+  margin-bottom: 2px;
 }
-.model-execution-success .model-execution-heading {
-  color: #718173;
+.model-execution-branch-group .model-input-attempt-controls > .projection-card {
+  margin-top: 4px;
 }
-.model-execution-success .markdown-like {
-  margin-top: 8px;
+.model-execution-branch-group .model-input-attempt-controls > .projection-card:not([open]) {
+  padding-bottom: 5px;
 }
-.model-execution-heading {
+.model-execution-empty-output,
+.model-execution-status-note {
+  margin: 1px 0 4px;
+  color: #9a8975;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.user-message.has-model-execution-groups:not(.incoming-message) > .message-body > .model-execution-branch-group {
+  align-self: flex-start;
+}
+.model-execution-error {
+  margin: 1px 0 4px;
+  color: #946b5d;
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.model-execution-error > summary {
   display: flex;
   align-items: center;
-  gap: 7px;
-  color: #806c61;
+  gap: 5px;
+  height: 15px;
+  cursor: pointer;
+  list-style: none;
 }
-.model-execution-heading strong {
-  font-size: 10px;
-  font-weight: 650;
+.model-execution-error > summary::-webkit-details-marker {
+  display: none;
 }
-.model-execution-heading time {
-  margin-left: auto;
-  color: #a49a92;
-  font-size: 9px;
+.model-execution-error[open] > summary .projection-chevron {
+  transform: rotate(90deg);
 }
-.model-execution-reason,
-.model-execution-detail {
-  margin: 7px 0 0;
-}
-.model-execution-reason {
-  color: #946b5d;
-}
-.incoming-message .model-execution-record {
-  align-self: flex-start;
+.model-execution-error > p {
+  margin: 5px 0;
 }
 .incoming-message .model-execution-branch-group {
   align-self: flex-start;
@@ -1495,6 +1496,46 @@ button:disabled {
   gap: 4px;
   color: #9aa69b;
   font-size: 9px;
+}
+.model-input-attempt-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+.model-attempt-actions {
+  display: flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: 5px;
+  margin-top: 1px;
+}
+.model-retry-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 23px;
+  padding: 2px 8px;
+  color: #819084;
+  background: #f6f8f4;
+  border: 1px solid #e8ede6;
+  border-radius: 999px;
+  font-size: 9px;
+  cursor: pointer;
+}
+.model-retry-button:hover:not(:disabled) {
+  color: #6e8673;
+  background: #eef3ed;
+  border-color: #dfe7dc;
+}
+.model-retry-button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+.model-retry-error {
+  color: #a06f60;
+  font-size: 9px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 .model-attempt-switcher button {
   display: grid;

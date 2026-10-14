@@ -160,6 +160,11 @@ function terminalStatus(status: ExecutionStatus): status is 'completed' | 'faile
   return status === 'completed' || status === 'failed' || status === 'interrupted';
 }
 
+function modelExecutionProjectionThrough(execution: Execution): number | null {
+  const value = execution.arguments?.projectionThrough;
+  return typeof value === 'number' && Number.isSafeInteger(value) ? value : null;
+}
+
 export interface RuntimeOptions {
   model?: ModelAdapter;
   plugins?: PicoPlugin[];
@@ -505,10 +510,18 @@ export class PicoRuntime {
     const thread = this.getThread(threadId);
     if (!thread) return null;
     const page = this.store.listRecordPage(threadId, beforeSeq, THREAD_HISTORY_PAGE_SIZE);
+    const executions = this.store.listSnapshotExecutions(threadId, page.records).map((execution) => {
+      if (execution.kind !== 'model' || typeof execution.arguments?.model === 'string') return execution;
+      const attempts = this.getModelInputAttempts(threadId, execution.id);
+      const model = attempts?.at(-1)?.prompt.model;
+      return typeof model === 'string' && model.trim()
+        ? { ...execution, arguments: { ...(execution.arguments ?? {}), model } }
+        : execution;
+    });
     return {
       thread,
       records: page.records,
-      executions: this.store.listSnapshotExecutions(threadId, page.records),
+      executions,
       children: this.listThreads(thread.projectId).filter((candidate) => candidate.parentThreadId === threadId),
       hasEarlierRecords: page.hasEarlierRecords,
       historyPageSize: THREAD_HISTORY_PAGE_SIZE,
@@ -694,6 +707,65 @@ export class PicoRuntime {
     return this.getThread(threadId)!;
   }
 
+  retryModelExecution(
+    threadId: string,
+    sourceExecutionId: string,
+  ): { execution: Execution; thread: Thread } {
+    const thread = this.store.getThread(threadId);
+    if (!thread) throw new Error('Thread not found');
+    const source = this.store.getExecution(sourceExecutionId);
+    if (!source || source.threadId !== threadId || source.kind !== 'model') {
+      throw new Error('Model Execution not found in this Thread.');
+    }
+    if (this.loops.has(threadId) || this.store.listActiveExecutions(threadId).length > 0) {
+      throw new Error('This Thread is already running. Wait for the active step to settle before retrying.');
+    }
+
+    const projectionThrough = modelExecutionProjectionThrough(source);
+    if (projectionThrough === null) throw new Error('This Model Execution has no saved projection boundary.');
+    const records = this.store.listRecords(threadId);
+    if (!records.some((record) => record.kind === 'message' && record.seq <= projectionThrough)) {
+      throw new Error('This Model Execution is not attached to a user message.');
+    }
+    if (
+      records.some((record) => record.kind === 'message' && record.seq > projectionThrough) ||
+      this.store.listExecutions(threadId).some((execution) => {
+        const laterProjection = modelExecutionProjectionThrough(execution);
+        return execution.kind === 'model' && laterProjection !== null && laterProjection > projectionThrough;
+      })
+    ) {
+      throw new Error('A newer message or Model Step exists. Continue the Thread from its latest step instead.');
+    }
+    const assistantRecord = this.store.getCanonicalRecordById(`${source.id}:assistant`);
+    const retryableFailure =
+      (source.status === 'failed' || source.status === 'interrupted') && assistantRecord === null;
+    const retryableEmptyCompletion = (() => {
+      if (source.status !== 'completed' || assistantRecord?.kind !== 'assistant') return false;
+      const payload = assistantRecord.payload as unknown as AssistantPayload;
+      return (
+        typeof payload.content === 'string' &&
+        payload.content.trim() === '' &&
+        Array.isArray(payload.toolCalls) &&
+        payload.toolCalls.length === 0
+      );
+    })();
+    if (!retryableFailure && !retryableEmptyCompletion) {
+      throw new Error('Only a failed, interrupted, or empty Model Execution can be retried.');
+    }
+
+    const execution = this.store.createModelExecution(
+      randomUUID(),
+      threadId,
+      projectionThrough,
+      source.id,
+      this.getModelSettings().model,
+    );
+    this.store.setPause(threadId, false);
+    this.executionChanged(execution);
+    this.startLoop(threadId);
+    return { execution, thread: this.getThread(threadId)! };
+  }
+
   async interrupt(threadId: string): Promise<Thread> {
     const thread = this.store.getThread(threadId);
     if (!thread) throw new Error('Thread not found');
@@ -804,7 +876,13 @@ export class PicoRuntime {
       if (this.shuttingDown) return;
       const thread = this.store.getThread(threadId);
       if (!thread) return;
-      if (!this.latestActiveBatch(threadId) && (thread.pauseRequested || !this.needsModelStep(threadId))) return;
+      const pendingRetry = this.pendingModelRetry(threadId);
+      if (
+        !this.latestActiveBatch(threadId) &&
+        (thread.pauseRequested || (!pendingRetry && !this.needsModelStep(threadId)))
+      ) {
+        return;
+      }
       let defaultStepRan = false;
       await this.pipelines.run('step', { thread, iteration }, async (input) => {
         if (input.thread.id !== threadId) throw new Error('Step plugins must preserve the active Thread identity.');
@@ -831,9 +909,14 @@ export class PicoRuntime {
       await this.runToolBatch(currentThread, activeBatch);
       return;
     }
-    if (currentThread.pauseRequested || !this.needsModelStep(thread.id)) return;
+    const pendingRetry = this.pendingModelRetry(thread.id);
+    if (pendingRetry) {
+      await this.runModelStep(currentThread, pendingRetry);
+    } else {
+      if (currentThread.pauseRequested || !this.needsModelStep(thread.id)) return;
+      await this.runModelStep(currentThread);
+    }
 
-    await this.runModelStep(thread);
     if (this.shuttingDown) return;
     const afterModel = this.store.getThread(thread.id);
     const modelBatch = afterModel ? this.latestActiveBatch(thread.id) : null;
@@ -1013,22 +1096,50 @@ export class PicoRuntime {
     return this.store.hasMessageAfter(threadId, latestAssistant.payload.projectionThrough);
   }
 
-  private hasUnprocessedWork(threadId: string): boolean {
-    return Boolean(this.latestActiveBatch(threadId) || this.needsModelStep(threadId));
+  private pendingModelRetry(threadId: string): Execution | null {
+    return (
+      this.store
+        .listActiveExecutions(threadId)
+        .find(
+          (execution) =>
+            execution.kind === 'model' &&
+            execution.status === 'pending' &&
+            typeof execution.arguments?.retryOf === 'string',
+        ) ?? null
+    );
   }
 
-  private async runModelStep(thread: Thread): Promise<void> {
-    const modelExecutionId = randomUUID();
-    const projectionRecords = this.store.listRecords(thread.id).map((record) => deepFreeze(record));
-    const through = projectionRecords.at(-1)?.seq ?? 0;
-    this.store.createModelExecution(modelExecutionId, thread.id, through);
+  private hasUnprocessedWork(threadId: string): boolean {
+    return Boolean(this.latestActiveBatch(threadId) || this.pendingModelRetry(threadId) || this.needsModelStep(threadId));
+  }
+
+  private async runModelStep(thread: Thread, retryExecution?: Execution): Promise<void> {
+    const allRecords = this.store.listRecords(thread.id);
+    const retryThrough = retryExecution ? modelExecutionProjectionThrough(retryExecution) : null;
+    if (retryExecution && retryThrough === null) {
+      const failed = this.store.transitionExecution(retryExecution.id, 'failed', {
+        error: 'Retry attempt lost its projection boundary.',
+      });
+      this.executionChanged(failed);
+      return;
+    }
+    const through = retryThrough ?? allRecords.at(-1)?.seq ?? 0;
+    const projectionRecords = allRecords
+      .filter((record) => record.seq <= through)
+      .map((record) => deepFreeze(record));
+    const modelExecutionId = retryExecution?.id ?? randomUUID();
+    const modelSettings = this.getModelSettings();
+    if (!retryExecution) {
+      this.store.createModelExecution(modelExecutionId, thread.id, through, undefined, modelSettings.model);
+    }
+    const identified = this.store.setModelExecutionModel(modelExecutionId, modelSettings.model);
+    this.executionChanged(identified);
     const running = this.store.transitionExecution(modelExecutionId, 'running');
     this.executionChanged(running);
     const controller = new AbortController();
     this.modelSignals.set(modelExecutionId, controller);
     let latestDraft = '';
     try {
-      const modelSettings = this.getModelSettings();
       const toolSurface = await this.toolSurfaceFor(thread);
       const disabledTools = new Set(this.disabledThreadToolNames(thread.id));
       const enabledTools = toolSurface.tools.filter((tool) => !disabledTools.has(tool.name));

@@ -244,6 +244,9 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     if (!attempts) return notFound(response, 'Model Execution not found in this Thread');
     response.json({ attempts });
   });
+  app.post('/api/threads/:threadId/executions/:executionId/retry', (request, response) => {
+    response.status(202).json(runtime.retryModelExecution(request.params.threadId!, request.params.executionId!));
+  });
   app.post('/api/threads/:threadId/messages', async (request, response) => {
     const body = bodyObject(request);
     const id = requiredText(body, 'id');
