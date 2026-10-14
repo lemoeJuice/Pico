@@ -178,14 +178,32 @@ function recordPayload<T>(record: CanonicalRecord): T {
   return record.payload as unknown as T;
 }
 
-function modelExecutionMessageId(execution: Execution, records: readonly CanonicalRecord[]): string | null {
+interface ModelExecutionVariant {
+  execution: Execution;
+  assistantRecord: CanonicalRecord | null;
+}
+
+interface ModelExecutionGroup {
+  projectionThrough: number;
+  variants: ModelExecutionVariant[];
+}
+
+function modelExecutionProjectionThrough(execution: Execution): number | null {
   const projectionThrough = execution.arguments?.projectionThrough;
-  if (typeof projectionThrough !== 'number' || !Number.isSafeInteger(projectionThrough)) return null;
+  return typeof projectionThrough === 'number' && Number.isSafeInteger(projectionThrough) ? projectionThrough : null;
+}
+
+function messageIdAtProjection(records: readonly CanonicalRecord[], projectionThrough: number): string | null {
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const record = records[index]!;
     if (record.kind === 'message' && record.seq <= projectionThrough) return record.id;
   }
   return null;
+}
+
+function modelExecutionMessageId(execution: Execution, records: readonly CanonicalRecord[]): string | null {
+  const projectionThrough = modelExecutionProjectionThrough(execution);
+  return projectionThrough === null ? null : messageIdAtProjection(records, projectionThrough);
 }
 
 function ExecutorPill({
@@ -1590,27 +1608,43 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
   const records = activeSnapshot?.records ?? [];
   const executions = activeSnapshot?.executions ?? [];
-  const committedModelExecutionIds = new Set(
-    records.filter((record) => record.kind === 'assistant').map((record) => record.id.replace(/:assistant$/, '')),
-  );
-  const uncommittedModelExecutions = executions.filter(
-    (execution) =>
-      execution.kind === 'model' && execution.status !== 'completed' && !committedModelExecutionIds.has(execution.id),
-  );
-  const modelExecutionsByMessageId = new Map<string, Execution[]>();
-  const unattachedModelExecutions: Execution[] = [];
-  for (const execution of uncommittedModelExecutions) {
-    const messageId = modelExecutionMessageId(execution, records);
-    if (!messageId) {
-      unattachedModelExecutions.push(execution);
-      continue;
-    }
-    const attached = modelExecutionsByMessageId.get(messageId) ?? [];
-    attached.push(execution);
-    modelExecutionsByMessageId.set(messageId, attached);
+  const assistantRecordsByExecutionId = new Map<string, CanonicalRecord>();
+  for (const record of records) {
+    if (record.kind === 'assistant') assistantRecordsByExecutionId.set(record.id.replace(/:assistant$/, ''), record);
   }
-  for (const attached of modelExecutionsByMessageId.values()) {
-    attached.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  const variantsByMessageAndProjection = new Map<string, Map<number, ModelExecutionVariant[]>>();
+  for (const execution of executions) {
+    if (execution.kind !== 'model') continue;
+    const projectionThrough = modelExecutionProjectionThrough(execution);
+    if (projectionThrough === null) continue;
+    const messageId = modelExecutionMessageId(execution, records);
+    if (!messageId) continue;
+    const assistantRecord =
+      execution.status === 'completed' ? (assistantRecordsByExecutionId.get(execution.id) ?? null) : null;
+    if (execution.status === 'completed' && !assistantRecord) continue;
+    const byProjection = variantsByMessageAndProjection.get(messageId) ?? new Map<number, ModelExecutionVariant[]>();
+    const variants = byProjection.get(projectionThrough) ?? [];
+    variants.push({ execution, assistantRecord });
+    byProjection.set(projectionThrough, variants);
+    variantsByMessageAndProjection.set(messageId, byProjection);
+  }
+  const modelExecutionGroupsByMessageId = new Map<string, ModelExecutionGroup[]>();
+  const groupedAssistantRecordIds = new Set<string>();
+  for (const [messageId, groupsByProjection] of variantsByMessageAndProjection) {
+    const groups: ModelExecutionGroup[] = [];
+    for (const [projectionThrough, variants] of groupsByProjection) {
+      variants.sort(
+        (left, right) =>
+          left.execution.createdAt.localeCompare(right.execution.createdAt) ||
+          left.execution.id.localeCompare(right.execution.id),
+      );
+      if (!variants.some((variant) => variant.execution.status !== 'completed')) continue;
+      groups.push({ projectionThrough, variants });
+      for (const variant of variants) {
+        if (variant.assistantRecord) groupedAssistantRecordIds.add(variant.assistantRecord.id);
+      }
+    }
+    if (groups.length > 0) modelExecutionGroupsByMessageId.set(messageId, groups);
   }
   const renderProjectThreads = (project: Project): ReactNode => {
     const projectThreads = threadsByProject[project.id];
@@ -1642,18 +1676,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       <div className="sidebar-empty project-thread-empty">No Threads yet. Start one with the + button.</div>
     );
   };
-  const renderedRecords = records.filter((record) => record.kind === 'message' || record.kind === 'assistant');
+  const renderedRecords = records.filter(
+    (record) =>
+      record.kind === 'message' || (record.kind === 'assistant' && !groupedAssistantRecordIds.has(record.id)),
+  );
   const timeline = [
     ...renderedRecords.map((record) => ({ type: 'record' as const, at: record.createdAt, record })),
-    ...unattachedModelExecutions.map((execution) => ({
-      type: 'model-execution' as const,
-      at: execution.updatedAt,
-      execution,
-    })),
-  ].sort(
-    (left, right) =>
-      left.at.localeCompare(right.at) || Number(left.type !== 'record') - Number(right.type !== 'record'),
-  );
+  ].sort((left, right) => left.at.localeCompare(right.at));
   const currentState = selectedThread?.state ?? 'idle';
   const pauseReason = visiblePauseReason(currentState, selectedThread?.pauseReason ?? null, [error, activeNotice]);
 
@@ -2058,21 +2087,17 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   </button>
                 ) : null}
                 {timeline.map((item) =>
-                  item.type === 'model-execution' ? (
-                    <ModelExecutionRecord
-                      key={item.execution.id}
-                      execution={item.execution}
-                      threadId={selectedThread.id}
-                      outputUnavailable={unavailableModelExecutionIds.has(item.execution.id)}
-                    />
-                  ) : item.record.kind === 'message' ? (
+                  item.record.kind === 'message' ? (
                     <MessageBubble
                       key={item.record.id}
                       record={item.record}
                       thread={selectedThread}
                       threadId={selectedThread.id}
-                      modelExecutions={modelExecutionsByMessageId.get(item.record.id) ?? []}
+                      modelExecutionGroups={modelExecutionGroupsByMessageId.get(item.record.id) ?? []}
                       unavailableModelExecutionIds={unavailableModelExecutionIds}
+                      executions={executions}
+                      records={records}
+                      renderTool={renderToolView}
                       onOpenThread={chooseThread}
                     />
                   ) : (
@@ -2735,15 +2760,21 @@ function MessageBubble({
   record,
   thread,
   threadId,
-  modelExecutions,
+  modelExecutionGroups,
   unavailableModelExecutionIds,
+  executions,
+  records,
+  renderTool,
   onOpenThread,
 }: {
   record: CanonicalRecord;
   thread: Thread;
   threadId: string;
-  modelExecutions: Execution[];
+  modelExecutionGroups: ModelExecutionGroup[];
   unavailableModelExecutionIds: ReadonlySet<string>;
+  executions: Execution[];
+  records: CanonicalRecord[];
+  renderTool(call: ToolCall, execution: Execution | undefined, result: ToolResultPayload | undefined): ReactNode;
   onOpenThread(id: string): void;
 }) {
   const message = recordPayload<MessagePayload>(record);
@@ -2772,18 +2803,149 @@ function MessageBubble({
           ) : null}
         </div>
         <div className="user-bubble">{message.content}</div>
-        {modelExecutions.map((execution) => (
-          <ModelExecutionRecord
-            key={execution.id}
-            execution={execution}
+        {modelExecutionGroups.map((group) => (
+          <ModelExecutionBranchGroup
+            key={`${threadId}:${group.projectionThrough}`}
+            group={group}
             threadId={threadId}
-            outputUnavailable={unavailableModelExecutionIds.has(execution.id)}
+            unavailableModelExecutionIds={unavailableModelExecutionIds}
+            executions={executions}
+            records={records}
+            renderTool={renderTool}
           />
         ))}
       </div>
       <div className="user-avatar">
         {incoming ? <GitBranch size={13} aria-hidden="true" /> : <UserRound size={13} aria-hidden="true" />}
       </div>
+    </div>
+  );
+}
+
+function ModelExecutionBranchGroup({
+  group,
+  threadId,
+  unavailableModelExecutionIds,
+  executions,
+  records,
+  renderTool,
+}: {
+  group: ModelExecutionGroup;
+  threadId: string;
+  unavailableModelExecutionIds: ReadonlySet<string>;
+  executions: Execution[];
+  records: CanonicalRecord[];
+  renderTool(call: ToolCall, execution: Execution | undefined, result: ToolResultPayload | undefined): ReactNode;
+}) {
+  const [selectedExecutionId, setSelectedExecutionId] = useState<string | null>(null);
+  const selectedIndex = selectedExecutionId
+    ? group.variants.findIndex((variant) => variant.execution.id === selectedExecutionId)
+    : -1;
+  const currentIndex = selectedIndex >= 0 ? selectedIndex : group.variants.length - 1;
+  const variant = group.variants[currentIndex];
+  if (!variant) return null;
+
+  return (
+    <div className="model-execution-branch-group">
+      <ModelExecutionVariantView
+        key={variant.execution.id}
+        variant={variant}
+        threadId={threadId}
+        outputUnavailable={unavailableModelExecutionIds.has(variant.execution.id)}
+        executions={executions}
+        records={records}
+        renderTool={renderTool}
+      />
+      {group.variants.length > 1 ? (
+        <div className="model-attempt-switcher" role="group" aria-label="Generation attempts">
+          <button
+            type="button"
+            aria-label="Previous generation attempt"
+            title="Previous generation attempt"
+            disabled={currentIndex === 0}
+            onClick={() => setSelectedExecutionId(group.variants[currentIndex - 1]!.execution.id)}
+          >
+            <ChevronLeft size={14} aria-hidden="true" />
+          </button>
+          <span>Attempt {currentIndex + 1} of {group.variants.length}</span>
+          <button
+            type="button"
+            aria-label="Next generation attempt"
+            title="Next generation attempt"
+            disabled={currentIndex === group.variants.length - 1}
+            onClick={() => setSelectedExecutionId(group.variants[currentIndex + 1]!.execution.id)}
+          >
+            <ChevronRight size={14} aria-hidden="true" />
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ModelExecutionVariantView({
+  variant,
+  threadId,
+  outputUnavailable,
+  executions,
+  records,
+  renderTool,
+}: {
+  variant: ModelExecutionVariant;
+  threadId: string;
+  outputUnavailable: boolean;
+  executions: Execution[];
+  records: CanonicalRecord[];
+  renderTool(call: ToolCall, execution: Execution | undefined, result: ToolResultPayload | undefined): ReactNode;
+}) {
+  const record = variant.assistantRecord;
+  if (!record) {
+    return <ModelExecutionRecord execution={variant.execution} threadId={threadId} outputUnavailable={outputUnavailable} />;
+  }
+
+  const assistant = recordPayload<AssistantPayload>(record);
+  const calls = assistant.toolCalls ?? [];
+  const usage = assistant.usage;
+  const usageLabel =
+    usage && Object.keys(usage).length > 0
+      ? [
+          usage.inputTokens === undefined ? null : `${usage.inputTokens.toLocaleString()} in`,
+          usage.outputTokens === undefined ? null : `${usage.outputTokens.toLocaleString()} out`,
+          usage.totalTokens === undefined ? null : `${usage.totalTokens.toLocaleString()} total`,
+        ]
+          .filter(Boolean)
+          .join(' / ')
+      : null;
+
+  return (
+    <div className="model-execution-record model-execution-success execution-completed">
+      <div className="model-execution-heading">
+        <strong>Response committed</strong>
+        <span className="tool-status status-completed">completed</span>
+        {assistant.model ? <span className="model-label">· {assistant.model}</span> : null}
+        {usageLabel ? <span className="usage-label">· {usageLabel} tokens</span> : null}
+        <time>{new Date(record.createdAt).toLocaleTimeString()}</time>
+      </div>
+      {assistant.content ? <div className="markdown-like">{assistant.content}</div> : null}
+      {assistant.finishReason === 'length' ? <p className="completion-label">Output limit reached</p> : null}
+      {calls.length > 0 ? (
+        <div className="tool-group">
+          <div className="tool-group-label">
+            <Sparkles size={12} aria-hidden="true" /> {calls.length} tool {calls.length === 1 ? 'call' : 'calls'} ·
+            parallel batch
+          </div>
+          {calls.map((call) => {
+            const executionId = `${threadId}:${variant.execution.id}:${call.id}`;
+            const execution = executions.find((item) => item.id === executionId);
+            const resultRecord = records.find(
+              (item) => item.kind === 'tool_result' && recordPayload<ToolResultPayload>(item).executionId === executionId,
+            );
+            const result = resultRecord ? recordPayload<ToolResultPayload>(resultRecord) : undefined;
+            return renderTool(call, execution, result);
+          })}
+        </div>
+      ) : null}
+      <ModelInputDisclosure threadId={threadId} executionId={variant.execution.id} />
     </div>
   );
 }

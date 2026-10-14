@@ -1437,6 +1437,29 @@ button:disabled {
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
+.model-execution-branch-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  width: min(100%, 560px);
+  margin-top: 8px;
+}
+.model-execution-branch-group .model-execution-record {
+  width: 100%;
+  margin-top: 0;
+}
+.model-execution-success {
+  color: #556457;
+  background: #f5f8f4;
+  border-color: #e5ece3;
+}
+.model-execution-success .model-execution-heading {
+  color: #718173;
+}
+.model-execution-success .markdown-like {
+  margin-top: 8px;
+}
 .model-execution-heading {
   display: flex;
   align-items: center;
@@ -1461,6 +1484,42 @@ button:disabled {
 }
 .incoming-message .model-execution-record {
   align-self: flex-start;
+}
+.incoming-message .model-execution-branch-group {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+.model-attempt-switcher {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #9aa69b;
+  font-size: 9px;
+}
+.model-attempt-switcher button {
+  display: grid;
+  place-items: center;
+  width: 21px;
+  height: 21px;
+  padding: 0;
+  color: #9aa69b;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.model-attempt-switcher button:hover:not(:disabled) {
+  color: #718675;
+  background: #f0f4ef;
+  border-color: #e7ece6;
+}
+.model-attempt-switcher button:focus-visible {
+  outline: 2px solid #a5b8a7;
+  outline-offset: 1px;
+}
+.model-attempt-switcher button:disabled {
+  opacity: 0.38;
+  cursor: default;
 }
 .projection-attempt {
   margin-top: 8px;

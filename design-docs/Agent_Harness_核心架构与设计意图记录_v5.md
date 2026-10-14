@@ -156,6 +156,8 @@ continue loop
 
 流式响应中断时，Runtime 结束当前 Model Execution 并记录失败，不自动重发。Runtime 进程重启发现未完成的 Model Execution 时，也会将其标记为中断并暂停 Thread，不自动提交替代 attempt。用户点击 Continue 后，Runtime 基于现有 Canonical History 开始新的 Model Execution attempt，不追加重复的 User Message。失败原因作为 Execution 记录关联显示在触发该轮的消息容器中；它不是 assistant output，也不进入模型上下文。
 
+UI 将拥有相同 `projectionThrough` 的 attempts 收敛到触发消息下方的同一展示位置；若其中一个 attempt 已提交 assistant record，则按 execution ID 配对后作为该位置的另一可切换结果。浅色前后箭头只切换当前展示的 attempt，不调用 Runtime、不修改 Canonical History 或 Model Input。相同用户消息下，`projectionThrough` 不同的模型步骤仍按顺序分别展示；它们不是同一个步骤的重试分支。
+
 ## 4.2 Model step 的 commit boundary
 
 模型 streaming 到一半断开时，partial output 可以用于 debug 或 UI 暂存，但不应该直接成为 canonical assistant message。只有完整 model step 成功后才 commit。
