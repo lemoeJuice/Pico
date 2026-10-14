@@ -1425,18 +1425,42 @@ button:disabled {
 .projection-error {
   color: #a06f60;
 }
-.model-execution-error {
-  margin: 7px 0;
-  color: #946b5d;
-  font-size: 11px;
+.model-execution-record {
+  width: min(100%, 440px);
+  margin-top: 8px;
+  padding: 10px 11px;
+  color: #765d52;
+  background: #fbf7f4;
+  border: 1px solid #eee2db;
+  border-radius: 10px;
+  font-size: 10px;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
-.model-execution-error > summary {
-  cursor: pointer;
+.model-execution-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #806c61;
 }
-.model-execution-error > p {
-  margin: 5px 0;
+.model-execution-heading strong {
+  font-size: 10px;
+  font-weight: 650;
+}
+.model-execution-heading time {
+  margin-left: auto;
+  color: #a49a92;
+  font-size: 9px;
+}
+.model-execution-reason,
+.model-execution-detail {
+  margin: 7px 0 0;
+}
+.model-execution-reason {
+  color: #946b5d;
+}
+.incoming-message .model-execution-record {
+  align-self: flex-start;
 }
 .projection-attempt {
   margin-top: 8px;

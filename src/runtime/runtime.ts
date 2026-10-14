@@ -1147,8 +1147,14 @@ export class PicoRuntime {
       this.publish({ type: 'model.draft-ended', threadId: thread.id, executionId: modelExecutionId });
       if (!interrupted) {
         const reason = error instanceof Error ? error.message : String(error);
-        this.store.setPause(thread.id, true, `Model step failed: ${reason}`);
-        this.publish({ type: 'runtime.error', threadId: thread.id, message: reason });
+        this.store.setPause(thread.id, true, 'Model step failed. Continue this Thread to start a new attempt.');
+        this.publish({
+          type: 'runtime.error',
+          threadId: thread.id,
+          executionId: modelExecutionId,
+          source: 'model-execution',
+          message: reason,
+        });
       }
     } finally {
       this.modelSignals.delete(modelExecutionId);

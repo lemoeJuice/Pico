@@ -144,8 +144,8 @@ User Message
 ↓  
 Thread Agent Loop  
 ↓  
-Model Attempt \#1 ── network error (debug only)  
-↓ retry  
+Model Attempt \#1 ── network error (execution record only)<br>
+↓ user clicks Continue (no automatic retry)<br>
 Model Attempt \#2 ── committed  
 ↓  
 Tool Batch ── concurrent, all settled  
@@ -153,6 +153,8 @@ Tool Batch ── concurrent, all settled
 continue loop
 
 > **设计意图：**核心原则：Failures terminate attempts, not intent. 失败结束的是某次 attempt，而不是整个用户意图。
+
+流式响应中断时，Runtime 结束当前 Model Execution 并记录失败，不自动重发。用户点击 Continue 后，Runtime 基于现有 Canonical History 开始新的 Model Execution attempt，不追加重复的 User Message。失败原因作为 Execution 记录关联显示在触发该轮的消息容器中；它不是 assistant output，也不进入模型上下文。
 
 ## 4.2 Model step 的 commit boundary
 

@@ -178,6 +178,16 @@ function recordPayload<T>(record: CanonicalRecord): T {
   return record.payload as unknown as T;
 }
 
+function modelExecutionMessageId(execution: Execution, records: readonly CanonicalRecord[]): string | null {
+  const projectionThrough = execution.arguments?.projectionThrough;
+  if (typeof projectionThrough !== 'number' || !Number.isSafeInteger(projectionThrough)) return null;
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index]!;
+    if (record.kind === 'message' && record.seq <= projectionThrough) return record.id;
+  }
+  return null;
+}
+
 function ExecutorPill({
   thread,
   connected,
@@ -1061,7 +1071,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           if (failedThreadId) {
             setAssistantDrafts((current) => clearAssistantDraft(current, failedThreadId));
           }
-          if (failedThreadId === activeThreadId.current) {
+          if (failedThreadId === activeThreadId.current && event.source !== 'model-execution') {
             setError(String(event.message ?? 'Runtime error'));
           }
         } else if (event.type === 'runtime.notice' && typeof event.threadId === 'string') {
@@ -1113,7 +1123,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   useEffect(() => {
     const list = listRef.current;
     if (list && followLatest.current) list.scrollTop = list.scrollHeight;
-  }, [threadId, activeSnapshot?.records.length, activeSnapshot?.executions.length, assistantDraft]);
+  }, [threadId, activeSnapshot?.records.length, activeSnapshot?.executions, assistantDraft]);
 
   const sendMessage = async (content = draft): Promise<void> => {
     const clean = content.trim();
@@ -1587,6 +1597,21 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     (execution) =>
       execution.kind === 'model' && execution.status !== 'completed' && !committedModelExecutionIds.has(execution.id),
   );
+  const modelExecutionsByMessageId = new Map<string, Execution[]>();
+  const unattachedModelExecutions: Execution[] = [];
+  for (const execution of uncommittedModelExecutions) {
+    const messageId = modelExecutionMessageId(execution, records);
+    if (!messageId) {
+      unattachedModelExecutions.push(execution);
+      continue;
+    }
+    const attached = modelExecutionsByMessageId.get(messageId) ?? [];
+    attached.push(execution);
+    modelExecutionsByMessageId.set(messageId, attached);
+  }
+  for (const attached of modelExecutionsByMessageId.values()) {
+    attached.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
   const renderProjectThreads = (project: Project): ReactNode => {
     const projectThreads = threadsByProject[project.id];
     if (projectThreads === undefined) {
@@ -1620,7 +1645,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const renderedRecords = records.filter((record) => record.kind === 'message' || record.kind === 'assistant');
   const timeline = [
     ...renderedRecords.map((record) => ({ type: 'record' as const, at: record.createdAt, record })),
-    ...uncommittedModelExecutions.map((execution) => ({
+    ...unattachedModelExecutions.map((execution) => ({
       type: 'model-execution' as const,
       at: execution.updatedAt,
       execution,
@@ -2034,7 +2059,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 ) : null}
                 {timeline.map((item) =>
                   item.type === 'model-execution' ? (
-                    <ModelExecutionNotice
+                    <ModelExecutionRecord
                       key={item.execution.id}
                       execution={item.execution}
                       threadId={selectedThread.id}
@@ -2045,6 +2070,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       key={item.record.id}
                       record={item.record}
                       thread={selectedThread}
+                      threadId={selectedThread.id}
+                      modelExecutions={modelExecutionsByMessageId.get(item.record.id) ?? []}
+                      unavailableModelExecutionIds={unavailableModelExecutionIds}
                       onOpenThread={chooseThread}
                     />
                   ) : (
@@ -2706,10 +2734,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 function MessageBubble({
   record,
   thread,
+  threadId,
+  modelExecutions,
+  unavailableModelExecutionIds,
   onOpenThread,
 }: {
   record: CanonicalRecord;
   thread: Thread;
+  threadId: string;
+  modelExecutions: Execution[];
+  unavailableModelExecutionIds: ReadonlySet<string>;
   onOpenThread(id: string): void;
 }) {
   const message = recordPayload<MessagePayload>(record);
@@ -2738,6 +2772,14 @@ function MessageBubble({
           ) : null}
         </div>
         <div className="user-bubble">{message.content}</div>
+        {modelExecutions.map((execution) => (
+          <ModelExecutionRecord
+            key={execution.id}
+            execution={execution}
+            threadId={threadId}
+            outputUnavailable={unavailableModelExecutionIds.has(execution.id)}
+          />
+        ))}
       </div>
       <div className="user-avatar">
         {incoming ? <GitBranch size={13} aria-hidden="true" /> : <UserRound size={13} aria-hidden="true" />}
@@ -2788,7 +2830,7 @@ function ModelInputDisclosure({ threadId, executionId }: { threadId: string; exe
   );
 }
 
-function ModelExecutionNotice({
+function ModelExecutionRecord({
   execution,
   threadId,
   outputUnavailable = false,
@@ -2797,31 +2839,32 @@ function ModelExecutionNotice({
   threadId: string;
   outputUnavailable?: boolean;
 }) {
+  const statusLabel =
+    execution.status === 'failed'
+      ? 'Generation failed'
+      : execution.status === 'interrupted'
+        ? 'Generation interrupted'
+        : execution.status === 'running'
+          ? 'Generating response'
+          : 'Waiting for generation';
+  const detail =
+    execution.error ??
+    (outputUnavailable
+      ? 'The UI connection dropped during this attempt. Partial text was not committed.'
+      : execution.status === 'running'
+        ? 'The model is generating a response.'
+        : execution.status === 'pending'
+          ? 'This model attempt is waiting to start.'
+          : 'This model attempt did not commit an assistant message.');
   return (
-    <div className="assistant-message model-execution-notice">
-      <div className="assistant-avatar">
-        <Sparkles size={13} aria-hidden="true" />
+    <div className={`model-execution-record execution-${execution.status}`}>
+      <div className="model-execution-heading">
+        <strong>{statusLabel}</strong>
+        <span className={`tool-status status-${execution.status}`}>{execution.status}</span>
+        <time>{new Date(execution.updatedAt).toLocaleTimeString()}</time>
       </div>
-      <div className="message-body">
-        <div className="message-author">
-          Model step <span className={`tool-status status-${execution.status}`}>{execution.status}</span>
-          <span className="subtle-inline">· {new Date(execution.updatedAt).toLocaleTimeString()}</span>
-        </div>
-        {execution.error ? (
-          <details className="model-execution-error">
-            <summary>Failure details</summary>
-            <p>{execution.error}</p>
-          </details>
-        ) : outputUnavailable ? (
-          <p className="projection-state">
-            The connection dropped during this Model Step. Partial text is unavailable; the final reply will appear when
-            the step commits.
-          </p>
-        ) : (
-          <p className="projection-state">This Model Step has not committed an assistant message.</p>
-        )}
-        <ModelInputDisclosure threadId={threadId} executionId={execution.id} />
-      </div>
+      <p className={execution.error ? 'model-execution-reason' : 'model-execution-detail'}>{detail}</p>
+      <ModelInputDisclosure threadId={threadId} executionId={execution.id} />
     </div>
   );
 }
