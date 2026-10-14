@@ -1,14 +1,14 @@
 {
   "name": "pico",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A small, durable, local-first agent runtime",
   "private": true,
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "dev:executor": "tsx watch src/executor/agent.ts",
     "start": "node dist/server/server.js",
-    "start:executor": "node dist/server/executor/agent.js",
-    "build": "tsc --noEmit && tsc --project tsconfig.build.json && vite build",
+    "start:executor": "node dist/executor-agent.mjs",
+    "build": "tsc --noEmit && tsc --project tsconfig.build.json && esbuild src/executor/agent.ts --bundle --platform=node --format=esm --target=node22 --external:node:* --banner:js=\"import{createRequire}from'node:module';const require=createRequire(import.meta.url);\" --outfile=dist/executor-agent.mjs && vite build",
     "plugins:build:chatgpt": "esbuild src/plugins/chatgpt-plan.ts --bundle --platform=node --format=esm --target=node20 --external:node:* --minify --outfile=plugins/pico.chatgpt-plan/runtime.mjs && vite build --config plugins/pico.chatgpt-plan/vite.config.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",

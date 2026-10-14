@@ -1,25 +1,31 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { accessSync, constants } from 'node:fs';
-import { readFile, readdir } from 'node:fs/promises';
-import { delimiter, dirname, join, resolve } from 'node:path';
-import type { Execution, ExecutorBinding } from '../core/types.js';
+import { mkdir, realpath, stat } from 'node:fs/promises';
+import { createServer } from 'node:net';
+import { delimiter, resolve, join } from 'node:path';
+import type { Execution, ExecutorBinding, ToolDefinition } from '../core/types.js';
 import { PicoStore } from '../core/store.js';
-import { CONTAINER_RUNNER } from './container-runner.js';
-import { ToolCatalog } from './tools.js';
-import type { ExecutionListener, ExecutorAdapter } from './executor.js';
-import type { ToolDefinition } from '../core/types.js';
-import { executorPluginDirectory, validateToolDefinitions } from './plugin-host.js';
+import { currentExecutorBundle, currentExecutorVersion } from './bundle.js';
+import type { ExecutionListener, ExecutorAdapter, ExecutorServiceAddress } from './executor.js';
+import { executorPluginDirectory } from './plugin-host.js';
+import { RemoteHostExecutor } from './remote-executor.js';
+import type { ToolCatalog } from './tools.js';
 
-interface ToolRunnerResponse {
-  status: 'running' | 'completed' | 'failed' | 'interrupted';
-  result?: unknown;
-  error?: string;
-  tools?: unknown;
+const CONTAINER_SETTING_PREFIX = 'executor-container-connection:';
+const CONTAINER_NAME_SETTING_PREFIX = 'executor-container-name:';
+const CONTAINER_INSTALLATION_SETTING = 'executor-container-installation-id';
+const CONTAINER_NAME_PREFIX = process.env.PICO_CONTAINER_NAME?.trim() || 'pico-executor';
+const CONTAINER_PORT = 4174;
+const EXECUTOR_PATH = '/opt/pico/executor-agent.mjs';
+const DEFAULT_CONTAINER_IMAGE = 'docker.io/library/node:22-bookworm-slim';
+
+interface SavedContainerConnection {
+  port: number;
+  accessToken: string;
 }
 
 type PodmanRunner = typeof podman;
-const DEFAULT_CONTAINER_IMAGE = 'docker.io/library/node:22-bookworm-slim';
 
 function configuredContainerImage(): string {
   return process.env.PICO_CONTAINER_IMAGE?.trim() || DEFAULT_CONTAINER_IMAGE;
@@ -35,7 +41,7 @@ function findOverlayMountProgram(): string | undefined {
       accessSync(candidate, constants.X_OK);
       return candidate;
     } catch {
-      // Continue through PATH until the standard overlay mount helper is found.
+      // Keep searching PATH for the configured storage helper.
     }
   }
   return undefined;
@@ -44,50 +50,20 @@ function findOverlayMountProgram(): string | undefined {
 function defaultVfsStorageRoot(): string {
   const configured = process.env.PICO_PODMAN_VFS_ROOT?.trim();
   if (configured) return resolve(configured);
-  const databasePath = process.env.PICO_DB_PATH;
-  const dataDirectory =
-    databasePath && databasePath !== ':memory:' ? dirname(resolve(databasePath)) : join(process.cwd(), 'data');
-  return join(dataDirectory, 'podman-vfs');
+  return join(process.cwd(), 'data', 'podman-vfs');
 }
 
-function isUnsupportedBtrfsOverlay(error: unknown): boolean {
-  return /overlay[^\n]*not supported[^\n]*btrfs|overlay[^\n]*unsupported[^\n]*btrfs/i.test(
-    error instanceof Error ? error.message : String(error),
-  );
-}
-
-function errorMessage(error: unknown): string {
+function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function safeErrorMessage(error: unknown): string {
-  return errorMessage(error)
-    .replace(/https?:\/\/[^\s"'<>]+/gi, (value) => {
-      try {
-        const url = new URL(value);
-        const hasCredentials = Boolean(url.username || url.password);
-        const hasSearch = Boolean(url.search || url.hash);
-        url.username = '';
-        url.password = '';
-        url.search = '';
-        url.hash = '';
-        return `${url.origin}${url.pathname}${hasSearch ? '?<redacted>' : ''}${hasCredentials ? '[credentials redacted]' : ''}`;
-      } catch {
-        return value.replace(/[?#].*$/, '?<redacted>');
-      }
-    })
-    .slice(0, 2_000);
-}
-
-function isRetryableContainerSetupFailure(error: unknown): boolean {
-  return /connection|refused|permission denied|read-only|\bEOF\b|network is unreachable|no route to host|temporary failure in name resolution|timed? out|context deadline exceeded|i\/o timeout/i.test(
-    errorMessage(error),
-  );
+function isUnsupportedBtrfsOverlay(error: unknown): boolean {
+  return /overlay[^\n]*not supported[^\n]*btrfs|overlay[^\n]*unsupported[^\n]*btrfs/i.test(message(error));
 }
 
 function podman(args: string[], input?: string, signal?: AbortSignal): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolvePromise, reject) => {
-    if (signal?.aborted) return reject(new DOMException('Execution interrupted', 'AbortError'));
+    if (signal?.aborted) return reject(new DOMException('Executor setup interrupted.', 'AbortError'));
     const child = spawn('podman', args, { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
@@ -98,12 +74,9 @@ function podman(args: string[], input?: string, signal?: AbortSignal): Promise<{
     child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
       stderr = `${stderr}${chunk}`.slice(-20_000);
     });
-    const stop = (): void => {
+    const onAbort = (): void => {
       child.kill('SIGTERM');
       killTimer ??= setTimeout(() => child.kill('SIGKILL'), 1_500);
-    };
-    const onAbort = (): void => {
-      stop();
     };
     signal?.addEventListener('abort', onAbort, { once: true });
     child.once('error', (error) => {
@@ -114,469 +87,303 @@ function podman(args: string[], input?: string, signal?: AbortSignal): Promise<{
     child.once('close', (code) => {
       if (killTimer) clearTimeout(killTimer);
       signal?.removeEventListener('abort', onAbort);
-      if (signal?.aborted) return reject(new DOMException('Execution interrupted', 'AbortError'));
+      if (signal?.aborted) return reject(new DOMException('Executor setup interrupted.', 'AbortError'));
       if (code !== 0) return reject(new Error(stderr.trim() || `podman exited with code ${code ?? 1}`));
       resolvePromise({ stdout, stderr });
     });
-    if (input !== undefined) child.stdin.end(input);
-    else child.stdin.end();
+    child.stdin.end(input);
+  });
+}
+
+function freePort(): Promise<number> {
+  const server = createServer();
+  return new Promise((resolvePromise, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.removeListener('error', reject);
+      const address = server.address();
+      if (!address || typeof address === 'string')
+        return reject(new Error('Could not allocate a Container Executor port.'));
+      const port = address.port;
+      server.close((error) => (error ? reject(error) : resolvePromise(port)));
+    });
   });
 }
 
 export class ContainerExecutor implements ExecutorAdapter {
   readonly kind = 'container' as const;
-  private readonly inFlight = new Map<string, { promise: Promise<Execution>; controller: AbortController }>();
-  private readonly detaching = new Set<string>();
-  private readonly containerIds = new Map<string, string>();
-  private readonly containerPluginFingerprints = new Map<string, string>();
-  private readonly discoveredToolCatalogs = new Map<string, { fingerprint: string; tools: ToolDefinition[] }>();
-  private readonly containerSetupTails = new Map<string, Promise<void>>();
-  private podmanStorageArgs: string[] | null = null;
+  private readonly client: RemoteHostExecutor;
+  private readonly installationId: string;
+  private readonly containerImage: string;
+  private readonly mountProgram: string | undefined;
+  private readonly vfsRoot: string;
+  private readonly pluginDirectory: string;
+  private readonly connectionPromises = new Map<string, Promise<SavedContainerConnection>>();
+  private readonly setupPromises = new Map<string, Promise<void>>();
+  private storageArgs: string[] | null = null;
 
   constructor(
     private readonly store: PicoStore,
     _tools: ToolCatalog,
-    private readonly onExecution: ExecutionListener = () => undefined,
-    private readonly image = configuredContainerImage(),
+    onExecution: ExecutionListener = () => undefined,
+    image = configuredContainerImage(),
     private readonly runPodmanCommand: PodmanRunner = podman,
-    private readonly overlayMountProgram = findOverlayMountProgram(),
-    private readonly vfsStorageRoot = defaultVfsStorageRoot(),
-    private readonly pluginDirectory = executorPluginDirectory(),
-  ) {}
-
-  async listTools(binding: ExecutorBinding, signal?: AbortSignal): Promise<ToolDefinition[]> {
-    const fingerprint = await this.pluginFingerprint();
-    const cached = this.discoveredToolCatalogs.get(binding.id);
-    if (cached?.fingerprint === fingerprint) return cached.tools;
-    await this.ensureContainer(binding, signal);
-    const response = await this.callRunner(
-      this.containerName(binding.id),
-      'tools',
-      'tool-catalog',
-      undefined,
-      undefined,
-      signal,
-    );
-    const tools = validateToolDefinitions(response.tools);
-    this.discoveredToolCatalogs.set(binding.id, { fingerprint, tools });
-    return tools;
+    overlayMountProgram = findOverlayMountProgram(),
+    vfsStorageRoot = defaultVfsStorageRoot(),
+    pluginDirectory = executorPluginDirectory(),
+  ) {
+    this.installationId = this.getInstallationId();
+    this.containerImage = image;
+    this.mountProgram = overlayMountProgram;
+    this.vfsRoot = vfsStorageRoot;
+    this.pluginDirectory = pluginDirectory;
+    this.client = new RemoteHostExecutor(store, onExecution, async (binding) => this.addressFor(binding));
   }
 
-  async checkConnection(_binding: ExecutorBinding, signal?: AbortSignal): Promise<void> {
-    await this.callPodman(['info', '--format', '{{.Version.Version}}'], undefined, signal);
+  listTools(binding: ExecutorBinding): Promise<ToolDefinition[]> {
+    return this.client.listTools(binding);
   }
 
-  private async callPodman(
-    args: string[],
-    input?: string,
-    signal?: AbortSignal,
-  ): Promise<{ stdout: string; stderr: string }> {
-    if (this.podmanStorageArgs) {
-      return this.runPodmanCommand([...this.podmanStorageArgs, ...args], input, signal);
+  checkConnection(binding: ExecutorBinding) {
+    return this.client.checkConnection(binding);
+  }
+
+  update(binding: ExecutorBinding, bundle: Uint8Array, version: string): Promise<{ executorVersion: string }> {
+    return this.client.update(binding, bundle, version);
+  }
+
+  execute(executionId: string, binding: ExecutorBinding, signal?: AbortSignal): Promise<Execution> {
+    return this.client.execute(executionId, binding, signal);
+  }
+
+  status(executionId: string, binding: ExecutorBinding): Promise<Execution | null> {
+    return this.client.status(executionId, binding);
+  }
+
+  interrupt(executionId: string, binding: ExecutorBinding): Promise<Execution | null> {
+    return this.client.interrupt(executionId, binding);
+  }
+
+  async shutdown(): Promise<void> {
+    // Workspace containers and their execution ledgers persist across Runtime restarts.
+    await this.client.shutdown();
+  }
+
+  private connection(workspaceKey: string): Promise<SavedContainerConnection> {
+    let promise = this.connectionPromises.get(workspaceKey);
+    if (promise) return promise;
+    promise = (async () => {
+      const settingName = `${CONTAINER_SETTING_PREFIX}${workspaceKey}`;
+      const current = this.store.getSetting<SavedContainerConnection | null>(settingName, null);
+      if (
+        current &&
+        Number.isInteger(current.port) &&
+        current.port > 0 &&
+        current.port <= 65_535 &&
+        typeof current.accessToken === 'string' &&
+        Buffer.byteLength(current.accessToken) >= 32
+      ) {
+        return current;
+      }
+      const created = { port: await freePort(), accessToken: randomBytes(32).toString('hex') };
+      this.store.setSetting(settingName, created);
+      return created;
+    })();
+    this.connectionPromises.set(workspaceKey, promise);
+    return promise;
+  }
+
+  private getInstallationId(): string {
+    const saved = this.store.getSetting<string | null>(CONTAINER_INSTALLATION_SETTING, null);
+    if (saved && /^[a-f0-9]{32}$/.test(saved)) return saved;
+    const created = randomBytes(16).toString('hex');
+    this.store.setSetting(CONTAINER_INSTALLATION_SETTING, created);
+    return created;
+  }
+
+  private async addressFor(binding: ExecutorBinding): Promise<ExecutorServiceAddress> {
+    const workspace = await realpath(binding.workspacePath);
+    const workspaceInfo = await stat(workspace);
+    if (!workspaceInfo.isDirectory()) throw new Error('Container workspace must be a directory.');
+    const workspaceKey = createHash('sha256').update(workspace).digest('hex');
+    const containerName = this.containerName(workspaceKey);
+    await this.ensureService(workspace, workspaceKey, containerName);
+    const saved = await this.connection(workspaceKey);
+    return {
+      endpointUrl: `http://127.0.0.1:${saved.port}`,
+      accessToken: saved.accessToken,
+      workspacePath: '/workspace',
+    };
+  }
+
+  private containerName(workspaceKey: string): string {
+    const settingName = `${CONTAINER_NAME_SETTING_PREFIX}${workspaceKey}`;
+    const saved = this.store.getSetting<string | null>(settingName, null);
+    if (saved) return saved;
+    const created = `${CONTAINER_NAME_PREFIX}-${this.installationId.slice(0, 16)}-${workspaceKey.slice(0, 32)}`;
+    this.store.setSetting(settingName, created);
+    return created;
+  }
+
+  private async ensureService(workspace: string, workspaceKey: string, containerName: string): Promise<void> {
+    const current = this.setupPromises.get(workspaceKey);
+    if (current) return current;
+    const setup = this.setupService(workspace, workspaceKey, containerName).finally(() => {
+      this.setupPromises.delete(workspaceKey);
+    });
+    this.setupPromises.set(workspaceKey, setup);
+    return setup;
+  }
+
+  private async setupService(workspace: string, workspaceKey: string, containerName: string): Promise<void> {
+    await this.callPodman(['info', '--format', '{{.Version.Version}}']);
+    const root = await realpath(workspace);
+    if (!(await stat(root)).isDirectory()) throw new Error('Container workspace must be a directory.');
+    await mkdir(this.pluginDirectory, { recursive: true });
+    const saved = await this.connection(workspaceKey);
+    const running = await this.inspectContainer(containerName);
+    if (!running.exists) {
+      await this.callPodman([
+        'run',
+        '-d',
+        '--name',
+        containerName,
+        '--restart=unless-stopped',
+        '--label',
+        'io.pico.executor=workspace',
+        '--label',
+        `io.pico.workspace-key=${workspaceKey}`,
+        '--label',
+        `io.pico.installation-id=${this.installationId}`,
+        '-p',
+        `127.0.0.1:${saved.port}:${CONTAINER_PORT}`,
+        '--volume',
+        `${root}:/workspace:rw`,
+        '--volume',
+        `pico-executor-data-${this.installationId.slice(0, 16)}-${workspaceKey.slice(0, 32)}:/opt/pico/data:rw`,
+        '--volume',
+        `${this.pluginDirectory}:/opt/pico/executor-plugins:ro`,
+        '-e',
+        `PICO_EXECUTOR_TOKEN=${saved.accessToken}`,
+        this.containerImage,
+        'sleep',
+        'infinity',
+      ]);
+    } else if (!running.running) {
+      await this.callPodman(['start', containerName]);
     }
+
+    await this.callPodman(['exec', containerName, 'sh', '-lc', 'mkdir -p /opt/pico/data /opt/pico/executor-plugins']);
+    const versionPath = `${EXECUTOR_PATH}.version`;
+    let installedVersion = 'unknown';
+    if (!(await this.containerFileExists(containerName, EXECUTOR_PATH))) {
+      installedVersion = currentExecutorVersion();
+      const bundle = await currentExecutorBundle();
+      await this.callPodman(
+        ['exec', '-i', containerName, 'sh', '-lc', `base64 -d > ${EXECUTOR_PATH} && chmod 700 ${EXECUTOR_PATH}`],
+        bundle.toString('base64'),
+      );
+      await this.callPodman(['exec', '-i', containerName, 'sh', '-lc', `cat > ${versionPath}`], installedVersion);
+    } else if (await this.containerFileExists(containerName, versionPath)) {
+      const version = await this.callPodman(['exec', containerName, 'cat', versionPath]);
+      installedVersion = version.stdout.trim() || 'unknown';
+    } else {
+      await this.callPodman(['exec', '-i', containerName, 'sh', '-lc', `cat > ${versionPath}`], installedVersion);
+    }
+    if (!(await this.isReachable(saved.port, saved.accessToken))) {
+      await this.callPodman([
+        'exec',
+        '-d',
+        containerName,
+        'env',
+        'PICO_EXECUTOR_HOST=0.0.0.0',
+        `PICO_EXECUTOR_PORT=${CONTAINER_PORT}`,
+        `PICO_EXECUTOR_TOKEN=${saved.accessToken}`,
+        'PICO_EXECUTOR_WORKSPACE_ROOT=/workspace',
+        'PICO_EXECUTOR_DB_PATH=/opt/pico/data/executor.sqlite',
+        'PICO_EXECUTOR_PLUGIN_DIR=/opt/pico/executor-plugins',
+        `PICO_EXECUTOR_INSTALL_PATH=${EXECUTOR_PATH}`,
+        `PICO_EXECUTOR_VERSION_FILE=${versionPath}`,
+        `PICO_EXECUTOR_VERSION=${installedVersion}`,
+        'node',
+        EXECUTOR_PATH,
+      ]);
+      await this.waitUntilReachable(saved.port, saved.accessToken);
+    }
+  }
+
+  private async inspectContainer(containerName: string): Promise<{ exists: boolean; running: boolean }> {
     try {
-      return await this.runPodmanCommand(args, input, signal);
+      const result = await this.callPodman(['container', 'inspect', containerName, '--format', '{{.State.Running}}']);
+      return { exists: true, running: result.stdout.trim() === 'true' };
+    } catch (error) {
+      if (/no such container|not found|does not exist/i.test(message(error))) return { exists: false, running: false };
+      throw error;
+    }
+  }
+
+  private async containerFileExists(containerName: string, path: string): Promise<boolean> {
+    try {
+      await this.callPodman(['exec', containerName, 'sh', '-lc', `test -s ${path}`]);
+      return true;
+    } catch (error) {
+      if (/exit code 1|returned non-zero|command exited/i.test(message(error))) return false;
+      // Podman versions format command failures differently; test the container state
+      // before treating the missing file as a provisioning requirement.
+      if (/no such|not running|container state/i.test(message(error))) throw error;
+      return false;
+    }
+  }
+
+  private async isReachable(port: number, accessToken: string): Promise<boolean> {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/info`, {
+        headers: { authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(500),
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  private async waitUntilReachable(port: number, accessToken: string): Promise<void> {
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      if (await this.isReachable(port, accessToken)) return;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
+    }
+    throw new Error('Container Executor did not become ready within 15 seconds.');
+  }
+
+  private async callPodman(args: string[], input?: string): Promise<{ stdout: string; stderr: string }> {
+    if (this.storageArgs) return this.runPodmanCommand([...this.storageArgs, ...args], input);
+    try {
+      return await this.runPodmanCommand(args, input);
     } catch (error) {
       if (!isUnsupportedBtrfsOverlay(error)) throw error;
-      const original = errorMessage(error);
-      let fallbackReason = original;
-      if (this.overlayMountProgram) {
-        const storageArgs = ['--storage-opt', `overlay.mount_program=${this.overlayMountProgram}`];
+      let fallbackError: unknown;
+      if (this.mountProgram) {
+        const storageArgs = ['--storage-opt', `overlay.mount_program=${this.mountProgram}`];
         try {
-          const result = await this.runPodmanCommand([...storageArgs, ...args], input, signal);
-          this.podmanStorageArgs = storageArgs;
+          const result = await this.runPodmanCommand([...storageArgs, ...args], input);
+          this.storageArgs = storageArgs;
           return result;
-        } catch (fallbackError) {
-          fallbackReason += `\nPodman could not use fuse-overlayfs helper ${this.overlayMountProgram}: ${errorMessage(fallbackError)}`;
+        } catch (caught) {
+          fallbackError = caught;
         }
-      } else {
-        fallbackReason +=
-          '\nNo fuse-overlayfs helper was found; Pico is retrying with an isolated VFS store. Set PICO_PODMAN_OVERLAY_MOUNT_PROGRAM to use a compatible overlay helper.';
       }
-      const storageArgs = ['--root', this.vfsStorageRoot, '--storage-driver', 'vfs'];
+      const storageArgs = ['--root', this.vfsRoot, '--storage-driver', 'vfs'];
       try {
-        const result = await this.runPodmanCommand([...storageArgs, ...args], input, signal);
-        this.podmanStorageArgs = storageArgs;
+        const result = await this.runPodmanCommand([...storageArgs, ...args], input);
+        this.storageArgs = storageArgs;
         return result;
-      } catch (fallbackError) {
+      } catch (caught) {
         throw new Error(
-          `${fallbackReason}\nPodman could not initialize isolated VFS storage at ${this.vfsStorageRoot}: ${errorMessage(fallbackError)}`,
-          { cause: fallbackError },
+          `Could not initialize Container Executor Podman storage. ${fallbackError ? message(fallbackError) : message(error)}; ${message(caught)}`,
+          { cause: caught },
         );
       }
     }
-  }
-
-  async execute(executionId: string, binding: ExecutorBinding, externalSignal?: AbortSignal): Promise<Execution> {
-    const current = this.store.getExecution(executionId);
-    if (!current) throw new Error(`Execution ${executionId} was not durably created`);
-    if (current.status === 'completed' || current.status === 'failed' || current.status === 'interrupted')
-      return current;
-    const active = this.inFlight.get(executionId);
-    if (active) return active.promise;
-    if (current.status === 'running') return this.resumeExisting(executionId, binding, externalSignal);
-    const controller = new AbortController();
-    const relayAbort = (): void => controller.abort();
-    externalSignal?.addEventListener('abort', relayAbort, { once: true });
-    if (externalSignal?.aborted) controller.abort();
-    const promise = (async () => {
-      const discovered = await this.listTools(binding, controller.signal);
-      if (!current.toolName || !discovered.some((tool) => tool.name === current.toolName)) {
-        const failed = this.store.transitionExecution(executionId, 'failed', {
-          error: `Container tool “${current.toolName ?? 'unknown'}” is not registered in the Container Executor.`,
-        });
-        this.onExecution(failed);
-        return failed;
-      }
-      const running = this.store.transitionExecution(executionId, 'running');
-      this.onExecution(running);
-      return this.runRemote(executionId, current.toolName!, current.arguments ?? {}, binding, controller.signal);
-    })()
-      .catch((error: unknown) => {
-        const latest = this.store.getExecution(executionId);
-        if (!latest || latest.status === 'completed' || latest.status === 'failed' || latest.status === 'interrupted')
-          return latest!;
-        if (this.detaching.has(executionId)) return latest;
-        if (controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) {
-          return this.store.transitionExecution(executionId, 'interrupted', { error: 'Execution was interrupted.' });
-        }
-        // Once submitted, a lost Podman response cannot prove whether the tool started or finished.
-        if (latest.status === 'running') return latest;
-        // Before submission, transient setup failures leave the durable execution available for retry.
-        if (latest.status === 'pending' && isRetryableContainerSetupFailure(error)) {
-          const diagnostic = safeErrorMessage(error);
-          const retryable = this.store.recordRetryableExecutionFailure(executionId, diagnostic);
-          this.onExecution(retryable);
-          return retryable;
-        }
-        return this.store.transitionExecution(executionId, latest.status === 'pending' ? 'failed' : 'interrupted', {
-          error: safeErrorMessage(error),
-        });
-      })
-      .finally(() => {
-        externalSignal?.removeEventListener('abort', relayAbort);
-        this.inFlight.delete(executionId);
-        this.detaching.delete(executionId);
-      });
-    this.inFlight.set(executionId, { promise, controller });
-    return promise;
-  }
-
-  async status(executionId: string, binding: ExecutorBinding): Promise<Execution | null> {
-    const current = this.store.getExecution(executionId);
-    if (!current) return null;
-    if (
-      current.status === 'pending' ||
-      current.status === 'completed' ||
-      current.status === 'failed' ||
-      current.status === 'interrupted'
-    )
-      return current;
-    if (this.inFlight.has(executionId)) return current;
-    return this.refreshStatus(executionId, binding);
-  }
-
-  /** Stop local setup and polling while leaving durable container executions recoverable. */
-  async shutdown(): Promise<void> {
-    const active = [...this.inFlight.entries()];
-    for (const [executionId, execution] of active) {
-      this.detaching.add(executionId);
-      execution.controller.abort();
-    }
-    await Promise.allSettled(active.map(([, execution]) => execution.promise));
-  }
-
-  private async refreshStatus(
-    executionId: string,
-    binding: ExecutorBinding,
-    signal?: AbortSignal,
-  ): Promise<Execution | null> {
-    const current = this.store.getExecution(executionId);
-    if (!current) return null;
-    if (current.status !== 'running') return current;
-    const name = this.containerName(binding.id);
-    const exists = await this.containerExists(name, signal);
-    if (!exists)
-      return this.store.transitionExecution(executionId, 'interrupted', {
-        error: 'The Container Executor confirmed that its previous container no longer exists.',
-        detail: { confirmedMissing: true },
-      });
-    await this.startContainer(name, signal);
-    const response = await this.callRunner(
-      name,
-      'status',
-      this.executionKey(executionId),
-      undefined,
-      undefined,
-      signal,
-    );
-    return this.acceptRunnerResponse(executionId, response);
-  }
-
-  async interrupt(executionId: string, binding: ExecutorBinding): Promise<Execution | null> {
-    const active = this.inFlight.get(executionId);
-    if (active) {
-      if (this.store.getExecution(executionId)?.status === 'pending') {
-        active.controller.abort();
-        return active.promise;
-      }
-      const response = await this.callRunner(
-        this.containerName(binding.id),
-        'interrupt',
-        this.executionKey(executionId),
-      );
-      const updated = this.acceptRunnerResponse(executionId, response);
-      if (updated.status !== 'running') active.controller.abort();
-      return updated;
-    }
-    const current = this.store.getExecution(executionId);
-    if (!current || current.status !== 'running') return current;
-    const name = this.containerName(binding.id);
-    if (!(await this.containerExists(name))) {
-      return this.store.transitionExecution(executionId, 'interrupted', {
-        error: 'The Container Executor confirmed that its previous container no longer exists.',
-        detail: { confirmedMissing: true },
-      });
-    }
-    const response = await this.callRunner(name, 'interrupt', this.executionKey(executionId));
-    return this.acceptRunnerResponse(executionId, response);
-  }
-
-  private async resumeExisting(
-    executionId: string,
-    binding: ExecutorBinding,
-    signal?: AbortSignal,
-  ): Promise<Execution> {
-    const controller = new AbortController();
-    const relayAbort = (): void => controller.abort();
-    signal?.addEventListener('abort', relayAbort, { once: true });
-    const promise = (async () => {
-      const existing = await this.refreshStatus(executionId, binding, controller.signal);
-      if (!existing || existing.status !== 'running') return existing!;
-      return this.poll(executionId, binding, controller.signal);
-    })()
-      .catch((error: unknown) => this.store.getExecution(executionId) ?? Promise.reject(error))
-      .finally(() => {
-        signal?.removeEventListener('abort', relayAbort);
-        this.inFlight.delete(executionId);
-        this.detaching.delete(executionId);
-      });
-    this.inFlight.set(executionId, { promise, controller });
-    return promise;
-  }
-
-  private async runRemote(
-    executionId: string,
-    toolName: string,
-    args: Record<string, unknown>,
-    binding: ExecutorBinding,
-    signal: AbortSignal,
-  ): Promise<Execution> {
-    const name = this.containerName(binding.id);
-    const key = this.executionKey(executionId);
-    const response = await this.callRunner(name, 'run', key, toolName, args, signal, executionId);
-    if (response.status === 'running') return this.poll(executionId, binding, signal);
-    return this.acceptRunnerResponse(executionId, response);
-  }
-
-  private async poll(executionId: string, binding: ExecutorBinding, signal: AbortSignal): Promise<Execution> {
-    while (!signal.aborted) {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 700));
-      if (signal.aborted) break;
-      const status = await this.refreshStatus(executionId, binding, signal);
-      if (!status || status.status !== 'running') return status!;
-    }
-    return this.store.getExecution(executionId)!;
-  }
-
-  private acceptRunnerResponse(executionId: string, response: ToolRunnerResponse): Execution {
-    const current = this.store.getExecution(executionId);
-    if (!current) throw new Error(`Execution ${executionId} not found`);
-    if (response.status === 'running') return current;
-    if (current.status === 'completed' || current.status === 'failed' || current.status === 'interrupted')
-      return current;
-    const updated = this.store.transitionExecution(executionId, response.status, {
-      ...(Object.hasOwn(response, 'result') ? { result: response.result } : {}),
-      ...(response.error ? { error: response.error } : {}),
-      detail: { source: 'container-runner' },
-    });
-    this.onExecution(updated);
-    return updated;
-  }
-
-  private async callRunner(
-    name: string,
-    mode: 'run' | 'status' | 'interrupt' | 'tools',
-    key: string,
-    toolName?: string,
-    args?: Record<string, unknown>,
-    signal?: AbortSignal,
-    runnerExecutionId = key,
-  ): Promise<ToolRunnerResponse> {
-    const command = [
-      'exec',
-      '-i',
-      name,
-      'node',
-      '-e',
-      CONTAINER_RUNNER,
-      mode,
-      key,
-      toolName ?? '',
-      '/tmp/pico-executions',
-      '/workspace',
-      '/opt/pico/executor-plugins',
-      runnerExecutionId,
-    ];
-    const { stdout } = await this.callPodman(command, args ? JSON.stringify(args) : undefined, signal);
-    try {
-      return JSON.parse(stdout) as ToolRunnerResponse;
-    } catch {
-      throw new Error(`Container Executor returned invalid status: ${stdout.slice(0, 300)}`);
-    }
-  }
-
-  private async ensureContainer(binding: ExecutorBinding, signal?: AbortSignal): Promise<void> {
-    const previous = this.containerSetupTails.get(binding.id);
-    let release!: () => void;
-    const turn = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const tail = previous ? previous.then(() => turn) : turn;
-    this.containerSetupTails.set(binding.id, tail);
-    void tail.then(() => {
-      if (this.containerSetupTails.get(binding.id) === tail) this.containerSetupTails.delete(binding.id);
-    });
-    try {
-      if (previous) await previous;
-      if (signal?.aborted) throw new DOMException('Execution interrupted', 'AbortError');
-      await this.prepareContainer(binding, signal);
-    } finally {
-      release();
-    }
-  }
-
-  private async prepareContainer(binding: ExecutorBinding, signal?: AbortSignal): Promise<void> {
-    await this.checkConnection(binding, signal);
-    const name = this.containerName(binding.id);
-    if (await this.containerExists(name, signal)) {
-      await this.startContainer(name, signal);
-      await this.installPluginBundles(name, signal);
-      return;
-    }
-    this.containerPluginFingerprints.delete(name);
-    this.discoveredToolCatalogs.delete(binding.id);
-    const volume = `${binding.workspacePath}:/workspace:rw`;
-    try {
-      await this.callPodman(
-        [
-          'run',
-          '-d',
-          '--name',
-          name,
-          '--label',
-          'io.pico.executor=true',
-          '--volume',
-          volume,
-          '--workdir',
-          '/workspace',
-          this.image,
-          'sleep',
-          'infinity',
-        ],
-        undefined,
-        signal,
-      );
-    } catch (error) {
-      if (signal?.aborted) await this.callPodman(['rm', '--force', name]).catch(() => undefined);
-      throw error;
-    }
-    this.containerIds.set(binding.id, name);
-    await this.installPluginBundles(name, signal);
-  }
-
-  private async installPluginBundles(name: string, signal?: AbortSignal): Promise<void> {
-    const { files, fingerprint } = await this.executorPluginBundles();
-    if (this.containerPluginFingerprints.get(name) === fingerprint) return;
-    await this.callPodman(
-      ['exec', name, 'sh', '-c', 'mkdir -p /opt/pico/executor-plugins && rm -f /opt/pico/executor-plugins/*.mjs'],
-      undefined,
-      signal,
-    );
-    for (const { filename } of files) {
-      await this.callPodman(
-        ['cp', join(this.pluginDirectory, filename), `${name}:/opt/pico/executor-plugins/${filename}`],
-        undefined,
-        signal,
-      );
-    }
-    this.containerPluginFingerprints.set(name, fingerprint);
-    for (const [bindingId, containerName] of this.containerIds) {
-      if (containerName === name) this.discoveredToolCatalogs.delete(bindingId);
-    }
-  }
-
-  private async pluginFingerprint(): Promise<string> {
-    return (await this.executorPluginBundles()).fingerprint;
-  }
-
-  private async executorPluginBundles(): Promise<{
-    files: Array<{ filename: string; content: Buffer }>;
-    fingerprint: string;
-  }> {
-    let filenames: string[];
-    try {
-      filenames = (await readdir(this.pluginDirectory, { withFileTypes: true }))
-        .filter((entry) => entry.isFile() && entry.name.endsWith('.mjs'))
-        .map((entry) => entry.name)
-        .sort();
-    } catch (error) {
-      if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
-        filenames = [];
-      } else {
-        throw error;
-      }
-    }
-    const files = await Promise.all(
-      filenames.map(async (filename) => ({ filename, content: await readFile(join(this.pluginDirectory, filename)) })),
-    );
-    const hash = createHash('sha256');
-    for (const file of files) hash.update(file.filename).update('\0').update(file.content).update('\0');
-    return { files, fingerprint: hash.digest('hex') };
-  }
-
-  private async containerExists(name: string, signal?: AbortSignal): Promise<boolean> {
-    try {
-      await this.callPodman(['inspect', '--type', 'container', name], undefined, signal);
-      return true;
-    } catch (error) {
-      if (
-        /no such container|no such object|not found|does not exist/i.test(
-          error instanceof Error ? error.message : String(error),
-        )
-      ) {
-        return false;
-      }
-      throw error;
-    }
-  }
-
-  private async startContainer(name: string, signal?: AbortSignal): Promise<void> {
-    await this.callPodman(['start', name], undefined, signal).catch((error: unknown) => {
-      if (error instanceof Error && /already running/i.test(error.message)) return;
-      throw error;
-    });
-  }
-
-  private containerName(executorId: string): string {
-    const known = this.containerIds.get(executorId);
-    if (known) return known;
-    const name = `pico-${executorId.replaceAll('-', '').slice(0, 24)}`;
-    this.containerIds.set(executorId, name);
-    return name;
-  }
-
-  private executionKey(executionId: string): string {
-    return createHash('sha256').update(executionId).digest('hex');
   }
 }

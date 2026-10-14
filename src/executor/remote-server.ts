@@ -4,6 +4,8 @@ import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep, join } from 'node:path';
 import { hostname } from 'node:os';
 import express, { type ErrorRequestHandler, type Request } from 'express';
+import { EXECUTOR_PROTOCOL_VERSION } from './remote-protocol.js';
+import { compareExecutorVersions, PICO_EXECUTOR_VERSION } from './version.js';
 import { createToolCatalog } from './tools.js';
 import { loadExecutorPlugins } from './plugin-host.js';
 import type { ToolCatalog } from './tools.js';
@@ -24,6 +26,8 @@ export interface RemoteExecutorServerOptions {
   databasePath?: string;
   pluginDirectory?: string;
   tools?: ToolCatalog;
+  executorVersion?: string;
+  update?: (bundle: Buffer, version: string) => Promise<void>;
 }
 
 export interface RunningRemoteExecutorServer {
@@ -64,6 +68,7 @@ export async function startRemoteExecutorServer(
   const workspaceRoot = await realpath(resolve(options.workspaceRoot));
   if (!(await stat(workspaceRoot)).isDirectory()) throw new Error('Executor workspace root must be a directory.');
   const databasePath = options.databasePath ?? join(process.cwd(), 'data', 'executor.sqlite');
+  const executorVersion = options.executorVersion ?? PICO_EXECUTOR_VERSION;
   const ledger = new RemoteExecutionLedger(databasePath);
   const tools = options.tools ?? createToolCatalog();
   const pluginLoad = await loadExecutorPlugins(tools, {
@@ -144,13 +149,38 @@ export async function startRemoteExecutorServer(
 
   app.get('/api/info', (_request, response) => {
     response.json({
-      protocolVersion: 1,
+      protocolVersion: EXECUTOR_PROTOCOL_VERSION,
+      executorVersion,
+      updateSupported: Boolean(options.update),
       name: options.name?.trim() || hostname(),
-      kind: 'host',
+      kind: 'executor',
       workspaceRoot,
       tools: tools.listBySource('executor').map((tool) => tool.definition),
     });
   });
+  app.post(
+    '/api/update',
+    express.raw({ type: 'application/octet-stream', limit: '25mb' }),
+    async (request, response) => {
+      if (!options.update) {
+        return response
+          .status(501)
+          .json({ error: 'This Executor installation has no self-update command configured.' });
+      }
+      if (!Buffer.isBuffer(request.body)) throw new Error('Executor update bundle is missing.');
+      const version = request.header('x-pico-executor-version')?.trim();
+      const targetVersionIsValid = compareExecutorVersions(version ?? '', '0.0.0') !== null;
+      if (
+        !version ||
+        !targetVersionIsValid ||
+        (executorVersion !== 'unknown' && compareExecutorVersions(version, executorVersion) !== 1)
+      ) {
+        throw new Error('Executor update bundle must have a valid newer version.');
+      }
+      await options.update(request.body, version);
+      return response.json({ updated: true, executorVersion: version });
+    },
+  );
   app.post('/api/workspaces/validate', async (request, response) => {
     response.json({ path: await validateWorkspace(bodyObject(request).path) });
   });

@@ -2,10 +2,14 @@ import type { ToolDefinition } from '../core/types.js';
 
 export type RemoteExecutionStatus = 'pending' | 'running' | 'completed' | 'failed' | 'interrupted';
 
+export const EXECUTOR_PROTOCOL_VERSION = 2;
+
 export interface RemoteExecutorInfo {
-  protocolVersion: 1;
+  protocolVersion: number;
+  executorVersion?: string;
+  updateSupported?: boolean;
   name: string;
-  kind: 'host';
+  kind: string;
   workspaceRoot: string;
   tools: ToolDefinition[];
 }

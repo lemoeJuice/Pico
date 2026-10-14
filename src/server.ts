@@ -14,6 +14,7 @@ import {
 import express, { type ErrorRequestHandler, type Request, type Response } from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
 import { PicoRuntime } from './runtime/runtime.js';
+import { currentExecutorVersion } from './executor/bundle.js';
 import { PicoStore } from './core/store.js';
 import type { ExecutorKind, ModelSettings } from './core/types.js';
 
@@ -153,7 +154,9 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   });
 
   app.get('/api/health', (_request, response) => response.json({ ok: true }));
-  app.get('/api/info', (_request, response) => response.json({ defaultWorkspace: process.cwd(), version: '0.1.0' }));
+  app.get('/api/info', (_request, response) =>
+    response.json({ defaultWorkspace: process.cwd(), version: currentExecutorVersion() }),
+  );
 
   app.get('/api/projects', (_request, response) => response.json(runtime.listProjects()));
   app.post('/api/projects', async (request, response) => {
@@ -261,6 +264,9 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   });
   app.get('/api/threads/:threadId/executor', async (request, response) => {
     response.json(await runtime.executorStatus(request.params.threadId!));
+  });
+  app.post('/api/threads/:threadId/executor/update', async (request, response) => {
+    response.json(await runtime.updateExecutor(request.params.threadId!));
   });
   app.get('/api/settings/model', (_request, response) => response.json(runtime.publicModelSettings()));
   app.put('/api/settings/model', (request, response) => {

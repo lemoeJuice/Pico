@@ -21,9 +21,11 @@ import type {
 import { PicoStore } from '../core/store.js';
 import { ExecutionPipelines } from '../core/pipeline.js';
 import { ContainerExecutor } from '../executor/container-executor.js';
-import { HostExecutor, type ExecutorAdapter } from '../executor/executor.js';
+import { HostExecutor, requiresExternalExecutor, type ExecutorAdapter } from '../executor/executor.js';
 import { RemoteHostExecutor, inspectRemoteExecutor, validateRemoteWorkspace } from '../executor/remote-executor.js';
-import { normalizeRemoteExecutorUrl } from '../executor/remote-protocol.js';
+import { EXECUTOR_PROTOCOL_VERSION, normalizeRemoteExecutorUrl } from '../executor/remote-protocol.js';
+import { currentExecutorBundle, currentExecutorVersion } from '../executor/bundle.js';
+import { compareExecutorVersions } from '../executor/version.js';
 import { loadExecutorPlugins } from '../executor/plugin-host.js';
 import { createToolCatalog, ToolCatalog, type ToolContext } from '../executor/tools.js';
 import { builtinPlugins } from '../plugins/builtin.js';
@@ -199,7 +201,12 @@ export class PicoRuntime {
     this.options = options;
     this.model = options.model ?? new OpenAiCompatibleAdapter();
     this.additionalPlugins = [...(options.plugins ?? [])];
-    this.hostExecutor = new HostExecutor(store, this.executorTools, (execution) => this.executionChanged(execution));
+    this.hostExecutor = new HostExecutor(
+      store,
+      this.executorTools,
+      (execution) => this.executionChanged(execution),
+      options.executorPluginDirectory,
+    );
     this.containerExecutor = new ContainerExecutor(
       store,
       this.executorTools,
@@ -502,20 +509,14 @@ export class PicoRuntime {
     if (!thread) throw new Error('Thread not found');
 
     const runtimeTools = this.tools.listBySource('runtime').map(({ definition }) => definition);
-    const binding = thread.executorKind === 'runtime' ? null : this.store.executorForThread(threadId);
-    const cachedSurface = this.readCachedThreadToolSurface(threadId);
+    const binding = requiresExternalExecutor(thread.executorKind) ? this.store.executorForThread(threadId) : null;
     let executorTools: ToolDefinition[] = [];
 
-    if (thread.executorKind !== 'runtime') {
-      if (binding?.remoteConnectionId) {
-        executorTools = cachedSurface?.tools.filter((tool) => cachedSurface.sources[tool.name] === 'executor') ?? [];
-      } else if (thread.executorKind === 'container') {
-        executorTools = this.executorTools.listBySource('executor').map(({ definition }) => definition);
-      } else if (binding) {
-        // Host discovery reads the in-process catalog. Container schemas are loaded in
-        // Runtime from the same bundles installed into containers; remote discovery can
-        // make a network request, so the toolbar only uses its last successful projection.
-        executorTools = await this.hostExecutor.listTools(binding);
+    if (binding) {
+      const cachedSurface = this.readCachedThreadToolSurface(threadId);
+      executorTools = cachedSurface?.tools.filter((tool) => cachedSurface.sources[tool.name] === 'executor') ?? [];
+      if (executorTools.length === 0) {
+        executorTools = await this.adapterFor(binding).listTools(binding);
       }
     }
 
@@ -1491,25 +1492,90 @@ export class PicoRuntime {
     return this.plugins.findHttpRoute(pluginId, method, path);
   }
 
-  async executorStatus(threadId: string): Promise<{ connected: boolean; kind: string; label: string; error?: string }> {
+  async executorStatus(threadId: string): Promise<{
+    requiresExecutor: boolean;
+    connected: boolean;
+    compatible: boolean;
+    kind: string;
+    label: string;
+    executorVersion?: string;
+    targetVersion?: string;
+    updateAvailable: boolean;
+    updateSupported: boolean;
+    error?: string;
+  }> {
     const binding = this.store.executorForThread(threadId);
     if (!binding) throw new Error('Executor binding is missing');
-    if (binding.kind === 'runtime') return { connected: true, kind: 'runtime', label: 'Chat' };
-    try {
-      await this.adapterFor(binding).checkConnection(binding);
+    const requiresExecutor = requiresExternalExecutor(binding.kind);
+    const targetVersion = currentExecutorVersion();
+    if (!requiresExecutor) {
       return {
+        requiresExecutor: false,
         connected: true,
-        kind: binding.remoteConnectionId ? 'remote-host' : binding.kind,
+        compatible: true,
+        kind: 'runtime',
+        label: 'Chat',
+        targetVersion,
+        updateAvailable: false,
+        updateSupported: false,
+      };
+    }
+    try {
+      const adapter = this.adapterFor(binding);
+      const info = await adapter.checkConnection(binding);
+      const compatible = info?.protocolVersion === EXECUTOR_PROTOCOL_VERSION && info.kind === 'executor';
+      const comparison = info?.executorVersion ? compareExecutorVersions(info.executorVersion, targetVersion) : null;
+      const updateAvailable = !compatible || comparison === -1 || comparison === null;
+      const kind = binding.remoteConnectionId ? 'remote-host' : binding.kind;
+      return {
+        requiresExecutor: true,
+        connected: compatible,
+        compatible,
+        kind,
         label: binding.label,
+        ...(info?.executorVersion ? { executorVersion: info.executorVersion } : {}),
+        targetVersion,
+        updateAvailable,
+        updateSupported: info?.updateSupported === true,
+        ...(!compatible
+          ? {
+              error: `Executor protocol is incompatible. ${info?.executorVersion ? `Installed version: ${info.executorVersion}.` : 'Installed version is unknown.'} Update the Executor to ${targetVersion}.`,
+            }
+          : {}),
       };
     } catch (error) {
       return {
+        requiresExecutor: true,
         connected: false,
+        compatible: false,
         kind: binding.remoteConnectionId ? 'remote-host' : binding.kind,
         label: binding.label,
+        targetVersion,
+        updateAvailable: false,
+        updateSupported: false,
         error: error instanceof Error ? error.message : String(error),
       };
     }
+  }
+
+  async updateExecutor(threadId: string): Promise<Awaited<ReturnType<PicoRuntime['executorStatus']>>> {
+    const binding = this.store.executorForThread(threadId);
+    if (!binding || !requiresExternalExecutor(binding.kind)) {
+      throw new Error('Chat mode does not use an external Executor.');
+    }
+    const version = currentExecutorVersion();
+    const result = await this.adapterFor(binding).update(binding, await currentExecutorBundle(), version);
+    if (result.executorVersion !== version) throw new Error('Executor did not confirm the requested version.');
+    let status = await this.executorStatus(threadId);
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      if (status.compatible && status.executorVersion === version) return status;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300));
+      status = await this.executorStatus(threadId);
+    }
+    throw new Error(
+      `Executor accepted version ${version} but did not reconnect with that version. ${status.error ?? 'Check its connection and try again.'}`,
+    );
   }
 
   async drain(): Promise<void> {

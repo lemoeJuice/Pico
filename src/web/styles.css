@@ -720,6 +720,31 @@ button:disabled {
 .thread-state-dot.state-idle {
   background: #bdc8be;
 }
+.executor-update-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  color: #718075;
+  font-size: 11px;
+  line-height: 1.65;
+}
+.executor-update-content p {
+  margin: 0;
+}
+.executor-update-content .executor-update-warning {
+  color: #8e5f51;
+}
+.executor-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+.executor-update-toolbar {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
 .connection-label {
   display: inline-flex;
   align-items: center;

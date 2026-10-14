@@ -107,6 +107,13 @@ type PluginHostUiProps = Omit<PluginUiProps, 'executeCommand'>;
 
 type RuntimeEvent = Record<string, unknown> & { type: string };
 type ThreadExecutorChoice = ExecutorKind | 'remote';
+type ExecutorStatusDetails = {
+  updateAvailable?: boolean;
+  compatible?: boolean;
+  executorVersion?: string | null;
+  targetVersion?: string | null;
+  updateSupported?: boolean;
+};
 
 function readComposerState(): ComposerState {
   try {
@@ -473,6 +480,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [commands, setCommands] = useState<Array<{ name: string; description: string }>>([]);
   const [executorConnected, setExecutorConnected] = useState<boolean | null>(null);
   const [executorError, setExecutorError] = useState<string | null>(null);
+  const [executorDetails, setExecutorDetails] = useState<ExecutorStatusDetails>({});
+  const [executorUpdateOpen, setExecutorUpdateOpen] = useState(false);
+  const [executorUpdateBusy, setExecutorUpdateBusy] = useState(false);
+  const [executorUpdateError, setExecutorUpdateError] = useState('');
   const [socketConnected, setSocketConnected] = useState(false);
   const [sendingThreadIds, setSendingThreadIds] = useState<Set<string>>(new Set());
   const [draftsByThread, setDraftsByThread] = useState<Record<string, string>>(
@@ -844,23 +855,45 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     if (!threadId) {
       setExecutorConnected(null);
       setExecutorError(null);
+      setExecutorDetails({});
+      setExecutorUpdateOpen(false);
       return;
     }
     setExecutorConnected(null);
     setExecutorError(null);
+    setExecutorDetails({});
+    setExecutorUpdateOpen(false);
+    setExecutorUpdateError('');
     let alive = true;
     let refreshing = false;
+    let promptedUpdate = false;
     const refresh = async (): Promise<void> => {
       if (!alive || refreshing) return;
       refreshing = true;
       try {
         const [executorResult] = await Promise.allSettled([
-          api<{ connected: boolean; error?: string }>(`/api/threads/${threadId}/executor`),
+          api<{
+            connected: boolean;
+            error?: string;
+            updateAvailable?: boolean;
+            compatible?: boolean;
+            executorVersion?: string | null;
+            targetVersion?: string | null;
+            updateSupported?: boolean;
+          }>(`/api/threads/${encodeURIComponent(threadId)}/executor`),
         ]);
         if (!alive) return;
         const executorStatus = executorStatusFromProbe(executorResult);
         setExecutorConnected(executorStatus.connected);
         setExecutorError(executorStatus.error);
+        if (executorResult.status === 'fulfilled') {
+          const details = executorResult.value;
+          setExecutorDetails(details);
+          if (selectedThread?.executorKind !== 'runtime' && details.updateAvailable && !promptedUpdate) {
+            promptedUpdate = true;
+            setExecutorUpdateOpen(true);
+          }
+        }
       } finally {
         refreshing = false;
       }
@@ -873,7 +906,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       alive = false;
       window.clearInterval(timer);
     };
-  }, [threadId]);
+  }, [selectedThread?.executorKind, threadId]);
 
   useEffect(() => {
     let closed = false;
@@ -1086,6 +1119,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     const clean = content.trim();
     const sentThreadId = threadId;
     if (!sentThreadId || !clean || busy || pendingSubmissionThreads.current.has(sentThreadId)) return;
+    if (selectedThread?.executorKind !== 'runtime' && executorConnected !== true) return;
     let id: string | undefined;
     try {
       followLatest.current = true;
@@ -1114,6 +1148,70 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       }
     } finally {
       markThreadSending(sentThreadId, false);
+    }
+  };
+
+  const updateExecutor = async (): Promise<void> => {
+    if (!selectedThread || selectedThread.executorKind === 'runtime' || executorUpdateBusy) return;
+    const targetThreadId = selectedThread.id;
+    setExecutorUpdateBusy(true);
+    setExecutorUpdateError('');
+    try {
+      await api(`/api/threads/${encodeURIComponent(targetThreadId)}/executor/update`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      const status = await api<{
+        connected: boolean;
+        error?: string;
+        updateAvailable?: boolean;
+        compatible?: boolean;
+        executorVersion?: string | null;
+        targetVersion?: string | null;
+        updateSupported?: boolean;
+      }>(`/api/threads/${encodeURIComponent(targetThreadId)}/executor`);
+      if (activeThreadId.current === targetThreadId) {
+        const checked = executorStatusFromProbe({ status: 'fulfilled', value: status });
+        setExecutorConnected(checked.connected);
+        setExecutorError(checked.error);
+        setExecutorDetails(status);
+      }
+    } catch (caught) {
+      if (activeThreadId.current === targetThreadId) {
+        setExecutorUpdateError(caught instanceof Error ? caught.message : 'Could not update the Executor.');
+      }
+    } finally {
+      setExecutorUpdateBusy(false);
+    }
+  };
+
+  const recheckExecutor = async (): Promise<void> => {
+    if (!selectedThread || selectedThread.executorKind === 'runtime') return;
+    const targetThreadId = selectedThread.id;
+    setExecutorUpdateBusy(true);
+    setExecutorUpdateError('');
+    try {
+      const status = await api<{
+        connected: boolean;
+        error?: string;
+        updateAvailable?: boolean;
+        compatible?: boolean;
+        executorVersion?: string | null;
+        targetVersion?: string | null;
+        updateSupported?: boolean;
+      }>(`/api/threads/${encodeURIComponent(targetThreadId)}/executor`);
+      const checked = executorStatusFromProbe({ status: 'fulfilled', value: status });
+      if (activeThreadId.current === targetThreadId) {
+        setExecutorConnected(checked.connected);
+        setExecutorError(checked.error);
+        setExecutorDetails(status);
+      }
+    } catch (caught) {
+      if (activeThreadId.current === targetThreadId) {
+        setExecutorUpdateError(caught instanceof Error ? caught.message : 'Could not check the Executor.');
+      }
+    } finally {
+      setExecutorUpdateBusy(false);
     }
   };
 
@@ -1720,16 +1818,27 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         {selectedThread && executorConnected === false && executorError ? (
           <div className="banner banner-error executor-error" role="status">
             <div className="executor-error-copy">
-              <strong>{executorLabel(selectedThread)} Executor unavailable.</strong>{' '}
+              <strong>
+                {executorDetails.compatible === false && executorDetails.updateAvailable
+                  ? 'Executor version is incompatible.'
+                  : `${executorLabel(selectedThread)} Executor unavailable.`}
+              </strong>
               <span>
-                Continue in a new {selectedThread.executorKind === 'container' ? 'Host' : 'Container'} Thread in this
-                Project.
+                {executorDetails.compatible === false && executorDetails.updateAvailable
+                  ? 'This Thread is unavailable until its Executor is updated.'
+                  : `Continue in a new ${selectedThread.executorKind === 'container' ? 'Host' : 'Container'} Thread in this Project.`}
               </span>
             </div>
             <div className="executor-error-actions">
-              <button type="button" onClick={startAlternateExecutorThread}>
-                New {selectedThread.executorKind === 'container' ? 'Host' : 'Container'} Thread
-              </button>
+              {executorDetails.compatible === false && executorDetails.updateAvailable ? (
+                <button type="button" onClick={() => setExecutorUpdateOpen(true)}>
+                  Update Executor
+                </button>
+              ) : (
+                <button type="button" onClick={startAlternateExecutorThread}>
+                  New {selectedThread.executorKind === 'container' ? 'Host' : 'Container'} Thread
+                </button>
+              )}
               <details className="executor-error-details">
                 <summary>Diagnostics</summary>
                 <pre>{executorError}</pre>
@@ -1888,6 +1997,18 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     buttonClassName="button button-quiet plugin-action"
                   />
                 ))}
+                {selectedThread.executorKind !== 'runtime' ? (
+                  <button
+                    type="button"
+                    className="button button-quiet plugin-action executor-update-toolbar"
+                    onClick={() => {
+                      setExecutorUpdateError('');
+                      setExecutorUpdateOpen(true);
+                    }}
+                  >
+                    Update
+                  </button>
+                ) : null}
               </div>
             </div>
 
@@ -2050,8 +2171,19 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       <button
                         className="send-button"
                         aria-label="Send message"
-                        title="Send message"
-                        disabled={!draft.trim() || busy || selectedThreadSending}
+                        disabled={
+                          !draft.trim() ||
+                          busy ||
+                          selectedThreadSending ||
+                          (selectedThread.executorKind !== 'runtime' && executorConnected !== true)
+                        }
+                        title={
+                          selectedThread.executorKind !== 'runtime' && executorConnected !== true
+                            ? executorConnected === null
+                              ? 'Checking Executor connection…'
+                              : 'Executor disconnected'
+                            : 'Send message'
+                        }
                         onClick={() => void sendMessage()}
                       >
                         {selectedThreadSending ? <i className="tiny-spinner" /> : <Send size={15} aria-hidden="true" />}
@@ -2073,6 +2205,78 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           </>
         )}
       </main>
+
+      {executorUpdateOpen && selectedThread && selectedThread.executorKind !== 'runtime' ? (
+        <Modal
+          title="Executor update"
+          contextLabel="PICO · EXECUTOR"
+          onClose={() => {
+            if (!executorUpdateBusy) setExecutorUpdateOpen(false);
+          }}
+          error={executorUpdateError}
+          onDismissError={() => setExecutorUpdateError('')}
+        >
+          <div className="executor-update-content">
+            {executorConnected === null ? (
+              <p>Checking the Executor version…</p>
+            ) : (
+              <p>
+                {executorDetails.executorVersion
+                  ? `Installed version: ${executorDetails.executorVersion}.`
+                  : 'Could not read the installed Executor version.'}
+                {executorDetails.targetVersion ? ` Available version: ${executorDetails.targetVersion}.` : ''}
+              </p>
+            )}
+            {executorConnected === null ? null : executorConnected === false && !executorDetails.updateAvailable ? (
+              <p className="executor-update-warning">
+                Could not check the Executor version: {executorError ?? 'the Executor is disconnected.'}
+              </p>
+            ) : executorDetails.compatible === false ? (
+              <p className="executor-update-warning">
+                This version is incompatible. The Executor remains disconnected until it is updated.
+              </p>
+            ) : executorDetails.updateAvailable ? (
+              <p>A newer Executor version is available. You can close this window and continue using the Thread.</p>
+            ) : (
+              <p>The Executor is up to date.</p>
+            )}
+            {executorDetails.updateAvailable && executorDetails.updateSupported === false ? (
+              <p>
+                Update this standalone Executor from its installation machine, then check again here. This installation
+                cannot update it through the current connection.
+              </p>
+            ) : null}
+            <div className="executor-update-actions">
+              {executorDetails.updateAvailable && executorDetails.updateSupported !== false ? (
+                <button
+                  type="button"
+                  className="button button-primary"
+                  disabled={executorUpdateBusy}
+                  onClick={() => void updateExecutor()}
+                >
+                  {executorUpdateBusy ? 'Updating…' : 'Update Executor'}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="button button-quiet"
+                disabled={executorUpdateBusy}
+                onClick={() => void recheckExecutor()}
+              >
+                {executorUpdateBusy ? 'Checking…' : 'Check again'}
+              </button>
+              <button
+                type="button"
+                className="button button-quiet"
+                disabled={executorUpdateBusy}
+                onClick={() => setExecutorUpdateOpen(false)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </Modal>
+      ) : null}
 
       {settingsOpen ? (
         <Modal

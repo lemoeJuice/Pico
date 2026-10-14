@@ -1,15 +1,25 @@
 import type { Execution, ExecutorBinding, ToolDefinition } from '../core/types.js';
 import { PicoStore } from '../core/store.js';
-import type { ExecutionListener, ExecutorAdapter } from './executor.js';
-import { remoteExecutorUrl, type RemoteExecutionState, type RemoteExecutorInfo } from './remote-protocol.js';
+import type {
+  ExecutionListener,
+  ExecutorAdapter,
+  ExecutorServiceAddress,
+  ExecutorServiceAddressResolver,
+} from './executor.js';
+import {
+  EXECUTOR_PROTOCOL_VERSION,
+  remoteExecutorUrl,
+  type RemoteExecutionState,
+  type RemoteExecutorInfo,
+} from './remote-protocol.js';
 import { validateToolDefinitions } from './plugin-host.js';
 const requestTimeoutMs = 15_000;
 
-function connection(binding: ExecutorBinding): { endpointUrl: string; accessToken: string } {
+function remoteConnection(binding: ExecutorBinding): ExecutorServiceAddress {
   const endpointUrl = binding.remoteEndpointUrl?.trim();
   const accessToken = binding.remoteAccessToken;
   if (!endpointUrl || !accessToken) throw new Error('Remote Executor connection details are missing.');
-  return { endpointUrl, accessToken };
+  return { endpointUrl, accessToken, workspacePath: binding.workspacePath };
 }
 
 async function requestJson<T>(
@@ -81,13 +91,20 @@ export async function inspectRemoteExecutor(endpointUrl: string, accessToken: st
   const info = await requestJson<RemoteExecutorInfo>(endpointUrl, accessToken, '/api/info');
   if (
     !info ||
-    info.protocolVersion !== 1 ||
-    info.kind !== 'host' ||
+    !Number.isSafeInteger(info.protocolVersion) ||
+    info.protocolVersion < 1 ||
+    typeof info.kind !== 'string' ||
     typeof info.name !== 'string' ||
     typeof info.workspaceRoot !== 'string' ||
     !Array.isArray(info.tools)
   ) {
-    throw new Error('The endpoint did not identify itself as a compatible Pico Executor (protocol version 1).');
+    throw new Error('The endpoint did not identify itself as a Pico Executor.');
+  }
+  if (info.executorVersion !== undefined && typeof info.executorVersion !== 'string') {
+    throw new Error('Remote Executor returned an invalid version.');
+  }
+  if (info.updateSupported !== undefined && typeof info.updateSupported !== 'boolean') {
+    throw new Error('Remote Executor returned an invalid update capability.');
   }
   info.tools = validateToolDefinitions(info.tools);
   return info;
@@ -119,19 +136,47 @@ export class RemoteHostExecutor implements ExecutorAdapter {
   constructor(
     private readonly store: PicoStore,
     private readonly onExecution: ExecutionListener = () => undefined,
+    private readonly resolveAddress: ExecutorServiceAddressResolver = async (binding) => remoteConnection(binding),
   ) {}
 
   async listTools(binding: ExecutorBinding): Promise<ToolDefinition[]> {
-    const { endpointUrl, accessToken } = connection(binding);
-    return (await inspectRemoteExecutor(endpointUrl, accessToken)).tools;
+    const { endpointUrl, accessToken } = await this.resolveAddress(binding);
+    const info = await inspectRemoteExecutor(endpointUrl, accessToken);
+    if (info.protocolVersion !== EXECUTOR_PROTOCOL_VERSION || info.kind !== 'executor') {
+      throw new Error(`Executor protocol version ${info.protocolVersion} is incompatible; update this Executor.`);
+    }
+    return info.tools;
   }
 
-  async checkConnection(binding: ExecutorBinding): Promise<void> {
-    const { endpointUrl, accessToken } = connection(binding);
-    await inspectRemoteExecutor(endpointUrl, accessToken);
+  async checkConnection(binding: ExecutorBinding): Promise<RemoteExecutorInfo> {
+    const { endpointUrl, accessToken } = await this.resolveAddress(binding);
+    return inspectRemoteExecutor(endpointUrl, accessToken);
   }
 
-  async execute(executionId: string, binding: ExecutorBinding): Promise<Execution> {
+  async update(binding: ExecutorBinding, bundle: Uint8Array, version: string): Promise<{ executorVersion: string }> {
+    const { endpointUrl, accessToken } = await this.resolveAddress(binding);
+    const updateBundle = new ArrayBuffer(bundle.byteLength);
+    new Uint8Array(updateBundle).set(bundle);
+    const result = await requestJson<{ updated?: unknown; executorVersion?: unknown }>(
+      endpointUrl,
+      accessToken,
+      '/api/update',
+      {
+        method: 'POST',
+        body: updateBundle,
+        headers: {
+          'content-type': 'application/octet-stream',
+          'x-pico-executor-version': version,
+        },
+      },
+    );
+    if (result.updated !== true || typeof result.executorVersion !== 'string') {
+      throw new Error('Remote Executor returned an invalid update result.');
+    }
+    return { executorVersion: result.executorVersion };
+  }
+
+  async execute(executionId: string, binding: ExecutorBinding, externalSignal?: AbortSignal): Promise<Execution> {
     const current = this.store.getExecution(executionId);
     if (!current) throw new Error(`Execution ${executionId} was not durably created`);
     if (current.status === 'completed' || current.status === 'failed' || current.status === 'interrupted')
@@ -139,9 +184,13 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     const active = this.inFlight.get(executionId);
     if (active) return active.promise;
     const controller = new AbortController();
-    const promise = this.drive(executionId, binding, controller.signal).finally(() =>
-      this.inFlight.delete(executionId),
-    );
+    const relayAbort = (): void => controller.abort();
+    if (externalSignal?.aborted) controller.abort();
+    else externalSignal?.addEventListener('abort', relayAbort, { once: true });
+    const promise = this.drive(executionId, binding, controller.signal).finally(() => {
+      externalSignal?.removeEventListener('abort', relayAbort);
+      this.inFlight.delete(executionId);
+    });
     this.inFlight.set(executionId, { controller, promise });
     return promise;
   }
@@ -153,7 +202,7 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     }
     const active = this.inFlight.get(executionId);
     if (active) return current;
-    const { endpointUrl, accessToken } = connection(binding);
+    const { endpointUrl, accessToken } = await this.resolveAddress(binding);
     try {
       const remote = await this.getState(endpointUrl, accessToken, executionId);
       return this.acceptState(executionId, remote);
@@ -173,7 +222,7 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     if (!current || ['completed', 'failed', 'interrupted'].includes(current.status)) return current;
     const active = this.inFlight.get(executionId);
     if (active) active.controller.abort();
-    const { endpointUrl, accessToken } = connection(binding);
+    const { endpointUrl, accessToken } = await this.resolveAddress(binding);
     let remote: RemoteExecutionState;
     try {
       remote = await requestJson<RemoteExecutionState>(
@@ -203,9 +252,11 @@ export class RemoteHostExecutor implements ExecutorAdapter {
   }
 
   private async drive(executionId: string, binding: ExecutorBinding, signal: AbortSignal): Promise<Execution> {
+    if (signal.aborted) throw new DOMException('Remote Executor request interrupted locally.', 'AbortError');
     const current = this.store.getExecution(executionId);
     if (!current) throw new Error(`Execution ${executionId} was not durably created`);
-    const { endpointUrl, accessToken } = connection(binding);
+    const address = await this.resolveAddress(binding);
+    const { endpointUrl, accessToken } = address;
     let remote: RemoteExecutionState;
     if (current.status === 'pending') {
       remote = await this.retryTransientRequest(signal, () =>
@@ -218,7 +269,7 @@ export class RemoteHostExecutor implements ExecutorAdapter {
             body: JSON.stringify({
               toolName: current.toolName,
               arguments: current.arguments ?? {},
-              workspacePath: binding.workspacePath,
+              workspacePath: address.workspacePath ?? binding.workspacePath,
             }),
           },
           signal,
