@@ -1433,7 +1433,7 @@ button:disabled {
   background: #fbf7f4;
   border: 1px solid #eee2db;
   border-radius: 10px;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -1499,8 +1499,8 @@ button:disabled {
 .model-attempt-switcher button {
   display: grid;
   place-items: center;
-  width: 21px;
-  height: 21px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   color: #9aa69b;
   background: transparent;
