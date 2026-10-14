@@ -301,11 +301,22 @@ export class PicoRuntime {
       ...this.additionalPlugins,
     ]);
     this.pluginLoadErrors = [...this.plugins.errors(), ...this.executorPluginLoadErrors];
-    // A Runtime restart confirms its own unfinished model stream was lost. Tool state is
-    // left untouched until the bound Executor can be queried.
+    // A Runtime restart confirms its own unfinished model stream was lost. Pause the
+    // Thread before recording the interruption so startup recovery cannot silently
+    // submit a replacement Model Execution. Tool state is left untouched until the
+    // bound Executor can be queried.
     for (const thread of this.store.listThreads()) {
-      for (const execution of this.store.listActiveExecutions(thread.id)) {
-        if (execution.kind !== 'model') continue;
+      const unfinishedModelExecutions = this.store
+        .listActiveExecutions(thread.id)
+        .filter((execution) => execution.kind === 'model');
+      if (unfinishedModelExecutions.length > 0) {
+        this.store.setPause(
+          thread.id,
+          true,
+          'Model step interrupted by a Runtime restart. Continue this Thread to start a new attempt.',
+        );
+      }
+      for (const execution of unfinishedModelExecutions) {
         const interrupted = this.store.transitionExecution(execution.id, 'interrupted', {
           error: 'Runtime restarted before this Model Step committed.',
           detail: { runtimeRestarted: true },
