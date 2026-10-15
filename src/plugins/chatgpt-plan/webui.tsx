@@ -30,9 +30,13 @@ const reasoningEffortLabels: Record<ChatGptReasoningEffort, string> = {
 function reasoningEffortsFor(model: ChatGptModelChoice | undefined): ChatGptReasoningEffort[] {
   if (!model) return ['auto'];
   const slug = model.slug.toLowerCase();
-  if (slug.includes('gpt-6.1-sol')) return ['auto', 'low', 'medium', 'high', 'xhigh', 'max'];
-  if (slug.includes('gpt-6-astra')) return ['auto', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-  if (slug.startsWith('gpt-6-')) return ['auto', 'low', 'medium', 'high'];
+  const flagshipEfforts: ChatGptReasoningEffort[] = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'];
+  const fullEfforts: ChatGptReasoningEffort[] = ['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max'];
+
+  if (/^gpt-6-astra(?:-|$)/.test(slug) || /^gpt-6\.1-sol(?:-|$)/.test(slug)) return flagshipEfforts;
+  if (/^gpt-6-(?:sol|luna)(?:-|$)/.test(slug) || /^gpt-5\.6-(?:sol|terra|luna)(?:-|$)/.test(slug)) {
+    return fullEfforts;
+  }
   return ['auto', 'low', 'medium', 'high'];
 }
 
