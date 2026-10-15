@@ -1,6 +1,7 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ChatGptPlanAuth, type ChatGptPluginState } from '../src/plugins/chatgpt-plan/auth.js';
+import type { ModelRequestTrace } from '../src/runtime/model.js';
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const jwk = {
@@ -230,5 +231,47 @@ describe('Sign in with ChatGPT credentials', () => {
     expect(expired.refreshToken).toBeNull();
     expect(expired.accessToken).toBeNull();
     expect(expired.idToken).toBe('retained-id-token');
+  });
+
+  it('records OAuth refresh transport failures with the underlying network error code', async () => {
+    const state = new MemoryPluginState();
+    state.set('oauth', {
+      hostId: 'urn:uuid:pico-test',
+      clientId: 'oaiapp_pico_test',
+      subject: 'chatgpt-user-1',
+      email: 'pico-user@example.test',
+      idToken: 'retained-id-token',
+      accessToken: 'expired-access-token',
+      refreshToken: 'must-not-be-logged',
+      expiresAt: 1,
+      scopes: scopes.split(' '),
+    });
+    const cause = Object.assign(new Error('dns lookup failed'), { code: 'EAI_AGAIN' });
+    const fetcher: typeof fetch = async () => {
+      throw Object.assign(new TypeError('fetch failed'), { cause });
+    };
+    const auth = new ChatGptPlanAuth(state, fetcher);
+    const trace: ModelRequestTrace = {
+      started: vi.fn(() => 'oauth-attempt-1'),
+      response: vi.fn(),
+      settled: vi.fn(),
+    };
+
+    await expect(auth.accessToken(false, trace)).rejects.toThrow('fetch failed');
+    expect(trace.started).toHaveBeenCalledWith({
+      provider: 'chatgpt-plan',
+      protocol: 'https+oauth-token',
+      endpoint: 'https://auth.openai.com/api/accounts/oauth/token',
+      attempt: 1,
+    });
+    expect(trace.response).not.toHaveBeenCalled();
+    expect(trace.settled).toHaveBeenCalledWith(
+      'oauth-attempt-1',
+      expect.objectContaining({
+        outcome: 'failed',
+        errorCategory: 'transport',
+        errorCode: 'EAI_AGAIN',
+      }),
+    );
   });
 });

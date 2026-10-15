@@ -1,4 +1,5 @@
 import { createHash, createPublicKey, randomBytes, randomUUID, verify } from 'node:crypto';
+import type { ModelRequestTrace } from '../../runtime/model.js';
 import type { ChatGptModelChoice } from './types.js';
 
 const authIssuer = 'https://auth.openai.com';
@@ -98,6 +99,19 @@ function expiryFrom(value: unknown, now: number): number {
     throw new Error('ChatGPT sign-in response did not include a valid token lifetime.');
   }
   return now + value * 1000;
+}
+
+function networkErrorCode(error: unknown): string | undefined {
+  let current: unknown = error;
+  const visited = new Set<object>();
+  for (let depth = 0; depth < 5 && current && typeof current === 'object' && !visited.has(current); depth += 1) {
+    visited.add(current);
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === 'string' && /^[a-z0-9_.:-]{1,80}$/i.test(code)) return code;
+    if ((current as { name?: unknown }).name === 'TimeoutError') return 'timeout';
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
 }
 
 function normalizedCredential(value: unknown): StoredCredentials | null {
@@ -268,7 +282,7 @@ export class ChatGptPlanAuth {
     return this.status();
   }
 
-  async accessToken(forceRefresh = false): Promise<string> {
+  async accessToken(forceRefresh = false, requestTrace?: ModelRequestTrace): Promise<string> {
     const credentials = this.readCredentials();
     if (!credentials?.clientId || !credentials.refreshToken || !credentials.accessToken || !credentials.expiresAt) {
       throw new Error('Connect a ChatGPT account in Settings before using this model provider.');
@@ -278,7 +292,7 @@ export class ChatGptPlanAuth {
     }
     if (!forceRefresh && credentials.expiresAt > this.now() + refreshAheadMs) return credentials.accessToken;
     if (this.refreshInFlight) return this.refreshInFlight;
-    this.refreshInFlight = this.refresh(credentials).finally(() => {
+    this.refreshInFlight = this.refresh(credentials, requestTrace).finally(() => {
       this.refreshInFlight = null;
     });
     return this.refreshInFlight;
@@ -401,15 +415,18 @@ export class ChatGptPlanAuth {
     return { remoteRevoked };
   }
 
-  private async refresh(credentials: StoredCredentials): Promise<string> {
+  private async refresh(credentials: StoredCredentials, requestTrace?: ModelRequestTrace): Promise<string> {
     let tokenResponse: TokenResponse;
     try {
-      tokenResponse = await this.exchangeToken({
-        grant_type: 'refresh_token',
-        client_id: credentials.clientId!,
-        refresh_token: credentials.refreshToken!,
-        resource,
-      });
+      tokenResponse = await this.exchangeToken(
+        {
+          grant_type: 'refresh_token',
+          client_id: credentials.clientId!,
+          refresh_token: credentials.refreshToken!,
+          resource,
+        },
+        requestTrace,
+      );
     } catch (error) {
       if (error instanceof UnusableChatGptRefreshToken) {
         this.writeCredentials({
@@ -448,15 +465,57 @@ export class ChatGptPlanAuth {
     return accessToken;
   }
 
-  private async exchangeToken(fields: Record<string, string>): Promise<TokenResponse> {
-    const response = await this.fetcher(tokenEndpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-      body: new URLSearchParams(fields),
-      signal: AbortSignal.timeout(15_000),
+  private async exchangeToken(
+    fields: Record<string, string>,
+    requestTrace?: ModelRequestTrace,
+  ): Promise<TokenResponse> {
+    const startedAt = Date.now();
+    const providerAttemptId = requestTrace?.started({
+      provider: 'chatgpt-plan',
+      protocol: 'https+oauth-token',
+      endpoint: tokenEndpoint,
+      attempt: 1,
     });
+    let settled = false;
+    const settle = (details: Parameters<ModelRequestTrace['settled']>[1]): void => {
+      if (!providerAttemptId || settled) return;
+      settled = true;
+      requestTrace?.settled(providerAttemptId, details);
+    };
+    let response: Response;
+    try {
+      response = await this.fetcher(tokenEndpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+        body: new URLSearchParams(fields),
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch (error) {
+      const aborted = error instanceof Error && error.name === 'AbortError';
+      const errorCode = aborted ? 'aborted' : networkErrorCode(error);
+      settle({
+        outcome: aborted ? 'interrupted' : 'failed',
+        durationMs: Date.now() - startedAt,
+        errorCategory: aborted ? 'aborted' : 'transport',
+        ...(errorCode ? { errorCode } : {}),
+      });
+      throw error;
+    }
+    if (providerAttemptId) {
+      requestTrace?.response(providerAttemptId, {
+        status: response.status,
+        contentType: response.headers.get('content-type'),
+      });
+    }
     const payload: unknown = await response.json().catch(() => null);
     if (!response.ok) {
+      settle({
+        outcome: 'failed',
+        durationMs: Date.now() - startedAt,
+        terminalEvent: 'http_response',
+        errorCategory: 'http',
+        errorCode: `http_${response.status}`,
+      });
       const error = isObject(payload) && typeof payload.error === 'string' ? payload.error : '';
       const unusableRefreshCodes = new Set([
         'invalid_grant',
@@ -471,7 +530,21 @@ export class ChatGptPlanAuth {
       }
       throw new Error(`ChatGPT token exchange failed (HTTP ${response.status}).`);
     }
-    if (!isObject(payload)) throw new Error('ChatGPT returned an invalid token response.');
+    if (!isObject(payload)) {
+      settle({
+        outcome: 'failed',
+        durationMs: Date.now() - startedAt,
+        terminalEvent: 'http_response',
+        errorCategory: 'protocol',
+        errorCode: 'invalid_token_response',
+      });
+      throw new Error('ChatGPT returned an invalid token response.');
+    }
+    settle({
+      outcome: 'completed',
+      durationMs: Date.now() - startedAt,
+      terminalEvent: 'http_response',
+    });
     return payload as TokenResponse;
   }
 

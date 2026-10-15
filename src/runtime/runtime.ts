@@ -313,10 +313,23 @@ function safeModelError(error: unknown): string {
   const message = isError ? error.message : '';
   const httpStatus = /^ChatGPT model request returned HTTP ([1-5][0-9]{2})\.$/.exec(message)?.[1];
   const streamCode = /^ChatGPT model request failed \(([a-z0-9_.:-]{1,80})\)\.$/i.exec(message)?.[1];
+  let cause: unknown = error;
+  const visited = new Set<object>();
+  let networkCode: string | undefined;
+  for (let depth = 0; depth < 5 && cause && typeof cause === 'object' && !visited.has(cause); depth += 1) {
+    visited.add(cause);
+    const rawCode = (cause as { code?: unknown }).code;
+    if (typeof rawCode === 'string' && /^[a-z0-9_.:-]{1,80}$/i.test(rawCode)) {
+      networkCode = rawCode;
+      break;
+    }
+    cause = (cause as { cause?: unknown }).cause;
+  }
   const code =
     diagnosticLabel(explicitCode, 80) ??
     (httpStatus ? `http_${httpStatus}` : undefined) ??
-    diagnosticLabel(streamCode, 80);
+    diagnosticLabel(streamCode, 80) ??
+    diagnosticLabel(networkCode, 80);
   return code ? `Model request failed (${code}).` : `Model request failed (${name}).`;
 }
 

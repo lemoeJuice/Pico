@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ChatGptResponsesAdapter } from '../src/plugins/chatgpt-plan/model.js';
 import type { ChatGptPlanAuth } from '../src/plugins/chatgpt-plan/auth.js';
-import type { ModelPrompt } from '../src/runtime/model.js';
+import type { ModelPrompt, ModelRequestTrace } from '../src/runtime/model.js';
 import type { ChatGptPlanPreferences } from '../src/plugins/chatgpt-plan/types.js';
 
 describe('ChatGPT Responses adapter', () => {
@@ -39,7 +39,13 @@ describe('ChatGPT Responses adapter', () => {
         headers: { 'content-type': 'text/event-stream' },
       });
     });
-    const auth = { accessToken: async () => 'oauth-access-token' } as unknown as ChatGptPlanAuth;
+    const accessToken = vi.fn(async () => 'oauth-access-token');
+    const auth = { accessToken } as unknown as ChatGptPlanAuth;
+    const requestTrace: ModelRequestTrace = {
+      started: vi.fn(() => 'provider-attempt-1'),
+      response: vi.fn(),
+      settled: vi.fn(),
+    };
     const prompt: ModelPrompt = {
       system: 'You are Pico.',
       model: 'selected-model',
@@ -68,8 +74,16 @@ describe('ChatGPT Responses adapter', () => {
       { reasoningEffort: 'high', fastMode: true } satisfies ChatGptPlanPreferences,
       new AbortController().signal,
       (delta) => deltas.push(delta),
+      requestTrace,
     );
 
+    expect(accessToken).toHaveBeenCalledWith(false, requestTrace);
+    expect(requestTrace.started).toHaveBeenCalledWith({
+      provider: 'chatgpt-plan',
+      protocol: 'https+sse',
+      endpoint: 'https://api.openai.com/v1/responses',
+      attempt: 1,
+    });
     expect(authorization).toBe('Bearer oauth-access-token');
     expect(requestBody).toMatchObject({
       model: 'selected-model',
@@ -291,5 +305,35 @@ describe('ChatGPT Responses adapter', () => {
         () => undefined,
       ),
     ).rejects.toThrow('subscription_sharing_usage_limit_exceeded');
+  });
+
+  it('records the nested network code when the Responses request fails before an HTTP response', async () => {
+    const cause = Object.assign(new Error('connection failed'), { code: 'ECONNRESET' });
+    vi.stubGlobal('fetch', async () => {
+      throw Object.assign(new TypeError('fetch failed'), { cause });
+    });
+    const trace: ModelRequestTrace = {
+      started: vi.fn(() => 'provider-attempt-1'),
+      response: vi.fn(),
+      settled: vi.fn(),
+    };
+    const adapter = new ChatGptResponsesAdapter({
+      accessToken: async () => 'oauth-access-token',
+    } as unknown as ChatGptPlanAuth);
+
+    await expect(
+      adapter.complete(
+        { system: '', model: 'selected-model', temperature: 0.2, turns: [], tools: [] },
+        { reasoningEffort: 'high', fastMode: false } satisfies ChatGptPlanPreferences,
+        new AbortController().signal,
+        () => undefined,
+        trace,
+      ),
+    ).rejects.toThrow('fetch failed');
+    expect(trace.response).not.toHaveBeenCalled();
+    expect(trace.settled).toHaveBeenCalledWith(
+      'provider-attempt-1',
+      expect.objectContaining({ outcome: 'failed', errorCategory: 'transport', errorCode: 'ECONNRESET' }),
+    );
   });
 });

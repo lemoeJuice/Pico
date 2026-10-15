@@ -138,9 +138,15 @@ function finalFunctionCalls(response: Record<string, unknown>): FinalFunctionCal
 }
 
 function errorCodeFrom(error: unknown): string | undefined {
-  if (!error || typeof error !== 'object') return undefined;
-  const code = (error as { code?: unknown }).code;
-  return typeof code === 'string' && /^[a-z0-9_.:-]{1,80}$/i.test(code) ? code : undefined;
+  let current: unknown = error;
+  const visited = new Set<object>();
+  for (let depth = 0; depth < 5 && current && typeof current === 'object' && !visited.has(current); depth += 1) {
+    visited.add(current);
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === 'string' && /^[a-z0-9_.:-]{1,80}$/i.test(code)) return code;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
 }
 
 function outputItemCounts(response: Record<string, unknown>): Record<string, number> {
@@ -185,13 +191,13 @@ export class ChatGptResponsesAdapter {
       ...(preferences.reasoningEffort === 'auto' ? {} : { reasoning: { effort: preferences.reasoningEffort } }),
       ...(preferences.fastMode ? { service_tier: 'fast' } : {}),
     };
-    let accessToken = await this.auth.accessToken();
+    let accessToken = await this.auth.accessToken(false, requestTrace);
     let tracedRequest = await this.requestTraced(body, accessToken, signal, requestTrace, 1);
     // A token may be revoked between the proactive refresh check and this request.
     if (tracedRequest.response.status === 401) {
       await tracedRequest.response.body?.cancel().catch(() => undefined);
       try {
-        accessToken = await this.auth.accessToken(true);
+        accessToken = await this.auth.accessToken(true, requestTrace);
       } catch (error) {
         tracedRequest.settle({
           outcome: 'failed',
