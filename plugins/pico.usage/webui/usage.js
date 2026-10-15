@@ -9,6 +9,16 @@
   let report = null;
   let error = '';
   let busy = false;
+  const query = new URLSearchParams(location.search);
+  let filters = {
+    threadId: query.get('threadId') || '',
+    projectId: query.get('projectId') || '',
+    provider: query.get('provider') || '',
+    model: query.get('model') || '',
+    purpose: query.get('purpose') || '',
+    from: query.get('from') || '',
+    to: query.get('to') || '',
+  };
   const escape = (value) =>
     String(value ?? '').replace(
       /[&<>"']/g,
@@ -32,8 +42,7 @@
   const money = (value, currency) => (value == null ? 'unknown' : `${currency || ''} ${value.toFixed(6)}`.trim());
   function filterQuery() {
     const params = new URLSearchParams();
-    const values = Object.fromEntries(new FormData(root.querySelector('#filters')).entries());
-    for (const [key, value] of Object.entries(values)) if (value) params.set(key, value);
+    for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value);
     return params.size ? `?${params}` : '';
   }
   async function refresh() {
@@ -67,7 +76,7 @@
     const rows = report?.rows || [];
     root.innerHTML = `<div class="panel">
       <div class="heading"><div><h1>Usage</h1><div class="subtle">Committed main calls and Runtime-tracked auxiliary model calls</div></div><button id="refresh" ${busy ? 'disabled' : ''}>Refresh</button></div>
-      <form id="filters" class="filters"><input name="threadId" placeholder="Thread ID" value="${escape(new URLSearchParams(location.search).get('threadId') || '')}"><input name="projectId" placeholder="Project ID"><input name="provider" placeholder="Provider"><input name="model" placeholder="Model"><input name="purpose" placeholder="Purpose"><input name="from" type="date" aria-label="From"><input name="to" type="date" aria-label="To"><button class="primary" ${busy ? 'disabled' : ''}>Apply filters</button></form>
+      <form id="filters" class="filters"><input name="threadId" placeholder="Thread ID" value="${escape(filters.threadId)}"><input name="projectId" placeholder="Project ID" value="${escape(filters.projectId)}"><input name="provider" placeholder="Provider" value="${escape(filters.provider)}"><input name="model" placeholder="Model" value="${escape(filters.model)}"><input name="purpose" placeholder="Purpose" value="${escape(filters.purpose)}"><input name="from" type="date" aria-label="From" value="${escape(filters.from)}"><input name="to" type="date" aria-label="To" value="${escape(filters.to)}"><button class="primary" ${busy ? 'disabled' : ''}>Apply filters</button></form>
       ${error ? `<div class="error" role="alert">${escape(error)}</div>` : ''}
       <div class="cards"><div class="card">Input tokens<strong>${fmt(totals.inputTokens)}</strong></div><div class="card">Output tokens<strong>${fmt(totals.outputTokens)}</strong></div><div class="card">Cache read<strong>${fmt(totals.cachedInputTokens)}</strong></div><div class="card">Cache write<strong>${fmt(totals.cacheWriteTokens)}</strong></div><div class="card">Reasoning<strong>${fmt(totals.reasoningTokens)}</strong></div><div class="card">Estimated cost<strong>${money(totals.estimatedCost, rows.find((r) => r.currency)?.currency)}</strong></div><div class="card">Main calls<strong>${fmt(report?.counts.completedMainCalls)}</strong></div><div class="card">Auxiliary calls<strong>${fmt(report?.counts.auxiliaryCalls)}</strong></div><div class="card">Provider attempts<strong>${fmt(report?.counts.providerAttempts)}</strong></div></div>
       <section class="section"><h2>Breakdown</h2><div class="groups">${group('By Thread', report?.groups.thread)}${group('By Project', report?.groups.project)}${group('By Provider', report?.groups.provider)}${group('By Model', report?.groups.model)}${group('By Purpose', report?.groups.purpose)}${group('By day', report?.groups.day)}</div></section>
@@ -88,6 +97,10 @@
     root.querySelector('#refresh')?.addEventListener('click', () => void refresh());
     root.querySelector('#filters')?.addEventListener('submit', (event) => {
       event.preventDefault();
+      const values = Object.fromEntries(new FormData(event.currentTarget).entries());
+      filters = Object.fromEntries(
+        ['threadId', 'projectId', 'provider', 'model', 'purpose', 'from', 'to'].map((key) => [key, values[key] || '']),
+      );
       void refresh();
     });
     root.querySelector('#rate-form')?.addEventListener('submit', async (event) => {
@@ -148,8 +161,8 @@
       }
     };
     port.start();
-    if (context.thread?.id) root.querySelector('[name="threadId"]').value = context.thread.id;
-    if (context.thread?.projectId) root.querySelector('[name="projectId"]').value = context.thread.projectId;
+    if (context.thread?.id) filters.threadId = context.thread.id;
+    if (context.thread?.projectId) filters.projectId = context.thread.projectId;
     void refresh();
   });
 })();
