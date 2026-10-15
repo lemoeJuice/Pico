@@ -947,6 +947,18 @@ export class PicoStore {
     });
   }
 
+  recordExecutionError(id: string, error: string): Execution {
+    return this.transaction(() => {
+      const current = this.getExecution(id);
+      if (!current) throw new Error(`Execution ${id} not found`);
+      if (current.status !== 'pending' && current.status !== 'running') return current;
+      const now = isoNow();
+      this.db.prepare('UPDATE executions SET error = ?, updated_at = ? WHERE id = ?').run(error, now, id);
+      this.logExecution(id, 'execution-error', { error }, now);
+      return this.getExecution(id)!;
+    });
+  }
+
   private transitionExecutionInternal(
     id: string,
     status: ExecutionStatus,

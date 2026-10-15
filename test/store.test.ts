@@ -149,6 +149,54 @@ describe('PicoStore execution transactions', () => {
       store.close();
     }
   });
+
+  it('persists executor errors atomically while preserving the recoverable Execution state', () => {
+    const store = new PicoStore(':memory:');
+    try {
+      const project = store.createProject('Executor error diagnostic', '/');
+      const thread = store.createThread(project.id, 'container');
+      const modelExecution = store.createModelExecution('executor-error-model', thread.id, 0);
+      store.transitionExecution(modelExecution.id, 'running');
+      const call = { id: 'executor-error-call', name: 'shell', arguments: { command: 'true' } };
+      store.commitModelStep({
+        assistantRecordId: 'executor-error-model:assistant',
+        modelExecutionId: modelExecution.id,
+        threadId: thread.id,
+        payload: assistantPayload({ batchId: 'executor-error-model:batch', toolCalls: [call] }),
+        toolCalls: [{ call, executionId: 'executor-error-tool' }],
+      });
+      store.db.exec(`
+        CREATE TRIGGER fail_executor_error_log
+        BEFORE INSERT ON execution_log
+        WHEN NEW.execution_id = 'executor-error-tool' AND NEW.kind = 'execution-error'
+        BEGIN SELECT RAISE(ABORT, 'simulated executor diagnostic log failure'); END;
+      `);
+
+      expect(() => store.recordExecutionError('executor-error-tool', 'Executor disconnected')).toThrow(
+        /simulated executor diagnostic log failure/,
+      );
+      expect(store.getExecution('executor-error-tool')).toMatchObject({ status: 'pending', error: null });
+
+      store.db.exec('DROP TRIGGER fail_executor_error_log;');
+      expect(store.recordExecutionError('executor-error-tool', 'Executor disconnected')).toMatchObject({
+        status: 'pending',
+        error: 'Executor disconnected',
+      });
+      store.transitionExecution('executor-error-tool', 'running');
+      expect(store.recordExecutionError('executor-error-tool', 'Executor stopped responding')).toMatchObject({
+        status: 'running',
+        error: 'Executor stopped responding',
+      });
+      expect(store.listExecutionLog('executor-error-tool', 'execution-error')).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ detail: { error: 'Executor disconnected' } }),
+          expect.objectContaining({ detail: { error: 'Executor stopped responding' } }),
+        ]),
+      );
+    } finally {
+      store.close();
+    }
+  });
 });
 
 describe('canonical history pages', () => {

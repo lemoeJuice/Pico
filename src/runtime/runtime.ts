@@ -1930,11 +1930,12 @@ export class PicoRuntime {
         } else {
           execution = latest;
           if (!terminalStatus(latest.status)) {
-            this.publish({
-              type: 'runtime.notice',
-              threadId: thread.id,
-              message: `Tool ${call.name} did not report a durable outcome. Its ${latest.status} Execution state was preserved for recovery.`,
-            });
+            const detail = error instanceof Error ? error.message : String(error);
+            execution = this.store.recordExecutionError(
+              executionId,
+              `${detail}\n\nThe Executor did not confirm an outcome. Side effects may be partial or unknown; inspect before retrying.`,
+            );
+            this.executionChanged(execution);
           }
         }
       }
