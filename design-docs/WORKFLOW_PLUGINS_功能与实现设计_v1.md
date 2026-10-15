@@ -1,6 +1,6 @@
 # Workflow Plugins 功能与实现设计
 
-状态：待用户确认的设计稿；不代表接口定稿，也不包含实现。
+状态：用户已确认并开始实现；接口以 Runtime 契约和阶段验收为准。
 
 本文补充 [Agent Harness 核心架构与设计意图记录 v5](Agent_Harness_核心架构与设计意图记录_v5.md)，落实当前阶段的七项 Workflow Plugin 和 Usage 统计设计。实现仍受现有架构锚点约束：Thread 是长期工作单元，Canonical History 只追加，Projection 决定模型输入，插件状态按命名空间持久化，Executor 不承载 Harness 工作流语义。
 
@@ -59,6 +59,15 @@ Rolling Context 需要调用 LLM 为每段生成摘要并独立评估分层；Pe
 - 辅助调用模型可单独配置；默认沿用可用的 Thread Model Profile，且不因调用辅助服务而扩大该 Thread 的权限。
 
 现有 Model Input execution log 已记录经过 projection 和 model plugins 后传给 Adapter 的 prompt。扩展 UI 应读取这份记录，展示真正发送内容和每次 Provider Attempt，而不能从 Canonical History 重构一个“看起来相同”的版本。
+
+### 2.5 插件控制面板、动态入口与热重载
+
+- Pico 内建插件控制面板，列出已安装插件、版本、来源、启用状态、加载状态、加载错误和插件页面入口；支持启用、停用和显式重新加载。
+- 用户的启停选择持久化。核心基础能力和控制面板自身不可停用；其他插件可独立启停。外部插件入口仍由 PluginHost 契约验证，UI 继续使用隔离 iframe 和已注册静态 API。
+- Runtime 插件以 `plugins/<plugin-id>.mjs` 独立入口加载，插件 UI、元数据和资源放在 `plugins/<plugin-id>/`。各插件运行时代码单独打包到各自入口，不静态 import 到 Pico Runtime 或 Web UI 主 bundle。
+- 首选无重启热重载：停用时先确认相关 Thread 没有正在执行的 Model / Tool Execution，随后调用 deactivate、清理该插件注册的 Tool、Pipeline、Command、Route、Provider 和 UI Contribution，再重新导入带新版本 URL 的入口并 activate。启用、停用或重载期间发生错误时保留诊断；重新启用失败不能留下半套注册。
+- 目录变化可由 watcher 或控制面板显式 Reload 触发。若运行时无法安全替换（例如有执行仍在进行、平台不支持动态导入或插件包无效），保留当前有效版本并在面板中说明需等安全边界或重启；不得为刷新插件而重启整个应用。
+- 插件启停不改写 Canonical History / Plugin State。重载期间保留各插件自己的持久状态；初始化和替换必须幂等。
 
 ## 3. 各插件设计
 
