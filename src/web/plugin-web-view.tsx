@@ -66,9 +66,11 @@ function serializedInit(value: PluginApiInit | undefined): PluginApiInit | undef
 export function PluginWebView(props: PluginWebViewProps): ReactElement {
   const frame = useRef<HTMLIFrameElement>(null);
   const toolbarAnchor = useRef<HTMLButtonElement>(null);
+  const popoverSurface = useRef<HTMLDivElement>(null);
   const portRef = useRef<MessagePort | null>(null);
   const connected = useRef(false);
   const popoverOpenRef = useRef(false);
+  const toolbarContentHeight = useRef(240);
   const deliveredEventSequence = useRef(props.events?.at(-1)?.sequence ?? 0);
   const deliveredContext = useRef(props.context);
   const current = useRef(props);
@@ -110,7 +112,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
     if (popoverOpenRef.current) {
       portRef.current?.postMessage({
         type: 'pico:plugin-ui:popover-viewport',
-        maxHeight: Math.min(480, Math.max(120, window.innerHeight - rect.bottom - 20)),
+        maxHeight: Math.min(460, Math.max(120, window.innerHeight - rect.bottom - 20)),
       });
     }
   };
@@ -136,7 +138,11 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       portRef.current?.postMessage({ type: 'pico:plugin-ui:popover-dismiss' });
     };
     const onPointerDown = (event: PointerEvent): void => {
-      if (event.target === frame.current || toolbarAnchor.current?.contains(event.target as Node)) return;
+      if (
+        popoverSurface.current?.contains(event.target as Node) ||
+        toolbarAnchor.current?.contains(event.target as Node)
+      )
+        return;
       dismiss();
     };
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -195,14 +201,9 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       const message = event.data as { type?: unknown; height?: unknown } | null;
       if (isPluginUiPopoverMessage(popoverMessage)) {
         if (!toolbarPopover) return;
-        setToolbarPopover(
-          popoverMessage.open
-            ? {
-                width: Math.max(280, Math.min(420, popoverMessage.width)),
-                height: Math.max(80, Math.min(480, popoverMessage.height, availablePopoverHeight())),
-              }
-            : null,
-        );
+        const height = Math.max(80, Math.min(460, Math.ceil(popoverMessage.height) + 4, availablePopoverHeight()));
+        if (popoverMessage.open) toolbarContentHeight.current = height;
+        setToolbarPopover(popoverMessage.open ? { width: 360, height } : null);
         return;
       }
       if (isPluginUiToolbarStateMessage(popoverMessage)) {
@@ -210,7 +211,12 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
         return;
       }
       if (message?.type === 'pico:plugin-ui:resize' && typeof message.height === 'number') {
-        if (toolbarPopover) return;
+        if (toolbarPopover) {
+          const height = Math.max(80, Math.min(460, Math.ceil(message.height) + 4, availablePopoverHeight()));
+          toolbarContentHeight.current = height;
+          setPopover((previous) => (previous ? { width: 360, height } : previous));
+          return;
+        }
         const fixedHeight = pluginUiLayoutForSlot(current.current.uiSlot).controlHeightPx;
         if (fixedHeight !== undefined) {
           if (frame.current) frame.current.style.height = `${fixedHeight}px`;
@@ -321,23 +327,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       className={`plugin-web-view plugin-web-view-${props.viewType}`}
       style={
         toolbarPopover
-          ? (() => {
-              const anchor = anchorPosition ?? { left: -1000, top: -1000, height: 0 };
-              const width = popover ? Math.min(popover.width, Math.max(120, window.innerWidth - 24)) : 390;
-              const height = popover ? Math.min(popover.height, availablePopoverHeight()) : 0;
-              const left = Math.max(12, Math.min(anchor.left, window.innerWidth - width - 12));
-              const top = anchor.top + anchor.height + 8;
-              return {
-                position: 'fixed' as const,
-                left,
-                top,
-                width,
-                height,
-                display: popover ? 'block' : 'none',
-                overflow: 'hidden',
-                zIndex: 30,
-              };
-            })()
+          ? { display: popover ? 'block' : 'none', width: '100%', height: '100%' }
           : layout.controlHeightPx === undefined
             ? undefined
             : { height: `${layout.controlHeightPx}px` }
@@ -365,21 +355,48 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
           const rect = toolbarAnchor.current?.getBoundingClientRect();
           if (rect) setAnchorPosition({ left: rect.left, top: rect.top, height: rect.height });
           if (nextOpen) {
-            setToolbarPopover({ width: 390, height: Math.min(480, availablePopoverHeight(rect?.top, rect?.height)) });
+            const maxHeight = Math.min(460, availablePopoverHeight(rect?.top, rect?.height));
+            setToolbarPopover({
+              width: 360,
+              height: Math.max(80, Math.min(toolbarContentHeight.current, maxHeight)),
+            });
           } else {
             setToolbarPopover(null);
           }
           portRef.current?.postMessage({
             type: 'pico:plugin-ui:toolbar-toggle',
             open: nextOpen,
-            maxHeight: Math.min(480, availablePopoverHeight(rect?.top, rect?.height)),
+            maxHeight: Math.min(460, availablePopoverHeight(rect?.top, rect?.height)),
           });
         }}
       >
         {props.controlLabel}
         {badgeCount !== null ? <span className="plugin-toolbar-badge">{badgeCount}</span> : null}
       </button>
-      {createPortal(iframe, document.body, `${props.pluginId}:${props.viewId}`)}
+      {createPortal(
+        <div
+          ref={popoverSurface}
+          className="plugin-toolbar-popover"
+          role="dialog"
+          aria-label={`${props.controlLabel} panel`}
+          style={(() => {
+            const anchor = anchorPosition ?? { left: -1000, top: -1000, height: 0 };
+            const width = Math.min(popover?.width ?? 360, Math.max(120, window.innerWidth - 24));
+            const height = popover ? Math.min(popover.height, availablePopoverHeight()) : 0;
+            return {
+              left: Math.max(12, Math.min(anchor.left, window.innerWidth - width - 12)),
+              top: anchor.top + anchor.height + 9,
+              width,
+              height,
+              display: popover ? 'flex' : 'none',
+            };
+          })()}
+        >
+          {iframe}
+        </div>,
+        document.body,
+        `${props.pluginId}:${props.viewId}`,
+      )}
     </>
   );
 }

@@ -253,11 +253,5 @@ export const collaborationPlugin: PicoPlugin = {
       component: 'CollaborationPanel',
       supportsPopover: true,
     });
-    ui.registerPage({
-      id: 'collaboration',
-      label: 'Child Threads',
-      description: 'Child Thread activity',
-      entry: 'webui',
-    });
   },
 };

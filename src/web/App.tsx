@@ -58,7 +58,6 @@ import {
   ArrowRight,
   ArrowUpRight,
   Box,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Cloud,
@@ -474,6 +473,8 @@ function ToolCard({
   result: ToolResultPayload | undefined;
 }) {
   const status = execution?.status ?? 'pending';
+  const hasError = Boolean(execution?.error || result?.status === 'failed' || result?.status === 'interrupted');
+  const outcomeUnconfirmed = execution?.error?.includes('The Executor did not confirm an outcome.') ?? false;
   const resultText =
     result?.status === 'interrupted'
       ? `The tool was interrupted. Its side effects may be partial or unknown. Inspect the workspace before retrying.${result.error ? `\n\n${result.error}` : ''}`
@@ -481,18 +482,18 @@ function ToolCard({
         ? (result.error ?? 'Tool failed.')
         : result
           ? toJson(result.result)
-          : execution?.status === 'pending' && execution.error
-            ? `${execution.error}\n\nContinue this Thread to retry the same Execution.`
+          : execution?.error
+            ? `${execution.error}${execution.status === 'pending' && !outcomeUnconfirmed ? '\n\nContinue this Thread to retry the same Execution.' : ''}`
             : execution?.status === 'running'
               ? 'Running in the selected Executor…'
               : 'Waiting for the Executor…';
   return (
     <details
-      className={`tool-card tool-${execution?.status ?? 'pending'}`}
-      open={execution?.status === 'pending' && Boolean(execution.error)}
+      className={`tool-card tool-${execution?.status ?? 'pending'}${hasError ? ' tool-has-error' : ''}`}
+      open={hasError}
     >
       <summary>
-        <ChevronDown className="tool-chevron" size={14} aria-hidden="true" />
+        <ChevronRight className="tool-chevron" size={14} aria-hidden="true" />
         <span className="tool-name">{call.name}</span>
         <span className={`tool-status status-${execution?.status ?? 'pending'}`}>{status}</span>
       </summary>
@@ -501,17 +502,14 @@ function ToolCard({
           <summary>Arguments</summary>
           <pre>{toJson(call.arguments)}</pre>
         </details>
-        <details
-          className="tool-detail"
-          open={Boolean(result?.status === 'failed' || result?.status === 'interrupted')}
-        >
+        <details className="tool-detail" open={hasError}>
           <summary>
             Result{' '}
             {execution?.updatedAt ? (
               <span className="subtle-inline">· {new Date(execution.updatedAt).toLocaleTimeString()}</span>
             ) : null}
           </summary>
-          <pre className="tool-output">{resultText}</pre>
+          <pre className={`tool-output${hasError ? ' tool-output-error' : ''}`}>{resultText}</pre>
         </details>
       </div>
     </details>
@@ -1180,6 +1178,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
   useEffect(() => {
     followLatest.current = true;
+    listRef.current?.classList.add('conversation-scroll-follow-latest');
   }, [threadId]);
 
   useEffect(() => {
@@ -1195,6 +1194,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     let id: string | undefined;
     try {
       followLatest.current = true;
+      listRef.current?.classList.add('conversation-scroll-follow-latest');
       markThreadSending(sentThreadId, true);
       setError('');
       id = messageSubmissionId(pendingMessageIds.current, sentThreadId, clean, createRequestUuid);
@@ -1508,6 +1508,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       throw new Error('A canonical message in the active Thread must be selected.');
     }
     followLatest.current = false;
+    listRef.current?.classList.remove('conversation-scroll-follow-latest');
     let target = document.getElementById(`canonical-message-${seq}`);
     let beforeSeq = activeSnapshot?.records[0]?.seq;
     let hasEarlier = activeSnapshot?.hasEarlierRecords ?? false;
@@ -1562,33 +1563,20 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const updatePluginEnabled = async (pluginId: string, enabled: boolean): Promise<void> => {
     setPluginActionId(pluginId);
     setError('');
+    let enabledStateChanged = false;
     try {
-      const catalog = await api<PluginInfo['catalog']>(`/api/plugins/${encodeURIComponent(pluginId)}`, {
+      await api<PluginInfo['catalog']>(`/api/plugins/${encodeURIComponent(pluginId)}`, {
         method: 'PUT',
         body: JSON.stringify({ enabled }),
       });
-      setPluginInfo((current) => (current ? { ...current, catalog } : current));
+      enabledStateChanged = true;
+      setPluginInfo(await api<PluginInfo>('/api/plugins'));
       setNotice(`${pluginId} ${enabled ? 'enabled' : 'disabled'}.`);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Plugin could not be updated.');
-      const refreshed = await api<PluginInfo>('/api/plugins').catch(() => null);
-      if (refreshed) setPluginInfo(refreshed);
-    } finally {
-      setPluginActionId(null);
-    }
-  };
-
-  const reloadPlugin = async (pluginId: string): Promise<void> => {
-    setPluginActionId(pluginId);
-    setError('');
-    try {
-      const catalog = await api<PluginInfo['catalog']>(`/api/plugins/${encodeURIComponent(pluginId)}/reload`, {
-        method: 'POST',
-      });
-      setPluginInfo((current) => (current ? { ...current, catalog } : current));
-      setNotice(`${pluginId} reloaded.`);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Plugin could not be reloaded.');
+      const message = caught instanceof Error ? caught.message : 'Plugin could not be updated.';
+      setError(
+        enabledStateChanged ? `Plugin state changed, but its settings could not be refreshed: ${message}` : message,
+      );
       const refreshed = await api<PluginInfo>('/api/plugins').catch(() => null);
       if (refreshed) setPluginInfo(refreshed);
     } finally {
@@ -1748,6 +1736,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     setLoadingEarlierThreadIds((current) => new Set(current).add(targetThreadId));
     followLatest.current = false;
     const scroll = listRef.current;
+    scroll?.classList.remove('conversation-scroll-follow-latest');
     const previousScrollTop = scroll?.scrollTop ?? 0;
     const previousScrollHeight = scroll?.scrollHeight ?? 0;
     try {
@@ -1861,7 +1850,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const pauseReason = visiblePauseReason(currentState, selectedThread?.pauseReason ?? null, [error, activeNotice]);
 
   return (
-    <div className={`app-shell ${desktopSidebarCollapsed ? 'desktop-sidebar-collapsed' : ''}`}>
+    <div
+      className={`app-shell ${desktopSidebarCollapsed ? 'desktop-sidebar-collapsed' : ''}${mobileSidebarOpen ? ' mobile-sidebar-open' : ''}`}
+    >
       {mobileSidebarOpen ? (
         <button className="mobile-scrim" aria-label="Close navigation" onClick={() => setMobileSidebarOpen(false)} />
       ) : null}
@@ -1871,17 +1862,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             <Sparkles size={17} aria-hidden="true" />
           </div>
           <div className="brand-name">pico</div>
-          <button
-            className="icon-button sidebar-collapse-button"
-            aria-label="Collapse sidebar"
-            title="Collapse sidebar"
-            onClick={() => {
-              if (window.matchMedia('(max-width: 680px)').matches) setMobileSidebarOpen(false);
-              else setDesktopSidebarCollapsed(true);
-            }}
-          >
-            <ChevronLeft size={18} aria-hidden="true" />
-          </button>
         </div>
         <div className="project-section-heading">
           <span className="eyebrow">PROJECTS</span>
@@ -2014,11 +1994,14 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         <header className="topbar">
           <button
             className="icon-button menu-button"
-            aria-label="Open sidebar"
-            title="Open sidebar"
+            aria-label="Toggle sidebar"
+            title="Toggle sidebar"
             onClick={() => {
-              if (window.matchMedia('(max-width: 680px)').matches) setMobileSidebarOpen(true);
-              else setDesktopSidebarCollapsed(false);
+              if (window.matchMedia('(max-width: 680px)').matches) {
+                setMobileSidebarOpen((open) => !open);
+              } else {
+                setDesktopSidebarCollapsed((collapsed) => !collapsed);
+              }
             }}
           >
             <Menu size={18} aria-hidden="true" />
@@ -2241,10 +2224,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             </div>
 
             <div
-              className="conversation-scroll"
+              className="conversation-scroll conversation-scroll-follow-latest"
               ref={listRef}
               onScroll={(event) => {
-                followLatest.current = isNearScrollEnd(event.currentTarget);
+                const follow = isNearScrollEnd(event.currentTarget);
+                followLatest.current = follow;
+                event.currentTarget.classList.toggle('conversation-scroll-follow-latest', follow);
               }}
             >
               <div className="timeline">
@@ -2586,7 +2571,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           {pluginManagerOpen ? (
             <section className="plugin-settings-page plugin-manager" aria-label="Plugin management">
               <p className="form-intro">
-                Enable, disable, or reload plugins while Pico is running. Plugin state is preserved.
+                Turning a plugin off unloads it. Turn it back on to reload it; plugin state is preserved.
               </p>
               <div className="plugin-manager-list">
                 {pluginInfo?.catalog.map((plugin) => (
@@ -2607,24 +2592,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     <div className="plugin-manager-actions">
                       <button
                         type="button"
-                        className={`button ${plugin.enabled ? 'button-quiet' : 'button-soft'}`}
+                        className={`native-tool-switch ${plugin.enabled ? 'is-enabled' : ''}`}
+                        role="switch"
+                        aria-checked={plugin.enabled}
+                        aria-label={`${plugin.enabled ? 'Disable' : 'Enable'} ${plugin.name}`}
+                        title={`${plugin.enabled ? 'Disable' : 'Enable'} ${plugin.name}`}
                         disabled={plugin.required || pluginActionId !== null}
                         onClick={() => void updatePluginEnabled(plugin.id, !plugin.enabled)}
                       >
-                        {pluginActionId === plugin.id ? 'Working…' : plugin.enabled ? 'Disable' : 'Enable'}
-                      </button>
-                      <button
-                        type="button"
-                        className="button button-quiet"
-                        disabled={!plugin.enabled || pluginActionId !== null}
-                        onClick={() => void reloadPlugin(plugin.id)}
-                        title={
-                          plugin.hotReloadable
-                            ? 'Reload this plugin entry without restarting Pico'
-                            : 'Reactivate the built-in plugin'
-                        }
-                      >
-                        Reload
+                        <span />
                       </button>
                     </div>
                   </article>
@@ -3411,11 +3387,19 @@ function ModelExecutionRecord({
   outputUnavailable?: boolean;
   attemptActions: ReactNode;
 }) {
+  const [showModelDetails, setShowModelDetails] = useState(false);
   return (
     <div className="assistant-message model-execution-notice">
-      <div className="assistant-avatar">
+      <button
+        type="button"
+        className="assistant-avatar assistant-avatar-toggle"
+        aria-label={showModelDetails ? 'Hide model input and attempts' : 'Show model input and attempts'}
+        aria-expanded={showModelDetails}
+        title={showModelDetails ? 'Hide model input and attempts' : 'Show model input and attempts'}
+        onClick={() => setShowModelDetails((visible) => !visible)}
+      >
         <Sparkles size={13} aria-hidden="true" />
-      </div>
+      </button>
       <div className="message-body">
         <div className="message-author">
           Pico <span className="model-label">· {modelExecutionModelId(execution) ?? 'Model step'}</span>
@@ -3440,10 +3424,12 @@ function ModelExecutionRecord({
         ) : (
           <p className="projection-state">This Model Step has not committed an assistant message.</p>
         )}
-        <div className="model-input-attempt-controls">
-          <ModelInputDisclosure threadId={threadId} executionId={execution.id} executionStatus={execution.status} />
-          {attemptActions}
-        </div>
+        {showModelDetails ? (
+          <div className="model-input-attempt-controls">
+            <ModelInputDisclosure threadId={threadId} executionId={execution.id} executionStatus={execution.status} />
+            {attemptActions}
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -3466,6 +3452,7 @@ function AssistantBubble({
   attemptActions?: ReactNode;
   emptyOutput?: boolean;
 }) {
+  const [showModelDetails, setShowModelDetails] = useState(false);
   const assistant = recordPayload<AssistantPayload>(record);
   const calls = assistant.toolCalls ?? [];
   const executionId = record.id.replace(/:assistant$/, '');
@@ -3483,9 +3470,16 @@ function AssistantBubble({
       : null;
   return (
     <div className="assistant-message">
-      <div className="assistant-avatar">
+      <button
+        type="button"
+        className="assistant-avatar assistant-avatar-toggle"
+        aria-label={showModelDetails ? 'Hide model input and attempts' : 'Show model input and attempts'}
+        aria-expanded={showModelDetails}
+        title={showModelDetails ? 'Hide model input and attempts' : 'Show model input and attempts'}
+        onClick={() => setShowModelDetails((visible) => !visible)}
+      >
         <Sparkles size={13} aria-hidden="true" />
-      </div>
+      </button>
       <div className="message-body">
         <div className="message-author">
           Pico {assistant.model ? <span className="model-label">· {assistant.model}</span> : null}
@@ -3516,14 +3510,16 @@ function AssistantBubble({
             })}
           </div>
         ) : null}
-        <div className="model-input-attempt-controls">
-          <ModelInputDisclosure
-            threadId={threadId}
-            executionId={executionId}
-            executionStatus={executions.find((execution) => execution.id === executionId)?.status ?? 'completed'}
-          />
-          {attemptActions}
-        </div>
+        {showModelDetails ? (
+          <div className="model-input-attempt-controls">
+            <ModelInputDisclosure
+              threadId={threadId}
+              executionId={executionId}
+              executionStatus={executions.find((execution) => execution.id === executionId)?.status ?? 'completed'}
+            />
+            {attemptActions}
+          </div>
+        ) : null}
       </div>
     </div>
   );

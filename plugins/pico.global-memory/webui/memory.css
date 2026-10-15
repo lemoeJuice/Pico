@@ -87,6 +87,50 @@ textarea {
 .toggle {
   font-size: 12px;
 }
+.auto-toggle {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.auto-toggle input {
+  appearance: none;
+  position: relative;
+  width: 30px;
+  height: 18px;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 2px;
+  background: #e5e9e5;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.auto-toggle input:checked {
+  background: #77937d;
+}
+.auto-toggle input::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 2px rgba(40, 51, 46, 0.16);
+  content: '';
+  transition: transform 0.15s ease;
+}
+.auto-toggle input:checked::after {
+  transform: translateX(12px);
+}
+.auto-toggle input:focus-visible {
+  outline: 2px solid #587a60;
+  outline-offset: 2px;
+}
+.auto-toggle input:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
 .items {
   display: grid;
   gap: 8px;

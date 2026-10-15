@@ -374,12 +374,13 @@ export const todoPlugin: PicoPlugin = {
       },
     });
     ui.contribute({
-      slot: 'sidebar.panel',
+      slot: 'thread.toolbar',
       id: 'todo',
       label: 'Todo',
       description: 'Manage this Thread’s short-term checklist.',
       entry: 'webui',
       component: 'TodoPanel',
+      supportsPopover: true,
     });
   },
 };

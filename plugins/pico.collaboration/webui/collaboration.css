@@ -1,24 +1,27 @@
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   font:
-    13px/1.45 Inter,
+    14px/1.45 'DM Sans',
     ui-sans-serif,
     system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
     sans-serif;
+  color: #27332b;
+  background: transparent;
 }
 * {
   box-sizing: border-box;
 }
 body {
   margin: 0;
-  color: #e7e9ed;
   background: transparent;
 }
 .panel {
-  padding: 12px;
-  border: 1px solid #343942;
-  border-radius: 12px;
-  background: #17191d;
+  display: grid;
+  gap: 10px;
+  padding: 10px 12px;
 }
 .heading,
 .child,
@@ -29,15 +32,13 @@ body {
   gap: 8px;
 }
 .heading {
-  margin-bottom: 10px;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
-  letter-spacing: 0.04em;
 }
 .count,
 .muted {
-  color: #969da8;
-  font-size: 11px;
+  color: #68766d;
+  font-size: 12px;
   font-weight: 400;
 }
 .children {
@@ -47,9 +48,9 @@ body {
 .child {
   align-items: flex-start;
   padding: 9px;
-  border: 1px solid #30343c;
-  border-radius: 9px;
-  background: #1e2126;
+  border: 1px solid #dce5de;
+  border-radius: 10px;
+  background: color-mix(in srgb, Canvas 94%, #7ea18a);
 }
 .child-main {
   min-width: 0;
@@ -60,14 +61,14 @@ body {
 }
 .meta {
   margin-top: 3px;
-  color: #9da4ae;
+  color: #68766d;
   font-size: 11px;
 }
 .state {
   padding: 2px 7px;
   border-radius: 999px;
-  color: #bec5cf;
-  background: #30343b;
+  color: #526258;
+  background: #e8eee9;
   white-space: nowrap;
   font-size: 10px;
 }
@@ -87,20 +88,20 @@ textarea {
   resize: vertical;
   padding: 8px;
   color: inherit;
-  background: #111317;
-  border: 1px solid #414650;
+  background: #fff;
+  border: 1px solid #cbd5cc;
   border-radius: 8px;
 }
 button {
   padding: 5px 8px;
-  color: #e7e9ed;
-  background: #2b2f36;
-  border: 1px solid #414650;
+  color: inherit;
+  background: #fff;
+  border: 1px solid #cbd5cc;
   border-radius: 7px;
   cursor: pointer;
 }
 button:hover {
-  background: #373c45;
+  background: #f3f7f3;
 }
 button:disabled {
   opacity: 0.55;
@@ -113,10 +114,8 @@ button:disabled {
 .empty,
 .error {
   padding: 9px;
+  border: 1px solid #ecc7c2;
   border-radius: 8px;
-  background: #202329;
-  color: #aeb5bf;
-}
-.error {
-  color: #ffb6ad;
+  background: #fff3f1;
+  color: #923d39;
 }

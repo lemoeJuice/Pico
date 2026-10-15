@@ -48,7 +48,7 @@
     if (!root) return;
     const threadId = context.thread?.id;
     root.innerHTML = `<section class="panel">
-      <div class="heading"><span>Memory</span><label class="toggle"><input id="auto" type="checkbox" ${autoEnabled ? 'checked' : ''} ${busy ? 'disabled' : ''}> Automatic memory</label></div>
+      <div class="heading"><span>Memory</span><label class="toggle auto-toggle"><span>Auto memory</span><input id="auto" type="checkbox" aria-label="Automatic memory" ${autoEnabled ? 'checked' : ''} ${busy ? 'disabled' : ''}></label></div>
       <div class="muted">Global memories apply across Projects. Project Context remains scoped to its Project.</div>
       <form class="form" id="add"><textarea name="text" maxlength="1200" required placeholder="Add a durable preference or general fact…" aria-label="Memory text"></textarea><select name="category" aria-label="Category"><option value="preference">Preference</option><option value="fact">Fact</option><option value="collaboration">Collaboration</option><option value="other">Other</option></select><button ${busy ? 'disabled' : ''}>Add</button></form>
       <div class="search"><input id="search" value="${escape(search)}" placeholder="Search memories…" aria-label="Search memories"></div>

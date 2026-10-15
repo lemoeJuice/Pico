@@ -512,12 +512,13 @@ export const projectContextPlugin: PicoPlugin = {
       },
     });
     ui.contribute({
-      slot: 'sidebar.panel',
+      slot: 'thread.toolbar',
       id: 'project-context',
       label: 'Project Context',
       description: 'Browse and manage shared Project Memory.',
       entry: 'webui',
       component: 'ProjectContextPanel',
+      supportsPopover: true,
     });
   },
 };

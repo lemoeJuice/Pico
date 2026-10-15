@@ -37,7 +37,7 @@ button:disabled {
 .panel {
   padding: 10px 12px;
   display: grid;
-  gap: 9px;
+  gap: 10px;
 }
 .heading {
   display: flex;

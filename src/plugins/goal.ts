@@ -287,20 +287,14 @@ export const goalPlugin: PicoPlugin = {
     );
 
     ui.contribute({
-      slot: 'sidebar.panel',
+      slot: 'thread.toolbar',
       id: 'goal-panel',
       label: 'Goal',
       description: 'View and manage the current Thread Goal.',
       entry: 'webui',
       component: 'GoalPanel',
+      supportsPopover: true,
     } satisfies UiContribution);
-    ui.registerPage({
-      id: 'goal',
-      label: 'Goal',
-      description: 'Manage this Thread’s persistent Goal.',
-      entry: 'webui',
-    });
-
     http.register('GET', '/goal', ({ query }) => {
       const threadId = requiredString(query.get('threadId'), 'threadId');
       validateThread(threadId);

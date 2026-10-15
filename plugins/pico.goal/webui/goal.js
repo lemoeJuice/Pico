@@ -59,7 +59,6 @@
     </form>`;
   }
   function panel() {
-    port?.postMessage({ type: 'pico:plugin-ui:toolbar-state', badgeCount: goal?.status === 'active' ? 1 : 0 });
     if (!context.thread)
       return '<section class="goal-panel"><div class="empty">Select a Thread to manage its Goal.</div></section>';
     if (editing || !goal || goal.status === 'cleared')

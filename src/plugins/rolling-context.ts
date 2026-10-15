@@ -831,18 +831,13 @@ export const rollingContextPlugin: PicoPlugin = {
       },
     });
     ui.contribute({
-      slot: 'sidebar.panel',
+      slot: 'thread.toolbar',
       id: 'rolling-context',
       label: 'Rolling Context',
       description: 'Inspect hot, warm, and cold Canonical segments and the actual projected context.',
       entry: 'webui',
       component: 'RollingContextPanel',
-    });
-    ui.registerPage({
-      id: 'rolling-context',
-      label: 'Rolling Context',
-      description: 'Inspect and manage context segment tiers.',
-      entry: 'webui',
+      supportsPopover: true,
     });
   },
 };
