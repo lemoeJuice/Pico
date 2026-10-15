@@ -14,7 +14,10 @@ export interface ExecutorServiceAddress {
   workspacePath?: string;
 }
 
-export type ExecutorServiceAddressResolver = (binding: ExecutorBinding) => Promise<ExecutorServiceAddress>;
+export type ExecutorServiceAddressResolver = (
+  binding: ExecutorBinding,
+  signal?: AbortSignal,
+) => Promise<ExecutorServiceAddress>;
 
 export interface ExecutorAdapter {
   readonly kind: ExecutorKind;

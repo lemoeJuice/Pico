@@ -801,7 +801,12 @@ export class PicoRuntime {
       const cachedSurface = this.readCachedThreadToolSurface(threadId);
       executorTools = cachedSurface?.tools.filter((tool) => cachedSurface.sources[tool.name] === 'executor') ?? [];
       if (executorTools.length === 0) {
-        executorTools = await this.adapterFor(binding).listTools(binding);
+        // Opening the Thread tools panel must not start a Container just to
+        // inspect its tool definitions. Built-in Executor schemas are already
+        // available in Runtime; dynamic Executor plugins are added once the
+        // Executor has been started and its complete surface has been cached.
+        executorTools =
+          binding.kind === 'container' ? this.executorTools.list() : await this.adapterFor(binding).listTools(binding);
       }
     }
 

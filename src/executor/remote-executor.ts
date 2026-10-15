@@ -127,6 +127,7 @@ export async function validateRemoteWorkspace(
 interface ActiveExecution {
   controller: AbortController;
   promise: Promise<Execution>;
+  address?: ExecutorServiceAddress;
 }
 
 export class RemoteHostExecutor implements ExecutorAdapter {
@@ -187,11 +188,24 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     const relayAbort = (): void => controller.abort();
     if (externalSignal?.aborted) controller.abort();
     else externalSignal?.addEventListener('abort', relayAbort, { once: true });
-    const promise = this.drive(executionId, binding, controller.signal).finally(() => {
-      externalSignal?.removeEventListener('abort', relayAbort);
-      this.inFlight.delete(executionId);
-    });
-    this.inFlight.set(executionId, { controller, promise });
+    const activeExecution: ActiveExecution = { controller, promise: Promise.resolve(current) };
+    const promise = this.drive(executionId, binding, controller.signal, activeExecution)
+      .catch((error: unknown) => {
+        const latest = this.store.getExecution(executionId);
+        if (controller.signal.aborted && !activeExecution.address && latest?.status === 'pending') {
+          return this.transition(executionId, 'interrupted', {
+            error: 'Execution interrupted before it was submitted to the Remote Executor.',
+            detail: { userInterrupted: true },
+          });
+        }
+        throw error;
+      })
+      .finally(() => {
+        externalSignal?.removeEventListener('abort', relayAbort);
+        this.inFlight.delete(executionId);
+      });
+    activeExecution.promise = promise;
+    this.inFlight.set(executionId, activeExecution);
     return promise;
   }
 
@@ -221,8 +235,43 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     const current = this.store.getExecution(executionId);
     if (!current || ['completed', 'failed', 'interrupted'].includes(current.status)) return current;
     const active = this.inFlight.get(executionId);
-    if (active) active.controller.abort();
-    const { endpointUrl, accessToken } = await this.resolveAddress(binding);
+    if (active) {
+      active.controller.abort();
+      if (!active.address && current.status === 'pending') {
+        // No Remote Executor request can have been sent before address resolution.
+        // Let the adapter cancel its preparation and settle this pending execution locally.
+        await active.promise.catch(() => undefined);
+        const latest = this.store.getExecution(executionId);
+        if (latest?.status === 'pending') {
+          return this.transition(executionId, 'interrupted', {
+            error: 'Execution interrupted before it was submitted to the Remote Executor.',
+            detail: { userInterrupted: true },
+          });
+        }
+        return latest;
+      }
+    }
+    const { endpointUrl, accessToken } = active?.address ?? (await this.resolveAddress(binding));
+    if (active?.address && current.status === 'pending') {
+      // The original POST may have reached the Executor even though aborting its
+      // response fetch made the local attempt look unsubmitted. Re-submit the
+      // same durable ID as a barrier before Interrupt so request reordering cannot
+      // leave a tool running after the local execution becomes terminal.
+      const submitted = await requestJson<RemoteExecutionState>(
+        endpointUrl,
+        accessToken,
+        `/api/executions/${encodeURIComponent(executionId)}`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            toolName: current.toolName,
+            arguments: current.arguments ?? {},
+            workspacePath: active.address.workspacePath ?? binding.workspacePath,
+          }),
+        },
+      );
+      this.acceptState(executionId, submitted);
+    }
     let remote: RemoteExecutionState;
     try {
       remote = await requestJson<RemoteExecutionState>(
@@ -251,11 +300,18 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     await Promise.allSettled(active.map((execution) => execution.promise));
   }
 
-  private async drive(executionId: string, binding: ExecutorBinding, signal: AbortSignal): Promise<Execution> {
+  private async drive(
+    executionId: string,
+    binding: ExecutorBinding,
+    signal: AbortSignal,
+    activeExecution: ActiveExecution,
+  ): Promise<Execution> {
     if (signal.aborted) throw new DOMException('Remote Executor request interrupted locally.', 'AbortError');
     const current = this.store.getExecution(executionId);
     if (!current) throw new Error(`Execution ${executionId} was not durably created`);
-    const address = await this.resolveAddress(binding);
+    const address = await this.resolveAddress(binding, signal);
+    if (signal.aborted) throw new DOMException('Remote Executor request interrupted locally.', 'AbortError');
+    activeExecution.address = address;
     const { endpointUrl, accessToken } = address;
     let remote: RemoteExecutionState;
     if (current.status === 'pending') {

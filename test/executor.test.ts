@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { access, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,9 +11,183 @@ import { assistantPayload, setToolPolicy } from './helpers.js';
 import { ToolCatalog } from '../src/executor/tools.js';
 import { HostExecutor } from '../src/executor/executor.js';
 import { ContainerExecutor } from '../src/executor/container-executor.js';
+import { EXECUTOR_PROTOCOL_VERSION } from '../src/executor/remote-protocol.js';
 import { READ_FILE_LIMITS, SEARCH_FILE_LIMITS } from '../src/executor/tool-limits.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
 import { FakeModel, response, setupRuntime } from './helpers.js';
+
+interface MockRemoteExecution {
+  id: string;
+  status: 'running' | 'completed' | 'failed' | 'interrupted';
+  result?: unknown;
+  error?: string;
+  controller?: AbortController;
+}
+
+function createMockContainerAgent(
+  workspace: string,
+  catalog: ToolCatalog,
+  podman: (args: string[], input?: string, signal?: AbortSignal) => Promise<{ stdout: string; stderr: string }>,
+): {
+  runner: (args: string[], input?: string, signal?: AbortSignal) => Promise<{ stdout: string; stderr: string }>;
+  executions: Map<string, MockRemoteExecution>;
+  getSubmissionCount: () => number;
+  loseExecutions: boolean;
+  completeExecution: (id: string, result: unknown) => void;
+  loseNextSubmissionAck: boolean;
+  close: () => void;
+} {
+  const executions = new Map<string, MockRemoteExecution>();
+  let exposedPort: number | null = null;
+  let accessToken: string | null = null;
+  let serviceReady = false;
+  let containerCreated = false;
+  let submissionCount = 0;
+  let loseExecutions = false;
+  let loseNextSubmissionAck = false;
+  const originalFetch = globalThis.fetch;
+
+  const json = (body: unknown, status = 200): Response =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = new URL(input instanceof Request ? input.url : String(input));
+    if (!exposedPort || Number(requestUrl.port) !== exposedPort) return originalFetch(input, init);
+    if (!serviceReady) return json({ error: 'Container Executor is not ready.' }, 503);
+
+    const headers = new Headers(input instanceof Request ? input.headers : undefined);
+    new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
+    if (!accessToken || headers.get('authorization') !== `Bearer ${accessToken}`) {
+      return json({ error: 'Remote Executor bearer token required.' }, 401);
+    }
+
+    if (requestUrl.pathname === '/api/info' && (init?.method ?? 'GET') === 'GET') {
+      return json({
+        protocolVersion: EXECUTOR_PROTOCOL_VERSION,
+        executorVersion: '0.2.0',
+        updateSupported: false,
+        name: 'Mock Container Executor',
+        kind: 'executor',
+        workspaceRoot: '/workspace',
+        tools: catalog.listBySource('executor').map((tool) => tool.definition),
+      });
+    }
+
+    const executionMatch = /^\/api\/executions\/([^/]+)(?:\/(interrupt))?$/.exec(requestUrl.pathname);
+    if (!executionMatch) return json({ error: 'Not found.' }, 404);
+    const id = decodeURIComponent(executionMatch[1]!);
+    const isInterrupt = executionMatch[2] === 'interrupt';
+    const method = init?.method ?? 'GET';
+
+    if (isInterrupt && method === 'POST') {
+      const execution = executions.get(id);
+      if (!execution) return json({ error: 'Execution not found.' }, 404);
+      execution.controller?.abort();
+      execution.status = 'interrupted';
+      execution.error = 'Execution interrupted.';
+      return json(execution);
+    }
+    if (method === 'GET') {
+      if (loseExecutions || !executions.has(id)) return json({ error: 'Execution not found.' }, 404);
+      return json(executions.get(id));
+    }
+    if (method !== 'POST' || isInterrupt) return json({ error: 'Method not allowed.' }, 405);
+
+    let requestBody: Record<string, unknown>;
+    try {
+      requestBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+    } catch {
+      return json({ error: 'Invalid JSON body.' }, 400);
+    }
+    const toolName = requestBody.toolName;
+    const args = requestBody.arguments;
+    if (typeof toolName !== 'string' || !args || typeof args !== 'object' || Array.isArray(args)) {
+      return json({ error: 'Invalid execution request.' }, 400);
+    }
+    const existing = executions.get(id);
+    if (existing) return json(existing);
+    const tool = catalog.get(toolName);
+    if (!tool || tool.source !== 'executor') return json({ error: `Unknown Executor tool: ${toolName}` }, 400);
+
+    submissionCount += 1;
+    const execution: MockRemoteExecution = { id, status: 'running', controller: new AbortController() };
+    executions.set(id, execution);
+    void Promise.resolve()
+      .then(() =>
+        tool.execute(args as Record<string, unknown>, {
+          workspacePath: workspace,
+          executionId: id,
+          signal: execution.controller!.signal,
+        }),
+      )
+      .then((result) => {
+        if (execution.status === 'running') {
+          execution.status = 'completed';
+          execution.result = result;
+        }
+      })
+      .catch((error: unknown) => {
+        if (execution.status === 'running') {
+          execution.status = execution.controller?.signal.aborted ? 'interrupted' : 'failed';
+          execution.error = error instanceof Error ? error.message : String(error);
+        }
+      });
+    if (loseNextSubmissionAck) {
+      loseNextSubmissionAck = false;
+      return json({ error: 'Submission response was lost.' }, 500);
+    }
+    return json(execution, 202);
+  };
+
+  return {
+    runner: async (args, input, signal) => {
+      if (args.includes('container') && args.includes('inspect')) {
+        if (!containerCreated) throw new Error('no such container');
+        return { stdout: 'true', stderr: '' };
+      }
+      if (args.includes('run')) {
+        const published = args[args.indexOf('-p') + 1];
+        const match = published && /^127\.0\.0\.1:(\d+):4174$/.exec(published);
+        if (match) exposedPort = Number(match[1]);
+      }
+      if (args.includes('exec')) {
+        if (!args.includes('-d')) return { stdout: '', stderr: '' };
+        const token = args.find((argument) => argument.startsWith('PICO_EXECUTOR_TOKEN='));
+        accessToken = token?.slice('PICO_EXECUTOR_TOKEN='.length) ?? null;
+        serviceReady = Boolean(exposedPort && accessToken);
+        return { stdout: '', stderr: '' };
+      }
+      const result = await podman(args, input, signal);
+      if (args.includes('run')) containerCreated = true;
+      return result;
+    },
+    executions,
+    getSubmissionCount: () => submissionCount,
+    get loseExecutions() {
+      return loseExecutions;
+    },
+    set loseExecutions(value: boolean) {
+      loseExecutions = value;
+    },
+    get loseNextSubmissionAck() {
+      return loseNextSubmissionAck;
+    },
+    set loseNextSubmissionAck(value: boolean) {
+      loseNextSubmissionAck = value;
+    },
+    completeExecution(id, result) {
+      const execution = executions.get(id);
+      if (execution) {
+        execution.status = 'completed';
+        execution.result = result;
+      }
+    },
+    close() {
+      for (const execution of executions.values()) execution.controller?.abort();
+      globalThis.fetch = originalFetch;
+    },
+  };
+}
 
 describe('Executor execution identity and recovery', () => {
   it('applies the same bounded file and search output in the Container Runner', async () => {
@@ -404,21 +578,27 @@ describe('Executor execution identity and recovery', () => {
   it('treats concurrent and repeated Host Executor submissions with one ID as one execution', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.createThread('host');
-    let invocationCount = 0;
-    let release!: (value: unknown) => void;
-    const wait = new Promise<unknown>((resolve) => {
-      release = resolve;
-    });
-    const catalog = new ToolCatalog();
-    catalog.register({
-      owner: 'test',
-      source: 'executor',
-      definition: { name: 'side_effect', description: 'count once', parameters: { type: 'object' } },
-      execute: async () => {
-        invocationCount += 1;
-        return wait;
-      },
-    });
+    const directory = await mkdtemp(join(tmpdir(), 'pico-host-dedupe-'));
+    const pluginDirectory = join(directory, 'executor-plugins');
+    await mkdir(pluginDirectory);
+    await writeFile(
+      join(pluginDirectory, 'side-effect.mjs'),
+      `export default {
+        id: 'test.side-effect', name: 'Side effect test tool', version: '1',
+        activateExecutor({ tools }) {
+          tools.register({ name: 'side_effect', description: 'Count executions in the workspace.', parameters: { type: 'object' } }, async (_args, context) => {
+            const fs = await import('node:fs/promises');
+            const path = await import('node:path');
+            const file = path.join(context.workspacePath, 'side-effect-count.txt');
+            const count = Number(await fs.readFile(file, 'utf8').catch(() => '0')) + 1;
+            await fs.writeFile(file, String(count));
+            return { changed: true };
+          });
+        }
+      };`,
+    );
+    const previousDatabasePath = process.env.PICO_DB_PATH;
+    process.env.PICO_DB_PATH = join(directory, 'pico.sqlite');
     const modelExecution = env.store.createModelExecution('prepare-model', thread.id, 0);
     env.store.transitionExecution(modelExecution.id, 'running');
     env.store.commitModelStep({
@@ -429,61 +609,61 @@ describe('Executor execution identity and recovery', () => {
         batchId: 'prepare-model:batch',
         toolCalls: [{ id: 'stable-call', name: 'side_effect', arguments: {} }],
       }),
-      toolCalls: [
-        { call: { id: 'stable-call', name: 'side_effect', arguments: {} }, executionId: 'stable-execution-id' },
-      ],
+      toolCalls: [{ call: { id: 'stable-call', name: 'side_effect', arguments: {} }, executionId: randomUUID() }],
     });
-    const executor = new HostExecutor(env.store, catalog);
+    const executionId = env.store.listExecutions(thread.id).find((execution) => execution.kind === 'tool')!.id;
+    const executor = new HostExecutor(env.store, new ToolCatalog(), undefined, pluginDirectory);
     const binding = env.store.executorForThread(thread.id)!;
     try {
-      const one = executor.execute('stable-execution-id', binding);
-      const two = executor.execute('stable-execution-id', binding);
-      await until(() => invocationCount === 1);
-      expect(invocationCount).toBe(1);
-      release({ changed: true });
+      const one = executor.execute(executionId, binding);
+      const two = executor.execute(executionId, binding);
+      await until(() => existsSync(join(env.workspace, 'side-effect-count.txt')));
       const [first, second] = await Promise.all([one, two]);
-      const retry = await executor.execute('stable-execution-id', binding);
+      const retry = await executor.execute(executionId, binding);
       expect(first.status).toBe('completed');
       expect(second.status).toBe('completed');
       expect(retry.status).toBe('completed');
-      expect(invocationCount).toBe(1);
+      expect(await readFile(join(env.workspace, 'side-effect-count.txt'), 'utf8')).toBe('1');
     } finally {
-      release({ cleanup: true });
+      await executor.shutdown();
+      if (previousDatabasePath === undefined) delete process.env.PICO_DB_PATH;
+      else process.env.PICO_DB_PATH = previousDatabasePath;
       await env.cleanup();
+      await rm(directory, { recursive: true, force: true });
     }
   });
 
   it('waits for active Host tool invocations to settle during shutdown', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.createThread('host');
-    let markStarted!: () => void;
-    let markAborted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      markStarted = resolve;
-    });
-    const aborted = new Promise<void>((resolve) => {
-      markAborted = resolve;
-    });
-    const catalog = new ToolCatalog();
-    catalog.register({
-      owner: 'test',
-      source: 'executor',
-      definition: { name: 'wait_for_abort', description: 'wait for shutdown', parameters: { type: 'object' } },
-      execute: async (_args, context) => {
-        markStarted();
-        return new Promise((_, reject) => {
-          context.signal.addEventListener(
-            'abort',
-            () => {
-              markAborted();
-              setTimeout(() => reject(new DOMException('Execution interrupted', 'AbortError')), 30);
-            },
-            { once: true },
-          );
-        });
-      },
-    });
+    const directory = await mkdtemp(join(tmpdir(), 'pico-host-shutdown-'));
+    const pluginDirectory = join(directory, 'executor-plugins');
+    await mkdir(pluginDirectory);
+    await writeFile(
+      join(pluginDirectory, 'wait-for-abort.mjs'),
+      `export default {
+        id: 'test.wait-for-abort', name: 'Wait for abort test tool', version: '1',
+        activateExecutor({ tools }) {
+          tools.register({ name: 'wait_for_abort', description: 'Wait until shutdown aborts the tool.', parameters: { type: 'object' } }, async (_args, context) => {
+            const fs = await import('node:fs/promises');
+            const path = await import('node:path');
+            await fs.writeFile(path.join(context.workspacePath, 'tool-started.txt'), 'started');
+            return new Promise((resolve, reject) => {
+              const timer = setTimeout(resolve, 60_000);
+              context.signal.addEventListener('abort', async () => {
+                clearTimeout(timer);
+                await fs.writeFile(path.join(context.workspacePath, 'tool-aborted.txt'), 'aborted');
+                setTimeout(() => reject(new DOMException('Execution interrupted', 'AbortError')), 100);
+              }, { once: true });
+            });
+          });
+        }
+      };`,
+    );
+    const previousDatabasePath = process.env.PICO_DB_PATH;
+    process.env.PICO_DB_PATH = join(directory, 'pico.sqlite');
     const modelExecution = env.store.createModelExecution('shutdown-model', thread.id, 0);
+    const shutdownExecutionId = randomUUID();
     env.store.transitionExecution(modelExecution.id, 'running');
     env.store.commitModelStep({
       assistantRecordId: 'shutdown-model:assistant',
@@ -494,26 +674,31 @@ describe('Executor execution identity and recovery', () => {
         toolCalls: [{ id: 'shutdown-call', name: 'wait_for_abort', arguments: {} }],
       }),
       toolCalls: [
-        { call: { id: 'shutdown-call', name: 'wait_for_abort', arguments: {} }, executionId: 'shutdown-execution' },
+        { call: { id: 'shutdown-call', name: 'wait_for_abort', arguments: {} }, executionId: shutdownExecutionId },
       ],
     });
-    const executor = new HostExecutor(env.store, catalog);
+    const executor = new HostExecutor(env.store, new ToolCatalog(), undefined, pluginDirectory);
     const binding = env.store.executorForThread(thread.id)!;
+    let execution: Promise<Awaited<ReturnType<typeof executor.execute>>> | undefined;
     try {
-      const execution = executor.execute('shutdown-execution', binding);
-      await started;
+      execution = executor.execute(shutdownExecutionId, binding);
+      await until(() => existsSync(join(env.workspace, 'tool-started.txt')));
       let shutdownSettled = false;
       const shutdown = executor.shutdown().then(() => {
         shutdownSettled = true;
       });
-      await aborted;
+      await until(() => existsSync(join(env.workspace, 'tool-aborted.txt')));
       expect(shutdownSettled).toBe(false);
       await shutdown;
-      expect((await execution).status).toBe('interrupted');
+      // Shutdown stops the Host process, but the Runtime keeps its last confirmed state.
+      expect((await execution).status).toBe('running');
       expect(shutdownSettled).toBe(true);
     } finally {
       await executor.shutdown();
+      if (previousDatabasePath === undefined) delete process.env.PICO_DB_PATH;
+      else process.env.PICO_DB_PATH = previousDatabasePath;
       await env.cleanup();
+      await rm(directory, { recursive: true, force: true });
     }
   });
 
@@ -695,10 +880,10 @@ describe('Executor execution identity and recovery', () => {
 
     let registryAvailable = false;
     let containerSetupAttempts = 0;
-    const runner = async (args: string[]) => {
-      if (args[0] === 'info') return { stdout: '5.0.0', stderr: '' };
-      if (args[0] === 'inspect') throw new Error('no such container');
-      if (args[0] === 'run') {
+    const podman = async (args: string[]) => {
+      if (args.includes('info')) return { stdout: '5.0.0', stderr: '' };
+      if (args.includes('inspect')) throw new Error('no such container');
+      if (args.includes('run')) {
         containerSetupAttempts += 1;
         if (!registryAvailable) {
           throw new Error(
@@ -707,7 +892,7 @@ describe('Executor execution identity and recovery', () => {
         }
         return { stdout: 'container-id', stderr: '' };
       }
-      if (args[0] === 'exec') {
+      if (args.includes('exec')) {
         if (args.includes(CONTAINER_RUNNER) && args[args.indexOf('-e') + 2] === 'tools') {
           return {
             stdout: JSON.stringify({
@@ -731,23 +916,29 @@ describe('Executor execution identity and recovery', () => {
       definition: { name: 'shell', description: 'test shell', parameters: { type: 'object' } },
       execute: async () => ({ exitCode: 0 }),
     });
-    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, runner);
+    const mockAgent = createMockContainerAgent(env.workspace, catalog, podman);
+    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, mockAgent.runner);
     try {
       const binding = env.store.executorForThread(thread.id)!;
-      expect((await executor.execute('registry-eof-tool', binding)).status).toBe('pending');
+      const firstAttempt = await executor.execute('registry-eof-tool', binding).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(firstAttempt).toBeInstanceOf(Error);
+      if (!(firstAttempt instanceof Error)) throw new Error('Expected the first Container setup attempt to fail.');
+      expect(firstAttempt.message).toContain('https://cdn.example.test/v2/blob?<redacted>');
+      expect(firstAttempt.message).toContain('EOF');
+      expect(firstAttempt.message).not.toContain('temporary-secret');
       const retryableExecution = env.store.getExecution('registry-eof-tool');
-      expect(retryableExecution).toMatchObject({
-        status: 'pending',
-        error: expect.stringMatching(/EOF/i),
-      });
-      expect(retryableExecution?.error).toContain('https://cdn.example.test/v2/blob?<redacted>');
-      expect(retryableExecution?.error).not.toContain('temporary-secret');
+      expect(retryableExecution?.status).toBe('pending');
 
       registryAvailable = true;
       expect((await executor.execute('registry-eof-tool', binding)).status).toBe('completed');
       expect(env.store.getExecution('registry-eof-tool')?.error).toBeNull();
       expect(containerSetupAttempts).toBe(2);
     } finally {
+      await executor.shutdown();
+      mockAgent.close();
       await env.cleanup();
     }
   });
@@ -766,33 +957,12 @@ describe('Executor execution identity and recovery', () => {
       toolCalls: [{ call, executionId: 'lost-ack-tool' }],
     });
 
-    let containerPresent = false;
-    const runner = async (args: string[]) => {
-      if (args[0] === 'info') return { stdout: '5.0.0', stderr: '' };
-      if (args[0] === 'inspect') {
-        if (containerPresent) return { stdout: '{}', stderr: '' };
-        throw new Error('no such container');
-      }
-      if (args[0] === 'run') {
-        containerPresent = true;
-        return { stdout: 'container-id', stderr: '' };
-      }
-      if (args[0] === 'start') return { stdout: 'container-id', stderr: '' };
-      if (args[0] === 'exec') {
-        if (!args.includes(CONTAINER_RUNNER)) return { stdout: '', stderr: '' };
-        const mode = args[args.indexOf('-e') + 2];
-        if (mode === 'tools') {
-          return {
-            stdout: JSON.stringify({
-              status: 'completed',
-              tools: [{ name: 'read_file', description: 'test read', parameters: { type: 'object' } }],
-            }),
-            stderr: '',
-          };
-        }
-        if (mode === 'run') throw new Error('unexpected EOF while reading Podman response');
-        if (mode === 'status') return { stdout: JSON.stringify({ status: 'running' }), stderr: '' };
-      }
+    const podman = async (args: string[]) => {
+      if (args.includes('info')) return { stdout: '5.0.0', stderr: '' };
+      if (args.includes('inspect')) return { stdout: 'true', stderr: '' };
+      if (args.includes('run')) return { stdout: 'container-id', stderr: '' };
+      if (args.includes('start')) return { stdout: 'container-id', stderr: '' };
+      if (args.includes('exec')) return { stdout: '', stderr: '' };
       throw new Error(`Unexpected Podman command: ${args[0] ?? 'empty'}`);
     };
     const catalog = new ToolCatalog();
@@ -800,19 +970,35 @@ describe('Executor execution identity and recovery', () => {
       owner: 'test',
       source: 'executor',
       definition: { name: 'read_file', description: 'test read', parameters: { type: 'object' } },
-      execute: async () => ({ contents: 'unused' }),
+      execute: async (_args, context) =>
+        new Promise((_, reject) => {
+          context.signal.addEventListener(
+            'abort',
+            () => reject(new DOMException('Execution interrupted', 'AbortError')),
+            { once: true },
+          );
+        }),
     });
-    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, runner);
+    const mockAgent = createMockContainerAgent(env.workspace, catalog, podman);
+    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, mockAgent.runner);
+    mockAgent.loseNextSubmissionAck = true;
+    let execution: Promise<Awaited<ReturnType<typeof executor.execute>>> | undefined;
     try {
       const binding = env.store.executorForThread(thread.id)!;
-      expect((await executor.execute('lost-ack-tool', binding)).status).toBe('running');
+      execution = executor.execute('lost-ack-tool', binding);
+      await until(() => env.store.getExecution('lost-ack-tool')?.status === 'running');
       expect((await executor.status('lost-ack-tool', binding))?.status).toBe('running');
+      expect(mockAgent.getSubmissionCount()).toBe(1);
 
-      containerPresent = false;
+      await executor.shutdown();
+      expect((await execution).status).toBe('running');
+      mockAgent.loseExecutions = true;
       const confirmedLost = await executor.status('lost-ack-tool', binding);
       expect(confirmedLost?.status).toBe('interrupted');
-      expect(confirmedLost?.error).toMatch(/confirmed.*no longer exists/i);
+      expect(confirmedLost?.error).toMatch(/confirmed.*no longer in its durable ledger/i);
     } finally {
+      await executor.shutdown();
+      mockAgent.close();
       await env.cleanup();
     }
   });
@@ -832,72 +1018,52 @@ describe('Executor execution identity and recovery', () => {
     });
 
     let containerPresent = false;
-    let runnerStatus: 'running' | 'completed' = 'running';
-    let submissions = 0;
-    let markStatusRequestStarted!: () => void;
-    const statusRequestStarted = new Promise<void>((resolve) => {
-      markStatusRequestStarted = resolve;
-    });
-    const runner = async (args: string[], _input?: string, signal?: AbortSignal) => {
-      if (args[0] === 'info') return { stdout: '5.0.0', stderr: '' };
-      if (args[0] === 'inspect') {
+    const podman = async (args: string[]) => {
+      if (args.includes('info')) return { stdout: '5.0.0', stderr: '' };
+      if (args.includes('inspect')) {
         if (containerPresent) return { stdout: '{}', stderr: '' };
         throw new Error('no such container');
       }
-      if (args[0] === 'run') {
+      if (args.includes('run')) {
         containerPresent = true;
         return { stdout: 'container-id', stderr: '' };
       }
-      if (args[0] === 'start') return { stdout: 'container-id', stderr: '' };
-      if (args[0] === 'exec') {
-        if (args[2] === 'sh') return { stdout: '', stderr: '' };
-        const mode = args[args.indexOf('-e') + 2];
-        if (mode === 'tools')
-          return {
-            stdout: JSON.stringify({
-              status: 'completed',
-              tools: [{ name: 'read_file', description: 'test read', parameters: { type: 'object' } }],
-            }),
-            stderr: '',
-          };
-        if (mode === 'run') {
-          submissions += 1;
-          return { stdout: JSON.stringify({ status: 'running' }), stderr: '' };
-        }
-        if (mode === 'status' && runnerStatus === 'completed') {
-          return { stdout: JSON.stringify({ status: 'completed', result: { contents: 'recovered' } }), stderr: '' };
-        }
-        if (mode === 'status') {
-          markStatusRequestStarted();
-          return new Promise<{ stdout: string; stderr: string }>((_resolve, reject) => {
-            signal?.addEventListener(
-              'abort',
-              () => reject(new DOMException('Detached local status request', 'AbortError')),
-              { once: true },
-            );
-          });
-        }
-      }
+      if (args.includes('start')) return { stdout: 'container-id', stderr: '' };
+      if (args.includes('exec')) return { stdout: '', stderr: '' };
       throw new Error(`Unexpected Podman command: ${args[0] ?? 'empty'}`);
     };
+    let markToolStarted!: () => void;
+    const toolStarted = new Promise<void>((resolve) => {
+      markToolStarted = resolve;
+    });
+    let releaseTool!: (result: { contents: string }) => void;
+    const toolResult = new Promise<{ contents: string }>((resolve) => {
+      releaseTool = resolve;
+    });
+    let submissions = 0;
     const catalog = new ToolCatalog();
     catalog.register({
       owner: 'test',
       source: 'executor',
       definition: { name: 'read_file', description: 'test read', parameters: { type: 'object' } },
-      execute: async () => ({ contents: 'unused' }),
+      execute: async () => {
+        submissions += 1;
+        markToolStarted();
+        return toolResult;
+      },
     });
+    const mockAgent = createMockContainerAgent(env.workspace, catalog, podman);
     const binding = env.store.executorForThread(thread.id)!;
-    const beforeRestart = new ContainerExecutor(env.store, catalog, undefined, undefined, runner);
+    const beforeRestart = new ContainerExecutor(env.store, catalog, undefined, undefined, mockAgent.runner);
     const executionPromise = beforeRestart.execute('shutdown-container-tool', binding);
     try {
-      await statusRequestStarted;
+      await toolStarted;
       await beforeRestart.shutdown();
       expect((await executionPromise).status).toBe('running');
       expect(env.store.getExecution('shutdown-container-tool')?.status).toBe('running');
 
-      runnerStatus = 'completed';
-      const afterRestart = new ContainerExecutor(env.store, catalog, undefined, undefined, runner);
+      mockAgent.completeExecution('shutdown-container-tool', { contents: 'recovered' });
+      const afterRestart = new ContainerExecutor(env.store, catalog, undefined, undefined, mockAgent.runner);
       try {
         const resumed = await afterRestart.execute('shutdown-container-tool', binding);
         expect(resumed).toMatchObject({ status: 'completed', result: { contents: 'recovered' } });
@@ -906,7 +1072,9 @@ describe('Executor execution identity and recovery', () => {
         await afterRestart.shutdown();
       }
     } finally {
+      releaseTool({ contents: 'unused' });
       await beforeRestart.shutdown();
+      mockAgent.close();
       await env.cleanup();
     }
   });
@@ -933,9 +1101,9 @@ describe('Executor execution identity and recovery', () => {
     const calls: string[][] = [];
     const runner = async (args: string[], _input?: string, signal?: AbortSignal) => {
       calls.push(args);
-      if (args[0] === 'info') return { stdout: '5.0.0', stderr: '' };
-      if (args[0] === 'inspect') throw new Error('no such container');
-      if (args[0] === 'run') {
+      if (args.includes('info')) return { stdout: '5.0.0', stderr: '' };
+      if (args.includes('inspect')) throw new Error('no such container');
+      if (args.includes('run')) {
         markRunStarted();
         return new Promise<{ stdout: string; stderr: string }>((_resolve, reject) => {
           signal?.addEventListener(
@@ -968,8 +1136,78 @@ describe('Executor execution identity and recovery', () => {
       expect(interrupted?.status).toBe('interrupted');
       expect((await execution).status).toBe('interrupted');
       expect(env.store.getExecution('preparing-tool')?.status).toBe('interrupted');
-      expect(calls.some((args) => args[0] === 'exec')).toBe(false);
+      expect(calls.some((args) => args.includes('exec'))).toBe(false);
     } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('replaces an aborted shared Container setup for a new waiter', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.createThread('container');
+    const modelExecution = env.store.createModelExecution('setup-retry-model', thread.id, 0);
+    env.store.transitionExecution(modelExecution.id, 'running');
+    const firstCall = { id: 'setup-retry-first-call', name: 'shell', arguments: { command: 'true' } };
+    const secondCall = { id: 'setup-retry-second-call', name: 'shell', arguments: { command: 'true' } };
+    env.store.commitModelStep({
+      assistantRecordId: 'setup-retry-model:assistant',
+      modelExecutionId: modelExecution.id,
+      threadId: thread.id,
+      payload: assistantPayload({ batchId: 'setup-retry-model:batch', toolCalls: [firstCall, secondCall] }),
+      toolCalls: [
+        { call: firstCall, executionId: 'setup-retry-first-tool' },
+        { call: secondCall, executionId: 'setup-retry-second-tool' },
+      ],
+    });
+
+    let runCalls = 0;
+    let markFirstRunStarted!: () => void;
+    const firstRunStarted = new Promise<void>((resolve) => {
+      markFirstRunStarted = resolve;
+    });
+    const podman = async (args: string[], _input?: string, signal?: AbortSignal) => {
+      if (args.includes('info')) return { stdout: '5.0.0', stderr: '' };
+      if (args.includes('inspect')) throw new Error('no such container');
+      if (args.includes('run')) {
+        runCalls += 1;
+        if (runCalls === 1) {
+          markFirstRunStarted();
+          return new Promise<{ stdout: string; stderr: string }>((_resolve, reject) => {
+            const onAbort = (): void => {
+              signal?.removeEventListener('abort', onAbort);
+              setTimeout(() => reject(new DOMException('Podman setup interrupted.', 'AbortError')), 150);
+            };
+            if (signal?.aborted) onAbort();
+            else signal?.addEventListener('abort', onAbort, { once: true });
+          });
+        }
+        return { stdout: 'container-id', stderr: '' };
+      }
+      if (args.includes('exec')) return { stdout: '', stderr: '' };
+      throw new Error(`Unexpected Podman command: ${args[0] ?? 'empty'}`);
+    };
+    const catalog = new ToolCatalog();
+    catalog.register({
+      owner: 'test',
+      source: 'executor',
+      definition: { name: 'shell', description: 'test shell', parameters: { type: 'object' } },
+      execute: async () => ({ exitCode: 0 }),
+    });
+    const mockAgent = createMockContainerAgent(env.workspace, catalog, podman);
+    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, mockAgent.runner);
+    try {
+      const binding = env.store.executorForThread(thread.id)!;
+      const firstExecution = executor.execute('setup-retry-first-tool', binding);
+      await firstRunStarted;
+      expect((await executor.interrupt('setup-retry-first-tool', binding))?.status).toBe('interrupted');
+
+      const secondExecution = await executor.execute('setup-retry-second-tool', binding);
+      expect(secondExecution.status).toBe('completed');
+      expect(runCalls).toBe(2);
+      expect((await firstExecution).status).toBe('interrupted');
+    } finally {
+      await executor.shutdown();
+      mockAgent.close();
       await env.cleanup();
     }
   });
@@ -992,27 +1230,13 @@ describe('Executor execution identity and recovery', () => {
 
     let selectedImage: string | undefined;
     const runner = async (args: string[]) => {
-      if (args[0] === 'info') return { stdout: '5.0.0', stderr: '' };
-      if (args[0] === 'inspect') throw new Error('no such container');
-      if (args[0] === 'run') {
-        selectedImage = args[args.indexOf('--workdir') + 2];
+      if (args.includes('info')) return { stdout: '5.0.0', stderr: '' };
+      if (args.includes('inspect')) throw new Error('no such container');
+      if (args.includes('run')) {
+        selectedImage = args[args.length - 3];
         return { stdout: 'container-id', stderr: '' };
       }
-      if (args[0] === 'exec') {
-        if (args.includes(CONTAINER_RUNNER) && args[args.indexOf('-e') + 2] === 'tools') {
-          return {
-            stdout: JSON.stringify({
-              status: 'completed',
-              tools: [{ name: 'shell', description: 'test shell', parameters: { type: 'object' } }],
-            }),
-            stderr: '',
-          };
-        }
-        return {
-          stdout: JSON.stringify({ status: 'completed', result: { exitCode: 0, stdout: 'ok', stderr: '' } }),
-          stderr: '',
-        };
-      }
+      if (args.includes('exec')) return { stdout: '', stderr: '' };
       throw new Error(`Unexpected Podman command: ${args[0] ?? 'empty'}`);
     };
     const catalog = new ToolCatalog();
@@ -1022,7 +1246,8 @@ describe('Executor execution identity and recovery', () => {
       definition: { name: 'shell', description: 'test shell', parameters: { type: 'object' } },
       execute: async () => ({ exitCode: 0 }),
     });
-    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, runner);
+    const mockAgent = createMockContainerAgent(env.workspace, catalog, runner);
+    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, mockAgent.runner);
     try {
       const binding = env.store.executorForThread(thread.id)!;
       const result = await executor.execute('image-tool', binding);
@@ -1031,6 +1256,8 @@ describe('Executor execution identity and recovery', () => {
     } finally {
       if (previousImage === undefined) delete process.env.PICO_CONTAINER_IMAGE;
       else process.env.PICO_CONTAINER_IMAGE = previousImage;
+      await executor.shutdown();
+      mockAgent.close();
       await env.cleanup();
     }
   });
@@ -1065,41 +1292,19 @@ describe('Executor execution identity and recovery', () => {
       releaseTools = resolve;
     });
     const runner = async (args: string[]) => {
-      if (args[0] === 'info') return { stdout: '5.0.0', stderr: '' };
-      if (args[0] === 'inspect') {
+      if (args.includes('info')) return { stdout: '5.0.0', stderr: '' };
+      if (args.includes('inspect')) {
         if (containerCreated) return { stdout: '{}', stderr: '' };
         throw new Error('no such container');
       }
-      if (args[0] === 'run') {
+      if (args.includes('run')) {
         if (containerCreated) throw new Error('container name is already in use');
         containerCreated = true;
         containerStarts += 1;
         return { stdout: 'container-id', stderr: '' };
       }
-      if (args[0] === 'start') return { stdout: 'container-id', stderr: '' };
-      if (args[0] === 'exec') {
-        if (!args.includes(CONTAINER_RUNNER)) return { stdout: '', stderr: '' };
-        if (args[args.indexOf('-e') + 2] === 'tools') {
-          return {
-            stdout: JSON.stringify({
-              status: 'completed',
-              tools: ['read_file', 'search_files'].map((name) => ({
-                name,
-                description: `test ${name}`,
-                parameters: { type: 'object' },
-              })),
-            }),
-            stderr: '',
-          };
-        }
-        const toolName = args.find((value) => value === 'read_file' || value === 'search_files') ?? 'unknown';
-        startedToolCalls.push(toolName);
-        activeToolCalls += 1;
-        maxConcurrentToolCalls = Math.max(maxConcurrentToolCalls, activeToolCalls);
-        await toolGate;
-        activeToolCalls -= 1;
-        return { stdout: JSON.stringify({ status: 'completed', result: { toolName } }), stderr: '' };
-      }
+      if (args.includes('start')) return { stdout: 'container-id', stderr: '' };
+      if (args.includes('exec')) return { stdout: '', stderr: '' };
       throw new Error(`Unexpected Podman command: ${args[0] ?? 'empty'}`);
     };
     const catalog = new ToolCatalog();
@@ -1108,10 +1313,18 @@ describe('Executor execution identity and recovery', () => {
         owner: 'test',
         source: 'executor',
         definition: { name, description: `test ${name}`, parameters: { type: 'object' } },
-        execute: async () => ({ ok: true }),
+        execute: async () => {
+          startedToolCalls.push(name);
+          activeToolCalls += 1;
+          maxConcurrentToolCalls = Math.max(maxConcurrentToolCalls, activeToolCalls);
+          await toolGate;
+          activeToolCalls -= 1;
+          return { toolName: name };
+        },
       });
     }
-    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, runner);
+    const mockAgent = createMockContainerAgent(env.workspace, catalog, runner);
+    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, mockAgent.runner);
     const binding = env.store.executorForThread(thread.id)!;
     let executions: Promise<PromiseSettledResult<Awaited<ReturnType<typeof executor.execute>>>[]> | undefined;
     try {
@@ -1132,6 +1345,8 @@ describe('Executor execution identity and recovery', () => {
     } finally {
       releaseTools();
       await executions;
+      await executor.shutdown();
+      mockAgent.close();
       await env.cleanup();
     }
   });
@@ -1140,33 +1355,37 @@ describe('Executor execution identity and recovery', () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.createThread('container');
     const calls: string[][] = [];
-    const runner = async (args: string[]) => {
+    const podman = async (args: string[]) => {
       calls.push(args);
-      if (!args.includes('--storage-opt')) {
+      if (args.includes('info') && !args.includes('--storage-opt')) {
         throw new Error(
           'kernel does not support overlay fs: \'overlay\' is not supported over btrfs at "/storage/overlay"',
         );
       }
       return { stdout: '5.0.0', stderr: '' };
     };
+    const catalog = new ToolCatalog();
+    const mockAgent = createMockContainerAgent(env.workspace, catalog, podman);
     const executor = new ContainerExecutor(
       env.store,
-      new ToolCatalog(),
+      catalog,
       undefined,
       undefined,
-      runner,
+      mockAgent.runner,
       '/usr/bin/fuse-overlayfs',
     );
     try {
       const binding = env.store.executorForThread(thread.id)!;
       await executor.checkConnection(binding);
       await executor.checkConnection(binding);
-      expect(calls).toEqual([
+      expect(calls.filter((args) => args.includes('info'))).toEqual([
         ['info', '--format', '{{.Version.Version}}'],
         ['--storage-opt', 'overlay.mount_program=/usr/bin/fuse-overlayfs', 'info', '--format', '{{.Version.Version}}'],
         ['--storage-opt', 'overlay.mount_program=/usr/bin/fuse-overlayfs', 'info', '--format', '{{.Version.Version}}'],
       ]);
     } finally {
+      await executor.shutdown();
+      mockAgent.close();
       await env.cleanup();
     }
   });
@@ -1175,23 +1394,28 @@ describe('Executor execution identity and recovery', () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.createThread('container');
     const calls: string[][] = [];
-    const runner = async (args: string[]) => {
+    const podman = async (args: string[]) => {
       calls.push(args);
-      if (!args.includes('--storage-driver')) throw new Error("'overlay' is not supported over btrfs");
+      if (args.includes('info') && !args.includes('--storage-driver'))
+        throw new Error("'overlay' is not supported over btrfs");
       return { stdout: '5.0.0', stderr: '' };
     };
     const vfsRoot = '/tmp/pico-test-vfs-root';
-    const executor = new ContainerExecutor(env.store, new ToolCatalog(), undefined, undefined, runner, '', vfsRoot);
+    const catalog = new ToolCatalog();
+    const mockAgent = createMockContainerAgent(env.workspace, catalog, podman);
+    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, mockAgent.runner, '', vfsRoot);
     try {
       const binding = env.store.executorForThread(thread.id)!;
       await executor.checkConnection(binding);
       await executor.checkConnection(binding);
-      expect(calls).toEqual([
+      expect(calls.filter((args) => args.includes('info'))).toEqual([
         ['info', '--format', '{{.Version.Version}}'],
         ['--root', vfsRoot, '--storage-driver', 'vfs', 'info', '--format', '{{.Version.Version}}'],
         ['--root', vfsRoot, '--storage-driver', 'vfs', 'info', '--format', '{{.Version.Version}}'],
       ]);
     } finally {
+      await executor.shutdown();
+      mockAgent.close();
       await env.cleanup();
     }
   });

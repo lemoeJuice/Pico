@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -226,8 +226,12 @@ describe('durable Thread runtime invariants', () => {
     const env = await setupRuntime(model, { plugins: [nativeTool] });
     const hostThread = env.createThread('host');
     const containerThread = env.runtime.createThread(env.project.id, 'container', 'Container thread');
+    const containerExecutor = (env.runtime as unknown as { containerExecutor: { listTools: () => Promise<unknown> } })
+      .containerExecutor;
+    const listContainerTools = vi.spyOn(containerExecutor, 'listTools');
     try {
       const containerTools = await env.runtime.listThreadTools(containerThread.id);
+      expect(listContainerTools).not.toHaveBeenCalled();
       expect(containerTools.map((tool) => tool.name)).toContain('optional_runtime_tool');
       expect(containerTools.find((tool) => tool.name === 'read_file')).toMatchObject({
         source: 'executor',

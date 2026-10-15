@@ -55,7 +55,7 @@ describe('Remote Host Executor', () => {
         `${baseUrl}/api/info`,
         token,
       );
-      expect(info.kind).toBe('host');
+      expect(info.kind).toBe('executor');
       expect(info.workspaceRoot).toBe(workspaceRoot);
       expect(info.tools.map((tool) => tool.name)).toEqual(
         expect.arrayContaining(['read_file', 'search_files', 'apply_patch', 'shell']),
@@ -764,4 +764,83 @@ describe('Remote Host Executor', () => {
       await rm(directory, { recursive: true, force: true });
     }
   }, 5000);
+
+  it('orders Interrupt after an in-flight submission even when the two requests could be reordered', async () => {
+    const directory = await import('node:fs/promises').then(({ mkdtemp }) =>
+      mkdtemp(join(tmpdir(), 'pico-remote-interrupt-reorder-')),
+    );
+    const workspaceRoot = join(directory, 'remote-root');
+    const remoteWorkspace = join(workspaceRoot, 'repo');
+    await mkdir(remoteWorkspace, { recursive: true });
+    const remote = await startRemoteExecutorServer({
+      token,
+      workspaceRoot,
+      databasePath: join(directory, 'executor.sqlite'),
+      port: 0,
+    });
+    const endpoint = `http://127.0.0.1:${remote.port}`;
+    const command = "node -e \"setTimeout(() => require('node:fs').appendFileSync('runs.log', 'x'), 1200)\"";
+    const model = new FakeModel((_prompt, callNumber) =>
+      callNumber === 1
+        ? response('', [{ id: 'reordered-interrupt-call', name: 'shell', arguments: { command } }])
+        : response('The command was interrupted before it could continue.'),
+    );
+    const env = await setupRuntime(model);
+    const originalFetch = globalThis.fetch;
+    let heldSubmission = false;
+    let submissionRequests = 0;
+    try {
+      const connection = await env.runtime.addRemoteExecutorConnection('Build host', endpoint, token);
+      const thread = await env.runtime.createRemoteThread(env.project.id, connection.id, remoteWorkspace);
+      setToolPolicy(env.store, thread.id, 'shell', 'allow');
+
+      globalThis.fetch = async (input, init) => {
+        const requestUrl = input instanceof URL ? input : new URL(typeof input === 'string' ? input : input.url);
+        if (
+          requestUrl.origin === endpoint &&
+          /^\/api\/executions\/[^/]+$/.test(requestUrl.pathname) &&
+          init?.method === 'POST'
+        ) {
+          submissionRequests += 1;
+          if (!heldSubmission) {
+            heldSubmission = true;
+            return await new Promise<Response>((_resolve, reject) => {
+              const signal = init.signal;
+              if (!signal) throw new Error('Expected the in-flight submission to be cancellable.');
+              const onAbort = (): void => {
+                signal.removeEventListener('abort', onAbort);
+                reject(new DOMException('Simulated delayed submission was cancelled.', 'AbortError'));
+              };
+              if (signal.aborted) onAbort();
+              else signal.addEventListener('abort', onAbort, { once: true });
+            });
+          }
+        }
+        return originalFetch(input, init);
+      };
+
+      await env.runtime.submit(thread.id, 'reordered-interrupt-message', 'Start then interrupt the command.');
+      await until(
+        () => heldSubmission && env.store.listExecutions(thread.id).some((item) => item.status === 'pending'),
+      );
+      const execution = env.store.listExecutions(thread.id).find((item) => item.kind === 'tool')!;
+
+      await env.runtime.interrupt(thread.id);
+      await env.runtime.drain();
+
+      expect(submissionRequests).toBe(2);
+      expect(env.store.getExecution(execution.id)?.status).toBe('interrupted');
+      expect(await getJson<{ status: string }>(`${endpoint}/api/executions/${execution.id}`, token)).toMatchObject({
+        status: 'interrupted',
+      });
+      expect(model.calls).toBe(1);
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 1400));
+      await expect(readFile(join(remoteWorkspace, 'runs.log'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      globalThis.fetch = originalFetch;
+      await env.cleanup();
+      await remote.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 7000);
 });
