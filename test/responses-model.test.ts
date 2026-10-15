@@ -95,6 +95,112 @@ describe('ChatGPT Responses adapter', () => {
     });
   });
 
+  it('recovers streamed text and function calls omitted from the completed response', async () => {
+    const frames = [
+      { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'Recovered ' },
+      { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'text' },
+      { type: 'response.output_text.done', output_index: 0, content_index: 0, text: 'Recovered text' },
+      {
+        type: 'response.output_item.added',
+        output_index: 1,
+        item: { id: 'item_2', type: 'function_call', call_id: 'call_2', name: 'read_file', arguments: '' },
+      },
+      {
+        type: 'response.function_call_arguments.delta',
+        output_index: 1,
+        item_id: 'item_2',
+        delta: '{"path":',
+      },
+      {
+        type: 'response.function_call_arguments.delta',
+        output_index: 1,
+        item_id: 'item_2',
+        delta: '"notes.txt"}',
+      },
+      {
+        type: 'response.function_call_arguments.done',
+        output_index: 1,
+        item_id: 'item_2',
+        arguments: '{"path":"notes.txt"}',
+      },
+      {
+        type: 'response.output_item.done',
+        output_index: 1,
+        item: {
+          id: 'item_2',
+          type: 'function_call',
+          call_id: 'call_2',
+          name: 'read_file',
+          arguments: '{"path":"notes.txt"}',
+        },
+      },
+      { type: 'response.completed', response: { status: 'completed', output: [] } },
+    ];
+    vi.stubGlobal(
+      'fetch',
+      async () =>
+        new Response(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''), {
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    );
+    const adapter = new ChatGptResponsesAdapter({
+      accessToken: async () => 'oauth-access-token',
+    } as unknown as ChatGptPlanAuth);
+    const deltas: string[] = [];
+
+    await expect(
+      adapter.complete(
+        { system: '', model: 'selected-model', temperature: 0.2, turns: [], tools: [] },
+        { reasoningEffort: 'auto', fastMode: false } satisfies ChatGptPlanPreferences,
+        new AbortController().signal,
+        (delta) => deltas.push(delta),
+      ),
+    ).resolves.toMatchObject({
+      content: 'Recovered text',
+      toolCalls: [{ id: 'call_2', name: 'read_file', arguments: { path: 'notes.txt' } }],
+      finishReason: 'tool_calls',
+    });
+    expect(deltas).toEqual(['Recovered ', 'text']);
+  });
+
+  it('rejects empty completed responses and function calls with unfinished arguments', async () => {
+    const settings = { reasoningEffort: 'auto', fastMode: false } satisfies ChatGptPlanPreferences;
+    const prompt: ModelPrompt = { system: '', model: 'selected-model', temperature: 0.2, turns: [], tools: [] };
+    const auth = {
+      accessToken: async () => 'oauth-access-token',
+    } as unknown as ChatGptPlanAuth;
+
+    vi.stubGlobal(
+      'fetch',
+      async () =>
+        new Response(`data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', output: [] } })}\n\n`, {
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    );
+    const emptyAdapter = new ChatGptResponsesAdapter(auth);
+    await expect(emptyAdapter.complete(prompt, settings, new AbortController().signal, () => undefined))
+      .rejects.toThrow('without text or tool calls');
+
+    vi.stubGlobal(
+      'fetch',
+      async () =>
+        new Response([
+          {
+            type: 'response.output_item.added',
+            output_index: 0,
+            item: { id: 'item_3', type: 'function_call', call_id: 'call_3', name: 'read_file', arguments: '' },
+          },
+          { type: 'response.function_call_arguments.delta', output_index: 0, item_id: 'item_3', delta: '{"path":' },
+          { type: 'response.completed', response: { status: 'completed', output: [] } },
+        ].map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''), {
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    );
+    const incompleteCallAdapter = new ChatGptResponsesAdapter(auth);
+    await expect(incompleteCallAdapter.complete(prompt, settings, new AbortController().signal, () => undefined))
+      .rejects.toThrow('without completing its arguments');
+  });
+
   it('does not return an incomplete stream as a completed model step', async () => {
     vi.stubGlobal(
       'fetch',

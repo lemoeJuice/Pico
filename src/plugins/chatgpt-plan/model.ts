@@ -102,6 +102,41 @@ function outputFrom(response: Record<string, unknown>, prompt: ModelPrompt): Mod
   };
 }
 
+interface StreamedFunctionCall {
+  itemId?: string;
+  outputIndex?: number;
+  callId?: string;
+  name?: string;
+  argumentsText: string;
+  argumentsComplete: boolean;
+  order: number;
+}
+
+interface FinalFunctionCall {
+  itemId?: string;
+  outputIndex: number;
+  callId?: string;
+  argumentsText?: string;
+  toolCallIndex: number;
+}
+
+function finalFunctionCalls(response: Record<string, unknown>): FinalFunctionCall[] {
+  if (!Array.isArray(response.output)) return [];
+  const calls: FinalFunctionCall[] = [];
+  for (const [outputIndex, rawItem] of response.output.entries()) {
+    const item = object(rawItem);
+    if (item?.type !== 'function_call' || typeof item.name !== 'string') continue;
+    calls.push({
+      ...(typeof item.id === 'string' ? { itemId: item.id } : {}),
+      outputIndex,
+      ...(typeof item.call_id === 'string' ? { callId: item.call_id } : {}),
+      ...(typeof item.arguments === 'string' ? { argumentsText: item.arguments } : {}),
+      toolCallIndex: calls.length,
+    });
+  }
+  return calls;
+}
+
 function errorCodeFrom(error: unknown): string | undefined {
   if (!error || typeof error !== 'object') return undefined;
   const code = (error as { code?: unknown }).code;
@@ -225,6 +260,102 @@ export class ChatGptResponsesAdapter {
     let firstTextMs: number | undefined;
     let deltaTextCharacters = 0;
     let ended = false;
+    const streamedTextParts = new Map<
+      string,
+      { outputIndex: number; contentIndex: number; order: number; text: string }
+    >();
+    const streamedFunctionCalls: StreamedFunctionCall[] = [];
+    const callsByItemId = new Map<string, StreamedFunctionCall>();
+    const callsByOutputIndex = new Map<number, StreamedFunctionCall>();
+    const getStreamedCall = (itemId?: string, outputIndex?: number): StreamedFunctionCall => {
+      const byItemId = itemId ? callsByItemId.get(itemId) : undefined;
+      const byOutputIndex = outputIndex === undefined ? undefined : callsByOutputIndex.get(outputIndex);
+      let call = byItemId ?? byOutputIndex;
+      if (byItemId && byOutputIndex && byItemId !== byOutputIndex) {
+        call = byItemId.order <= byOutputIndex.order ? byItemId : byOutputIndex;
+        const duplicate = call === byItemId ? byOutputIndex : byItemId;
+        if (call.itemId === undefined && duplicate.itemId !== undefined) call.itemId = duplicate.itemId;
+        if (call.outputIndex === undefined && duplicate.outputIndex !== undefined) call.outputIndex = duplicate.outputIndex;
+        if (call.callId === undefined && duplicate.callId !== undefined) call.callId = duplicate.callId;
+        if (call.name === undefined && duplicate.name !== undefined) call.name = duplicate.name;
+        if (duplicate.argumentsComplete && !call.argumentsComplete) {
+          call.argumentsText = duplicate.argumentsText;
+        } else if (!call.argumentsText) {
+          call.argumentsText = duplicate.argumentsText;
+        }
+        call.argumentsComplete ||= duplicate.argumentsComplete;
+        call.order = Math.min(call.order, duplicate.order);
+        for (const [id, candidate] of callsByItemId) {
+          if (candidate === duplicate) callsByItemId.set(id, call);
+        }
+        for (const [index, candidate] of callsByOutputIndex) {
+          if (candidate === duplicate) callsByOutputIndex.set(index, call);
+        }
+        const duplicateIndex = streamedFunctionCalls.indexOf(duplicate);
+        if (duplicateIndex >= 0) streamedFunctionCalls.splice(duplicateIndex, 1);
+      }
+      if (!call) {
+        call = { argumentsText: '', argumentsComplete: false, order: streamedFunctionCalls.length };
+        streamedFunctionCalls.push(call);
+      }
+      if (itemId) {
+        call.itemId = itemId;
+        callsByItemId.set(itemId, call);
+      }
+      if (outputIndex !== undefined) {
+        call.outputIndex = outputIndex;
+        callsByOutputIndex.set(outputIndex, call);
+      }
+      return call;
+    };
+    const recordStreamedCall = (
+      event: Record<string, unknown>,
+      item?: Record<string, unknown>,
+      completeArguments = false,
+    ): StreamedFunctionCall => {
+      const itemId = typeof event.item_id === 'string'
+        ? event.item_id
+        : typeof item?.id === 'string'
+          ? item.id
+          : undefined;
+      const outputIndex = typeof event.output_index === 'number' && Number.isInteger(event.output_index)
+        ? event.output_index
+        : undefined;
+      const call = getStreamedCall(itemId, outputIndex);
+      if (typeof item?.call_id === 'string') call.callId = item.call_id;
+      if (typeof item?.name === 'string') call.name = item.name;
+      if (completeArguments && typeof event.arguments === 'string') {
+        call.argumentsText = event.arguments;
+        call.argumentsComplete = true;
+      } else if (completeArguments && typeof item?.arguments === 'string') {
+        call.argumentsText = item.arguments;
+        call.argumentsComplete = true;
+      }
+      return call;
+    };
+    const recordStreamedText = (event: Record<string, unknown>, text: string, append: boolean): void => {
+      const outputIndex = typeof event.output_index === 'number' && Number.isInteger(event.output_index)
+        ? event.output_index
+        : Number.MAX_SAFE_INTEGER;
+      const contentIndex = typeof event.content_index === 'number' && Number.isInteger(event.content_index)
+        ? event.content_index
+        : Number.MAX_SAFE_INTEGER;
+      const key = `${outputIndex}:${contentIndex}`;
+      const existing = streamedTextParts.get(key);
+      streamedTextParts.set(key, {
+        outputIndex,
+        contentIndex,
+        order: existing?.order ?? streamedTextParts.size,
+        text: append ? `${existing?.text ?? ''}${text}` : text,
+      });
+    };
+    const streamedText = (): string => [...streamedTextParts.values()]
+      .sort((left, right) =>
+        left.outputIndex - right.outputIndex
+        || left.contentIndex - right.contentIndex
+        || left.order - right.order)
+      .map((part) => part.text)
+      .join('');
     const countEvent = (name: string): void => {
       if (/^[a-z0-9_.:-]{1,80}$/i.test(name)) eventCounts[name] = (eventCounts[name] ?? 0) + 1;
     };
@@ -252,7 +383,22 @@ export class ChatGptResponsesAdapter {
       if (value.type === 'response.output_text.delta' && typeof value.delta === 'string') {
         if (value.delta.length > 0 && firstTextMs === undefined) firstTextMs = Date.now() - tracedRequest.startedAt;
         deltaTextCharacters += value.delta.length;
+        recordStreamedText(value, value.delta, true);
         onText(value.delta);
+      } else if (value.type === 'response.output_text.done' && typeof value.text === 'string') {
+        // The completed response is authoritative, but some provider streams omit its output array.
+        // Retain the finalized text event as a fallback for that case.
+        recordStreamedText(value, value.text, false);
+      } else if (value.type === 'response.output_item.added') {
+        const item = object(value.item);
+        if (item?.type === 'function_call') recordStreamedCall(value, item);
+      } else if (value.type === 'response.function_call_arguments.delta' && typeof value.delta === 'string') {
+        recordStreamedCall(value).argumentsText += value.delta;
+      } else if (value.type === 'response.function_call_arguments.done') {
+        recordStreamedCall(value, undefined, true);
+      } else if (value.type === 'response.output_item.done') {
+        const item = object(value.item);
+        if (item?.type === 'function_call') recordStreamedCall(value, item, true);
       } else if (value.type === 'response.completed') {
         terminalEvent = value.type;
         finalResponse = object(value.response);
@@ -329,10 +475,65 @@ export class ChatGptResponsesAdapter {
         if (incomplete?.reason !== 'max_output_tokens') {
           failureCategory = 'protocol';
           failureCode = typeof incomplete?.reason === 'string' ? incomplete.reason : 'incomplete';
-          throw new Error('ChatGPT response was incomplete.');
+          throw new Error(`ChatGPT response was incomplete (${failureCode}).`);
         }
       }
       const result = outputFrom(completedResponse, prompt);
+      if (!result.content) result.content = streamedText();
+
+      // The completed response is the canonical source. Responses API streams also emit
+      // finalized function-call events, so use those when the final output array omitted a call.
+      const finalCalls = finalFunctionCalls(completedResponse);
+      for (const streamedCall of streamedFunctionCalls.sort((left, right) => left.order - right.order)) {
+        const finalCall = finalCalls.find((call) =>
+          (streamedCall.callId !== undefined && call.callId === streamedCall.callId)
+          || (streamedCall.itemId !== undefined && call.itemId === streamedCall.itemId)
+          || (streamedCall.outputIndex !== undefined && call.outputIndex === streamedCall.outputIndex));
+        if (finalCall) {
+          const finalArguments = finalCall.argumentsText;
+          if ((!finalArguments || !finalArguments.trim()) && streamedCall.argumentsComplete) {
+            const name = streamedCall.name;
+            if (!name) {
+              failureCategory = 'protocol';
+              failureCode = 'missing_function_name';
+              throw new Error('ChatGPT completed a function call without a tool name.');
+            }
+            result.toolCalls[finalCall.toolCallIndex] = {
+              id:
+                finalCall.callId
+                ?? result.toolCalls[finalCall.toolCallIndex]?.id
+                ?? streamedCall.callId
+                ?? `call-${finalCall.toolCallIndex}`,
+              name,
+              arguments: parseArguments(streamedCall.argumentsText, name),
+            };
+          }
+          continue;
+        }
+        if (!streamedCall.argumentsComplete) {
+          failureCategory = 'protocol';
+          failureCode = 'incomplete_function_call';
+          throw new Error('ChatGPT streamed a function call without completing its arguments.');
+        }
+        if (!streamedCall.name) {
+          failureCategory = 'protocol';
+          failureCode = 'missing_function_name';
+          throw new Error('ChatGPT completed a function call without a tool name.');
+        }
+        result.toolCalls.push({
+          id: streamedCall.callId ?? `call-${result.toolCalls.length}`,
+          name: streamedCall.name,
+          arguments: parseArguments(streamedCall.argumentsText, streamedCall.name),
+        });
+      }
+      if (completedResponse.status !== 'incomplete' && result.toolCalls.length > 0) {
+        result.finishReason = 'tool_calls';
+      }
+      if (!result.content.trim() && result.toolCalls.length === 0) {
+        failureCategory = 'protocol';
+        failureCode = 'empty_output';
+        throw new Error('ChatGPT completed a response without text or tool calls.');
+      }
       // Deltas are transient until this complete result is returned to the Runtime.
       tracedRequest.settle({
         outcome: 'completed',
