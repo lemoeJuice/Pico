@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 
 export const sessionCookieName = 'pico_session';
@@ -6,10 +6,27 @@ export const sessionMaxAgeSeconds = 12 * 60 * 60;
 
 type Session = { expiresAt: number };
 
+export interface AccessSessionStore {
+  ensureAuthTokenFingerprint(fingerprint: string): void;
+  createAuthSession(tokenHash: string, expiresAt: number, now: number): void;
+  getAuthSessionExpiry(tokenHash: string): number | null;
+  deleteAuthSession(tokenHash: string): void;
+}
+
 export class AccessSessions {
   private readonly sessions = new Map<string, Session>();
 
-  constructor(private readonly accessToken: string | undefined) {}
+  constructor(
+    private readonly accessToken: string | undefined,
+    private readonly store?: AccessSessionStore,
+  ) {
+    if (store) {
+      const fingerprint = createHash('sha256')
+        .update(accessToken ?? '')
+        .digest('hex');
+      store.ensureAuthTokenFingerprint(fingerprint);
+    }
+  }
 
   get required(): boolean {
     return this.accessToken !== undefined;
@@ -17,37 +34,53 @@ export class AccessSessions {
 
   login(candidate: unknown, now = Date.now()): string | null {
     if (!this.accessToken || typeof candidate !== 'string' || !safeEqual(candidate, this.accessToken)) return null;
-    this.prune(now);
-    while (this.sessions.size >= 256) {
-      const oldest = this.sessions.keys().next().value as string | undefined;
-      if (!oldest) break;
-      this.sessions.delete(oldest);
+    if (!this.store) {
+      this.prune(now);
+      while (this.sessions.size >= 256) {
+        const oldest = this.sessions.keys().next().value as string | undefined;
+        if (!oldest) break;
+        this.sessions.delete(oldest);
+      }
     }
     const sessionId = randomBytes(32).toString('base64url');
-    this.sessions.set(sessionId, { expiresAt: now + sessionMaxAgeSeconds * 1000 });
+    const expiresAt = now + sessionMaxAgeSeconds * 1000;
+    const tokenHash = this.sessionHash(sessionId);
+    if (this.store) this.store.createAuthSession(tokenHash, expiresAt, now);
+    else this.sessions.set(tokenHash, { expiresAt });
     return sessionId;
   }
 
   authenticated(sessionId: string | null, now = Date.now()): boolean {
     if (!this.required) return true;
     if (!sessionId) return false;
-    const session = this.sessions.get(sessionId);
-    if (!session) return false;
-    if (session.expiresAt <= now) {
-      this.sessions.delete(sessionId);
+    const tokenHash = this.sessionHash(sessionId);
+    const expiresAt = this.store ? this.store.getAuthSessionExpiry(tokenHash) : this.sessions.get(tokenHash)?.expiresAt;
+    if (expiresAt === null || expiresAt === undefined) return false;
+    if (expiresAt <= now) {
+      if (this.store) this.store.deleteAuthSession(tokenHash);
+      else this.sessions.delete(tokenHash);
       return false;
     }
     return true;
   }
 
   revoke(sessionId: string | null): void {
-    if (sessionId) this.sessions.delete(sessionId);
+    if (!sessionId) return;
+    const tokenHash = this.sessionHash(sessionId);
+    if (this.store) this.store.deleteAuthSession(tokenHash);
+    else this.sessions.delete(tokenHash);
   }
 
   private prune(now: number): void {
-    for (const [id, session] of this.sessions) {
-      if (session.expiresAt <= now) this.sessions.delete(id);
+    for (const [tokenHash, session] of this.sessions) {
+      if (session.expiresAt <= now) this.sessions.delete(tokenHash);
     }
+  }
+
+  private sessionHash(sessionId: string): string {
+    return createHmac('sha256', this.accessToken ?? '')
+      .update(sessionId)
+      .digest('hex');
   }
 }
 

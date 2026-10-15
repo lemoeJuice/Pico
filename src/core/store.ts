@@ -198,6 +198,15 @@ export class PicoStore {
         value_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS auth_sessions (
+        token_hash TEXT PRIMARY KEY,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS auth_sessions_expiry ON auth_sessions(expires_at);
+      CREATE TABLE IF NOT EXISTS auth_session_config (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        token_fingerprint TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS plugin_state (
         plugin_id TEXT NOT NULL,
         key TEXT NOT NULL,
@@ -209,6 +218,47 @@ export class PicoStore {
     this.migrateRemoteExecutorBindings();
     this.migrateRuntimeExecutorKind();
     migrateLegacyPermissions(this.db);
+  }
+
+  ensureAuthTokenFingerprint(fingerprint: string): void {
+    this.transaction(() => {
+      const row = this.db.prepare('SELECT token_fingerprint FROM auth_session_config WHERE id = 1').get() as
+        SqlRow | undefined;
+      if (!row) {
+        this.db.prepare('INSERT INTO auth_session_config (id, token_fingerprint) VALUES (1, ?)').run(fingerprint);
+      } else if (row.token_fingerprint !== fingerprint) {
+        this.db.prepare('DELETE FROM auth_sessions').run();
+        this.db.prepare('UPDATE auth_session_config SET token_fingerprint = ? WHERE id = 1').run(fingerprint);
+      }
+    });
+  }
+
+  createAuthSession(tokenHash: string, expiresAt: number, now: number): void {
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(now);
+      const row = this.db.prepare('SELECT COUNT(*) AS count FROM auth_sessions').get() as SqlRow | undefined;
+      const count = Number(row?.count ?? 0);
+      if (count >= 256) {
+        this.db
+          .prepare(
+            `DELETE FROM auth_sessions WHERE token_hash IN (
+              SELECT token_hash FROM auth_sessions ORDER BY expires_at ASC, token_hash ASC LIMIT ?
+            )`,
+          )
+          .run(count - 255);
+      }
+      this.db.prepare('INSERT INTO auth_sessions (token_hash, expires_at) VALUES (?, ?)').run(tokenHash, expiresAt);
+    });
+  }
+
+  getAuthSessionExpiry(tokenHash: string): number | null {
+    const row = this.db.prepare('SELECT expires_at FROM auth_sessions WHERE token_hash = ?').get(tokenHash) as
+      SqlRow | undefined;
+    return row ? Number(row.expires_at) : null;
+  }
+
+  deleteAuthSession(tokenHash: string): void {
+    this.db.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').run(tokenHash);
   }
 
   private migrateRemoteExecutorBindings(): void {

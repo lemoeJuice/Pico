@@ -52,7 +52,7 @@ export PICO_ACCESS_TOKEN="$(openssl rand -hex 32)"
 PICO_HOST=0.0.0.0 npm run dev
 ```
 
-The browser asks for the token once and receives a revocable, `HttpOnly`, `SameSite=Strict` session cookie that expires after 12 hours. API routes and the event WebSocket require that session; WebSocket upgrades also check the browser origin. Sign out from the top bar to revoke the current session. The token itself is not stored in browser storage. Use HTTPS when traffic crosses a network you do not fully trust. When TLS terminates at a trusted reverse proxy, set `PICO_TRUST_PROXY=1` so Pico can mark the session cookie `Secure`; only enable this when the direct peer is that proxy.
+The browser asks for the token once and receives a revocable, `HttpOnly`, `SameSite=Strict` session cookie that expires after 12 hours. Session records are stored as hashes in Pico's SQLite database, so a valid session survives Runtime restarts and can still be revoked by signing out. Changing `PICO_ACCESS_TOKEN` invalidates existing sessions. API routes and the event WebSocket require that session; WebSocket upgrades also check the browser origin. Sign out from the top bar to revoke the current session. The token itself is not stored in browser storage. Use HTTPS when traffic crosses a network you do not fully trust. When TLS terminates at a trusted reverse proxy, set `PICO_TRUST_PROXY=1` so Pico can mark the session cookie `Secure`; only enable this when the direct peer is that proxy.
 
 ## Executors and permissions
 

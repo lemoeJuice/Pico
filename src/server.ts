@@ -114,9 +114,9 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   if (!accessToken && !isLoopbackHost(host)) {
     throw new Error('PICO_ACCESS_TOKEN is required when PICO_HOST is not a loopback address');
   }
-  const sessions = new AccessSessions(accessToken);
   const trustProxy = process.env.PICO_TRUST_PROXY === '1';
   const store = new PicoStore();
+  const sessions = new AccessSessions(accessToken, store);
   const runtime = new PicoRuntime(store);
   await runtime.initialize();
 
