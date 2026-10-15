@@ -1,0 +1,122 @@
+:root {
+  color-scheme: light dark;
+  font:
+    13px/1.45 Inter,
+    ui-sans-serif,
+    system-ui,
+    sans-serif;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  color: #e7e9ed;
+  background: transparent;
+}
+.panel {
+  padding: 12px;
+  border: 1px solid #343942;
+  border-radius: 12px;
+  background: #17191d;
+}
+.heading,
+.child,
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.heading {
+  margin-bottom: 10px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.count,
+.muted {
+  color: #969da8;
+  font-size: 11px;
+  font-weight: 400;
+}
+.children {
+  display: grid;
+  gap: 8px;
+}
+.child {
+  align-items: flex-start;
+  padding: 9px;
+  border: 1px solid #30343c;
+  border-radius: 9px;
+  background: #1e2126;
+}
+.child-main {
+  min-width: 0;
+}
+.title {
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+.meta {
+  margin-top: 3px;
+  color: #9da4ae;
+  font-size: 11px;
+}
+.state {
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: #bec5cf;
+  background: #30343b;
+  white-space: nowrap;
+  font-size: 10px;
+}
+.form {
+  display: flex;
+  gap: 7px;
+  margin-top: 9px;
+}
+input,
+textarea,
+button {
+  font: inherit;
+}
+textarea {
+  width: 100%;
+  min-height: 58px;
+  resize: vertical;
+  padding: 8px;
+  color: inherit;
+  background: #111317;
+  border: 1px solid #414650;
+  border-radius: 8px;
+}
+button {
+  padding: 5px 8px;
+  color: #e7e9ed;
+  background: #2b2f36;
+  border: 1px solid #414650;
+  border-radius: 7px;
+  cursor: pointer;
+}
+button:hover {
+  background: #373c45;
+}
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.actions {
+  justify-content: flex-start;
+  margin-top: 7px;
+}
+.empty,
+.error {
+  padding: 9px;
+  border-radius: 8px;
+  background: #202329;
+  color: #aeb5bf;
+}
+.error {
+  color: #ffb6ad;
+}

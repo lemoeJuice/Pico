@@ -295,6 +295,24 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     return response.json(await runtime.submit(threadId, id, command));
   });
   app.get('/api/plugins', (_request, response) => response.json(runtime.pluginInfo()));
+  app.put('/api/plugins/:pluginId', async (request, response) => {
+    const body = bodyObject(request);
+    if (typeof body.enabled !== 'boolean') {
+      return response.status(400).json({ error: 'Plugin updates require an enabled boolean.' });
+    }
+    try {
+      return response.json(await runtime.setPluginEnabled(request.params.pluginId!, body.enabled));
+    } catch (error) {
+      return response.status(409).json({ error: error instanceof Error ? error.message : 'Plugin update failed.' });
+    }
+  });
+  app.post('/api/plugins/:pluginId/reload', async (request, response) => {
+    try {
+      return response.json(await runtime.reloadPlugin(request.params.pluginId!));
+    } catch (error) {
+      return response.status(409).json({ error: error instanceof Error ? error.message : 'Plugin reload failed.' });
+    }
+  });
   app.use('/_pico/plugin-ui', async (request, response) => {
     await servePluginUiAsset(runtime, request, response);
   });

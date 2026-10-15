@@ -81,6 +81,8 @@ export interface PluginUiProps {
   context: PluginUiContext;
   updateModelSettings(update: PluginModelSettingsUpdate): Promise<void>;
   openPage(pluginId: string, pageId: string): void;
+  openThread(threadId: string): Promise<void>;
+  openMessage(seq: number): Promise<void>;
   onError(message: string): void;
   onNotice(message: string): void;
 }
@@ -92,6 +94,8 @@ export type PluginUiRequest =
   | { type: 'pico:plugin-ui:request'; id: string; action: 'command'; command: string }
   | { type: 'pico:plugin-ui:request'; id: string; action: 'update-model-settings'; update: PluginModelSettingsUpdate }
   | { type: 'pico:plugin-ui:request'; id: string; action: 'open-page'; pluginId: string; pageId: string }
+  | { type: 'pico:plugin-ui:request'; id: string; action: 'open-thread'; threadId: string }
+  | { type: 'pico:plugin-ui:request'; id: string; action: 'open-message'; seq: number }
   | { type: 'pico:plugin-ui:request'; id: string; action: 'error' | 'notice'; message: string };
 
 export type PluginUiRequestPayload =
@@ -99,6 +103,8 @@ export type PluginUiRequestPayload =
   | { action: 'command'; command: string }
   | { action: 'update-model-settings'; update: PluginModelSettingsUpdate }
   | { action: 'open-page'; pluginId: string; pageId: string }
+  | { action: 'open-thread'; threadId: string }
+  | { action: 'open-message'; seq: number }
   | { action: 'error' | 'notice'; message: string };
 
 export type PluginUiResponse =
@@ -239,6 +245,12 @@ export function createPluginUiClient(
         openPage: (pluginId, pageId) => {
           void request({ action: 'open-page', pluginId, pageId }).catch(() => undefined);
         },
+        openThread: async (threadId) => {
+          await request({ action: 'open-thread', threadId });
+        },
+        openMessage: async (seq) => {
+          await request({ action: 'open-message', seq });
+        },
         onError: (message) => {
           void request({ action: 'error', message }).catch(() => undefined);
         },
@@ -292,6 +304,10 @@ export function isPluginUiRequest(value: unknown): value is PluginUiRequest {
       return isPluginModelSettingsUpdate(message.update);
     case 'open-page':
       return typeof message.pluginId === 'string' && typeof message.pageId === 'string';
+    case 'open-thread':
+      return typeof message.threadId === 'string' && message.threadId.length > 0 && message.threadId.length <= 200;
+    case 'open-message':
+      return Number.isSafeInteger(message.seq) && (message.seq as number) >= 0;
     case 'error':
     case 'notice':
       return typeof message.message === 'string';

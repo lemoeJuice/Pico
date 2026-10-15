@@ -1687,6 +1687,92 @@ button:disabled {
   height: 360px;
   max-height: min(62dvh, 620px);
 }
+.memory-settings-page {
+  display: grid;
+  gap: 14px;
+  min-height: 360px;
+}
+.memory-scope-tabs {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 12px;
+}
+.plugin-manager-list {
+  display: grid;
+  gap: 10px;
+  max-height: min(58dvh, 640px);
+  overflow: auto;
+  padding-right: 3px;
+}
+.plugin-manager-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 15px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-raised, #fff);
+}
+.plugin-manager-copy {
+  min-width: 0;
+}
+.plugin-manager-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+.plugin-manager-title-row h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+.plugin-manager-copy p {
+  margin: 5px 0 0;
+  color: var(--ink-soft);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.plugin-manager-copy .plugin-manager-error {
+  color: var(--danger, #a23c35);
+}
+.plugin-manager-status {
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-soft);
+  font-size: 9px;
+  letter-spacing: 0.02em;
+}
+.plugin-manager-status.is-loaded {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
+  color: var(--accent-strong, #426a50);
+  background: color-mix(in srgb, var(--accent) 8%, white);
+}
+.plugin-manager-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+.plugin-manager-actions .button {
+  min-height: 30px;
+  padding: 6px 10px;
+  font-size: 10px;
+}
+@media (max-width: 560px) {
+  .plugin-manager-card {
+    flex-direction: column;
+  }
+  .plugin-manager-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
 .composer-box {
   flex: 1 1 auto;
   min-width: 170px;

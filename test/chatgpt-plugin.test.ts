@@ -20,7 +20,16 @@ describe('ChatGPT provider plugin', () => {
     const context: PluginContext = {
       ...unavailablePluginServices,
       tools: { register: () => undefined },
-      models: { registerProvider: (provider) => providers.push(provider) },
+      models: {
+        complete: async () => {
+          throw new Error('not used by this test');
+        },
+        history: () => [],
+        inputs: () => [],
+        subscribe: () => () => undefined,
+        registerProvider: (provider) => providers.push(provider),
+      },
+      continuations: { register: () => () => undefined },
       pipelines: { use: (stage, interceptor) => pipelines.use(stage, plugin.id, interceptor) },
       commands: { register: (command) => commands.register(plugin.id, command) },
       ui: {

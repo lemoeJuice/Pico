@@ -19,7 +19,7 @@ import type {
   ToolDefinition,
   ToolResultPayload,
 } from '../core/types.js';
-import { PicoStore } from '../core/store.js';
+import { PicoStore, type PluginModelCallRecord } from '../core/store.js';
 import { ExecutionPipelines } from '../core/pipeline.js';
 import { ContainerExecutor } from '../executor/container-executor.js';
 import { HostExecutor, requiresExternalExecutor, type ExecutorAdapter } from '../executor/executor.js';
@@ -30,7 +30,7 @@ import { compareExecutorVersions } from '../executor/version.js';
 import { loadExecutorPlugins } from '../executor/plugin-host.js';
 import { createToolCatalog, ToolCatalog, type ToolContext } from '../executor/tools.js';
 import { builtinPlugins } from '../plugins/builtin.js';
-import { CommandRegistry, PluginHost, type CommandResult } from '../plugins/host.js';
+import { CommandRegistry, PluginHost, type CommandResult, type PluginCatalogEntry } from '../plugins/host.js';
 import type { PluginServices } from '../plugins/services.js';
 import {
   OpenAiCompatibleAdapter,
@@ -44,7 +44,13 @@ import {
   type ModelResponse,
   type PromptTurn,
 } from './model.js';
-import type { ModelStageInput, ProjectionInput, ToolBatchInput, ToolInvocationInput } from './stages.js';
+import type {
+  ModelStageInput,
+  ProjectionInput,
+  ProjectionProvenance,
+  ToolBatchInput,
+  ToolInvocationInput,
+} from './stages.js';
 import type { PicoPlugin } from '../plugins/host.js';
 
 export interface RuntimeEvent {
@@ -114,6 +120,7 @@ function commandResultFromRecord(
 export interface ModelInputAttempt {
   id: string;
   prompt: ModelPrompt;
+  projectionProvenance?: ProjectionProvenance[];
   status: 'running' | 'completed' | 'failed' | 'interrupted';
   error?: string;
   result?: ModelInputResultSummary;
@@ -158,7 +165,13 @@ function objectValue(value: unknown): Record<string, unknown> | null {
 
 function diagnosticText(value: unknown, maxLength = 128): string | undefined {
   if (typeof value !== 'string') return undefined;
-  const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, '').trim();
+  const cleaned = [...value]
+    .filter((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint > 31 && codePoint !== 127;
+    })
+    .join('')
+    .trim();
   return cleaned ? cleaned.slice(0, maxLength) : undefined;
 }
 
@@ -393,6 +406,11 @@ export class PicoRuntime {
   private storeUnsubscribers: Array<() => void> = [];
   private readonly loops = new Map<string, Promise<void>>();
   private readonly modelSignals = new Map<string, AbortController>();
+  private readonly pluginModelCallsInFlight = new Map<
+    string,
+    Promise<PluginModelCallRecord & { response: ModelResponse }>
+  >();
+  private readonly pluginModelCallControllers = new Set<AbortController>();
   private readonly runtimeToolRuns = new Map<string, { promise: Promise<Execution>; controller: AbortController }>();
   private readonly invocationRuns = new Map<
     string,
@@ -466,6 +484,8 @@ export class PicoRuntime {
           const result = this.postMessage(target, messageId, payload);
           return { delivered: result.inserted, threadId: target.id, messageId: result.record.id };
         },
+        pause: (threadId, reason) => this.pauseForPlugin(threadId, reason),
+        resume: (threadId) => this.resumeForPlugin(threadId),
       },
       executions: {
         get: (executionId) => this.store.getExecution(executionId),
@@ -482,13 +502,52 @@ export class PicoRuntime {
           return () => this.executionListeners.delete(listener);
         },
       },
+      models: {
+        complete: (pluginId, request) => this.completePluginModelCall(pluginId, request),
+        history: (filter = {}) => this.store.listPluginModelCalls(filter),
+        inputs: (threadId) =>
+          this.store
+            .listExecutions(threadId)
+            .filter((execution) => execution.kind === 'model')
+            .flatMap((execution) =>
+              (this.getModelInputAttempts(threadId, execution.id) ?? []).map((attempt) => ({
+                executionId: execution.id,
+                attempt,
+              })),
+            ),
+        subscribe: (listener) => this.store.subscribePluginModelCalls(listener),
+      },
+      continuations: {
+        register: (pluginId, hasPendingWork) =>
+          this.plugins?.registerContinuation(pluginId, hasPendingWork) ?? (() => undefined),
+        hasPendingWork: (threadId) => this.plugins?.hasPendingPluginWork(threadId) ?? false,
+      },
     };
-    this.plugins = new PluginHost(store, this.tools, this.pipelines, this.commands, options.pluginDirectory, services);
+    this.plugins = new PluginHost(store, this.tools, this.pipelines, this.commands, options.pluginDirectory, services, {
+      canReload: () => {
+        const activeExecutions = store.listThreads().flatMap((thread) => store.listActiveExecutions(thread.id));
+        if (activeExecutions.length > 0 || this.pluginModelCallsInFlight.size > 0) {
+          return {
+            allowed: false,
+            reason:
+              'Pause active Threads and wait for Model, Tool, and plugin model calls to settle before changing plugins.',
+          };
+        }
+        return { allowed: true };
+      },
+      onChange: (pluginId) => this.publish({ type: 'plugin.updated', pluginId }),
+    });
   }
 
   async initialize(): Promise<void> {
     this.storeUnsubscribers.push(
-      this.store.subscribePluginState((pluginId) => this.publish({ type: 'plugin.updated', pluginId })),
+      this.store.subscribePluginState((pluginId) => {
+        this.publish({ type: 'plugin.updated', pluginId });
+        for (const thread of this.store.listThreads()) {
+          if (!thread.pauseRequested && this.plugins.hasPendingPluginWork(thread.id)) this.startLoop(thread.id);
+        }
+      }),
+      this.store.subscribePluginModelCalls(() => this.publish({ type: 'usage.updated', pluginId: 'pico.usage' })),
       this.store.subscribeCanonical((record) => this.publishRecord(record)),
     );
     const disabled = new Set([
@@ -496,17 +555,16 @@ export class PicoRuntime {
         .split(',')
         .map((id) => id.trim())
         .filter(Boolean),
-      ...(this.options.disabledBuiltinPlugins ?? []),
+      ...(this.options.disabledBuiltinPlugins ?? []).filter(
+        (id) => !this.additionalPlugins.some((plugin) => plugin.id === id),
+      ),
     ]);
     const executorPluginLoad = await loadExecutorPlugins(
       this.executorTools,
       this.options.executorPluginDirectory ? { pluginDirectory: this.options.executorPluginDirectory } : {},
     );
     this.executorPluginLoadErrors = executorPluginLoad.errors;
-    await this.plugins.load([
-      ...builtinPlugins.filter((plugin) => !disabled.has(plugin.id)),
-      ...this.additionalPlugins,
-    ]);
+    await this.plugins.load([...builtinPlugins, ...this.additionalPlugins], [...disabled]);
     this.pluginLoadErrors = [...this.plugins.errors(), ...this.executorPluginLoadErrors];
     // A Runtime restart confirms its own unfinished model stream was lost. Pause the
     // Thread before recording the interruption so startup recovery cannot silently
@@ -552,6 +610,7 @@ export class PicoRuntime {
 
   private async finishShutdown(): Promise<void> {
     for (const controller of this.modelSignals.values()) controller.abort();
+    for (const controller of this.pluginModelCallControllers) controller.abort();
     for (const active of this.runtimeToolRuns.values()) active.controller.abort();
 
     await Promise.all([
@@ -777,11 +836,7 @@ export class PicoRuntime {
     return this.listThreadTools(threadId);
   }
 
-  private appendProviderRequestDiagnostic(
-    executionId: string,
-    kind: string,
-    detail: Record<string, unknown>,
-  ): void {
+  private appendProviderRequestDiagnostic(executionId: string, kind: string, detail: Record<string, unknown>): void {
     try {
       this.store.appendExecutionLog(executionId, kind, detail);
     } catch {
@@ -968,6 +1023,9 @@ export class PicoRuntime {
         {
           id: requestId,
           prompt: prompt as ModelPrompt,
+          ...(Array.isArray(entry.detail.projectionProvenance)
+            ? { projectionProvenance: entry.detail.projectionProvenance as ProjectionProvenance[] }
+            : {}),
           status,
           ...(outcome?.error ? { error: outcome.error } : {}),
           ...(outcome?.result ? { result: outcome.result } : {}),
@@ -1056,6 +1114,24 @@ export class PicoRuntime {
     return this.getThread(threadId)!;
   }
 
+  private pauseForPlugin(threadId: string, reason: string): Thread {
+    const thread = this.store.getThread(threadId);
+    if (!thread) throw new Error('Thread not found');
+    const cleanedReason = reason.trim().slice(0, 500) || 'Paused by a workflow plugin.';
+    this.store.setPause(threadId, true, cleanedReason);
+    this.publishThreadUpdate(threadId);
+    return this.getThread(threadId)!;
+  }
+
+  private resumeForPlugin(threadId: string): Thread {
+    const thread = this.store.getThread(threadId);
+    if (!thread) throw new Error('Thread not found');
+    this.store.setPause(threadId, false);
+    this.publishThreadUpdate(threadId);
+    this.startLoop(threadId);
+    return this.getThread(threadId)!;
+  }
+
   continue(threadId: string): Thread {
     const thread = this.store.getThread(threadId);
     if (!thread) throw new Error('Thread not found');
@@ -1065,10 +1141,7 @@ export class PicoRuntime {
     return this.getThread(threadId)!;
   }
 
-  retryModelExecution(
-    threadId: string,
-    sourceExecutionId: string,
-  ): { execution: Execution; thread: Thread } {
+  retryModelExecution(threadId: string, sourceExecutionId: string): { execution: Execution; thread: Thread } {
     const thread = this.store.getThread(threadId);
     if (!thread) throw new Error('Thread not found');
     const source = this.store.getExecution(sourceExecutionId);
@@ -1451,7 +1524,10 @@ export class PicoRuntime {
         executions.every((execution) => terminalStatus(execution.status) && this.store.hasToolResult(execution.id))
       );
     }
-    return this.store.hasMessageAfter(threadId, latestAssistant.payload.projectionThrough);
+    return (
+      this.store.hasMessageAfter(threadId, latestAssistant.payload.projectionThrough) ||
+      this.plugins.hasPendingPluginWork(threadId)
+    );
   }
 
   private pendingModelRetry(threadId: string): Execution | null {
@@ -1468,7 +1544,9 @@ export class PicoRuntime {
   }
 
   private hasUnprocessedWork(threadId: string): boolean {
-    return Boolean(this.latestActiveBatch(threadId) || this.pendingModelRetry(threadId) || this.needsModelStep(threadId));
+    return Boolean(
+      this.latestActiveBatch(threadId) || this.pendingModelRetry(threadId) || this.needsModelStep(threadId),
+    );
   }
 
   private async runModelStep(thread: Thread, retryExecution?: Execution): Promise<void> {
@@ -1482,9 +1560,7 @@ export class PicoRuntime {
       return;
     }
     const through = retryThrough ?? allRecords.at(-1)?.seq ?? 0;
-    const projectionRecords = allRecords
-      .filter((record) => record.seq <= through)
-      .map((record) => deepFreeze(record));
+    const projectionRecords = allRecords.filter((record) => record.seq <= through).map((record) => deepFreeze(record));
     const modelExecutionId = retryExecution?.id ?? randomUUID();
     const modelSettings = this.getModelSettings();
     if (!retryExecution) {
@@ -1512,6 +1588,17 @@ export class PicoRuntime {
         turns: this.projectTurns(projectionRecords, thread),
         tools: enabledTools,
         toolSources: enabledToolSources,
+        provenance: projectionRecords
+          .filter((record) => record.kind !== 'plugin')
+          .map((record): ProjectionProvenance => ({
+            id: `canonical:${record.id}`,
+            sourcePluginId: 'pico.core',
+            label: `Canonical ${record.kind}`,
+            kind: 'canonical',
+            disposition: 'raw',
+            canonicalStartSeq: record.seq,
+            canonicalEndSeq: record.seq,
+          })),
       };
       const projected = await this.pipelines.run('projection', baseProjection, async (value) => value);
       const projectedTools = projected.tools;
@@ -1523,18 +1610,19 @@ export class PicoRuntime {
         temperature: modelSettings.temperature,
       };
       let requestId: string | null = null;
-      const recordModelInput: ModelStageInput['recordModelInput'] = (actualPrompt, provider) => {
+      const recordModelInput: ModelStageInput['recordModelInput'] = (actualPrompt, provider, provenance) => {
         if (requestId) return;
         requestId = randomUUID();
         this.store.appendExecutionLog(modelExecutionId, 'model-input-requested', {
           requestId,
           prompt: structuredClone(actualPrompt),
+          projectionProvenance: structuredClone(provenance ?? projected.provenance ?? []),
           provider,
         });
       };
       const requestTrace: ModelRequestTrace = {
         started: (details) => {
-          recordModelInput(prompt, modelSettings.provider);
+          recordModelInput(prompt, modelSettings.provider, projected.provenance);
           const providerAttemptId = randomUUID();
           this.appendProviderRequestDiagnostic(modelExecutionId, 'provider-request-started', {
             requestId,
@@ -1570,13 +1658,14 @@ export class PicoRuntime {
           this.publish({ type: 'model.delta', threadId: thread.id, executionId: modelExecutionId, delta });
         },
         recordModelInput,
+        ...(projected.provenance ? { projectionProvenance: projected.provenance } : {}),
         requestTrace,
       };
       let response: ModelResponse;
       try {
         response = await this.pipelines.run<ModelStageInput, ModelResponse>('model', modelInput, async (input) => {
-          input.recordModelInput(input.prompt, input.provider);
-          return this.model.complete(input.prompt, modelSettings, input.signal, input.onText);
+          input.recordModelInput(input.prompt, input.provider, input.projectionProvenance);
+          return this.model.complete(input.prompt, modelSettings, input.signal, input.onText, input.requestTrace);
         });
         if (requestId)
           this.store.appendExecutionLog(modelExecutionId, 'model-input-settled', {
@@ -1930,6 +2019,182 @@ export class PicoRuntime {
     return binding.kind === 'container' ? this.containerExecutor : this.hostExecutor;
   }
 
+  private completePluginModelCall(
+    pluginId: string,
+    request: {
+      threadId?: string;
+      projectId?: string;
+      purpose: string;
+      idempotencyKey: string;
+      prompt: ModelPrompt;
+      signal?: AbortSignal;
+    },
+  ): Promise<PluginModelCallRecord & { response: ModelResponse }> {
+    if (!/^[a-z0-9][a-z0-9._-]*$/i.test(request.purpose) || request.purpose.length > 80) {
+      throw new Error('Plugin model call purpose must be a short stable identifier.');
+    }
+    if (!request.idempotencyKey.trim() || request.idempotencyKey.length > 240) {
+      throw new Error('Plugin model calls require a stable idempotency key.');
+    }
+    if (!request.threadId) throw new Error('Plugin model calls require a Thread context.');
+    const thread = this.store.getThread(request.threadId);
+    if (!thread) throw new Error('Thread not found');
+    if (request.projectId && request.projectId !== thread.projectId) {
+      throw new Error('Plugin model call Project must match its Thread.');
+    }
+    if (
+      !request.prompt ||
+      typeof request.prompt.system !== 'string' ||
+      !Array.isArray(request.prompt.turns) ||
+      !Array.isArray(request.prompt.tools)
+    ) {
+      throw new Error('Plugin model call prompt is invalid.');
+    }
+
+    const key = `${pluginId}:${request.idempotencyKey}`;
+    const inFlight = this.pluginModelCallsInFlight.get(key);
+    if (inFlight) return inFlight;
+    const prior = this.store.findPluginModelCall(pluginId, request.idempotencyKey);
+    if (prior) {
+      if (prior.status === 'completed' && prior.response && typeof prior.response === 'object') {
+        return Promise.resolve({ ...prior, response: prior.response as ModelResponse });
+      }
+      return Promise.reject(
+        new Error(`Plugin model call ${prior.status}; use a new idempotency key to start a new attempt.`),
+      );
+    }
+
+    const pending = this.runPluginModelCall(pluginId, thread, request);
+    this.pluginModelCallsInFlight.set(key, pending);
+    return pending.finally(() => {
+      if (this.pluginModelCallsInFlight.get(key) === pending) this.pluginModelCallsInFlight.delete(key);
+    });
+  }
+
+  private async runPluginModelCall(
+    pluginId: string,
+    thread: Thread,
+    request: {
+      threadId?: string;
+      projectId?: string;
+      purpose: string;
+      idempotencyKey: string;
+      prompt: ModelPrompt;
+      signal?: AbortSignal;
+    },
+  ): Promise<PluginModelCallRecord & { response: ModelResponse }> {
+    const settings = this.getModelSettings();
+    const prompt: ModelPrompt = {
+      ...structuredClone(request.prompt),
+      model: request.prompt.model.trim() || settings.model,
+      temperature: request.prompt.temperature,
+    };
+    const now = new Date().toISOString();
+    let call: PluginModelCallRecord = {
+      id: randomUUID(),
+      pluginId,
+      idempotencyKey: request.idempotencyKey,
+      threadId: thread.id,
+      projectId: thread.projectId,
+      purpose: request.purpose,
+      provider: settings.provider,
+      model: prompt.model,
+      prompt,
+      status: 'running',
+      response: null,
+      usage: null,
+      attempts: [],
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    call = this.store.savePluginModelCall(call);
+    const controller = new AbortController();
+    const abortFromRequest = (): void => controller.abort();
+    request.signal?.addEventListener('abort', abortFromRequest, { once: true });
+    if (request.signal?.aborted || this.shuttingDown) controller.abort();
+    this.pluginModelCallControllers.add(controller);
+
+    const save = (): void => {
+      call = this.store.savePluginModelCall({ ...call, updatedAt: new Date().toISOString() });
+    };
+    const requestTrace: ModelRequestTrace = {
+      started: (details) => {
+        const id = randomUUID();
+        call = {
+          ...call,
+          attempts: [...call.attempts, { id, ...details, outcome: 'running', createdAt: new Date().toISOString() }],
+        };
+        save();
+        return id;
+      },
+      response: (id, details) => {
+        call = {
+          ...call,
+          attempts: call.attempts.map((attempt) => (attempt.id === id ? { ...attempt, ...details } : attempt)),
+        };
+        save();
+      },
+      settled: (id, details) => {
+        call = {
+          ...call,
+          attempts: call.attempts.map((attempt) => (attempt.id === id ? { ...attempt, ...details } : attempt)),
+        };
+        save();
+      },
+    };
+    const recordModelInput = (actualPrompt: ModelPrompt, provider: string): void => {
+      call = { ...call, prompt: structuredClone(actualPrompt), provider, model: actualPrompt.model };
+      save();
+    };
+    const modelInput: ModelStageInput = {
+      thread,
+      provider: settings.provider,
+      prompt,
+      signal: controller.signal,
+      onText: () => undefined,
+      recordModelInput,
+      requestTrace,
+    };
+    try {
+      const response = await this.pipelines.run<ModelStageInput, ModelResponse>('model', modelInput, async (input) => {
+        input.recordModelInput(input.prompt, input.provider);
+        return this.model.complete(input.prompt, settings, input.signal, input.onText, input.requestTrace);
+      });
+      call = {
+        ...call,
+        status: 'completed',
+        response,
+        usage: response.usage,
+        model: response.model || call.model,
+        error: null,
+      };
+      save();
+      return { ...call, response };
+    } catch (error) {
+      const interrupted = controller.signal.aborted || (error instanceof Error && error.name === 'AbortError');
+      call = {
+        ...call,
+        status: interrupted ? 'interrupted' : 'failed',
+        error: safeModelError(error),
+        attempts: call.attempts.map((attempt) =>
+          attempt.outcome === 'running'
+            ? {
+                ...attempt,
+                outcome: interrupted ? 'interrupted' : 'failed',
+                errorCategory: interrupted ? 'aborted' : 'transport',
+              }
+            : attempt,
+        ),
+      };
+      save();
+      throw error;
+    } finally {
+      request.signal?.removeEventListener('abort', abortFromRequest);
+      this.pluginModelCallControllers.delete(controller);
+    }
+  }
+
   getModelSettings(): ModelSettings {
     const stored = this.store.getSetting<Record<string, unknown>>('model', {});
     return {
@@ -1998,6 +2263,7 @@ export class PicoRuntime {
 
   pluginInfo(): {
     plugins: ReturnType<PluginHost['list']>;
+    catalog: ReturnType<PluginHost['catalog']>;
     ui: ReturnType<PluginHost['uiContributions']>;
     pages: ReturnType<PluginHost['uiPages']>;
     providers: ReturnType<PluginHost['modelProviders']>;
@@ -2006,12 +2272,25 @@ export class PicoRuntime {
   } {
     return {
       plugins: this.plugins.list(),
+      catalog: this.plugins.catalog(),
       ui: this.plugins.uiContributions(),
       pages: this.plugins.uiPages(),
       providers: this.plugins.modelProviders(),
       pipelines: this.pipelines.registrations(),
       errors: [...this.pluginLoadErrors],
     };
+  }
+
+  async setPluginEnabled(pluginId: string, enabled: boolean): Promise<PluginCatalogEntry[]> {
+    const catalog = await this.plugins.setEnabled(pluginId, enabled);
+    this.pluginLoadErrors = [...this.plugins.errors(), ...this.executorPluginLoadErrors];
+    return catalog;
+  }
+
+  async reloadPlugin(pluginId: string): Promise<PluginCatalogEntry[]> {
+    const catalog = await this.plugins.reload(pluginId);
+    this.pluginLoadErrors = [...this.plugins.errors(), ...this.executorPluginLoadErrors];
+    return catalog;
   }
 
   pluginHttpRoute(pluginId: string, method: string, path: string) {

@@ -1,4 +1,3 @@
-/* global document, window, requestAnimationFrame */
 (() => {
   'use strict';
 
@@ -11,7 +10,7 @@
   let context = { thread: null };
   let sequence = 0;
   let requestId = 0;
-  let data = { tools: [], approvals: [] };
+  let data = { tools: [], approvals: [], autoReview: false };
   let busy = false;
   let error = '';
   let toolsExpanded = false;
@@ -57,7 +56,7 @@
   async function refresh() {
     const threadId = context.thread?.id;
     if (!threadId) {
-      data = { tools: [], approvals: [] };
+      data = { tools: [], approvals: [], autoReview: false };
       draw();
       return;
     }
@@ -68,6 +67,7 @@
       data = {
         tools: Array.isArray(next.tools) ? next.tools : [],
         approvals: Array.isArray(next.approvals) ? next.approvals : [],
+        autoReview: next.autoReview === true,
       };
       error = '';
     } catch (reason) {
@@ -96,6 +96,7 @@
       <div class="permission-menu">
         <div class="permission-popover" role="dialog" aria-label="Tool permissions">
           <div class="popover-heading"><strong>Tool permissions</strong><span>Saved for this Thread</span></div>
+          <label class="reviewer-toggle"><span><strong>Auto-review</strong><small>Use an independent reviewer for tools set to Ask</small></span><input type="checkbox" data-reviewer ${data.autoReview ? 'checked' : ''} /></label>
           ${error ? `<div class="error">${escape(error)}</div>` : ''}
           <div class="tools">${rows || '<div class="empty">Tool definitions will appear after the next Model projection.</div>'}</div>
         </div>
@@ -137,13 +138,16 @@
     const failure = execution?.error ?? context.result?.error;
     const approval = currentApproval();
     const awaiting = status === 'pending' && approval?.status === 'pending';
+    const review = approval?.reviewer;
+    const reviewerBoundary = Boolean(review);
     return `<section class="panel"><article class="card">
       <div class="card-header"><strong>${escape(name)}</strong><span class="status ${awaiting ? 'pending' : ''}">${escape(awaiting ? 'awaiting approval' : status)}</span></div>
       ${args === undefined ? '' : `<details ${awaiting ? 'open' : ''}><summary>Arguments</summary><pre>${escape(JSON.stringify(args, null, 2))}</pre></details>`}
       ${failure ? `<div class="error">${escape(failure)}</div>` : ''}
+      ${review ? `<div class="review-result"><strong>${escape(review.outcome === 'allow' ? 'Auto-review allowed' : review.outcome === 'deny' ? 'Auto-review denied' : 'Auto-review unavailable')}</strong><span>${escape(review.reason)}</span>${review.model ? `<small>Reviewer model: ${escape(review.model)}</small>` : ''}</div>` : ''}
       ${status === 'interrupted' ? '<div class="muted">Execution was interrupted. Side effects may be partial or unknown.</div>' : ''}
       ${result === undefined ? '' : `<details><summary>Result</summary><pre>${escape(typeof result === 'string' ? result : JSON.stringify(result, null, 2))}</pre></details>`}
-      ${awaiting ? `<div class="actions"><label class="remember"><input id="remember" type="checkbox" /> Allow this tool in this Thread</label><button class="deny" data-decision="deny" ${busy ? 'disabled' : ''}>Deny</button><button class="allow" data-decision="allow" ${busy ? 'disabled' : ''}>Allow once</button></div>` : ''}
+      ${awaiting ? `<div class="actions">${reviewerBoundary ? '' : '<label class="remember"><input id="remember" type="checkbox" /> Allow this tool in this Thread</label>'}<button class="deny" data-decision="deny" ${busy ? 'disabled' : ''}>Deny</button><button class="allow" data-decision="allow" ${busy ? 'disabled' : ''}>Allow once</button></div>` : ''}
       ${error ? `<div class="error">${escape(error)}</div>` : ''}
     </article></section>`;
   }
@@ -167,6 +171,20 @@
             busy = false;
           }
         });
+      });
+      root.querySelector('[data-reviewer]')?.addEventListener('change', async (event) => {
+        if (!context.thread) return;
+        const enabled = event.currentTarget.checked;
+        try {
+          busy = true;
+          await api('/reviewer', 'PUT', { threadId: context.thread.id, enabled });
+          await refresh();
+        } catch (reason) {
+          error = reason instanceof Error ? reason.message : String(reason);
+          draw();
+        } finally {
+          busy = false;
+        }
       });
       if (toolsExpanded) {
         setPopover(true, popoverMaxHeight);

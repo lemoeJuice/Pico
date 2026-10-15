@@ -1,6 +1,8 @@
 node_modules/
 dist/
 data/
+plugins/**/runtime.mjs
+plugins/**/runtime.mjs.map
 .env
 .env.*
 !.env.example

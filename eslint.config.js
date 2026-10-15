@@ -8,7 +8,8 @@ export default [
     ignores: [
       'dist/**',
       'node_modules/**',
-      'plugins/pico.chatgpt-plan/runtime.mjs',
+      'data/**',
+      'plugins/**/runtime.mjs',
       'plugins/pico.chatgpt-plan/webui/build/**',
     ],
   },
@@ -32,6 +33,10 @@ export default [
   {
     files: ['src/web/**/*.{ts,tsx}'],
     languageOptions: { globals: { ...globals.browser, ...globals.node } },
+  },
+  {
+    files: ['plugins/**/webui/**/*.js'],
+    languageOptions: { globals: globals.browser },
   },
   {
     files: ['**/*.{js,mjs}'],

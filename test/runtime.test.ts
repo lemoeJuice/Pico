@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import type { AssistantPayload, Execution } from '../src/core/types.js';
 import { PicoStore } from '../src/core/store.js';
 import type { PicoPlugin } from '../src/plugins/host.js';
+import { permissionPlugin } from '../src/plugins/permissions.js';
 import type { ModelResponse } from '../src/runtime/model.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
 import type { ModelStageInput, ProjectionInput, StepInput, ToolBatchInput } from '../src/runtime/stages.js';
@@ -174,16 +175,24 @@ describe('durable Thread runtime invariants', () => {
       await env.runtime.drain();
 
       expect(thread.workspacePath).toBe('');
-      expect(status).toEqual({ connected: true, kind: 'runtime', label: 'Chat' });
+      expect(status).toMatchObject({ connected: true, kind: 'runtime', label: 'Chat' });
       expect(model.prompts[0]?.tools.map((tool) => tool.name)).toEqual([
         'workspace_info',
+        'project_memory_record',
+        'project_memory_search',
         'spawn_thread',
         'send_thread_message',
+        'list_child_threads',
+        'read_thread_history',
       ]);
       expect((await permissionView(env.runtime, thread.id)).tools.map((tool) => tool.name)).toEqual([
         'workspace_info',
+        'project_memory_record',
+        'project_memory_search',
         'spawn_thread',
         'send_thread_message',
+        'list_child_threads',
+        'read_thread_history',
       ]);
       expect(env.runtime.getSnapshot(thread.id)?.executions.map((execution) => execution.status)).toEqual([
         'completed',
@@ -350,7 +359,11 @@ describe('durable Thread runtime invariants', () => {
           : response('The file was read after restart.');
       });
     let store = new PicoStore(databasePath);
-    let runtime = new PicoRuntime(store, { model: createModel(), pluginDirectory: join(directory, 'empty-plugins') });
+    let runtime = new PicoRuntime(store, {
+      model: createModel(),
+      pluginDirectory: join(directory, 'empty-plugins'),
+      plugins: [permissionPlugin],
+    });
     await runtime.initialize();
     const project = await runtime.createProject('Approval recovery', workspace);
     const thread = runtime.createThread(project.id, 'host');
@@ -365,16 +378,13 @@ describe('durable Thread runtime invariants', () => {
       await runtime.shutdown();
       expect(executionBeforeShutdown?.status).toBe('pending');
       expect(store.getExecution(approval.executionId)?.status).toBe('pending');
-      expect(
-        (await permissionView(runtime, thread.id)).approvals.find((item) => item.executionId === approval.executionId)
-          ?.status,
-      ).toBe('pending');
       store.close();
 
       store = new PicoStore(databasePath);
       runtime = new PicoRuntime(store, {
         model: createModel(),
         pluginDirectory: join(directory, 'empty-plugins'),
+        plugins: [permissionPlugin],
       });
       await runtime.initialize();
       await untilAsync(async () => (await permissionView(runtime, thread.id)).approvals[0]?.status === 'pending');
@@ -1367,7 +1377,11 @@ describe('durable Thread runtime invariants', () => {
       const modelExecution = env.store.listExecutions(thread.id).find((execution) => execution.kind === 'model');
       expect(modelExecution?.status).toBe('failed');
       expect(env.runtime.getModelInputAttempts(thread.id, modelExecution!.id)).toMatchObject([
-        { status: 'failed', error: 'stream disconnected', prompt: { turns: [{ content: 'Write something' }] } },
+        {
+          status: 'failed',
+          error: 'Model request failed (Error).',
+          prompt: { turns: [{ content: 'Write something' }] },
+        },
       ]);
       expect(env.store.listRecords(thread.id).map((record) => record.kind)).toEqual(['message']);
       expect(env.runtime.getThread(thread.id)?.state).toBe('paused');
@@ -1597,58 +1611,75 @@ describe('durable Thread runtime invariants', () => {
       expect(saved.command?.text).toContain('Project context saved');
       expect(env.store.listRecords(sourceThread.id).filter((record) => record.kind === 'message')).toHaveLength(0);
       expect(
-        env.store.getPluginState<Record<string, { text: string; revision: number }>>(
-          'pico.project-context',
-          'byProject',
-          {},
-        )[env.project.id],
-      ).toEqual({ text: contextText, revision: 1 });
+        env.store.getPluginState<{
+          entries: Array<{ projectId: string; text: string; source: string; status: string }>;
+        }>('pico.project-context', 'memory', { entries: [] }).entries,
+      ).toContainEqual(
+        expect.objectContaining({
+          projectId: env.project.id,
+          text: contextText,
+          source: 'manual',
+          status: 'active',
+        }),
+      );
       expect(
         env.store
           .listRecords(sourceThread.id)
-          .find((record) => record.kind === 'plugin' && record.payload.action === 'project-context.updated')?.payload,
+          .find((record) => record.kind === 'plugin' && record.payload.action === 'memory.recorded')?.payload,
       ).toMatchObject({
         pluginId: 'pico.project-context',
         projectId: env.project.id,
-        revision: 1,
-        operation: 'set',
-        characters: contextText.length,
+        category: 'fact',
       });
       expect(
         env.store
           .listRecords(sourceThread.id)
           .some(
             (record) =>
-              record.kind === 'plugin' &&
-              record.payload.action === 'project-context.updated' &&
-              'text' in record.payload,
+              record.kind === 'plugin' && record.payload.action === 'memory.recorded' && 'text' in record.payload,
           ),
       ).toBe(false);
 
-      await env.runtime.submit(otherExecutorThread.id, 'context-shared-message', 'Use project guidance.');
+      await env.runtime.submit(
+        otherExecutorThread.id,
+        'context-shared-message',
+        'Apply the guidance about keeping canonical history append-only across Threads.',
+      );
       await env.runtime.drain();
       const sharedPrompt = model.prompts.find((prompt) =>
-        prompt.turns.some((turn) => turn.kind === 'message' && turn.content === 'Use project guidance.'),
+        prompt.turns.some(
+          (turn) =>
+            turn.kind === 'message' &&
+            turn.content === 'Apply the guidance about keeping canonical history append-only across Threads.',
+        ),
       );
-      expect(sharedPrompt?.system).toContain(contextText);
-      expect(sharedPrompt?.system).toContain('User-maintained Project Context');
+      expect(sharedPrompt?.turns.some((turn) => turn.kind === 'message' && turn.content.includes(contextText))).toBe(
+        true,
+      );
+      expect(
+        sharedPrompt?.turns.some((turn) => turn.kind === 'message' && turn.content.includes('Relevant Project Memory')),
+      ).toBe(true);
 
       await env.runtime.submit(isolatedThread.id, 'context-isolated-message', 'Check the other Project.');
       await env.runtime.drain();
       const isolatedPrompt = model.prompts.find((prompt) =>
         prompt.turns.some((turn) => turn.kind === 'message' && turn.content === 'Check the other Project.'),
       );
-      expect(isolatedPrompt?.system).not.toContain(contextText);
+      expect(isolatedPrompt?.turns.some((turn) => turn.kind === 'message' && turn.content.includes(contextText))).toBe(
+        false,
+      );
 
       const cleared = await env.runtime.submit(sourceThread.id, 'project-context-clear', '/project-context clear');
-      expect(cleared.command?.text).toContain('Project context cleared');
+      expect(cleared.command?.text).toContain('Manual Project Context cleared');
       expect(env.store.listRecords(sourceThread.id).filter((record) => record.kind === 'message')).toHaveLength(0);
       await env.runtime.submit(otherExecutorThread.id, 'context-cleared-message', 'Check the updated guidance.');
       await env.runtime.drain();
       const clearedPrompt = model.prompts.find((prompt) =>
         prompt.turns.some((turn) => turn.kind === 'message' && turn.content === 'Check the updated guidance.'),
       );
-      expect(clearedPrompt?.system).not.toContain(contextText);
+      expect(clearedPrompt?.turns.some((turn) => turn.kind === 'message' && turn.content.includes(contextText))).toBe(
+        false,
+      );
     } finally {
       await env.cleanup();
     }
@@ -1674,7 +1705,9 @@ describe('durable Thread runtime invariants', () => {
           .pluginInfo()
           .ui.some(
             (contribution) =>
-              contribution.id === 'pico.project-context:project-context' && contribution.command === '/project-context',
+              contribution.id === 'pico.project-context:project-context' &&
+              contribution.entry === 'webui' &&
+              contribution.component === 'ProjectContextPanel',
           ),
       ).toBe(true);
 

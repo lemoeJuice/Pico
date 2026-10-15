@@ -98,6 +98,17 @@ import {
 
 type PluginInfo = {
   plugins: Array<{ id: string; name: string; version: string; source: string }>;
+  catalog: Array<{
+    id: string;
+    name: string;
+    version: string;
+    source: string;
+    enabled: boolean;
+    loaded: boolean;
+    hotReloadable: boolean;
+    required: boolean;
+    error?: string;
+  }>;
   ui: UiContribution[];
   pages: Array<{ id: string; label: string; description?: string; entry: string; pluginId: string }>;
   providers: ModelProviderContribution[];
@@ -200,7 +211,11 @@ function assistantRecordHasVisibleResult(record: CanonicalRecord | null): boolea
 
 function modelExecutionCanRetry(variant: ModelExecutionVariant): boolean {
   if (variant.execution.status === 'failed' || variant.execution.status === 'interrupted') return true;
-  return variant.execution.status === 'completed' && Boolean(variant.assistantRecord) && !assistantRecordHasVisibleResult(variant.assistantRecord);
+  return (
+    variant.execution.status === 'completed' &&
+    Boolean(variant.assistantRecord) &&
+    !assistantRecordHasVisibleResult(variant.assistantRecord)
+  );
 }
 
 function modelExecutionProjectionThrough(execution: Execution): number | null {
@@ -518,6 +533,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [remoteConnections, setRemoteConnections] = useState<RemoteExecutorConnectionView[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pluginPageSelection, setPluginPageSelection] = useState<{ pluginId: string; pageId: string } | null>(null);
+  const [pluginManagerOpen, setPluginManagerOpen] = useState(false);
+  const [memoryManagerOpen, setMemoryManagerOpen] = useState(false);
+  const [memoryPageSelection, setMemoryPageSelection] = useState<'project' | 'global'>('project');
+  const [pluginActionId, setPluginActionId] = useState<string | null>(null);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newThreadOpen, setNewThreadOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -1426,7 +1445,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       `/api/threads/${encodeURIComponent(targetThreadId)}/executions/${encodeURIComponent(sourceExecutionId)}/retry`,
       { method: 'POST', body: '{}' },
     );
-    if (activeThreadId.current === targetThreadId && (threadUpdateVersions.current.get(targetThreadId) ?? 0) === updateVersion) {
+    if (
+      activeThreadId.current === targetThreadId &&
+      (threadUpdateVersions.current.get(targetThreadId) ?? 0) === updateVersion
+    ) {
       setSnapshot((current) =>
         current?.thread.id === targetThreadId
           ? {
@@ -1480,10 +1502,98 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     setModelForm((current) => ({ ...current, ...saved, apiKey: '' }));
   };
 
+  const openCanonicalMessage: PluginUiProps['openMessage'] = async (seq) => {
+    const targetThreadId = threadId;
+    if (!targetThreadId || !Number.isSafeInteger(seq) || seq < 0) {
+      throw new Error('A canonical message in the active Thread must be selected.');
+    }
+    followLatest.current = false;
+    let target = document.getElementById(`canonical-message-${seq}`);
+    let beforeSeq = activeSnapshot?.records[0]?.seq;
+    let hasEarlier = activeSnapshot?.hasEarlierRecords ?? false;
+    while (!target && hasEarlier && beforeSeq !== undefined) {
+      const page = await api<ThreadSnapshot>(
+        `/api/threads/${encodeURIComponent(targetThreadId)}?beforeSeq=${beforeSeq}`,
+      );
+      if (activeThreadId.current !== targetThreadId)
+        throw new Error('The active Thread changed before history loaded.');
+      historyExpandedThreads.current.add(targetThreadId);
+      setSnapshot((current) =>
+        current && current.thread.id === targetThreadId ? mergeEarlierSnapshot(current, page) : current,
+      );
+      beforeSeq = page.records[0]?.seq;
+      hasEarlier = page.hasEarlierRecords;
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      target = document.getElementById(`canonical-message-${seq}`);
+    }
+    if (!target) throw new Error(`Canonical message ${seq} is not available in the active Thread.`);
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+
+  const openProjectThread: PluginUiProps['openThread'] = async (targetThreadId) => {
+    const currentProjectId = selectedThread?.projectId;
+    if (!currentProjectId || !targetThreadId || targetThreadId.length > 200) {
+      throw new Error('A Thread in the active Project must be selected.');
+    }
+    const target = await api<ThreadSnapshot>(`/api/threads/${encodeURIComponent(targetThreadId)}`);
+    if (target.thread.projectId !== currentProjectId) {
+      throw new Error('Plugin navigation is limited to Threads in the active Project.');
+    }
+    chooseThread(target.thread.id, currentProjectId);
+  };
+
   const openPluginPage = (pluginId: string, pageId: string): void => {
+    if (pluginId === 'pico.project-context' || pluginId === 'pico.global-memory') {
+      setMemoryPageSelection(pluginId === 'pico.project-context' ? 'project' : 'global');
+      setMemoryManagerOpen(true);
+      setPluginManagerOpen(false);
+      setPluginPageSelection(null);
+      setSettingsOpen(true);
+      setError('');
+      return;
+    }
     setPluginPageSelection({ pluginId, pageId });
+    setPluginManagerOpen(false);
+    setMemoryManagerOpen(false);
     setSettingsOpen(true);
     setError('');
+  };
+
+  const updatePluginEnabled = async (pluginId: string, enabled: boolean): Promise<void> => {
+    setPluginActionId(pluginId);
+    setError('');
+    try {
+      const catalog = await api<PluginInfo['catalog']>(`/api/plugins/${encodeURIComponent(pluginId)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ enabled }),
+      });
+      setPluginInfo((current) => (current ? { ...current, catalog } : current));
+      setNotice(`${pluginId} ${enabled ? 'enabled' : 'disabled'}.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Plugin could not be updated.');
+      const refreshed = await api<PluginInfo>('/api/plugins').catch(() => null);
+      if (refreshed) setPluginInfo(refreshed);
+    } finally {
+      setPluginActionId(null);
+    }
+  };
+
+  const reloadPlugin = async (pluginId: string): Promise<void> => {
+    setPluginActionId(pluginId);
+    setError('');
+    try {
+      const catalog = await api<PluginInfo['catalog']>(`/api/plugins/${encodeURIComponent(pluginId)}/reload`, {
+        method: 'POST',
+      });
+      setPluginInfo((current) => (current ? { ...current, catalog } : current));
+      setNotice(`${pluginId} reloaded.`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Plugin could not be reloaded.');
+      const refreshed = await api<PluginInfo>('/api/plugins').catch(() => null);
+      if (refreshed) setPluginInfo(refreshed);
+    } finally {
+      setPluginActionId(null);
+    }
   };
 
   const viewContext: PluginUiContext = { thread: selectedThread };
@@ -1512,6 +1622,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       settings,
       context: viewContext,
       updateModelSettings: updateModelSettingsFromPlugin,
+      openThread: openProjectThread,
+      openMessage: openCanonicalMessage,
       openPage: openPluginPage,
       onError: setError,
       onNotice: setNotice,
@@ -1524,6 +1636,14 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         (page) => page.pluginId === pluginPageSelection.pluginId && page.id === pluginPageSelection.pageId,
       )
     : undefined;
+  const memoryPages =
+    pluginInfo?.pages.filter(
+      (page) => page.pluginId === 'pico.project-context' || page.pluginId === 'pico.global-memory',
+    ) ?? [];
+  const selectedMemoryPage =
+    memoryPages.find(
+      (page) => page.pluginId === (memoryPageSelection === 'project' ? 'pico.project-context' : 'pico.global-memory'),
+    ) ?? memoryPages[0];
   const isRegisteredPluginPage = (pluginId: string, pageId: string): boolean =>
     Boolean(pluginInfo?.pages.some((page) => page.pluginId === pluginId && page.id === pageId));
 
@@ -1691,7 +1811,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           left.execution.id.localeCompare(right.execution.id),
       );
       const needsAttemptGroup =
-        variants.length > 1 || variants.some((variant) => variant.execution.status !== 'completed' || modelExecutionCanRetry(variant));
+        variants.length > 1 ||
+        variants.some((variant) => variant.execution.status !== 'completed' || modelExecutionCanRetry(variant));
       if (!needsAttemptGroup) continue;
       groups.push({ projectionThrough, variants });
       for (const variant of variants) {
@@ -1731,8 +1852,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     );
   };
   const renderedRecords = records.filter(
-    (record) =>
-      record.kind === 'message' || (record.kind === 'assistant' && !groupedAssistantRecordIds.has(record.id)),
+    (record) => record.kind === 'message' || (record.kind === 'assistant' && !groupedAssistantRecordIds.has(record.id)),
   );
   const timeline = [
     ...renderedRecords.map((record) => ({ type: 'record' as const, at: record.createdAt, record })),
@@ -2389,37 +2509,166 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
       {settingsOpen ? (
         <Modal
-          title="Model connections"
+          title={
+            memoryManagerOpen
+              ? 'Memory'
+              : pluginManagerOpen
+                ? 'Plugins'
+                : pluginPageSelection
+                  ? 'Plugin settings'
+                  : 'Model connections'
+          }
           onClose={() => {
             setSettingsOpen(false);
             setPluginPageSelection(null);
+            setPluginManagerOpen(false);
+            setMemoryManagerOpen(false);
           }}
           error={error}
           onDismissError={() => setError('')}
         >
-          {pluginInfo?.pages.length ? (
+          {pluginInfo ? (
             <nav className="plugin-settings-pages" aria-label="Plugin settings pages">
               <button
                 type="button"
-                className={`button ${pluginPageSelection ? 'button-quiet' : 'button-soft'}`}
-                onClick={() => setPluginPageSelection(null)}
+                className={`button ${!pluginPageSelection && !pluginManagerOpen && !memoryManagerOpen ? 'button-soft' : 'button-quiet'}`}
+                onClick={() => {
+                  setPluginPageSelection(null);
+                  setPluginManagerOpen(false);
+                  setMemoryManagerOpen(false);
+                }}
               >
                 Default
               </button>
-              {pluginInfo.pages.map((page) => (
+              <button
+                type="button"
+                className={`button ${pluginManagerOpen ? 'button-soft' : 'button-quiet'}`}
+                onClick={() => {
+                  setPluginPageSelection(null);
+                  setPluginManagerOpen(true);
+                  setMemoryManagerOpen(false);
+                }}
+              >
+                Plugins
+              </button>
+              {memoryPages.length > 0 ? (
                 <button
                   type="button"
-                  className={`button ${pluginPageSelection?.pluginId === page.pluginId && pluginPageSelection.pageId === page.id ? 'button-soft' : 'button-quiet'}`}
-                  key={`${page.pluginId}:${page.id}`}
-                  onClick={() => setPluginPageSelection({ pluginId: page.pluginId, pageId: page.id })}
-                  title={page.description}
+                  className={`button ${memoryManagerOpen ? 'button-soft' : 'button-quiet'}`}
+                  onClick={() => {
+                    setPluginManagerOpen(false);
+                    setPluginPageSelection(null);
+                    setMemoryManagerOpen(true);
+                  }}
                 >
-                  {page.label}
+                  Memory
                 </button>
-              ))}
+              ) : null}
+              {pluginInfo.pages
+                .filter((page) => page.pluginId !== 'pico.project-context' && page.pluginId !== 'pico.global-memory')
+                .map((page) => (
+                  <button
+                    type="button"
+                    className={`button ${!pluginManagerOpen && !memoryManagerOpen && pluginPageSelection?.pluginId === page.pluginId && pluginPageSelection.pageId === page.id ? 'button-soft' : 'button-quiet'}`}
+                    key={`${page.pluginId}:${page.id}`}
+                    onClick={() => {
+                      setPluginManagerOpen(false);
+                      setMemoryManagerOpen(false);
+                      setPluginPageSelection({ pluginId: page.pluginId, pageId: page.id });
+                    }}
+                    title={page.description}
+                  >
+                    {page.label}
+                  </button>
+                ))}
             </nav>
           ) : null}
-          {pluginPageSelection ? (
+          {pluginManagerOpen ? (
+            <section className="plugin-settings-page plugin-manager" aria-label="Plugin management">
+              <p className="form-intro">
+                Enable, disable, or reload plugins while Pico is running. Plugin state is preserved.
+              </p>
+              <div className="plugin-manager-list">
+                {pluginInfo?.catalog.map((plugin) => (
+                  <article className="plugin-manager-card" key={plugin.id}>
+                    <div className="plugin-manager-copy">
+                      <div className="plugin-manager-title-row">
+                        <h3>{plugin.name}</h3>
+                        <span className={`plugin-manager-status ${plugin.loaded ? 'is-loaded' : ''}`}>
+                          {plugin.loaded ? 'Loaded' : plugin.enabled ? 'Load failed' : 'Disabled'}
+                        </span>
+                      </div>
+                      <p>
+                        {plugin.id} · v{plugin.version} · {plugin.source}
+                      </p>
+                      {plugin.error ? <p className="plugin-manager-error">{plugin.error}</p> : null}
+                      {plugin.required ? <p className="field-note">Required by Pico</p> : null}
+                    </div>
+                    <div className="plugin-manager-actions">
+                      <button
+                        type="button"
+                        className={`button ${plugin.enabled ? 'button-quiet' : 'button-soft'}`}
+                        disabled={plugin.required || pluginActionId !== null}
+                        onClick={() => void updatePluginEnabled(plugin.id, !plugin.enabled)}
+                      >
+                        {pluginActionId === plugin.id ? 'Working…' : plugin.enabled ? 'Disable' : 'Enable'}
+                      </button>
+                      <button
+                        type="button"
+                        className="button button-quiet"
+                        disabled={!plugin.enabled || pluginActionId !== null}
+                        onClick={() => void reloadPlugin(plugin.id)}
+                        title={
+                          plugin.hotReloadable
+                            ? 'Reload this plugin entry without restarting Pico'
+                            : 'Reactivate the built-in plugin'
+                        }
+                      >
+                        Reload
+                      </button>
+                    </div>
+                  </article>
+                ))}
+                {pluginInfo?.catalog.length === 0 ? <p className="field-note">No runtime plugins were found.</p> : null}
+              </div>
+            </section>
+          ) : memoryManagerOpen ? (
+            <section className="plugin-settings-page memory-settings-page" aria-label="Memory management">
+              <div className="memory-scope-tabs" role="tablist" aria-label="Memory scope">
+                {(['project', 'global'] as const).map((scope) => {
+                  const page = memoryPages.find(
+                    (item) => item.pluginId === (scope === 'project' ? 'pico.project-context' : 'pico.global-memory'),
+                  );
+                  return page ? (
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={selectedMemoryPage?.pluginId === page.pluginId}
+                      className={`button ${selectedMemoryPage?.pluginId === page.pluginId ? 'button-soft' : 'button-quiet'}`}
+                      key={page.pluginId}
+                      onClick={() => setMemoryPageSelection(scope)}
+                    >
+                      {scope === 'project' ? 'Project' : 'Global'}
+                    </button>
+                  ) : null;
+                })}
+              </div>
+              {selectedMemoryPage && pluginUiContext ? (
+                <PluginWebView
+                  key={`${selectedMemoryPage.pluginId}:${selectedMemoryPage.entry}:${selectedMemoryPage.id}`}
+                  pluginId={selectedMemoryPage.pluginId}
+                  entry={selectedMemoryPage.entry}
+                  viewType="page"
+                  viewId={selectedMemoryPage.id}
+                  {...pluginUiContext}
+                  isRegisteredPage={isRegisteredPluginPage}
+                  runCommand={runPluginCommand}
+                />
+              ) : (
+                <p className="field-note">Enable the relevant Memory plugin in Plugins to manage this scope.</p>
+              )}
+            </section>
+          ) : pluginPageSelection ? (
             <section className="plugin-settings-page">
               {selectedPluginPage && pluginUiContext ? (
                 <PluginWebView
@@ -2847,6 +3096,7 @@ function MessageBubble({
         : 'Agent';
   return (
     <div
+      id={`canonical-message-${record.seq}`}
       className={`user-message ${incoming ? 'incoming-message' : ''} ${
         modelExecutionGroups.length > 0 ? 'has-model-execution-groups' : ''
       }`}
@@ -2948,7 +3198,9 @@ function ModelExecutionBranchGroup({
           >
             <ChevronLeft size={14} aria-hidden="true" />
           </button>
-          <span>{currentIndex + 1}/{group.variants.length}</span>
+          <span>
+            {currentIndex + 1}/{group.variants.length}
+          </span>
           <button
             type="button"
             aria-label="Next generation attempt"
@@ -2973,7 +3225,11 @@ function ModelExecutionBranchGroup({
           <span>{retryingExecutionId === variant.execution.id ? 'Retrying…' : 'Retry'}</span>
         </button>
       ) : null}
-      {retryError ? <span className="model-retry-error" role="alert">{retryError}</span> : null}
+      {retryError ? (
+        <span className="model-retry-error" role="alert">
+          {retryError}
+        </span>
+      ) : null}
     </div>
   );
 
@@ -3185,11 +3441,7 @@ function ModelExecutionRecord({
           <p className="projection-state">This Model Step has not committed an assistant message.</p>
         )}
         <div className="model-input-attempt-controls">
-          <ModelInputDisclosure
-            threadId={threadId}
-            executionId={execution.id}
-            executionStatus={execution.status}
-          />
+          <ModelInputDisclosure threadId={threadId} executionId={execution.id} executionStatus={execution.status} />
           {attemptActions}
         </div>
       </div>

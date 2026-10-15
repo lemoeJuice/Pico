@@ -22,6 +22,20 @@ export interface ProjectionInput {
   turns: ModelPrompt['turns'];
   tools: ToolDefinition[];
   toolSources?: Record<string, 'runtime' | 'executor'>;
+  provenance?: ProjectionProvenance[];
+}
+
+export interface ProjectionProvenance {
+  id: string;
+  sourcePluginId: string;
+  label: string;
+  kind: 'canonical' | 'plugin' | 'rolling_segment';
+  disposition: 'raw' | 'summary' | 'omitted';
+  canonicalStartSeq?: number;
+  canonicalEndSeq?: number;
+  summaryVersion?: string;
+  turnIndex?: number;
+  reason?: string;
 }
 
 export interface ModelStageInput {
@@ -30,7 +44,8 @@ export interface ModelStageInput {
   prompt: ModelPrompt;
   signal: AbortSignal;
   onText(delta: string): void;
-  recordModelInput(prompt: ModelPrompt, provider: ModelProvider): void;
+  recordModelInput(prompt: ModelPrompt, provider: ModelProvider, provenance?: ProjectionProvenance[]): void;
+  projectionProvenance?: ProjectionProvenance[];
   requestTrace?: ModelRequestTrace;
 }
 

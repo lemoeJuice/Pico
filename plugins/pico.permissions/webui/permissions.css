@@ -67,6 +67,42 @@ button:disabled {
   display: grid;
   gap: 6px;
 }
+.reviewer-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #dce5de;
+  border-radius: 9px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, Canvas 94%, #7ea18a);
+}
+.reviewer-toggle span {
+  display: grid;
+  gap: 2px;
+}
+.reviewer-toggle strong {
+  font-size: 12px;
+}
+.reviewer-toggle small,
+.review-result small {
+  color: #68766d;
+  font-size: 11px;
+}
+.reviewer-toggle input {
+  accent-color: #587a60;
+}
+.review-result {
+  display: grid;
+  gap: 3px;
+  border-left: 3px solid #d3a14d;
+  padding: 6px 8px;
+  background: color-mix(in srgb, Canvas 94%, #fff0ca);
+  font-size: 12px;
+}
+.review-result span {
+  overflow-wrap: anywhere;
+}
 .tool-list-disclosure {
   min-width: 0;
 }

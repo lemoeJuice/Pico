@@ -53,9 +53,9 @@ async function startRemoteSchemaServer() {
     const path = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
     if (request.method === 'GET' && path === '/api/info') {
       return json(response, {
-        protocolVersion: 1,
+        protocolVersion: 2,
         name: 'Custom schema endpoint',
-        kind: 'host',
+        kind: 'executor',
         workspaceRoot: '/remote-workspaces',
         tools: [remoteTool],
       });
@@ -145,7 +145,7 @@ describe('workflow plugin boundaries', () => {
       await env.runtime.submit(thread.id, 'replacement-plugin-message', 'Check plugin replacement.');
       await env.runtime.drain();
       expect(model.prompts[0]?.system).not.toContain(legacyContext);
-      expect(model.prompts[0]?.system).not.toContain('User-maintained Project Context');
+      expect(model.prompts[0]?.system).not.toContain('Relevant Project Memory');
     } finally {
       await env.cleanup();
     }

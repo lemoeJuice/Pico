@@ -1,0 +1,162 @@
+:root {
+  color-scheme: light;
+  font:
+    13px/1.45 Inter,
+    ui-sans-serif,
+    system-ui,
+    sans-serif;
+  color: #272a31;
+  background: #fff;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  padding: 12px;
+}
+.panel {
+  display: grid;
+  gap: 12px;
+}
+.top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.title {
+  font-size: 14px;
+  font-weight: 650;
+}
+.muted,
+.source {
+  color: #747986;
+  font-size: 11px;
+}
+.search,
+input,
+textarea,
+select {
+  width: 100%;
+  border: 1px solid #d9dbe1;
+  border-radius: 7px;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+  padding: 8px 9px;
+}
+.search {
+  padding-left: 30px;
+}
+.search-wrap {
+  position: relative;
+}
+.search-wrap:before {
+  content: '⌕';
+  position: absolute;
+  left: 10px;
+  top: 5px;
+  color: #767b85;
+  font-size: 17px;
+}
+.group {
+  display: grid;
+  gap: 7px;
+}
+.group h3 {
+  margin: 4px 0 0;
+  color: #727783;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.card {
+  border: 1px solid #e1e3e8;
+  border-radius: 9px;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+.card-head,
+.card-actions,
+.form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+}
+.badge {
+  border-radius: 999px;
+  background: #f0f1f4;
+  padding: 2px 7px;
+  font-size: 10px;
+  color: #525761;
+}
+.text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.source {
+  overflow-wrap: anywhere;
+}
+.source-link {
+  margin-left: 5px;
+  border: 0;
+  padding: 0;
+  color: #315aa6;
+  font-size: 10px;
+  text-decoration: underline;
+}
+button {
+  border: 1px solid #d9dbe1;
+  border-radius: 7px;
+  background: #fff;
+  color: inherit;
+  padding: 6px 9px;
+  font: inherit;
+  cursor: pointer;
+}
+button:hover {
+  background: #f6f7f9;
+}
+button.primary {
+  border-color: #31343d;
+  background: #31343d;
+  color: #fff;
+}
+button.danger {
+  color: #a33d3d;
+}
+button.icon {
+  min-width: 30px;
+  padding: 4px 7px;
+}
+.form {
+  display: grid;
+  gap: 8px;
+}
+.form label {
+  display: grid;
+  gap: 4px;
+  color: #626773;
+  font-size: 11px;
+}
+textarea {
+  min-height: 82px;
+  resize: vertical;
+}
+.empty {
+  border: 1px dashed #d7d9df;
+  border-radius: 9px;
+  color: #767b85;
+  padding: 18px 12px;
+  text-align: center;
+}
+.error {
+  color: #aa3838;
+  background: #fff2f2;
+  border-radius: 7px;
+  padding: 8px;
+}

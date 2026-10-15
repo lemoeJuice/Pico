@@ -3,6 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AssistantPayload } from '../src/core/types.js';
 import { PicoStore } from '../src/core/store.js';
+import { collaborationPlugin } from '../src/plugins/collaboration.js';
+import { permissionPlugin } from '../src/plugins/permissions.js';
+import { projectContextPlugin } from '../src/plugins/project-context.js';
 import type { ModelAdapter, ModelPrompt, ModelResponse } from '../src/runtime/model.js';
 import { PicoRuntime, type RuntimeOptions } from '../src/runtime/runtime.js';
 
@@ -52,8 +55,17 @@ export async function setupRuntime(model: ModelAdapter, options: RuntimeOptions 
   const workspace = join(directory, 'workspace');
   await import('node:fs/promises').then(({ mkdir }) => mkdir(workspace));
   const store = new PicoStore(':memory:');
+  const providedPlugins = options.plugins ?? [];
+  const fixturePlugins = options.pluginDirectory
+    ? []
+    : [permissionPlugin, projectContextPlugin, collaborationPlugin].filter(
+        (plugin) =>
+          !providedPlugins.some((provided) => provided.id === plugin.id) &&
+          !options.disabledBuiltinPlugins?.includes(plugin.id),
+      );
   const runtime = new PicoRuntime(store, {
     ...options,
+    plugins: [...fixturePlugins, ...providedPlugins],
     model,
     pluginDirectory: options.pluginDirectory ?? join(directory, 'empty-plugins'),
   });

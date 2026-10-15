@@ -1,5 +1,6 @@
 import type { ExecutorPluginContext } from '../executor/plugin-host.js';
 import { unavailablePluginServices, type PluginServices } from './services.js';
+import { existsSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { join, resolve } from 'node:path';
@@ -38,6 +39,7 @@ export interface PicoPlugin {
   id: string;
   name: string;
   version: string;
+  pipelinePriority?: Partial<Record<PipelineStage, number>>;
   activate?(context: PluginContext): Promise<void> | void;
   activateExecutor?(context: ExecutorPluginContext): Promise<void> | void;
   deactivate?(): Promise<void> | void;
@@ -67,14 +69,25 @@ interface RegisteredPluginPage extends PluginPageContribution {
   pluginId: string;
 }
 
-export interface PluginContext extends PluginServices {
+export interface PluginContext extends Omit<PluginServices, 'models' | 'continuations'> {
   tools: {
     register(
       definition: ToolDefinition,
       execute: (args: Record<string, unknown>, context: ToolContext) => Promise<unknown> | unknown,
     ): void;
   };
-  models: { registerProvider(provider: ModelProviderContribution): void };
+  models: {
+    complete: (
+      request: Parameters<PluginServices['models']['complete']>[1],
+    ) => ReturnType<PluginServices['models']['complete']>;
+    history: PluginServices['models']['history'];
+    inputs: PluginServices['models']['inputs'];
+    subscribe: PluginServices['models']['subscribe'];
+    registerProvider(provider: ModelProviderContribution): void;
+  };
+  continuations: {
+    register(hasPendingWork: (threadId: string) => boolean): () => void;
+  };
   pipelines: {
     use<I, O>(stage: PipelineStage, interceptor: Interceptor<I, O>): void;
   };
@@ -109,6 +122,25 @@ export interface LoadedPlugin {
   name: string;
   version: string;
   source: string;
+}
+
+export interface PluginCatalogEntry extends LoadedPlugin {
+  enabled: boolean;
+  loaded: boolean;
+  hotReloadable: boolean;
+  required: boolean;
+  error?: string;
+}
+
+interface PluginCandidate {
+  plugin: PicoPlugin;
+  source: string;
+  filename?: string;
+}
+
+export interface PluginHostOptions {
+  canReload?: () => { allowed: boolean; reason?: string };
+  onChange?: (pluginId: string) => void;
 }
 
 export class CommandRegistry {
@@ -158,7 +190,16 @@ export class PluginHost {
   private readonly routes: RegisteredPluginHttpRoute[] = [];
   private readonly activePlugins: PicoPlugin[] = [];
   private readonly subscriptions = new Map<string, Array<() => void>>();
+  private readonly continuations = new Map<string, (threadId: string) => boolean>();
   private readonly loadErrors: string[] = [];
+  private readonly candidates = new Map<string, PluginCandidate>();
+  private readonly candidateErrors = new Map<string, { source: string; error: string }>();
+  private readonly enablement = new Map<string, boolean>();
+  private readonly lifecycleQueues = new Map<string, Promise<void>>();
+  private readonly requiredPlugins = new Set(['pico.workspace', 'pico.commands']);
+  private readonly forcedDisabled = new Set<string>();
+  private shutdownStarted = false;
+  private importSequence = 0;
 
   constructor(
     private readonly store: PicoStore,
@@ -167,10 +208,180 @@ export class PluginHost {
     readonly commands: CommandRegistry,
     private readonly pluginDirectory = resolve(process.env.PICO_PLUGIN_DIR ?? join(process.cwd(), 'plugins')),
     private readonly services: PluginServices = unavailablePluginServices,
+    private readonly options: PluginHostOptions = {},
   ) {}
 
   list(): LoadedPlugin[] {
     return [...this.loaded];
+  }
+
+  catalog(): PluginCatalogEntry[] {
+    const entries = [...this.candidates.entries()].map(([id, candidate]) => {
+      const error = this.candidateErrors.get(id)?.error;
+      return {
+        id,
+        name: candidate.plugin.name,
+        version: candidate.plugin.version,
+        source: candidate.source,
+        enabled: this.enablement.get(id) ?? false,
+        loaded: this.loaded.some((plugin) => plugin.id === id),
+        hotReloadable: Boolean(candidate.filename),
+        required: this.requiredPlugins.has(id),
+        ...(error ? { error } : {}),
+      };
+    });
+    for (const [id, diagnostic] of this.candidateErrors) {
+      if (this.candidates.has(id)) continue;
+      entries.push({
+        id,
+        name: id,
+        version: 'unknown',
+        source: diagnostic.source,
+        enabled: false,
+        loaded: false,
+        hotReloadable: true,
+        required: this.requiredPlugins.has(id),
+        error: diagnostic.error,
+      });
+    }
+    return entries.sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  async setEnabled(pluginId: string, enabled: boolean): Promise<PluginCatalogEntry[]> {
+    return this.withLifecycleLock(pluginId, () => this.applyEnabled(pluginId, enabled));
+  }
+
+  private async applyEnabled(pluginId: string, enabled: boolean): Promise<PluginCatalogEntry[]> {
+    if (this.shutdownStarted) throw new Error('Plugin host is shutting down.');
+    const candidate = this.candidates.get(pluginId);
+    if (!candidate) throw new Error(`Plugin ${pluginId} is not installed.`);
+    if (!enabled && this.requiredPlugins.has(pluginId)) throw new Error(`${pluginId} is required by Pico.`);
+    if (enabled && this.forcedDisabled.has(pluginId)) throw new Error(`${pluginId} is disabled by Runtime policy.`);
+    if (this.enablement.get(pluginId) === enabled) return this.catalog();
+    this.assertLifecycleSafe();
+    if (!enabled) {
+      await this.deactivatePlugin(pluginId);
+      this.enablement.set(pluginId, false);
+      this.persistEnablement();
+      this.options.onChange?.(pluginId);
+      return this.catalog();
+    }
+    try {
+      const plugin = candidate.filename ? await this.importPlugin(candidate.filename) : candidate.plugin;
+      candidate.plugin = plugin;
+      await this.activate(plugin, candidate.source);
+      this.enablement.set(pluginId, true);
+      this.candidateErrors.delete(pluginId);
+      this.persistEnablement();
+      this.options.onChange?.(pluginId);
+      return this.catalog();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.candidateErrors.set(pluginId, { source: candidate.source, error: message });
+      this.loadErrors.push(`${pluginId}: ${message}`);
+      throw error;
+    }
+  }
+
+  async reload(pluginId: string): Promise<PluginCatalogEntry[]> {
+    return this.withLifecycleLock(pluginId, () => this.reloadUnlocked(pluginId));
+  }
+
+  private async reloadUnlocked(pluginId: string): Promise<PluginCatalogEntry[]> {
+    if (this.shutdownStarted) throw new Error('Plugin host is shutting down.');
+    const candidate = this.candidates.get(pluginId);
+    if (!candidate) throw new Error(`Plugin ${pluginId} is not installed.`);
+    if (!this.enablement.get(pluginId)) throw new Error(`${pluginId} is disabled.`);
+    this.assertLifecycleSafe();
+    const previous = candidate.plugin;
+    await this.deactivatePlugin(pluginId);
+    try {
+      candidate.plugin = candidate.filename ? await this.importPlugin(candidate.filename) : previous;
+      await this.activate(candidate.plugin, candidate.source);
+      this.candidateErrors.delete(pluginId);
+      this.options.onChange?.(pluginId);
+      return this.catalog();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.candidateErrors.set(pluginId, { source: candidate.source, error: message });
+      this.loadErrors.push(`${pluginId} reload: ${message}`);
+      candidate.plugin = previous;
+      try {
+        await this.activate(previous, candidate.source);
+      } catch (restoreError) {
+        const restoreMessage = restoreError instanceof Error ? restoreError.message : String(restoreError);
+        this.loadErrors.push(`${pluginId} restore after failed reload: ${restoreMessage}`);
+        this.candidateErrors.set(pluginId, {
+          source: candidate.source,
+          error: `${message}; restore failed: ${restoreMessage}`,
+        });
+      }
+      this.options.onChange?.(pluginId);
+      throw new Error(
+        `Plugin reload failed; the previous version ${this.loaded.some((item) => item.id === pluginId) ? 'was restored' : 'could not be restored'}: ${message}`,
+        { cause: error },
+      );
+    }
+  }
+
+  private assertLifecycleSafe(): void {
+    const result = this.options.canReload?.();
+    if (result && !result.allowed)
+      throw new Error(result.reason ?? 'Plugins cannot be changed while Runtime executions are active.');
+  }
+
+  private async withLifecycleLock<T>(pluginId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.lifecycleQueues.get(pluginId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolvePromise) => {
+      release = resolvePromise;
+    });
+    this.lifecycleQueues.set(pluginId, current);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.lifecycleQueues.get(pluginId) === current) this.lifecycleQueues.delete(pluginId);
+    }
+  }
+
+  private persistEnablement(): void {
+    this.store.setSetting('plugin-enablement', Object.fromEntries(this.enablement));
+  }
+
+  private async deactivatePlugin(pluginId: string): Promise<void> {
+    const index = this.activePlugins.findIndex((plugin) => plugin.id === pluginId);
+    const plugin = index < 0 ? undefined : this.activePlugins[index];
+    if (!plugin) {
+      this.loaded.splice(0, this.loaded.length, ...this.loaded.filter((item) => item.id !== pluginId));
+      return;
+    }
+    this.activePlugins.splice(index, 1);
+    this.loaded.splice(0, this.loaded.length, ...this.loaded.filter((item) => item.id !== pluginId));
+    for (const unsubscribe of this.subscriptions.get(pluginId) ?? []) unsubscribe();
+    this.subscriptions.delete(pluginId);
+    this.continuations.delete(pluginId);
+    this.tools.removeOwner(pluginId);
+    this.pipelines.removePlugin(pluginId);
+    this.commands.removeOwner(pluginId);
+    this.contributions.splice(
+      0,
+      this.contributions.length,
+      ...this.contributions.filter((item) => item.pluginId !== pluginId),
+    );
+    this.pages.splice(0, this.pages.length, ...this.pages.filter((item) => item.pluginId !== pluginId));
+    this.providers.splice(
+      1,
+      this.providers.length - 1,
+      ...this.providers.slice(1).filter((item) => item.pluginId !== pluginId),
+    );
+    this.routes.splice(0, this.routes.length, ...this.routes.filter((item) => item.pluginId !== pluginId));
+    try {
+      await plugin.deactivate?.();
+    } catch (error) {
+      this.loadErrors.push(`${pluginId} deactivate: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   uiContributions(): UiContribution[] {
@@ -218,23 +429,36 @@ export class PluginHost {
     return [...this.loadErrors];
   }
 
-  async shutdown(): Promise<void> {
-    for (const plugin of this.activePlugins.splice(0).reverse()) {
-      for (const unsubscribe of this.subscriptions.get(plugin.id) ?? []) unsubscribe();
-      this.subscriptions.delete(plugin.id);
+  hasPendingPluginWork(threadId: string): boolean {
+    for (const [pluginId, hasPendingWork] of this.continuations) {
       try {
-        await plugin.deactivate?.();
+        if (hasPendingWork(threadId)) return true;
       } catch (error) {
-        this.loadErrors.push(`${plugin.id} shutdown: ${error instanceof Error ? error.message : String(error)}`);
+        this.loadErrors.push(`${pluginId} continuation: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
+    return false;
   }
 
-  async load(plugins: PicoPlugin[] = []): Promise<LoadedPlugin[]> {
-    const candidates: Array<{ plugin: PicoPlugin; source: string }> = plugins.map((plugin) => ({
-      plugin,
-      source: 'built-in',
-    }));
+  registerContinuation(pluginId: string, hasPendingWork: (threadId: string) => boolean): () => void {
+    if (typeof hasPendingWork !== 'function') throw new Error('Plugin continuation must be a function.');
+    if (this.continuations.has(pluginId)) throw new Error(`Plugin ${pluginId} already registered a continuation.`);
+    this.continuations.set(pluginId, hasPendingWork);
+    return () => {
+      if (this.continuations.get(pluginId) === hasPendingWork) this.continuations.delete(pluginId);
+    };
+  }
+
+  async shutdown(): Promise<void> {
+    this.shutdownStarted = true;
+    for (const { plugin } of [...this.candidates.values()].reverse())
+      await this.withLifecycleLock(plugin.id, () => this.deactivatePlugin(plugin.id));
+  }
+
+  async load(plugins: PicoPlugin[] = [], defaultDisabled: string[] = []): Promise<LoadedPlugin[]> {
+    this.forcedDisabled.clear();
+    for (const id of defaultDisabled) this.forcedDisabled.add(id);
+    const candidates: PluginCandidate[] = plugins.map((plugin) => ({ plugin, source: 'built-in' }));
     const files: string[] = [];
     try {
       files.push(...(await readdir(this.pluginDirectory)).filter((file) => file.endsWith('.mjs')).sort());
@@ -243,24 +467,56 @@ export class PluginHost {
     }
     for (const filename of files) {
       try {
-        const moduleUrl = pathToFileURL(join(this.pluginDirectory, filename));
-        moduleUrl.searchParams.set('loadedAt', String(Date.now()));
-        const imported = (await import(moduleUrl.href)) as { default?: PicoPlugin; plugin?: PicoPlugin };
-        const plugin = imported.default ?? imported.plugin;
-        if (!plugin) throw new Error(`Plugin ${filename} must export a default PicoPlugin`);
-        candidates.push({ plugin, source: filename });
+        const plugin = await this.importPlugin(filename);
+        candidates.push({ plugin, source: filename, filename });
       } catch (error) {
-        this.loadErrors.push(`${filename}: ${error instanceof Error ? error.message : String(error)}`);
+        const message = error instanceof Error ? error.message : String(error);
+        this.loadErrors.push(`${filename}: ${message}`);
+        const id = filename.replace(/\.mjs$/i, '');
+        if (/^[a-z0-9][a-z0-9._-]*$/.test(id)) this.candidateErrors.set(id, { source: filename, error: message });
       }
     }
-    for (const { plugin, source } of candidates) {
+    const persisted = this.store.getSetting<unknown>('plugin-enablement', {});
+    const saved =
+      persisted && typeof persisted === 'object' && !Array.isArray(persisted)
+        ? (persisted as Record<string, unknown>)
+        : {};
+    for (const { plugin, source, filename } of candidates) {
+      if (this.candidates.has(plugin.id)) {
+        this.loadErrors.push(`${plugin.id}: Duplicate plugin ID from ${source}`);
+        continue;
+      }
+      this.candidates.set(plugin.id, { plugin, source, ...(filename ? { filename } : {}) });
+      const savedValue = saved[plugin.id];
+      const enabled = this.forcedDisabled.has(plugin.id) ? false : typeof savedValue === 'boolean' ? savedValue : true;
+      this.enablement.set(plugin.id, enabled);
+    }
+    for (const [pluginId, candidate] of this.candidates) {
+      if (!this.enablement.get(pluginId)) continue;
       try {
-        await this.activate(plugin, source);
+        await this.activate(candidate.plugin, candidate.source);
       } catch (error) {
-        this.loadErrors.push(`${plugin.id}: ${error instanceof Error ? error.message : String(error)}`);
+        const message = error instanceof Error ? error.message : String(error);
+        this.loadErrors.push(`${pluginId}: ${message}`);
+        this.candidateErrors.set(pluginId, { source: candidate.source, error: message });
       }
     }
+    this.options.onChange?.('pico.plugin-manager');
     return this.list();
+  }
+
+  private async importPlugin(filename: string): Promise<PicoPlugin> {
+    const packageRuntime = join(this.pluginDirectory, filename.replace(/\.mjs$/i, ''), 'runtime.mjs');
+    const moduleUrl = pathToFileURL(existsSync(packageRuntime) ? packageRuntime : join(this.pluginDirectory, filename));
+    moduleUrl.searchParams.set('loadedAt', `${Date.now()}-${++this.importSequence}`);
+    const imported = (await import(moduleUrl.href)) as {
+      default?: PicoPlugin;
+      plugin?: PicoPlugin;
+      createChatGptPlanPlugin?: () => PicoPlugin;
+    };
+    const plugin = imported.default ?? imported.plugin ?? imported.createChatGptPlanPlugin?.();
+    if (!plugin) throw new Error(`Plugin ${filename} must export a default PicoPlugin`);
+    return plugin;
   }
 
   private async activate(plugin: PicoPlugin, source: string): Promise<void> {
@@ -285,7 +541,14 @@ export class PluginHost {
     };
     const subscriptions: Array<() => void> = [];
     const context: PluginContext = {
-      threads: this.services.threads,
+      threads: {
+        ...this.services.threads,
+        create: (projectId, executorKind, title, options = {}) =>
+          this.services.threads.create(projectId, executorKind, title, {
+            ...options,
+            ...(options.idempotencyKey ? { idempotencyKey: `${plugin.id}:${options.idempotencyKey}` } : {}),
+          }),
+      },
       executions: {
         ...this.services.executions,
         subscribe: (listener) => {
@@ -304,9 +567,18 @@ export class PluginHost {
           }),
       },
       pipelines: {
-        use: (stage, interceptor) => this.pipelines.use(stage, plugin.id, interceptor),
+        use: (stage, interceptor) =>
+          this.pipelines.use(stage, plugin.id, interceptor, plugin.pipelinePriority?.[stage] ?? 0),
       },
       models: {
+        complete: (request) => this.services.models.complete(plugin.id, request),
+        history: this.services.models.history,
+        inputs: this.services.models.inputs,
+        subscribe: (listener) => {
+          const unsubscribe = this.services.models.subscribe(listener);
+          subscriptions.push(unsubscribe);
+          return unsubscribe;
+        },
         registerProvider: (provider) => {
           if (!/^[a-z0-9][a-z0-9._-]*$/.test(provider.id)) throw new Error(`Invalid model provider ID: ${provider.id}`);
           if (!provider.label.trim()) throw new Error('Model provider label is required.');
@@ -314,6 +586,13 @@ export class PluginHost {
             throw new Error(`Model provider ${provider.id} is already registered`);
           }
           this.providers.push({ ...provider, pluginId: plugin.id });
+        },
+      },
+      continuations: {
+        register: (hasPendingWork) => {
+          const remove = this.registerContinuation(plugin.id, hasPendingWork);
+          subscriptions.push(remove);
+          return remove;
         },
       },
       commands: { register: (command) => this.commands.register(plugin.id, command) },
@@ -419,6 +698,7 @@ export class PluginHost {
       this.pages.splice(pagesStart);
       this.providers.splice(providersStart);
       this.routes.splice(routesStart);
+      this.continuations.delete(plugin.id);
       await plugin.deactivate?.();
       throw error;
     }

@@ -35,6 +35,8 @@ type PluginWebViewProps = {
   settings: PublicSettings;
   api<T>(path: string, init?: PluginApiInit): Promise<T>;
   updateModelSettings(update: PluginModelSettingsUpdate): Promise<void>;
+  openThread(threadId: string): Promise<void>;
+  openMessage(seq: number): Promise<void>;
   runCommand(pluginId: string, threadId: string | null, command: string): Promise<unknown>;
   openPage(pluginId: string, pageId: string): void;
   isRegisteredPage(pluginId: string, pageId: string): boolean;
@@ -290,6 +292,21 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
         throw new Error('A plugin UI may only open its own registered pages.');
       }
       latest.openPage(message.pluginId, message.pageId);
+      return null;
+    }
+    if (message.action === 'open-message') {
+      if (!Number.isSafeInteger(message.seq) || message.seq < 0 || !latest.context.thread) {
+        throw new Error('A canonical message in the active Thread must be selected.');
+      }
+      await latest.openMessage(message.seq);
+      return null;
+    }
+    if (message.action === 'open-thread') {
+      const currentThread = latest.context.thread;
+      if (!currentThread || message.threadId.length > 200) {
+        throw new Error('A Thread in the active Project must be selected.');
+      }
+      await latest.openThread(message.threadId);
       return null;
     }
     if (message.message.length > 2000) throw new Error('Plugin UI messages are too long.');

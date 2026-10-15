@@ -143,7 +143,7 @@ export class HostExecutor implements ExecutorAdapter {
     const directory = dataDirectory();
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const versionPath = `${this.agentPath}.version`;
-    let installedVersion = 'unknown';
+    let installedVersion: string;
     if (!existsSync(this.agentPath)) {
       installedVersion = currentExecutorVersion();
       await writeFile(this.agentPath, await currentExecutorBundle(), { mode: 0o700 });

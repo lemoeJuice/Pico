@@ -66,6 +66,7 @@ export interface ModelAdapter {
     settings: ModelSettings,
     signal: AbortSignal,
     onText: (delta: string) => void,
+    requestTrace?: ModelRequestTrace,
   ): Promise<ModelResponse>;
 }
 
@@ -133,6 +134,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
     settings: ModelSettings,
     signal: AbortSignal,
     onText: (delta: string) => void,
+    requestTrace?: ModelRequestTrace,
   ): Promise<ModelResponse> {
     if (!prompt.model.trim()) throw new Error('Choose a model in Settings before sending a message.');
     const headers: Record<string, string> = {
@@ -140,7 +142,15 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
       accept: 'text/event-stream, application/json',
     };
     if (settings.apiKey.trim()) headers.authorization = `Bearer ${settings.apiKey.trim()}`;
-    const response = await fetch(endpointFor(settings.baseUrl), {
+    const endpoint = endpointFor(settings.baseUrl);
+    const startedAt = Date.now();
+    const providerAttemptId = requestTrace?.started({
+      provider: settings.provider,
+      protocol: 'chat-completions',
+      endpoint,
+      attempt: 1,
+    });
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers,
       signal,
@@ -157,6 +167,13 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
         parallel_tool_calls: true,
       }),
     });
+    if (providerAttemptId) {
+      requestTrace?.response(providerAttemptId, {
+        status: response.status,
+        contentType: response.headers.get('content-type'),
+        ...(response.headers.get('x-request-id') ? { providerRequestId: response.headers.get('x-request-id')! } : {}),
+      });
+    }
     if (!response.ok) {
       const body = await response.text().catch(() => '');
       const excerpt = body ? `: ${body.slice(0, 1200)}` : '';
@@ -172,7 +189,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
       const content = typeof message.content === 'string' ? message.content : '';
       if (content) onText(content);
       const calls = Array.isArray(message.tool_calls) ? (message.tool_calls as Array<Record<string, unknown>>) : [];
-      return {
+      const result: ModelResponse = {
         content,
         toolCalls: calls.map((item, index) => {
           const fn = item.function as Record<string, unknown> | undefined;
@@ -187,6 +204,16 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
         model: typeof value.model === 'string' ? value.model : prompt.model,
         finishReason: typeof choices?.[0]?.finish_reason === 'string' ? (choices[0]!.finish_reason as string) : null,
       };
+      if (providerAttemptId) {
+        requestTrace?.settled(providerAttemptId, {
+          outcome: 'completed',
+          durationMs: Date.now() - startedAt,
+          toolCallCount: result.toolCalls.length,
+          finishReason: result.finishReason,
+          usage: result.usage,
+        });
+      }
+      return result;
     }
 
     const reader = response.body.getReader();
@@ -266,6 +293,16 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
         name: call.name,
         arguments: parseToolArguments(call.arguments, call.name),
       }));
-    return { content, toolCalls, usage, model: actualModel, finishReason };
+    const result = { content, toolCalls, usage, model: actualModel, finishReason };
+    if (providerAttemptId) {
+      requestTrace?.settled(providerAttemptId, {
+        outcome: 'completed',
+        durationMs: Date.now() - startedAt,
+        toolCallCount: result.toolCalls.length,
+        finishReason: result.finishReason,
+        usage: result.usage,
+      });
+    }
+    return result;
   }
 }

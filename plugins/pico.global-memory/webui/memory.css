@@ -1,0 +1,141 @@
+:root {
+  color-scheme: light;
+  font:
+    13px/1.45 'DM Sans',
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+  color: #28332e;
+  background: #fbfcfa;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  padding: 12px;
+}
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+button {
+  border: 1px solid #d9dfe0;
+  border-radius: 7px;
+  background: #fbfcfa;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+button:hover {
+  background: #f0f4ef;
+}
+button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+input,
+textarea,
+select {
+  width: 100%;
+  border: 1px solid #d9dfe0;
+  border-radius: 7px;
+  background: #fff;
+  padding: 8px 9px;
+}
+textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+.panel {
+  max-width: 760px;
+  margin: 0 auto;
+}
+.heading,
+.row,
+.actions,
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.heading {
+  justify-content: space-between;
+  margin-bottom: 12px;
+  font-weight: 650;
+}
+.muted,
+.source {
+  color: #7a867f;
+  font-size: 11px;
+}
+.search,
+.form {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0;
+}
+.form {
+  display: grid;
+  grid-template-columns: 1fr 150px auto;
+}
+.toggle {
+  font-size: 12px;
+}
+.items {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+.item {
+  border: 1px solid #e6eae4;
+  border-radius: 9px;
+  background: #fff;
+  padding: 11px;
+}
+.item-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.row {
+  justify-content: space-between;
+  margin-bottom: 7px;
+}
+.tag {
+  color: #385a49;
+  border-radius: 99px;
+  background: #e8f0e9;
+  padding: 2px 8px;
+  font-size: 10px;
+}
+.actions {
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+.sources {
+  margin-top: 7px;
+}
+.error {
+  color: #a33d3d;
+  margin: 8px 0;
+}
+.empty {
+  border: 1px dashed #d7dfd7;
+  border-radius: 8px;
+  color: #7a867f;
+  padding: 18px;
+  text-align: center;
+}
+@media (max-width: 520px) {
+  .form {
+    grid-template-columns: 1fr 1fr;
+  }
+  .form textarea {
+    grid-column: 1 / -1;
+  }
+}

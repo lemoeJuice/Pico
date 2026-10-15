@@ -151,7 +151,7 @@ describe('Remote Host Executor', () => {
         protocolVersion: number;
         tools: Array<{ name: string; parameters: Record<string, unknown> }>;
       }>(`${baseUrl}/api/info`, token);
-      expect(info.protocolVersion).toBe(1);
+      expect(info.protocolVersion).toBe(2);
       expect(info.tools.map((tool) => tool.name)).toEqual(['write_marker']);
       expect(info.tools.find((tool) => tool.name === 'write_marker')?.parameters).toMatchObject({
         type: 'object',

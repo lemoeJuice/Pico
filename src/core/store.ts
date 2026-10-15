@@ -1,7 +1,7 @@
 import { migrateLegacyPermissions } from './migrations/legacy-permissions.js';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import type {
   AssistantPayload,
@@ -17,6 +17,7 @@ import type {
   RemoteExecutorConnection,
   RemoteExecutorConnectionView,
   Thread,
+  TokenUsage,
   ToolCall,
   ToolResultPayload,
 } from './types.js';
@@ -49,6 +50,25 @@ export interface ExecutionLogEntry {
   createdAt: string;
 }
 
+export interface PluginModelCallRecord {
+  id: string;
+  pluginId: string;
+  idempotencyKey: string;
+  threadId: string | null;
+  projectId: string | null;
+  purpose: string;
+  provider: string;
+  model: string;
+  prompt: unknown;
+  status: 'running' | 'completed' | 'failed' | 'interrupted';
+  response: unknown;
+  usage: TokenUsage | null;
+  attempts: Array<Record<string, unknown>>;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface CanonicalRecordPage {
   records: CanonicalRecord[];
   hasEarlierRecords: boolean;
@@ -69,6 +89,7 @@ export class PicoStore {
   private savepointSequence = 0;
   private readonly canonicalListeners = new Set<(record: CanonicalRecord) => void>();
   private readonly stateListeners = new Set<(pluginId: string) => void>();
+  private readonly pluginModelCallListeners = new Set<(call: PluginModelCallRecord) => void>();
   private pendingNotifications: Array<() => void> = [];
 
   subscribeCanonical(listener: (record: CanonicalRecord) => void): () => void {
@@ -79,6 +100,11 @@ export class PicoStore {
   subscribePluginState(listener: (pluginId: string) => void): () => void {
     this.stateListeners.add(listener);
     return () => this.stateListeners.delete(listener);
+  }
+
+  subscribePluginModelCalls(listener: (call: PluginModelCallRecord) => void): () => void {
+    this.pluginModelCallListeners.add(listener);
+    return () => this.pluginModelCallListeners.delete(listener);
   }
 
   private notifyAfterCommit(notification: () => void): void {
@@ -144,6 +170,12 @@ export class PicoStore {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS threads_project_created ON threads(project_id, created_at);
+      CREATE TABLE IF NOT EXISTS thread_create_requests (
+        idempotency_key TEXT PRIMARY KEY,
+        request_hash TEXT NOT NULL,
+        thread_id TEXT NOT NULL UNIQUE REFERENCES threads(id),
+        created_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS canonical_records (
         id TEXT PRIMARY KEY,
         thread_id TEXT NOT NULL REFERENCES threads(id),
@@ -193,6 +225,29 @@ export class PicoStore {
       BEFORE DELETE ON execution_log BEGIN
         SELECT RAISE(ABORT, 'execution log is append-only');
       END;
+      CREATE TABLE IF NOT EXISTS plugin_model_calls (
+        id TEXT PRIMARY KEY,
+        plugin_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        thread_id TEXT,
+        project_id TEXT,
+        purpose TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        prompt_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'interrupted')),
+        response_json TEXT,
+        usage_json TEXT,
+        attempts_json TEXT NOT NULL,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(plugin_id, idempotency_key)
+      );
+      CREATE INDEX IF NOT EXISTS plugin_model_calls_thread_created
+        ON plugin_model_calls(thread_id, created_at);
+      CREATE INDEX IF NOT EXISTS plugin_model_calls_project_created
+        ON plugin_model_calls(project_id, created_at);
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value_json TEXT NOT NULL,
@@ -369,6 +424,7 @@ export class PicoStore {
       createdByAgent?: boolean;
       remoteConnectionId?: string | null;
       workspacePath?: string;
+      idempotencyKey?: string;
     } = {},
   ): Thread {
     const project = this.getProject(projectId);
@@ -379,10 +435,24 @@ export class PicoStore {
     if (options.remoteConnectionId && !remoteConnection) throw new Error('Remote Executor connection not found');
     if (remoteConnection && executorKind !== 'host')
       throw new Error('Remote Host Executor must use Host execution kind');
-    const id = randomUUID();
-    const executorId = randomUUID();
-    const createdAt = isoNow();
     const workspacePath = executorKind === 'runtime' ? '' : (options.workspacePath ?? project.workspacePath);
+    const idempotencyKey = options.idempotencyKey?.trim();
+    if (idempotencyKey && idempotencyKey.length > 240) throw new Error('Thread creation idempotency key is too long.');
+    const requestHash = idempotencyKey
+      ? createHash('sha256')
+          .update(
+            JSON.stringify({
+              projectId,
+              executorKind,
+              title,
+              parentThreadId: options.parentThreadId ?? null,
+              createdByAgent: options.createdByAgent ?? false,
+              remoteConnectionId: remoteConnection?.id ?? null,
+              workspacePath,
+            }),
+          )
+          .digest('hex')
+      : null;
     const kindLabel = remoteConnection
       ? `Remote Host · ${remoteConnection.name}`
       : executorKind === 'container'
@@ -391,7 +461,23 @@ export class PicoStore {
           ? 'Chat'
           : 'Host';
     const label = `${kindLabel} · ${project.name}`;
-    this.transaction(() => {
+    return this.transaction(() => {
+      if (idempotencyKey && requestHash) {
+        const existing = this.db
+          .prepare('SELECT request_hash, thread_id FROM thread_create_requests WHERE idempotency_key = ?')
+          .get(idempotencyKey) as SqlRow | undefined;
+        if (existing) {
+          if (existing.request_hash !== requestHash) {
+            throw new Error('Thread creation idempotency key was already used with different parameters.');
+          }
+          const previous = this.getThread(String(existing.thread_id));
+          if (!previous) throw new Error('The Thread created for this idempotency key no longer exists.');
+          return previous;
+        }
+      }
+      const id = randomUUID();
+      const executorId = randomUUID();
+      const createdAt = isoNow();
       this.db
         .prepare(
           'INSERT INTO executors (id, kind, label, workspace_path, remote_connection_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
@@ -415,23 +501,30 @@ export class PicoStore {
           options.createdByAgent ? 1 : 0,
           createdAt,
         );
+      if (idempotencyKey && requestHash) {
+        this.db
+          .prepare(
+            'INSERT INTO thread_create_requests (idempotency_key, request_hash, thread_id, created_at) VALUES (?, ?, ?, ?)',
+          )
+          .run(idempotencyKey, requestHash, id, createdAt);
+      }
+      return {
+        id,
+        projectId,
+        executorId,
+        executorKind,
+        executorRemote: Boolean(remoteConnection),
+        executorLabel: label,
+        workspacePath,
+        title,
+        parentThreadId: options.parentThreadId ?? null,
+        createdByAgent: options.createdByAgent ?? false,
+        pauseRequested: false,
+        pauseReason: null,
+        createdAt,
+        state: 'idle',
+      };
     });
-    return {
-      id,
-      projectId,
-      executorId,
-      executorKind,
-      executorRemote: Boolean(remoteConnection),
-      executorLabel: label,
-      workspacePath,
-      title,
-      parentThreadId: options.parentThreadId ?? null,
-      createdByAgent: options.createdByAgent ?? false,
-      pauseRequested: false,
-      pauseReason: null,
-      createdAt,
-      state: 'idle',
-    };
   }
 
   getThread(id: string): Thread | null {
@@ -914,6 +1007,102 @@ export class PicoStore {
       detail: json<Record<string, unknown>>(row.detail_json, {}),
       createdAt: String(row.created_at),
     }));
+  }
+
+  getPluginModelCall(id: string): PluginModelCallRecord | null {
+    const row = this.db.prepare('SELECT * FROM plugin_model_calls WHERE id = ?').get(id) as SqlRow | undefined;
+    return row ? this.pluginModelCallFromRow(row) : null;
+  }
+
+  findPluginModelCall(pluginId: string, idempotencyKey: string): PluginModelCallRecord | null {
+    const row = this.db
+      .prepare('SELECT * FROM plugin_model_calls WHERE plugin_id = ? AND idempotency_key = ?')
+      .get(pluginId, idempotencyKey) as SqlRow | undefined;
+    return row ? this.pluginModelCallFromRow(row) : null;
+  }
+
+  savePluginModelCall(call: PluginModelCallRecord): PluginModelCallRecord {
+    const current = this.findPluginModelCall(call.pluginId, call.idempotencyKey);
+    const createdAt = current?.createdAt ?? call.createdAt;
+    this.db
+      .prepare(
+        `INSERT INTO plugin_model_calls (
+          id, plugin_id, idempotency_key, thread_id, project_id, purpose, provider, model,
+          prompt_json, status, response_json, usage_json, attempts_json, error, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(plugin_id, idempotency_key) DO UPDATE SET
+          thread_id = excluded.thread_id, project_id = excluded.project_id, purpose = excluded.purpose,
+          provider = excluded.provider, model = excluded.model, prompt_json = excluded.prompt_json,
+          status = excluded.status, response_json = excluded.response_json, usage_json = excluded.usage_json,
+          attempts_json = excluded.attempts_json, error = excluded.error, updated_at = excluded.updated_at`,
+      )
+      .run(
+        current?.id ?? call.id,
+        call.pluginId,
+        call.idempotencyKey,
+        call.threadId,
+        call.projectId,
+        call.purpose,
+        call.provider,
+        call.model,
+        JSON.stringify(call.prompt),
+        call.status,
+        call.response === null ? null : JSON.stringify(call.response),
+        call.usage === null ? null : JSON.stringify(call.usage),
+        JSON.stringify(call.attempts),
+        call.error,
+        createdAt,
+        call.updatedAt,
+      );
+    const saved = this.findPluginModelCall(call.pluginId, call.idempotencyKey)!;
+    this.notifyAfterCommit(() => {
+      for (const listener of this.pluginModelCallListeners) listener(saved);
+    });
+    return saved;
+  }
+
+  listPluginModelCalls(
+    filter: { pluginId?: string; threadId?: string; projectId?: string } = {},
+  ): PluginModelCallRecord[] {
+    const clauses: string[] = [];
+    const values: string[] = [];
+    if (filter.pluginId !== undefined) {
+      clauses.push('plugin_id = ?');
+      values.push(filter.pluginId);
+    }
+    if (filter.threadId !== undefined) {
+      clauses.push('thread_id = ?');
+      values.push(filter.threadId);
+    }
+    if (filter.projectId !== undefined) {
+      clauses.push('project_id = ?');
+      values.push(filter.projectId);
+    }
+    const where = clauses.length > 0 ? ` WHERE ${clauses.join(' AND ')}` : '';
+    return (
+      this.db.prepare(`SELECT * FROM plugin_model_calls${where} ORDER BY created_at, id`).all(...values) as SqlRow[]
+    ).map((row) => this.pluginModelCallFromRow(row));
+  }
+
+  private pluginModelCallFromRow(row: SqlRow): PluginModelCallRecord {
+    return {
+      id: String(row.id),
+      pluginId: String(row.plugin_id),
+      idempotencyKey: String(row.idempotency_key),
+      threadId: typeof row.thread_id === 'string' ? row.thread_id : null,
+      projectId: typeof row.project_id === 'string' ? row.project_id : null,
+      purpose: String(row.purpose),
+      provider: String(row.provider),
+      model: String(row.model),
+      prompt: json<unknown>(row.prompt_json, null),
+      status: row.status as PluginModelCallRecord['status'],
+      response: json<unknown>(row.response_json, null),
+      usage: json<TokenUsage | null>(row.usage_json, null),
+      attempts: json<Array<Record<string, unknown>>>(row.attempts_json, []),
+      error: typeof row.error === 'string' ? row.error : null,
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
   }
 
   getExecution(id: string): Execution | null {
