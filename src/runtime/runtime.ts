@@ -14,6 +14,7 @@ import type {
   RemoteExecutorConnectionView,
   Thread,
   ThreadState,
+  TokenUsage,
   ToolCall,
   ToolDefinition,
   ToolResultPayload,
@@ -33,8 +34,13 @@ import { CommandRegistry, PluginHost, type CommandResult } from '../plugins/host
 import type { PluginServices } from '../plugins/services.js';
 import {
   OpenAiCompatibleAdapter,
+  type ModelRequestTrace,
   type ModelAdapter,
   type ModelPrompt,
+  type ProviderRequestOutcome,
+  type ProviderRequestSummary,
+  type ProviderRequestStart,
+  type ProviderRequestResponse,
   type ModelResponse,
   type PromptTurn,
 } from './model.js';
@@ -110,7 +116,203 @@ export interface ModelInputAttempt {
   prompt: ModelPrompt;
   status: 'running' | 'completed' | 'failed' | 'interrupted';
   error?: string;
+  result?: ModelInputResultSummary;
+  partialOutputCharacters?: number;
+  providerRequests?: ProviderRequestAttempt[];
   createdAt: string;
+}
+
+export interface ModelInputResultSummary {
+  textCharacters: number;
+  toolCallCount: number;
+  finishReason: string | null;
+  usage: TokenUsage | null;
+  empty: boolean;
+}
+
+export interface ProviderRequestAttempt extends ProviderRequestStart {
+  id: string;
+  status?: number;
+  contentType?: string | null;
+  providerRequestId?: string;
+  outcome: ProviderRequestOutcome | 'running';
+  durationMs?: number;
+  terminalEvent?: string;
+  errorCategory?: ProviderRequestSummary['errorCategory'];
+  errorCode?: string;
+  eventCounts?: Record<string, number>;
+  firstTextMs?: number;
+  deltaTextCharacters?: number;
+  outputTextCharacters?: number;
+  outputItemCounts?: Record<string, number>;
+  toolCallCount?: number;
+  finishReason?: string | null;
+  responseId?: string;
+  usage?: TokenUsage | null;
+  createdAt: string;
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function diagnosticText(value: unknown, maxLength = 128): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, '').trim();
+  return cleaned ? cleaned.slice(0, maxLength) : undefined;
+}
+
+function diagnosticLabel(value: unknown, maxLength = 80): string | undefined {
+  const label = diagnosticText(value, maxLength);
+  return label && /^[a-z0-9_.:-]+$/i.test(label) ? label : undefined;
+}
+
+function diagnosticEndpoint(value: unknown): string {
+  if (typeof value !== 'string') return 'unknown';
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return 'unknown';
+    const path = url.pathname
+      .split('/')
+      .map((segment) => (segment && !/^[a-z0-9._~-]{1,40}$/i.test(segment) ? ':redacted' : segment))
+      .join('/');
+    return `${url.origin}${path}`.slice(0, 256);
+  } catch {
+    return 'unknown';
+  }
+}
+
+function diagnosticMime(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const mime = value.split(';', 1)[0]?.trim().toLowerCase() ?? '';
+  return /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(mime) ? mime.slice(0, 128) : null;
+}
+
+function diagnosticCountMap(value: unknown): Record<string, number> | undefined {
+  const entries = objectValue(value);
+  if (!entries) return undefined;
+  const result: Record<string, number> = {};
+  for (const [rawKey, rawCount] of Object.entries(entries).slice(0, 32)) {
+    const key = diagnosticText(rawKey, 80);
+    if (!key || !/^[a-z0-9_.:-]+$/i.test(key)) continue;
+    if (typeof rawCount !== 'number' || !Number.isSafeInteger(rawCount) || rawCount < 0) continue;
+    result[key] = Math.min(rawCount, 1_000_000_000);
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function diagnosticUsage(value: unknown): TokenUsage | null {
+  const usage = objectValue(value);
+  if (!usage) return null;
+  const count = (key: string): number | undefined => {
+    const raw = usage[key];
+    return typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0
+      ? Math.min(raw, 1_000_000_000_000)
+      : undefined;
+  };
+  const inputTokens = count('inputTokens');
+  const outputTokens = count('outputTokens');
+  const totalTokens = count('totalTokens');
+  if (inputTokens === undefined && outputTokens === undefined && totalTokens === undefined) return null;
+  return {
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+    ...(totalTokens === undefined ? {} : { totalTokens }),
+  };
+}
+
+function sanitizeRequestStart(details: ProviderRequestStart): ProviderRequestStart {
+  const provider = diagnosticText(details.provider, 64);
+  const protocol = diagnosticText(details.protocol, 64);
+  return {
+    provider: provider && /^[a-z0-9_.:-]+$/i.test(provider) ? provider : 'unknown',
+    protocol: protocol && /^[a-z0-9_.:+-]+$/i.test(protocol) ? protocol : 'unknown',
+    endpoint: diagnosticEndpoint(details.endpoint),
+    attempt: Number.isSafeInteger(details.attempt) && details.attempt > 0 ? Math.min(details.attempt, 1000) : 1,
+  };
+}
+
+function sanitizeRequestResponse(details: ProviderRequestResponse): ProviderRequestResponse {
+  const providerRequestId = diagnosticText(details.providerRequestId, 128);
+  return {
+    status: Number.isInteger(details.status) && details.status >= 100 && details.status <= 599 ? details.status : 0,
+    contentType: diagnosticMime(details.contentType),
+    ...(providerRequestId && /^[a-z0-9_.:-]+$/i.test(providerRequestId) ? { providerRequestId } : {}),
+  };
+}
+
+function sanitizeRequestSummary(details: ProviderRequestSummary): ProviderRequestSummary {
+  const durationMs =
+    Number.isFinite(details.durationMs) && details.durationMs >= 0
+      ? Math.min(Math.round(details.durationMs), 86_400_000)
+      : 0;
+  const terminalEvent = diagnosticLabel(details.terminalEvent, 80);
+  const errorCode = diagnosticLabel(details.errorCode, 80);
+  const responseId = diagnosticLabel(details.responseId, 128);
+  const finishReason = details.finishReason === null ? null : diagnosticLabel(details.finishReason, 80);
+  const outcome: ProviderRequestOutcome =
+    details.outcome === 'retrying' ||
+    details.outcome === 'completed' ||
+    details.outcome === 'interrupted' ||
+    details.outcome === 'failed'
+      ? details.outcome
+      : 'failed';
+  const errorCategory =
+    details.errorCategory === 'http' ||
+    details.errorCategory === 'transport' ||
+    details.errorCategory === 'protocol' ||
+    details.errorCategory === 'aborted'
+      ? details.errorCategory
+      : undefined;
+  const firstTextMs =
+    Number.isFinite(details.firstTextMs) && details.firstTextMs! >= 0
+      ? Math.min(Math.round(details.firstTextMs!), durationMs)
+      : undefined;
+  const eventCounts = diagnosticCountMap(details.eventCounts);
+  const outputItemCounts = diagnosticCountMap(details.outputItemCounts);
+  const count = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? Math.min(value, 1_000_000_000) : undefined;
+  const deltaTextCharacters = count(details.deltaTextCharacters);
+  const outputTextCharacters = count(details.outputTextCharacters);
+  const toolCallCount = count(details.toolCallCount);
+  return {
+    outcome,
+    durationMs,
+    ...(terminalEvent ? { terminalEvent } : {}),
+    ...(errorCategory ? { errorCategory } : {}),
+    ...(errorCode ? { errorCode } : {}),
+    ...(eventCounts ? { eventCounts } : {}),
+    ...(firstTextMs === undefined ? {} : { firstTextMs }),
+    ...(deltaTextCharacters === undefined ? {} : { deltaTextCharacters }),
+    ...(outputTextCharacters === undefined ? {} : { outputTextCharacters }),
+    ...(outputItemCounts ? { outputItemCounts } : {}),
+    ...(toolCallCount === undefined ? {} : { toolCallCount }),
+    ...(finishReason === undefined ? {} : { finishReason }),
+    ...(responseId ? { responseId } : {}),
+    ...(details.usage === undefined ? {} : { usage: diagnosticUsage(details.usage) }),
+  };
+}
+
+function safeModelError(error: unknown): string {
+  const isError = error instanceof Error;
+  const name = isError && /^[a-z][a-z0-9]{0,48}$/i.test(error.name) ? error.name : 'UnknownError';
+  const explicitCode = objectValue(error)?.code;
+  const message = isError ? error.message : '';
+  const httpStatus = /^ChatGPT model request returned HTTP ([1-5][0-9]{2})\.$/.exec(message)?.[1];
+  const streamCode = /^ChatGPT model request failed \(([a-z0-9_.:-]{1,80})\)\.$/i.exec(message)?.[1];
+  const code =
+    diagnosticLabel(explicitCode, 80) ??
+    (httpStatus ? `http_${httpStatus}` : undefined) ??
+    diagnosticLabel(streamCode, 80);
+  return code ? `Model request failed (${code}).` : `Model request failed (${name}).`;
+}
+
+function safeStoredModelError(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const safeSummary = /^Model request failed \(([a-z0-9_.:-]{1,80})\)\.$/i.exec(value)?.[1];
+  if (safeSummary) return `Model request failed (${safeSummary}).`;
+  const httpStatus = /\bHTTP ([1-5][0-9]{2})\b/i.exec(value)?.[1];
+  return httpStatus ? `Model request failed (http_${httpStatus}).` : 'Model request failed (previous detail redacted).';
 }
 
 const defaultModelSettings: ModelSettings = {
@@ -575,10 +777,34 @@ export class PicoRuntime {
     return this.listThreadTools(threadId);
   }
 
+  private appendProviderRequestDiagnostic(
+    executionId: string,
+    kind: string,
+    detail: Record<string, unknown>,
+  ): void {
+    try {
+      this.store.appendExecutionLog(executionId, kind, detail);
+    } catch {
+      try {
+        console.warn('Provider request diagnostics could not be persisted.');
+      } catch {
+        // Diagnostic persistence is best-effort and must not change model execution.
+      }
+    }
+  }
+
   getModelInputAttempts(threadId: string, executionId: string): ModelInputAttempt[] | null {
     const execution = this.store.getExecution(executionId);
     if (!execution || execution.threadId !== threadId || execution.kind !== 'model') return null;
-    const outcomes = new Map<string, { status: ModelInputAttempt['status']; error?: string }>();
+    const outcomes = new Map<
+      string,
+      {
+        status: ModelInputAttempt['status'];
+        error?: string;
+        result?: ModelInputResultSummary;
+        partialOutputCharacters?: number;
+      }
+    >();
     for (const entry of this.store.listExecutionLog(executionId, 'model-input-settled')) {
       const requestId = entry.detail.requestId;
       const status = entry.detail.status;
@@ -586,12 +812,139 @@ export class PicoRuntime {
         typeof requestId === 'string' &&
         (status === 'completed' || status === 'failed' || status === 'interrupted')
       ) {
+        const safeError = safeStoredModelError(entry.detail.error);
         outcomes.set(requestId, {
           status,
-          ...(typeof entry.detail.error === 'string' ? { error: entry.detail.error } : {}),
+          ...(safeError ? { error: safeError } : {}),
+          ...(Number.isSafeInteger(entry.detail.partialOutputCharacters) &&
+          (entry.detail.partialOutputCharacters as number) >= 0
+            ? { partialOutputCharacters: Math.min(entry.detail.partialOutputCharacters as number, 1_000_000_000) }
+            : {}),
+          ...(objectValue(entry.detail.result) &&
+          Number.isSafeInteger(objectValue(entry.detail.result)!.textCharacters) &&
+          Number.isSafeInteger(objectValue(entry.detail.result)!.toolCallCount) &&
+          typeof objectValue(entry.detail.result)!.empty === 'boolean'
+            ? {
+                result: {
+                  textCharacters: Math.max(
+                    0,
+                    Math.min(objectValue(entry.detail.result)!.textCharacters as number, 1_000_000_000),
+                  ),
+                  toolCallCount: Math.max(
+                    0,
+                    Math.min(objectValue(entry.detail.result)!.toolCallCount as number, 1_000_000),
+                  ),
+                  finishReason:
+                    objectValue(entry.detail.result)!.finishReason === null
+                      ? null
+                      : (diagnosticLabel(objectValue(entry.detail.result)!.finishReason, 80) ?? null),
+                  usage: diagnosticUsage(objectValue(entry.detail.result)!.usage),
+                  empty: objectValue(entry.detail.result)!.empty as boolean,
+                },
+              }
+            : {}),
         });
       }
     }
+
+    const providerRequestsById = new Map<string, ProviderRequestAttempt>();
+    for (const entry of this.store.listExecutionLog(executionId, 'provider-request-started')) {
+      const requestId = entry.detail.requestId;
+      const id = entry.detail.providerAttemptId;
+      if (typeof requestId !== 'string' || typeof id !== 'string') continue;
+      const start = sanitizeRequestStart({
+        provider: typeof entry.detail.provider === 'string' ? entry.detail.provider : 'unknown',
+        protocol: typeof entry.detail.protocol === 'string' ? entry.detail.protocol : 'unknown',
+        endpoint: typeof entry.detail.endpoint === 'string' ? entry.detail.endpoint : '',
+        attempt: typeof entry.detail.attempt === 'number' ? entry.detail.attempt : 1,
+      });
+      providerRequestsById.set(id, {
+        id,
+        ...start,
+        outcome: 'running',
+        createdAt: entry.createdAt,
+      });
+    }
+    for (const entry of this.store.listExecutionLog(executionId, 'provider-request-response')) {
+      const id = entry.detail.providerAttemptId;
+      const attempt = typeof id === 'string' ? providerRequestsById.get(id) : undefined;
+      if (!attempt) continue;
+      const response = sanitizeRequestResponse({
+        status: typeof entry.detail.status === 'number' ? entry.detail.status : 0,
+        contentType: typeof entry.detail.contentType === 'string' ? entry.detail.contentType : null,
+        ...(typeof entry.detail.providerRequestId === 'string'
+          ? { providerRequestId: entry.detail.providerRequestId }
+          : {}),
+      });
+      if (response.status) attempt.status = response.status;
+      attempt.contentType = response.contentType;
+      if (response.providerRequestId) attempt.providerRequestId = response.providerRequestId;
+    }
+    for (const entry of this.store.listExecutionLog(executionId, 'provider-request-settled')) {
+      const id = entry.detail.providerAttemptId;
+      const attempt = typeof id === 'string' ? providerRequestsById.get(id) : undefined;
+      if (!attempt) continue;
+      const outcome =
+        entry.detail.outcome === 'retrying' ||
+        entry.detail.outcome === 'completed' ||
+        entry.detail.outcome === 'failed' ||
+        entry.detail.outcome === 'interrupted'
+          ? entry.detail.outcome
+          : 'failed';
+      const terminalEvent = typeof entry.detail.terminalEvent === 'string' ? entry.detail.terminalEvent : undefined;
+      const errorCategory =
+        entry.detail.errorCategory === 'http' ||
+        entry.detail.errorCategory === 'transport' ||
+        entry.detail.errorCategory === 'protocol' ||
+        entry.detail.errorCategory === 'aborted'
+          ? entry.detail.errorCategory
+          : undefined;
+      const errorCode = typeof entry.detail.errorCode === 'string' ? entry.detail.errorCode : undefined;
+      const eventCounts = objectValue(entry.detail.eventCounts) as Record<string, number> | null;
+      const firstTextMs = typeof entry.detail.firstTextMs === 'number' ? entry.detail.firstTextMs : undefined;
+      const deltaTextCharacters =
+        typeof entry.detail.deltaTextCharacters === 'number' ? entry.detail.deltaTextCharacters : undefined;
+      const outputTextCharacters =
+        typeof entry.detail.outputTextCharacters === 'number' ? entry.detail.outputTextCharacters : undefined;
+      const outputItemCounts = objectValue(entry.detail.outputItemCounts) as Record<string, number> | null;
+      const toolCallCount = typeof entry.detail.toolCallCount === 'number' ? entry.detail.toolCallCount : undefined;
+      const finishReason =
+        entry.detail.finishReason === null
+          ? null
+          : typeof entry.detail.finishReason === 'string'
+            ? entry.detail.finishReason
+            : undefined;
+      const responseId = typeof entry.detail.responseId === 'string' ? entry.detail.responseId : undefined;
+      const usage = objectValue(entry.detail.usage) as TokenUsage | null;
+      const summary = sanitizeRequestSummary({
+        outcome,
+        durationMs: typeof entry.detail.durationMs === 'number' ? entry.detail.durationMs : 0,
+        ...(terminalEvent ? { terminalEvent } : {}),
+        ...(errorCategory ? { errorCategory } : {}),
+        ...(errorCode ? { errorCode } : {}),
+        ...(eventCounts ? { eventCounts } : {}),
+        ...(firstTextMs === undefined ? {} : { firstTextMs }),
+        ...(deltaTextCharacters === undefined ? {} : { deltaTextCharacters }),
+        ...(outputTextCharacters === undefined ? {} : { outputTextCharacters }),
+        ...(outputItemCounts ? { outputItemCounts } : {}),
+        ...(toolCallCount === undefined ? {} : { toolCallCount }),
+        ...(finishReason === undefined ? {} : { finishReason }),
+        ...(responseId ? { responseId } : {}),
+        ...(usage ? { usage } : {}),
+      });
+      Object.assign(attempt, summary);
+    }
+    const providerRequestsByModelRequestId = new Map<string, ProviderRequestAttempt[]>();
+    for (const entry of this.store.listExecutionLog(executionId, 'provider-request-started')) {
+      const requestId = entry.detail.requestId;
+      const id = entry.detail.providerAttemptId;
+      const attempt = typeof id === 'string' ? providerRequestsById.get(id) : undefined;
+      if (typeof requestId !== 'string' || !attempt) continue;
+      const grouped = providerRequestsByModelRequestId.get(requestId) ?? [];
+      grouped.push(attempt);
+      providerRequestsByModelRequestId.set(requestId, grouped);
+    }
+
     return this.store.listExecutionLog(executionId, 'model-input-requested').flatMap((entry): ModelInputAttempt[] => {
       const requestId = entry.detail.requestId;
       const prompt = entry.detail.prompt;
@@ -617,6 +970,11 @@ export class PicoRuntime {
           prompt: prompt as ModelPrompt,
           status,
           ...(outcome?.error ? { error: outcome.error } : {}),
+          ...(outcome?.result ? { result: outcome.result } : {}),
+          ...(outcome?.partialOutputCharacters === undefined
+            ? {}
+            : { partialOutputCharacters: outcome.partialOutputCharacters }),
+          providerRequests: providerRequestsByModelRequestId.get(requestId) ?? [],
           createdAt: entry.createdAt,
         },
       ];
@@ -1174,6 +1532,34 @@ export class PicoRuntime {
           provider,
         });
       };
+      const requestTrace: ModelRequestTrace = {
+        started: (details) => {
+          recordModelInput(prompt, modelSettings.provider);
+          const providerAttemptId = randomUUID();
+          this.appendProviderRequestDiagnostic(modelExecutionId, 'provider-request-started', {
+            requestId,
+            providerAttemptId,
+            ...sanitizeRequestStart(details),
+          });
+          return providerAttemptId;
+        },
+        response: (providerAttemptId, details) => {
+          if (!requestId || !providerAttemptId) return;
+          this.appendProviderRequestDiagnostic(modelExecutionId, 'provider-request-response', {
+            requestId,
+            providerAttemptId,
+            ...sanitizeRequestResponse(details),
+          });
+        },
+        settled: (providerAttemptId, details) => {
+          if (!requestId || !providerAttemptId) return;
+          this.appendProviderRequestDiagnostic(modelExecutionId, 'provider-request-settled', {
+            requestId,
+            providerAttemptId,
+            ...sanitizeRequestSummary(details),
+          });
+        },
+      };
       const modelInput: ModelStageInput = {
         thread,
         provider: modelSettings.provider,
@@ -1184,6 +1570,7 @@ export class PicoRuntime {
           this.publish({ type: 'model.delta', threadId: thread.id, executionId: modelExecutionId, delta });
         },
         recordModelInput,
+        requestTrace,
       };
       let response: ModelResponse;
       try {
@@ -1192,7 +1579,17 @@ export class PicoRuntime {
           return this.model.complete(input.prompt, modelSettings, input.signal, input.onText);
         });
         if (requestId)
-          this.store.appendExecutionLog(modelExecutionId, 'model-input-settled', { requestId, status: 'completed' });
+          this.store.appendExecutionLog(modelExecutionId, 'model-input-settled', {
+            requestId,
+            status: 'completed',
+            result: {
+              textCharacters: response.content.length,
+              toolCallCount: response.toolCalls.length,
+              finishReason: response.finishReason === null ? null : (diagnosticLabel(response.finishReason) ?? null),
+              usage: diagnosticUsage(response.usage),
+              empty: response.content.trim().length === 0 && response.toolCalls.length === 0,
+            } satisfies ModelInputResultSummary,
+          });
       } catch (error) {
         if (requestId)
           this.store.appendExecutionLog(modelExecutionId, 'model-input-settled', {
@@ -1201,7 +1598,8 @@ export class PicoRuntime {
               controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')
                 ? 'interrupted'
                 : 'failed',
-            error: error instanceof Error ? error.message : String(error),
+            error: safeModelError(error),
+            partialOutputCharacters: latestDraft.length,
           });
         throw error;
       }

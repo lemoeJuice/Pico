@@ -7,7 +7,7 @@ import type {
   ToolCall,
   ToolDefinition,
 } from '../core/types.js';
-import type { ModelPrompt } from './model.js';
+import type { ModelPrompt, ModelRequestTrace } from './model.js';
 
 export interface StepInput {
   thread: Thread;
@@ -31,6 +31,7 @@ export interface ModelStageInput {
   signal: AbortSignal;
   onText(delta: string): void;
   recordModelInput(prompt: ModelPrompt, provider: ModelProvider): void;
+  requestTrace?: ModelRequestTrace;
 }
 
 export interface ToolBatchInput {

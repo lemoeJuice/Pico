@@ -104,7 +104,13 @@ export function createChatGptPlanPlugin(): PicoPlugin {
       context.pipelines.use<ModelStageInput, ModelResponse>('model', async (input, next) => {
         if (input.provider !== 'chatgpt-plan') return next();
         input.recordModelInput(input.prompt, input.provider);
-        return model.complete(input.prompt, readPreferences(context.state.get), input.signal, input.onText);
+        return model.complete(
+          input.prompt,
+          readPreferences(context.state.get),
+          input.signal,
+          input.onText,
+          input.requestTrace,
+        );
       });
 
       context.commands.register({

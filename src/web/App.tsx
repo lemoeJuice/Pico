@@ -3071,7 +3071,10 @@ function ModelInputDisclosure({
       <summary>
         <ChevronRight className="projection-chevron" size={13} aria-hidden="true" /> Model input
       </summary>
-      <p className="projection-note">The exact prompt passed to the model adapter. API credentials are not included.</p>
+      <p className="projection-note">
+        The exact prompt passed to the model adapter, plus provider request metadata. Transport logs omit credentials,
+        request bodies, and generated text.
+      </p>
       {modelInputsLoading ? <p className="projection-state">Loading model input…</p> : null}
       {modelInputsError ? <p className="projection-error">{modelInputsError}</p> : null}
       {modelInputs?.length === 0 ? (
@@ -3090,6 +3093,50 @@ function ModelInputDisclosure({
             Attempt {index + 1} · {attempt.status}
           </summary>
           {attempt.error ? <p className="projection-error">{attempt.error}</p> : null}
+          {attempt.result ? (
+            <p className="projection-note">
+              Result: {attempt.result.textCharacters} text characters · {attempt.result.toolCallCount} tool calls ·{' '}
+              {attempt.result.finishReason ?? 'no finish reason'} ·{' '}
+              {attempt.result.empty ? 'empty output' : 'has output'}
+              {attempt.result.usage?.totalTokens === undefined ? '' : ` · ${attempt.result.usage.totalTokens} tokens`}
+            </p>
+          ) : null}
+          {attempt.partialOutputCharacters ? (
+            <p className="projection-note">Discarded partial stream: {attempt.partialOutputCharacters} characters.</p>
+          ) : null}
+          {(attempt.providerRequests ?? []).map((request, requestIndex) => (
+            <details className="projection-attempt" key={request.id}>
+              <summary>
+                <ChevronRight className="projection-chevron" size={13} aria-hidden="true" />
+                Provider request {requestIndex + 1} · {request.outcome}
+                {request.status ? ` · HTTP ${request.status}` : ''}
+              </summary>
+              <pre className="projection-view">
+                {toJson({
+                  provider: request.provider,
+                  protocol: request.protocol,
+                  endpoint: request.endpoint,
+                  attempt: request.attempt,
+                  status: request.status,
+                  contentType: request.contentType,
+                  providerRequestId: request.providerRequestId,
+                  durationMs: request.durationMs,
+                  terminalEvent: request.terminalEvent,
+                  errorCategory: request.errorCategory,
+                  errorCode: request.errorCode,
+                  eventCounts: request.eventCounts,
+                  firstTextMs: request.firstTextMs,
+                  deltaTextCharacters: request.deltaTextCharacters,
+                  outputTextCharacters: request.outputTextCharacters,
+                  outputItemCounts: request.outputItemCounts,
+                  toolCallCount: request.toolCallCount,
+                  finishReason: request.finishReason,
+                  responseId: request.responseId,
+                  usage: request.usage,
+                })}
+              </pre>
+            </details>
+          ))}
           <pre className="projection-view">{toJson(attempt.prompt)}</pre>
         </details>
       ))}
