@@ -101,6 +101,11 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
     return Math.max(120, window.innerHeight - top - height - 20);
   };
 
+  const toolbarPopoverWidth = (): number => {
+    if (props.pluginId !== 'pico.rolling-context') return 360;
+    return Math.max(120, window.innerWidth - 24);
+  };
+
   const updateAnchor = (): void => {
     const rect = toolbarAnchor.current?.getBoundingClientRect();
     if (!rect) return;
@@ -110,6 +115,14 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
         : { left: rect.left, top: rect.top, height: rect.height },
     );
     if (popoverOpenRef.current) {
+      setPopover((previous) =>
+        previous
+          ? {
+              width: toolbarPopoverWidth(),
+              height: Math.min(previous.height, availablePopoverHeight(rect.top, rect.height)),
+            }
+          : previous,
+      );
       portRef.current?.postMessage({
         type: 'pico:plugin-ui:popover-viewport',
         maxHeight: availablePopoverHeight(rect.top, rect.height),
@@ -203,7 +216,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
         if (!toolbarPopover) return;
         const height = Math.max(80, Math.min(Math.ceil(popoverMessage.height) + 4, availablePopoverHeight()));
         if (popoverMessage.open) toolbarContentHeight.current = height;
-        setToolbarPopover(popoverMessage.open ? { width: 360, height } : null);
+        setToolbarPopover(popoverMessage.open ? { width: toolbarPopoverWidth(), height } : null);
         return;
       }
       if (isPluginUiToolbarStateMessage(popoverMessage)) {
@@ -214,7 +227,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
         if (toolbarPopover) {
           const height = Math.max(80, Math.min(Math.ceil(message.height) + 4, availablePopoverHeight()));
           toolbarContentHeight.current = height;
-          setPopover((previous) => (previous ? { width: 360, height } : previous));
+          setPopover((previous) => (previous ? { width: toolbarPopoverWidth(), height } : previous));
           return;
         }
         const fixedHeight = pluginUiLayoutForSlot(current.current.uiSlot).controlHeightPx;
@@ -357,7 +370,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
           if (nextOpen) {
             const maxHeight = availablePopoverHeight(rect?.top, rect?.height);
             setToolbarPopover({
-              width: 360,
+              width: toolbarPopoverWidth(),
               height: Math.max(80, Math.min(toolbarContentHeight.current, maxHeight)),
             });
           } else {
@@ -381,7 +394,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
           aria-label={`${props.controlLabel} panel`}
           style={(() => {
             const anchor = anchorPosition ?? { left: -1000, top: -1000, height: 0 };
-            const width = Math.min(popover?.width ?? 360, Math.max(120, window.innerWidth - 24));
+            const width = Math.min(popover?.width ?? toolbarPopoverWidth(), Math.max(120, window.innerWidth - 24));
             const height = popover ? Math.min(popover.height, availablePopoverHeight()) : 0;
             return {
               left: Math.max(12, Math.min(anchor.left, window.innerWidth - width - 12)),
