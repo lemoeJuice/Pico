@@ -54,11 +54,17 @@ export interface ModelPrompt {
 
 export interface ModelResponse {
   content: string;
+  /** Provider-supplied reasoning summary text only; never inferred from hidden reasoning tokens. */
+  reasoningSummary?: string;
   toolCalls: ToolCall[];
   usage: TokenUsage | null;
   model: string;
   finishReason: string | null;
 }
+
+export type ModelStreamEvent =
+  | { type: 'reasoning_summary.delta'; delta: string }
+  | { type: 'tool_call.preview'; index: number; id?: string; name?: string; argumentsText: string };
 
 export interface ModelAdapter {
   complete(
@@ -67,6 +73,7 @@ export interface ModelAdapter {
     signal: AbortSignal,
     onText: (delta: string) => void,
     requestTrace?: ModelRequestTrace,
+    onEvent?: (event: ModelStreamEvent) => void,
   ): Promise<ModelResponse>;
 }
 
@@ -135,6 +142,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
     signal: AbortSignal,
     onText: (delta: string) => void,
     requestTrace?: ModelRequestTrace,
+    onEvent?: (event: ModelStreamEvent) => void,
   ): Promise<ModelResponse> {
     if (!prompt.model.trim()) throw new Error('Choose a model in Settings before sending a message.');
     const headers: Record<string, string> = {
@@ -188,9 +196,16 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
       if (!message) throw new Error('Model provider response did not include a choice');
       const content = typeof message.content === 'string' ? message.content : '';
       if (content) onText(content);
+      const reasoningSummary =
+        typeof message.reasoning_summary === 'string'
+          ? message.reasoning_summary
+          : typeof message.reasoning_summary_text === 'string'
+            ? message.reasoning_summary_text
+            : undefined;
       const calls = Array.isArray(message.tool_calls) ? (message.tool_calls as Array<Record<string, unknown>>) : [];
       const result: ModelResponse = {
         content,
+        ...(reasoningSummary ? { reasoningSummary } : {}),
         toolCalls: calls.map((item, index) => {
           const fn = item.function as Record<string, unknown> | undefined;
           const name = typeof fn?.name === 'string' ? fn.name : '';
@@ -220,6 +235,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
     const decoder = new TextDecoder();
     let buffer = '';
     let content = '';
+    let reasoningSummary = '';
     let usage: TokenUsage | null = null;
     let actualModel = prompt.model;
     let finishReason: string | null = null;
@@ -251,6 +267,16 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
         content += delta.content;
         onText(delta.content);
       }
+      const summaryDelta =
+        typeof delta.reasoning_summary_text === 'string'
+          ? delta.reasoning_summary_text
+          : typeof delta.reasoning_summary === 'string'
+            ? delta.reasoning_summary
+            : undefined;
+      if (summaryDelta) {
+        reasoningSummary += summaryDelta;
+        onEvent?.({ type: 'reasoning_summary.delta', delta: summaryDelta });
+      }
       const chunks = Array.isArray(delta.tool_calls) ? (delta.tool_calls as Array<Record<string, unknown>>) : [];
       for (const item of chunks) {
         const index = typeof item.index === 'number' ? item.index : calls.size;
@@ -260,6 +286,13 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
         if (typeof fn?.name === 'string') current.name += fn.name;
         if (typeof fn?.arguments === 'string') current.arguments += fn.arguments;
         calls.set(index, current);
+        onEvent?.({
+          type: 'tool_call.preview',
+          index,
+          ...(current.id ? { id: current.id } : {}),
+          ...(current.name ? { name: current.name } : {}),
+          argumentsText: current.arguments,
+        });
       }
     };
     const processBuffer = (final = false): void => {
@@ -293,7 +326,14 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
         name: call.name,
         arguments: parseToolArguments(call.arguments, call.name),
       }));
-    const result = { content, toolCalls, usage, model: actualModel, finishReason };
+    const result = {
+      content,
+      ...(reasoningSummary ? { reasoningSummary } : {}),
+      toolCalls,
+      usage,
+      model: actualModel,
+      finishReason,
+    };
     if (providerAttemptId) {
       requestTrace?.settled(providerAttemptId, {
         outcome: 'completed',

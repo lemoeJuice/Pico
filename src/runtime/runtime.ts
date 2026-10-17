@@ -1675,6 +1675,8 @@ export class PicoRuntime {
           latestDraft += delta;
           this.publish({ type: 'model.delta', threadId: thread.id, executionId: modelExecutionId, delta });
         },
+        onEvent: (event) =>
+          this.publish({ ...event, type: `model.${event.type}`, threadId: thread.id, executionId: modelExecutionId }),
         recordModelInput,
         ...(projected.provenance ? { projectionProvenance: projected.provenance } : {}),
         requestTrace,
@@ -1683,7 +1685,14 @@ export class PicoRuntime {
       try {
         response = await this.pipelines.run<ModelStageInput, ModelResponse>('model', modelInput, async (input) => {
           input.recordModelInput(input.prompt, input.provider, input.projectionProvenance);
-          return this.model.complete(input.prompt, modelSettings, input.signal, input.onText, input.requestTrace);
+          return this.model.complete(
+            input.prompt,
+            modelSettings,
+            input.signal,
+            input.onText,
+            input.requestTrace,
+            input.onEvent,
+          );
         });
         if (requestId)
           this.store.appendExecutionLog(modelExecutionId, 'model-input-settled', {
@@ -1730,6 +1739,7 @@ export class PicoRuntime {
       const batchId = calls.length > 0 ? `${modelExecutionId}:batch` : null;
       const payload: AssistantPayload = {
         content: response.content,
+        ...(response.reasoningSummary ? { reasoningSummary: response.reasoningSummary } : {}),
         toolCalls: calls,
         batchId,
         projectionThrough: through,

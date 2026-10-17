@@ -1,6 +1,6 @@
 import type { TokenUsage, ToolCall, ToolDefinition } from '../../core/types.js';
 import type { ChatGptPlanAuth } from './auth.js';
-import type { ModelPrompt, ModelRequestTrace, ModelResponse, ProviderRequestSummary } from '../../runtime/model.js';
+import type { ModelPrompt, ModelRequestTrace, ModelResponse, ModelStreamEvent, ProviderRequestSummary } from '../../runtime/model.js';
 import type { ChatGptPlanPreferences } from './types.js';
 
 const responsesUrl = 'https://api.openai.com/v1/responses';
@@ -67,11 +67,17 @@ function parseArguments(value: unknown, name: string): Record<string, unknown> {
 function outputFrom(response: Record<string, unknown>, prompt: ModelPrompt): ModelResponse {
   const output = Array.isArray(response.output) ? response.output : [];
   let content = '';
+  const reasoningSummaryParts: string[] = [];
   const toolCalls: ToolCall[] = [];
   for (const rawItem of output) {
     const item = object(rawItem);
     if (!item) continue;
-    if (item.type === 'message' && Array.isArray(item.content)) {
+    if (item.type === 'reasoning' && Array.isArray(item.summary)) {
+      for (const rawPart of item.summary) {
+        const text = object(rawPart)?.text;
+        if (typeof text === 'string' && text.length > 0) reasoningSummaryParts.push(text);
+      }
+    } else if (item.type === 'message' && Array.isArray(item.content)) {
       for (const rawContent of item.content) {
         const part = object(rawContent);
         if (part?.type === 'output_text' && typeof part.text === 'string') content += part.text;
@@ -86,8 +92,10 @@ function outputFrom(response: Record<string, unknown>, prompt: ModelPrompt): Mod
     }
   }
   const incomplete = object(response.incomplete_details);
+  const reasoningSummary = reasoningSummaryParts.join('\n\n');
   return {
     content,
+    ...(reasoningSummary ? { reasoningSummary } : {}),
     toolCalls,
     usage: readUsage(response.usage),
     model: typeof response.model === 'string' ? response.model : prompt.model,
@@ -178,6 +186,7 @@ export class ChatGptResponsesAdapter {
     signal: AbortSignal,
     onText: (delta: string) => void,
     requestTrace?: ModelRequestTrace,
+    onEvent?: (event: ModelStreamEvent) => void,
   ): Promise<ModelResponse> {
     if (!prompt.model.trim()) throw new Error('Choose a ChatGPT model in Settings before sending a message.');
     const body: Record<string, unknown> = {
@@ -188,7 +197,10 @@ export class ChatGptResponsesAdapter {
       stream: true,
       parallel_tool_calls: true,
       tools: responseTools(prompt.tools),
-      ...(preferences.reasoningEffort === 'auto' ? {} : { reasoning: { effort: preferences.reasoningEffort } }),
+      reasoning: {
+        summary: 'auto',
+        ...(preferences.reasoningEffort === 'auto' ? {} : { effort: preferences.reasoningEffort }),
+      },
       ...(preferences.fastMode ? { service_tier: 'fast' } : {}),
     };
     let accessToken = await this.auth.accessToken(false, requestTrace);
@@ -257,6 +269,8 @@ export class ChatGptResponsesAdapter {
     let buffer = '';
     let eventData: string[] = [];
     let finalResponse: Record<string, unknown> | null = null;
+    let streamedReasoningSummary = '';
+    let previousReasoningSummaryKey: string | null = null;
     let streamFailure: string | null = null;
     let streamFailureCode: string | undefined;
     let failureCategory: ProviderRequestSummary['errorCategory'];
@@ -391,15 +405,31 @@ export class ChatGptResponsesAdapter {
         deltaTextCharacters += value.delta.length;
         recordStreamedText(value, value.delta, true);
         onText(value.delta);
+      } else if (value.type === 'response.reasoning_summary_text.delta' && typeof value.delta === 'string') {
+        const outputIndex = typeof value.output_index === 'number' ? value.output_index : 0;
+        const summaryIndex = typeof value.summary_index === 'number' ? value.summary_index : 0;
+        const summaryKey = `${outputIndex}:${summaryIndex}`;
+        if (value.delta && previousReasoningSummaryKey !== null && previousReasoningSummaryKey !== summaryKey) {
+          streamedReasoningSummary += '\n\n';
+          onEvent?.({ type: 'reasoning_summary.delta', delta: '\n\n' });
+        }
+        if (value.delta) previousReasoningSummaryKey = summaryKey;
+        streamedReasoningSummary += value.delta;
+        onEvent?.({ type: 'reasoning_summary.delta', delta: value.delta });
       } else if (value.type === 'response.output_text.done' && typeof value.text === 'string') {
         // The completed response is authoritative, but some provider streams omit its output array.
         // Retain the finalized text event as a fallback for that case.
         recordStreamedText(value, value.text, false);
       } else if (value.type === 'response.output_item.added') {
         const item = object(value.item);
-        if (item?.type === 'function_call') recordStreamedCall(value, item);
+        if (item?.type === 'function_call') {
+          const call = recordStreamedCall(value, item);
+          onEvent?.({ type: 'tool_call.preview', index: call.outputIndex ?? call.order, ...(call.callId ? { id: call.callId } : {}), ...(call.name ? { name: call.name } : {}), argumentsText: call.argumentsText });
+        }
       } else if (value.type === 'response.function_call_arguments.delta' && typeof value.delta === 'string') {
-        recordStreamedCall(value).argumentsText += value.delta;
+        const call = recordStreamedCall(value);
+        call.argumentsText += value.delta;
+        onEvent?.({ type: 'tool_call.preview', index: call.outputIndex ?? call.order, ...(call.callId ? { id: call.callId } : {}), ...(call.name ? { name: call.name } : {}), argumentsText: call.argumentsText });
       } else if (value.type === 'response.function_call_arguments.done') {
         recordStreamedCall(value, undefined, true);
       } else if (value.type === 'response.output_item.done') {
@@ -485,6 +515,7 @@ export class ChatGptResponsesAdapter {
         }
       }
       const result = outputFrom(completedResponse, prompt);
+      if (!result.reasoningSummary && streamedReasoningSummary) result.reasoningSummary = streamedReasoningSummary;
       if (!result.content) result.content = streamedText();
 
       // The completed response is the canonical source. Responses API streams also emit

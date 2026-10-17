@@ -110,6 +110,7 @@ export function createChatGptPlanPlugin(): PicoPlugin {
           input.signal,
           input.onText,
           input.requestTrace,
+          input.onEvent,
         );
       });
 

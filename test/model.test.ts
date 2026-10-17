@@ -24,7 +24,10 @@ describe('OpenAI-compatible streaming adapter', () => {
         requestBody = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>;
         response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' });
         const frames = [
-          { model: 'actual-model', choices: [{ delta: { content: 'Hel' }, finish_reason: null }] },
+          {
+            model: 'actual-model',
+            choices: [{ delta: { content: 'Hel', reasoning_summary_text: 'Checking ' }, finish_reason: null }],
+          },
           {
             choices: [
               {
@@ -67,6 +70,7 @@ describe('OpenAI-compatible streaming adapter', () => {
       temperature: 0.4,
     };
     const deltas: string[] = [];
+    const events: Array<Record<string, unknown>> = [];
     const result = await new OpenAiCompatibleAdapter().complete(
       prompt,
       {
@@ -78,6 +82,8 @@ describe('OpenAI-compatible streaming adapter', () => {
       },
       new AbortController().signal,
       (delta) => deltas.push(delta),
+      undefined,
+      (event) => events.push(event),
     );
 
     expect(requestBody?.stream).toBe(true);
@@ -86,6 +92,15 @@ describe('OpenAI-compatible streaming adapter', () => {
     expect(requestBody?.model).toBe('configured-model');
     expect((requestBody?.messages as Array<{ role: string }>)[1]?.role).toBe('user');
     expect(deltas).toEqual(['Hel', 'lo']);
+    expect(events).toContainEqual({ type: 'reasoning_summary.delta', delta: 'Checking ' });
+    expect(events).toContainEqual({
+      type: 'tool_call.preview',
+      index: 0,
+      id: 'call_1',
+      name: 'read_file',
+      argumentsText: '{"path":',
+    });
+    expect(result.reasoningSummary).toBe('Checking ');
     expect(result).toMatchObject({
       content: 'Hello',
       model: 'actual-model',

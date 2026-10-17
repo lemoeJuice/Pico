@@ -7,7 +7,7 @@ import type {
   ToolCall,
   ToolDefinition,
 } from '../core/types.js';
-import type { ModelPrompt, ModelRequestTrace } from './model.js';
+import type { ModelPrompt, ModelRequestTrace, ModelStreamEvent } from './model.js';
 
 export interface StepInput {
   thread: Thread;
@@ -44,6 +44,7 @@ export interface ModelStageInput {
   prompt: ModelPrompt;
   signal: AbortSignal;
   onText(delta: string): void;
+  onEvent?(event: ModelStreamEvent): void;
   recordModelInput(prompt: ModelPrompt, provider: ModelProvider, provenance?: ProjectionProvenance[]): void;
   projectionProvenance?: ProjectionProvenance[];
   requestTrace?: ModelRequestTrace;

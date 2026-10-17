@@ -14,6 +14,7 @@ describe('ChatGPT Responses adapter', () => {
       requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
       authorization = new Headers(init?.headers).get('authorization') ?? '';
       const frames = [
+        { type: 'response.reasoning_summary_text.delta', delta: 'Checking the path. ' },
         { type: 'response.output_text.delta', delta: 'Hel' },
         { type: 'response.output_text.delta', delta: 'lo' },
         {
@@ -68,6 +69,7 @@ describe('ChatGPT Responses adapter', () => {
       ],
     };
     const deltas: string[] = [];
+    const events: Array<Record<string, unknown>> = [];
     const adapter = new ChatGptResponsesAdapter(auth);
     const result = await adapter.complete(
       prompt,
@@ -75,6 +77,7 @@ describe('ChatGPT Responses adapter', () => {
       new AbortController().signal,
       (delta) => deltas.push(delta),
       requestTrace,
+      (event) => events.push(event),
     );
 
     expect(accessToken).toHaveBeenCalledWith(false, requestTrace);
@@ -91,7 +94,7 @@ describe('ChatGPT Responses adapter', () => {
       store: false,
       stream: true,
       parallel_tool_calls: true,
-      reasoning: { effort: 'high' },
+      reasoning: { effort: 'high', summary: 'auto' },
       service_tier: 'fast',
     });
     expect(requestBody?.input).toEqual([
@@ -100,6 +103,8 @@ describe('ChatGPT Responses adapter', () => {
       { type: 'function_call_output', call_id: 'call_old', output: '{"text":"old"}' },
     ]);
     expect(deltas).toEqual(['Hel', 'lo']);
+    expect(events).toContainEqual({ type: 'reasoning_summary.delta', delta: 'Checking the path. ' });
+    expect(result.reasoningSummary).toBe('Checking the path. ');
     expect(result).toMatchObject({
       content: 'Hello',
       model: 'account-model',
@@ -109,7 +114,78 @@ describe('ChatGPT Responses adapter', () => {
     });
   });
 
+  it('keeps distinct reasoning summary parts separated without splitting deltas within a part', async () => {
+    const frames = [
+      {
+        type: 'response.reasoning_summary_text.delta',
+        output_index: 0,
+        summary_index: 0,
+        delta: '**Archive download timed out**',
+      },
+      {
+        type: 'response.reasoning_summary_text.delta',
+        output_index: 0,
+        summary_index: 0,
+        delta: ' during the request.',
+      },
+      {
+        type: 'response.reasoning_summary_text.delta',
+        output_index: 0,
+        summary_index: 1,
+        delta: '**Clarifying no file created**',
+      },
+      { type: 'response.reasoning_summary_text.delta', output_index: 1, summary_index: 0, delta: 'A separate point.' },
+      {
+        type: 'response.completed',
+        response: {
+          status: 'completed',
+          output: [
+            {
+              type: 'reasoning',
+              summary: [
+                { type: 'summary_text', text: '**Archive download timed out** during the request.' },
+                { type: 'summary_text', text: '**Clarifying no file created**' },
+              ],
+            },
+            { type: 'reasoning', summary: [{ type: 'summary_text', text: 'A separate point.' }] },
+            { type: 'message', content: [{ type: 'output_text', text: 'Done.' }] },
+          ],
+        },
+      },
+    ];
+    vi.stubGlobal(
+      'fetch',
+      async () =>
+        new Response(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''), {
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+    );
+    const adapter = new ChatGptResponsesAdapter({
+      accessToken: async () => 'oauth-access-token',
+    } as unknown as ChatGptPlanAuth);
+    const events: Array<{ type: string; delta?: string }> = [];
+
+    const result = await adapter.complete(
+      { system: '', model: 'selected-model', temperature: 0.2, turns: [], tools: [] },
+      { reasoningEffort: 'auto', fastMode: false } satisfies ChatGptPlanPreferences,
+      new AbortController().signal,
+      () => undefined,
+      undefined,
+      (event) => events.push(event),
+    );
+
+    const streamedSummary = events
+      .filter((event) => event.type === 'reasoning_summary.delta')
+      .map((event) => event.delta)
+      .join('');
+    const expectedSummary =
+      '**Archive download timed out** during the request.\n\n**Clarifying no file created**\n\nA separate point.';
+    expect(streamedSummary).toBe(expectedSummary);
+    expect(result.reasoningSummary).toBe(expectedSummary);
+  });
+
   it('recovers streamed text and function calls omitted from the completed response', async () => {
+    let requestBody: Record<string, unknown> | undefined;
     const frames = [
       { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'Recovered ' },
       { type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: 'text' },
@@ -150,17 +226,17 @@ describe('ChatGPT Responses adapter', () => {
       },
       { type: 'response.completed', response: { status: 'completed', output: [] } },
     ];
-    vi.stubGlobal(
-      'fetch',
-      async () =>
-        new Response(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''), {
-          headers: { 'content-type': 'text/event-stream' },
-        }),
-    );
+    vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''), {
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
     const adapter = new ChatGptResponsesAdapter({
       accessToken: async () => 'oauth-access-token',
     } as unknown as ChatGptPlanAuth);
     const deltas: string[] = [];
+    const events: Array<Record<string, unknown>> = [];
 
     await expect(
       adapter.complete(
@@ -168,6 +244,8 @@ describe('ChatGPT Responses adapter', () => {
         { reasoningEffort: 'auto', fastMode: false } satisfies ChatGptPlanPreferences,
         new AbortController().signal,
         (delta) => deltas.push(delta),
+        undefined,
+        (event) => events.push(event),
       ),
     ).resolves.toMatchObject({
       content: 'Recovered text',
@@ -175,6 +253,14 @@ describe('ChatGPT Responses adapter', () => {
       finishReason: 'tool_calls',
     });
     expect(deltas).toEqual(['Recovered ', 'text']);
+    expect(requestBody?.reasoning).toEqual({ summary: 'auto' });
+    expect(events).toContainEqual({
+      type: 'tool_call.preview',
+      index: 1,
+      id: 'call_2',
+      name: 'read_file',
+      argumentsText: '{"path":',
+    });
   });
 
   it('rejects empty completed responses and function calls with unfinished arguments', async () => {
@@ -187,32 +273,42 @@ describe('ChatGPT Responses adapter', () => {
     vi.stubGlobal(
       'fetch',
       async () =>
-        new Response(`data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', output: [] } })}\n\n`, {
-          headers: { 'content-type': 'text/event-stream' },
-        }),
+        new Response(
+          `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', output: [] } })}\n\n`,
+          {
+            headers: { 'content-type': 'text/event-stream' },
+          },
+        ),
     );
     const emptyAdapter = new ChatGptResponsesAdapter(auth);
-    await expect(emptyAdapter.complete(prompt, settings, new AbortController().signal, () => undefined))
-      .rejects.toThrow('without text or tool calls');
+    await expect(
+      emptyAdapter.complete(prompt, settings, new AbortController().signal, () => undefined),
+    ).rejects.toThrow('without text or tool calls');
 
     vi.stubGlobal(
       'fetch',
       async () =>
-        new Response([
+        new Response(
+          [
+            {
+              type: 'response.output_item.added',
+              output_index: 0,
+              item: { id: 'item_3', type: 'function_call', call_id: 'call_3', name: 'read_file', arguments: '' },
+            },
+            { type: 'response.function_call_arguments.delta', output_index: 0, item_id: 'item_3', delta: '{"path":' },
+            { type: 'response.completed', response: { status: 'completed', output: [] } },
+          ]
+            .map((frame) => `data: ${JSON.stringify(frame)}\n\n`)
+            .join(''),
           {
-            type: 'response.output_item.added',
-            output_index: 0,
-            item: { id: 'item_3', type: 'function_call', call_id: 'call_3', name: 'read_file', arguments: '' },
+            headers: { 'content-type': 'text/event-stream' },
           },
-          { type: 'response.function_call_arguments.delta', output_index: 0, item_id: 'item_3', delta: '{"path":' },
-          { type: 'response.completed', response: { status: 'completed', output: [] } },
-        ].map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''), {
-          headers: { 'content-type': 'text/event-stream' },
-        }),
+        ),
     );
     const incompleteCallAdapter = new ChatGptResponsesAdapter(auth);
-    await expect(incompleteCallAdapter.complete(prompt, settings, new AbortController().signal, () => undefined))
-      .rejects.toThrow('without completing its arguments');
+    await expect(
+      incompleteCallAdapter.complete(prompt, settings, new AbortController().signal, () => undefined),
+    ).rejects.toThrow('without completing its arguments');
   });
 
   it('does not return an incomplete stream as a completed model step', async () => {

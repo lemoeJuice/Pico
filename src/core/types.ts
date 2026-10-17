@@ -79,6 +79,7 @@ export interface ToolCall {
 
 export interface AssistantPayload {
   content: string;
+  reasoningSummary?: string;
   toolCalls: ToolCall[];
   batchId: string | null;
   projectionThrough: number;

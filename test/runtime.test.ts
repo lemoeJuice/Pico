@@ -7,7 +7,7 @@ import type { AssistantPayload, Execution } from '../src/core/types.js';
 import { PicoStore } from '../src/core/store.js';
 import type { PicoPlugin } from '../src/plugins/host.js';
 import { permissionPlugin } from '../src/plugins/permissions.js';
-import type { ModelResponse } from '../src/runtime/model.js';
+import type { ModelAdapter, ModelResponse } from '../src/runtime/model.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
 import type { ModelStageInput, ProjectionInput, StepInput, ToolBatchInput } from '../src/runtime/stages.js';
 import { threadCanBeInterrupted } from '../src/web/thread-controls.js';
@@ -57,6 +57,63 @@ async function decidePermission(runtime: PicoRuntime, executionId: string, allow
 }
 
 describe('durable Thread runtime invariants', () => {
+  it('publishes provider previews and persists the returned reasoning summary', async () => {
+    let adapterCalled = false;
+    const model: ModelAdapter = {
+      async complete(_prompt, _settings, _signal, _onText, _requestTrace, onEvent) {
+        adapterCalled = true;
+        onEvent?.({ type: 'reasoning_summary.delta', delta: 'Checking the request.' });
+        onEvent?.({
+          type: 'tool_call.preview',
+          index: 0,
+          id: 'call-preview',
+          name: 'read_file',
+          argumentsText: '{"path":"notes.txt"}',
+        });
+        return {
+          content: 'Done.',
+          reasoningSummary: 'Checked the request and found the answer.',
+          toolCalls: [],
+          usage: null,
+          model: 'test-model',
+          finishReason: 'stop',
+        };
+      },
+    };
+    const env = await setupRuntime(model);
+    const thread = env.createThread();
+    const events: Array<Record<string, unknown>> = [];
+    const unsubscribe = env.runtime.subscribe((event) => events.push(event));
+    try {
+      await env.runtime.submit(thread.id, 'preview-and-summary', 'Read a note.');
+      await env.runtime.drain();
+
+      expect(adapterCalled).toBe(true);
+      const previews = events.filter((event) => event.executionId && String(event.type).startsWith('model.'));
+      expect(previews).toContainEqual({
+        type: 'model.reasoning_summary.delta',
+        threadId: thread.id,
+        executionId: expect.any(String),
+        delta: 'Checking the request.',
+      });
+      expect(previews).toContainEqual({
+        type: 'model.tool_call.preview',
+        threadId: thread.id,
+        executionId: expect.any(String),
+        index: 0,
+        id: 'call-preview',
+        name: 'read_file',
+        argumentsText: '{"path":"notes.txt"}',
+      });
+      expect(env.store.modelOutputForThread(thread.id)?.payload).toMatchObject({
+        reasoningSummary: 'Checked the request and found the answer.',
+      });
+    } finally {
+      unsubscribe();
+      await env.cleanup();
+    }
+  });
+
   it('keeps model selections separate across provider switches, including existing saved settings', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')), {
       pluginDirectory: resolve(process.cwd(), 'plugins'),
