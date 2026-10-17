@@ -230,7 +230,7 @@ export const todoPlugin: PicoPlugin = {
   version: '0.1.0',
   pipelinePriority: { projection: 30 },
   activate(context) {
-    const { tools, pipelines, commands, ui, http, state, canonical } = context;
+    const { tools, pipelines, commands, http, state, canonical } = context;
     const list = (threadId: string) => {
       const todos = readThreadTodos(state, threadId);
       return { items: todos.items, openCount: todos.items.filter((item) => item.status === 'open').length };
@@ -372,15 +372,6 @@ export const todoPlugin: PicoPlugin = {
             : 'No Todo items yet.',
         };
       },
-    });
-    ui.contribute({
-      slot: 'thread.toolbar',
-      id: 'todo',
-      label: 'Todo',
-      description: 'Manage this Thread’s short-term checklist.',
-      entry: 'webui',
-      component: 'TodoPanel',
-      supportsPopover: true,
     });
   },
 };

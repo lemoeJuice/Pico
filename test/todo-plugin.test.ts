@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { CanonicalRecord, Thread } from '../src/core/types.js';
+import type { CanonicalRecord, Thread, UiContribution } from '../src/core/types.js';
 import type { PluginContext } from '../src/plugins/host.js';
 import { formatOpenTodos, todoPlugin } from '../src/plugins/todo.js';
 import type { ProjectionInput } from '../src/runtime/stages.js';
@@ -11,6 +11,7 @@ function harness() {
     string,
     (args: Record<string, unknown>, context: { executionId: string; thread?: Thread }) => unknown
   >();
+  const contributions: UiContribution[] = [];
   const routes = new Map<string, (request: { body: unknown; query: URLSearchParams }) => unknown>();
   let project:
     | ((input: ProjectionInput, next: (input: ProjectionInput) => Promise<ProjectionInput>) => Promise<ProjectionInput>)
@@ -31,7 +32,11 @@ function harness() {
       },
     },
     commands: { register() {} },
-    ui: { contribute() {} },
+    ui: {
+      contribute(contribution: UiContribution) {
+        contributions.push(contribution);
+      },
+    },
     http: {
       register(method: string, path: string, handler: (request: { body: unknown; query: URLSearchParams }) => unknown) {
         routes.set(`${method} ${path}`, handler);
@@ -82,10 +87,17 @@ function harness() {
     if (!implementation) throw new Error(`Tool not found: ${name}`);
     return implementation(args, { executionId, thread });
   };
-  return { context, thread, records, tools, routes, getProjection: () => project, runTool };
+  return { context, thread, records, tools, routes, contributions, getProjection: () => project, runTool };
 }
 
 describe('Todo plugin', () => {
+  it('registers model tools without a Thread toolbar contribution', () => {
+    const env = harness();
+    expect(env.tools.has('todo_add')).toBe(true);
+    expect(env.tools.has('todo_list')).toBe(true);
+    expect(env.contributions).toEqual([]);
+  });
+
   it('keeps add retries idempotent and preserves concurrent additions', () => {
     const env = harness();
     const first = env.runTool('todo_add', { title: 'Inspect the deployment', operation_id: 'add-1' }, 'call-a') as {
