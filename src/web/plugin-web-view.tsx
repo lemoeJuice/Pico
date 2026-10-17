@@ -103,7 +103,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
 
   const toolbarPopoverWidth = (): number => {
     if (props.pluginId !== 'pico.rolling-context') return 360;
-    return Math.max(120, window.innerWidth - 24);
+    return Math.min(640, Math.max(120, window.innerWidth - 24));
   };
 
   const updateAnchor = (): void => {

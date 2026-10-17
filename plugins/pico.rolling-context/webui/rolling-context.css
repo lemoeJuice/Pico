@@ -24,7 +24,9 @@ body {
   font-size: 13px;
 }
 .muted {
+  min-width: 0;
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 .toolbar,
 .actions {
@@ -45,6 +47,11 @@ body {
   justify-content: space-between;
   gap: 8px;
   align-items: center;
+  min-width: 0;
+}
+.segment-head > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .tier {
   text-transform: uppercase;
