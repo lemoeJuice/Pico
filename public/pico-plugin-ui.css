@@ -1,0 +1,210 @@
+:root {
+  color-scheme: light;
+  font:
+    14px/1.5 'DM Sans',
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+  color: var(--pico-ui-text);
+  background: transparent;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  --pico-ui-bg: #f8faf7;
+  --pico-ui-panel: #ffffff;
+  --pico-ui-text: #27332b;
+  --pico-ui-muted: #68766d;
+  --pico-ui-border: #dce5de;
+  --pico-ui-accent: #587a60;
+  --pico-ui-success: #688570;
+  --pico-ui-error: #946b5d;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+select,
+input {
+  font: inherit;
+}
+
+.pico-ui-panel {
+  display: grid;
+  gap: 9px;
+  padding: 10px 12px;
+  color: var(--pico-ui-text);
+  background: var(--pico-ui-panel);
+  border: 1px solid var(--pico-ui-border);
+  border-radius: 10px;
+}
+
+.pico-ui-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--pico-ui-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pico-ui-card,
+.pico-ui-list-item,
+.pico-ui-metric-card {
+  min-width: 0;
+  padding: 9px 11px;
+  color: var(--pico-ui-text);
+  background: color-mix(in srgb, var(--pico-ui-bg) 88%, white);
+  border: 1px solid var(--pico-ui-border);
+  border-radius: 9px;
+}
+
+.pico-ui-list-item,
+.pico-ui-metric-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pico-ui-metric-card {
+  display: grid;
+  align-content: start;
+  justify-content: initial;
+}
+
+.pico-ui-section {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.pico-ui-status,
+.pico-ui-tag {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  padding: 3px 7px;
+  overflow-wrap: anywhere;
+  color: var(--pico-ui-muted);
+  background: color-mix(in srgb, var(--pico-ui-border) 45%, white);
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.pico-ui-status[data-status='success'],
+.pico-ui-status[data-status='completed'],
+.pico-ui-status[data-status='allowed'] {
+  color: var(--pico-ui-success);
+  background: color-mix(in srgb, var(--pico-ui-success) 13%, white);
+}
+
+.pico-ui-status[data-status='failed'],
+.pico-ui-status[data-status='error'],
+.pico-ui-status[data-status='denied'] {
+  color: var(--pico-ui-error);
+  background: color-mix(in srgb, var(--pico-ui-error) 12%, white);
+}
+
+.pico-ui-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.pico-ui-button {
+  min-height: 30px;
+  padding: 6px 10px;
+  color: var(--pico-ui-text);
+  background: var(--pico-ui-panel);
+  border: 1px solid var(--pico-ui-border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.pico-ui-button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--pico-ui-accent) 55%, var(--pico-ui-border));
+}
+
+.pico-ui-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.pico-ui-button--primary {
+  color: #fff;
+  background: var(--pico-ui-accent);
+  border-color: var(--pico-ui-accent);
+}
+
+.pico-ui-button--danger {
+  color: var(--pico-ui-error);
+  background: color-mix(in srgb, var(--pico-ui-error) 8%, white);
+  border-color: color-mix(in srgb, var(--pico-ui-error) 35%, var(--pico-ui-border));
+}
+
+.pico-ui-control {
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 8px;
+  color: var(--pico-ui-text);
+  background: var(--pico-ui-panel);
+  border: 1px solid var(--pico-ui-border);
+  border-radius: 7px;
+}
+
+.pico-ui-empty,
+.pico-ui-error {
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.pico-ui-empty {
+  color: var(--pico-ui-muted);
+  background: color-mix(in srgb, var(--pico-ui-bg) 88%, white);
+}
+
+.pico-ui-error {
+  color: var(--pico-ui-error);
+  background: color-mix(in srgb, var(--pico-ui-error) 8%, white);
+  border: 1px solid color-mix(in srgb, var(--pico-ui-error) 24%, white);
+}
+
+.pico-ui-preview {
+  min-width: 0;
+  padding: 9px 10px;
+  overflow: auto;
+  color: var(--pico-ui-muted);
+  background: color-mix(in srgb, var(--pico-ui-bg) 90%, white);
+  border: 1px solid var(--pico-ui-border);
+  border-radius: 8px;
+  font:
+    11px/1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.pico-ui-disclosure {
+  min-width: 0;
+  border-top: 1px solid var(--pico-ui-border);
+  padding-top: 7px;
+}

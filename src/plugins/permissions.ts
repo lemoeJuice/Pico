@@ -57,14 +57,24 @@ function isPolicy(value: unknown): value is PermissionPolicy {
   return value === 'allow' || value === 'deny' || value === 'ask';
 }
 
-const permissionRendererUi = (id: string, component: string): UiContribution => ({
-  slot: 'tool.renderer',
+const permissionResultUi = (id: string, component: string): UiContribution => ({
+  slot: 'tool.result',
   id,
-  label: 'Tool execution',
-  description: 'Inspect a Tool execution and resolve a pending permission request.',
+  label: 'Permission decision',
+  description: 'Resolve a pending permission request in the framework-owned Tool Card.',
   entry: 'webui',
   component,
 });
+
+function deniedResult(reason: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    denied: true,
+    reason,
+    modelGuidance:
+      'This tool call was blocked by the permission policy or denied by the user. Do not repeat the same call. Explain the reason and ask for permission or use an allowed alternative.',
+    ...extra,
+  };
+}
 
 export const permissionPlugin: PicoPlugin = {
   id: 'pico.permissions',
@@ -428,7 +438,8 @@ export const permissionPlugin: PicoPlugin = {
           reason: 'Denied by the current permission policy.',
           source: 'policy',
         });
-        return input.fail('Denied by the current permission policy.', { denied: true });
+        const reason = 'Denied by the current permission policy.';
+        return input.fail(reason, deniedResult(reason));
       }
       if (policy === 'ask') {
         let approval = createApproval(input);
@@ -442,13 +453,13 @@ export const permissionPlugin: PicoPlugin = {
             approval.reviewer?.outcome === 'deny'
               ? `Denied after Auto-review: ${approval.reviewer.reason}`
               : 'Denied by the user.';
-          return input.fail(reason, { denied: true, ...(approval.reviewer ? { reviewer: approval.reviewer } : {}) });
+          return input.fail(reason, deniedResult(reason, approval.reviewer ? { reviewer: approval.reviewer } : {}));
         }
       }
       return next(input);
     });
 
-    ui.contribute(permissionRendererUi('permission-tool', 'PermissionTool'));
+    ui.contribute(permissionResultUi('permission-result-actions', 'PermissionResultActions'));
 
     http.register('GET', '/threads', async ({ query }) => {
       const threadId = permissionPath(query.get('threadId'), 'threadId');

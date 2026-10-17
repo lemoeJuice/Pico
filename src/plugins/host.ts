@@ -600,7 +600,7 @@ export class PluginHost {
       ui: {
         contribute: (contribution) => {
           if (
-            !['thread.toolbar', 'composer.action', 'composer.model', 'sidebar.panel', 'tool.renderer'].includes(
+            !['thread.toolbar', 'composer.action', 'composer.model', 'sidebar.panel', 'tool.result'].includes(
               contribution.slot,
             )
           ) {
@@ -614,10 +614,10 @@ export class PluginHost {
             throw new Error('UI component contributions must name a valid Web UI entry and component.');
           }
           if (
-            (contribution.slot === 'composer.model' || contribution.slot === 'tool.renderer') &&
+            (contribution.slot === 'composer.model' || contribution.slot === 'tool.result') &&
             (!contribution.entry || !contribution.component)
           ) {
-            throw new Error('composer.model contributions must name a Web UI entry and component.');
+            throw new Error('composer.model and tool.result contributions must name a Web UI entry and component.');
           }
           if (
             contribution.providers !== undefined &&

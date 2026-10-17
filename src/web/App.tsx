@@ -46,7 +46,7 @@ import {
   type AssistantStreamExecutions,
 } from './assistant-drafts.js';
 import { noticeForThread, withThreadNotice, withoutThreadNotice, type ThreadNotices } from './thread-notices.js';
-import { toolRendererForCall, uiContributionsAt } from './ui-contributions.js';
+import { toolResultForCall, uiContributionsAt } from './ui-contributions.js';
 import {
   PLUGIN_COMPOSER_CONTROL_HEIGHT_PX,
   type PluginUiContext,
@@ -625,7 +625,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const composerActions = uiContributionsAt(uiContributions, 'composer.action');
   const composerModelContributions = uiContributionsAt(uiContributions, 'composer.model', settings?.provider);
   const sidebarPanels = uiContributionsAt(uiContributions, 'sidebar.panel');
-  const toolRenderers = uiContributionsAt(uiContributions, 'tool.renderer');
+  const toolResultContributions = uiContributionsAt(uiContributions, 'tool.result');
   const newProjectWorkspacePath = newProjectPath || defaultWorkspace;
   const suggestedNewProjectName = workspaceDirectoryName(newProjectWorkspacePath);
 
@@ -1620,31 +1620,38 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     execution: Execution | undefined,
     result: ToolResultPayload | undefined,
   ): ReactNode => {
-    const renderer = toolRendererForCall(toolRenderers, call.name);
-    if (renderer?.entry && renderer.component && renderer.pluginId && pluginUiContext && selectedThread) {
-      return (
-        <div className="plugin-tool-renderer" key={execution?.id ?? call.id}>
+    const contribution =
+      execution?.status === 'pending' ? toolResultForCall(toolResultContributions, call.name) : undefined;
+    const resultActions =
+      contribution?.entry && contribution.component && contribution.pluginId && pluginUiContext && selectedThread ? (
+        <div className="plugin-tool-result" key={`tool-result-${execution?.id ?? call.id}`}>
           <PluginWebView
-            pluginId={renderer.pluginId}
-            entry={renderer.entry}
+            pluginId={contribution.pluginId}
+            entry={contribution.entry}
             viewType="component"
-            viewId={renderer.component}
-            uiSlot={renderer.slot}
+            viewId={contribution.component}
+            uiSlot={contribution.slot}
             {...pluginUiContext}
             context={{
-              thread: selectedThread,
-              toolCall: call,
-              ...(execution ? { execution } : {}),
-              ...(result ? { result } : {}),
+              thread: null,
+              threadId: selectedThread.id,
+              ...(execution ? { toolResult: { executionId: execution.id, status: execution.status } } : {}),
             }}
             events={pluginEvents}
             isRegisteredPage={isRegisteredPluginPage}
             runCommand={runPluginCommand}
           />
         </div>
-      );
-    }
-    return <ToolCard key={execution?.id ?? call.id} call={call} execution={execution} result={result} />;
+      ) : undefined;
+    return (
+      <ToolCard
+        key={execution?.id ?? call.id}
+        call={call}
+        execution={execution}
+        result={result}
+        resultActions={resultActions}
+      />
+    );
   };
 
   const clearApiKey = async (): Promise<void> => {
@@ -2252,15 +2259,17 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       ) : null}
                       {assistantDraft ? <Markdown>{assistantDraft}</Markdown> : null}
                       {assistantPreview.tools?.map((call) => (
-                        <div className="tool-preview" key={call.index}>
-                          <div className="tool-preview-heading">
-                            <LoaderCircle size={12} aria-hidden="true" />
-                            <strong>{call.name ?? 'Tool call'}</strong>
-                            <span>Preparing arguments…</span>
-                          </div>
-                          <pre>{call.argumentsText || 'Waiting for arguments…'}</pre>
-                          <span className="subtle-inline">Result · waiting for execution</span>
-                        </div>
+                        <ToolCard
+                          key={call.id ?? `${assistantPreview.executionId}:${call.index}`}
+                          call={{
+                            id: call.id ?? `preview:${assistantPreview.executionId}:${call.index}`,
+                            name: call.name ?? 'Tool call',
+                            arguments: {},
+                          }}
+                          execution={undefined}
+                          result={undefined}
+                          preview={{ argumentsText: call.argumentsText }}
+                        />
                       ))}
                       <span className="cursor-block" />
                     </div>
@@ -2778,11 +2787,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           <form className="form-stack" onSubmit={(event) => void updateThreadTitle(event)}>
             <label>
               Thread name
-              <input
-                value={threadTitleDraft}
-                onChange={(event) => setThreadTitleDraft(event.target.value)}
-                autoFocus
-              />
+              <input value={threadTitleDraft} onChange={(event) => setThreadTitleDraft(event.target.value)} autoFocus />
             </label>
             <div className="thread-info-details">
               <div>

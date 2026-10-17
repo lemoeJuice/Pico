@@ -138,7 +138,7 @@ export interface ToolDefinition {
 }
 
 export interface UiContribution {
-  slot: 'thread.toolbar' | 'composer.action' | 'composer.model' | 'sidebar.panel' | 'tool.renderer';
+  slot: 'thread.toolbar' | 'composer.action' | 'composer.model' | 'sidebar.panel' | 'tool.result';
   id: string;
   label: string;
   description?: string;

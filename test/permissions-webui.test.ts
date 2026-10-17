@@ -2,18 +2,43 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { expect, it } from 'vitest';
 
-function renderTool(status: string, result: unknown = null, error: string | null = null) {
+async function renderPermissionActions(status: string, approvalStatus: string | null = 'pending') {
   let html = '';
   let listener: (event: unknown) => void = () => {};
+  let portListener: (event: { data: unknown }) => void = () => {};
   const root = {
     set innerHTML(value: string) {
       html = value;
     },
     querySelector: () => null,
     querySelectorAll: () => [],
-    getBoundingClientRect: () => ({ height: 300 }),
+    getBoundingClientRect: () => ({ height: 90 }),
   };
   const parent = {};
+  const port = {
+    postMessage(message: { type?: string; id?: string; action?: string }) {
+      if (message.action !== 'api' || !message.id) return;
+      portListener({
+        data: {
+          type: 'pico:plugin-ui:response',
+          id: message.id,
+          ok: true,
+          value: {
+            tools: [],
+            autoReview: false,
+            approvals:
+              approvalStatus === null
+                ? []
+                : [{ executionId: 'execution', status: approvalStatus, reviewer: undefined }],
+          },
+        },
+      });
+    },
+    start() {},
+    set onmessage(callback: (event: { data: unknown }) => void) {
+      portListener = callback;
+    },
+  };
   runInNewContext(readFileSync(new URL('../plugins/pico.permissions/webui/permissions.js', import.meta.url), 'utf8'), {
     document: { getElementById: () => root, addEventListener() {} },
     window: {
@@ -31,35 +56,30 @@ function renderTool(status: string, result: unknown = null, error: string | null
       protocolVersion: 1,
       pluginId: 'pico.permissions',
       entry: 'webui',
-      viewId: 'ToolExecution',
+      viewId: 'PermissionResultActions',
       context: {
         thread: null,
-        toolCall: { id: 'call', name: 'shell', arguments: { command: 'pwd' } },
-        execution: { id: 'execution', toolName: 'shell', arguments: { command: 'pwd' }, status, result, error },
+        threadId: 'thread',
+        toolResult: { executionId: 'execution', status },
       },
     },
-    ports: [{ postMessage() {}, start() {} }],
+    ports: [port],
   });
+  await new Promise((resolve) => setTimeout(resolve, 0));
   return html;
 }
 
-it('keeps the permissions renderer arguments and result visible in every execution phase', () => {
-  for (const status of ['pending', 'running', 'completed', 'failed', 'interrupted']) {
-    const html = renderTool(status, status === 'completed' ? '/workspace' : null);
-    expect(html).not.toContain('<details');
-    expect(html).not.toContain('<summary');
-    expect(html).toContain('Arguments');
-    expect(html).toContain('Result');
-    expect(html).toContain('pwd');
-  }
-  expect(renderTool('pending')).toContain('Waiting for approval or Executor');
-  expect(renderTool('running')).toContain('Running in the selected Executor');
-  expect(renderTool('running')).not.toContain('<pre class="">null</pre>');
-  expect(renderTool('completed', '/workspace')).toContain('/workspace');
-});
+it('keeps the framework Tool Card intact and adds approval actions only while an approval is pending', async () => {
+  const pending = await renderPermissionActions('pending');
+  expect(pending).toContain('Allow once');
+  expect(pending).toContain('Deny');
+  expect(pending).toContain('pico-ui-button--primary');
+  expect(pending).not.toContain('Arguments');
+  expect(pending).not.toContain('Result');
+  expect(pending).not.toContain('<article');
 
-it('escapes results and retains failure styling in the actual plugin renderer', () => {
-  expect(renderTool('completed', '<script>alert(1)</script>')).toContain('&lt;script&gt;');
-  expect(renderTool('failed', null, 'Executor <failed>')).toContain('Executor &lt;failed&gt;');
-  expect(renderTool('failed', null, 'failure')).toContain('result-error');
+  for (const status of ['running', 'completed', 'failed', 'interrupted']) {
+    expect(await renderPermissionActions(status)).toBe('');
+  }
+  expect(await renderPermissionActions('pending', 'allowed')).toBe('');
 });

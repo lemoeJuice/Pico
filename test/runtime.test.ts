@@ -299,7 +299,7 @@ describe('durable Thread runtime invariants', () => {
           .pluginInfo()
           .ui.filter((item) => item.pluginId === 'pico.permissions')
           .map((item) => item.slot),
-      ).toEqual(['tool.renderer']);
+      ).toEqual(['tool.result']);
 
       expect(
         (await env.runtime.listThreadTools(hostThread.id)).find((tool) => tool.name === 'optional_runtime_tool')
@@ -1191,6 +1191,44 @@ describe('durable Thread runtime invariants', () => {
           ),
       ).toBe(true);
       expect(env.store.getExecution(approval.executionId)?.status).toBe('completed');
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('returns permission denials with a visible reason and guidance for the next Model Step', async () => {
+    const model = new FakeModel((_prompt, callNumber) =>
+      callNumber === 1
+        ? response('', [{ id: 'policy-denial', name: 'read_file', arguments: { path: 'facts.txt' } }])
+        : response('The tool was blocked by policy, so I will explain that and offer another path.'),
+    );
+    const env = await setupRuntime(model);
+    const thread = env.createThread('host');
+    await setPermission(env.runtime, thread.id, 'read_file', 'deny');
+    try {
+      await env.runtime.submit(thread.id, 'policy-denial-message', 'Read facts.txt.');
+      await env.runtime.drain();
+
+      const execution = env.store.listExecutions(thread.id).find((item) => item.toolName === 'read_file')!;
+      const result = env.store.listRecords(thread.id).find((record) => record.kind === 'tool_result');
+      expect(execution).toMatchObject({
+        status: 'failed',
+        error: 'Denied by the current permission policy.',
+        result: {
+          denied: true,
+          reason: 'Denied by the current permission policy.',
+          modelGuidance: expect.stringContaining('Do not repeat the same call.'),
+        },
+      });
+      expect(result?.payload).toMatchObject({
+        status: 'failed',
+        error: 'Denied by the current permission policy.',
+        result: { denied: true, modelGuidance: expect.any(String) },
+      });
+      const modelToolResult = model.prompts[1]?.turns.find((turn) => turn.kind === 'tool_result');
+      expect(modelToolResult?.content).toContain('Denied by the current permission policy.');
+      expect(modelToolResult?.content).toContain('Model guidance:');
+      expect(modelToolResult?.content).toContain('Do not repeat the same call.');
     } finally {
       await env.cleanup();
     }

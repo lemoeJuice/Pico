@@ -362,7 +362,16 @@ function stringifyToolResult(payload: ToolResultPayload): string {
   if (payload.status === 'interrupted') {
     return `Execution interrupted. ${payload.error ?? ''} Its real-world side effects may be partial or unknown. Inspect the environment before retrying.`;
   }
-  if (payload.status === 'failed') return `Tool failed: ${payload.error ?? 'Unknown error'}`;
+  if (payload.status === 'failed') {
+    const guidance =
+      payload.result &&
+      typeof payload.result === 'object' &&
+      !Array.isArray(payload.result) &&
+      typeof (payload.result as Record<string, unknown>).modelGuidance === 'string'
+        ? (payload.result as Record<string, unknown>).modelGuidance
+        : undefined;
+    return `Tool failed: ${payload.error ?? 'Unknown error'}${guidance ? `\nModel guidance: ${guidance}` : ''}`;
+  }
   try {
     return JSON.stringify(payload.result ?? null);
   } catch {
@@ -2044,9 +2053,8 @@ export class PicoRuntime {
       batchId: execution.batchId ?? '',
       toolName: execution.toolName ?? 'unknown',
       status: execution.status,
-      ...(execution.status === 'completed'
-        ? { result: execution.result }
-        : { error: execution.error ?? 'Execution ended without a result.' }),
+      ...(execution.result === null || execution.result === undefined ? {} : { result: execution.result }),
+      ...(execution.status === 'completed' ? {} : { error: execution.error ?? 'Execution ended without a result.' }),
     };
     this.store.appendToolResult(threadId, payload);
   }

@@ -1,4 +1,5 @@
 import type { Execution, ToolCall, ToolResultPayload } from '../core/types.js';
+import type { ReactNode } from 'react';
 
 function toJson(value: unknown): string {
   try {
@@ -12,16 +13,26 @@ export function ToolCard({
   call,
   execution,
   result,
+  preview,
+  resultActions,
 }: {
   call: ToolCall;
   execution: Execution | undefined;
   result: ToolResultPayload | undefined;
+  preview?: { argumentsText: string };
+  resultActions?: ReactNode;
 }) {
   const status = execution?.status ?? result?.status ?? 'pending';
   const hasError = Boolean(execution?.error || result?.status === 'failed' || result?.status === 'interrupted');
   const outcomeUnconfirmed = execution?.error?.includes('The Executor did not confirm an outcome.') ?? false;
-  const resultText =
-    result?.status === 'interrupted'
+  const structuredResult =
+    result?.result && typeof result.result === 'object' && !Array.isArray(result.result)
+      ? (result.result as Record<string, unknown>)
+      : undefined;
+  const modelGuidance = typeof structuredResult?.modelGuidance === 'string' ? structuredResult.modelGuidance : null;
+  const resultText = preview
+    ? 'Waiting for the model to finish this call…'
+    : result?.status === 'interrupted'
       ? `The tool was interrupted. Its side effects may be partial or unknown. Inspect the workspace before retrying.${result.error ? `\n\n${result.error}` : ''}`
       : result?.status === 'failed'
         ? (result.error ?? 'Tool failed.')
@@ -33,15 +44,18 @@ export function ToolCard({
               ? 'Running in the selected Executor…'
               : 'Waiting for the Executor…';
   return (
-    <article className={`conversation-detail-card tool-card tool-${status}${hasError ? ' tool-has-error' : ''}`}>
+    <article
+      className={`conversation-detail-card tool-card tool-${status}${hasError ? ' tool-has-error' : ''}`}
+      data-phase={preview ? 'generating' : status}
+    >
       <div className="tool-card-heading">
         <span className="tool-name">{call.name}</span>
-        <span className={`tool-status status-${status}`}>{status}</span>
+        <span className={`tool-status status-${status}`}>{preview ? 'Generating' : status}</span>
       </div>
       <div className="tool-card-body">
         <section className="conversation-detail-row tool-detail">
           <div className="tool-detail-heading">Arguments</div>
-          <pre>{toJson(call.arguments)}</pre>
+          <pre>{preview ? preview.argumentsText || 'Waiting for arguments…' : toJson(call.arguments)}</pre>
         </section>
         <section className="conversation-detail-row tool-detail">
           <div className="tool-detail-heading">
@@ -51,6 +65,13 @@ export function ToolCard({
             ) : null}
           </div>
           <pre className={`tool-output${hasError ? ' tool-output-error' : ''}`}>{resultText}</pre>
+          {modelGuidance ? (
+            <>
+              <div className="tool-detail-heading tool-model-guidance-heading">Model guidance</div>
+              <pre className="tool-model-guidance">{modelGuidance}</pre>
+            </>
+          ) : null}
+          {resultActions}
         </section>
       </div>
     </article>

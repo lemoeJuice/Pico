@@ -236,8 +236,8 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
           return;
         }
         const limits =
-          current.current.uiSlot === 'tool.renderer'
-            ? { min: 72, max: 620 }
+          current.current.uiSlot === 'tool.result'
+            ? { min: 0, max: 180 }
             : current.current.viewType === 'page'
               ? { min: 220, max: 620 }
               : { min: 46, max: 180 };

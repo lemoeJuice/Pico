@@ -1708,13 +1708,13 @@ button:disabled {
   width: auto;
   height: var(--pico-composer-control-height, 32px);
 }
-.plugin-tool-renderer {
+.plugin-tool-result {
   width: 100%;
   max-width: 100%;
 }
-.plugin-tool-renderer > .plugin-web-view-component {
+.plugin-tool-result > .plugin-web-view-component {
   width: 100%;
-  min-height: 46px;
+  min-height: 0;
 }
 .composer-plugin-controls .plugin-web-view-component {
   flex: 1 1 100%;
@@ -2928,8 +2928,7 @@ button:disabled {
   font-size: 1.15em;
 }
 .markdown-body pre,
-.tool-card pre,
-.tool-preview pre {
+.tool-card pre {
   overflow: auto;
   max-height: 320px;
   padding: 10px 12px;
@@ -2997,21 +2996,13 @@ button:disabled {
 .reasoning-summary .markdown-body p {
   margin: 0;
 }
-.tool-preview {
-  margin: 8px 0;
-  border: 1px solid #e0e7dc;
-  border-radius: 9px;
-  padding: 10px 12px;
+.tool-model-guidance-heading {
+  margin-top: 8px;
 }
-.tool-preview-heading {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  font-size: 11px;
-  color: #738173;
-}
-.tool-preview-heading strong {
-  color: #4b5850;
+.tool-model-guidance {
+  color: #68766d;
+  background: #f3f6f2;
+  border-left: 2px solid #9eac9f;
 }
 .composer-usage {
   display: flex;

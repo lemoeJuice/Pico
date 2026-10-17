@@ -49,12 +49,12 @@
   }
 
   function currentApproval() {
-    const id = context.execution?.id;
+    const id = context.toolResult?.executionId ?? context.execution?.id;
     return id ? data.approvals.find((approval) => approval.executionId === id) : undefined;
   }
 
   async function refresh() {
-    const threadId = context.thread?.id;
+    const threadId = context.threadId ?? context.thread?.id;
     if (!threadId) {
       data = { tools: [], approvals: [], autoReview: false };
       draw();
@@ -126,46 +126,25 @@
     setPopover(false);
   });
 
-  function renderer() {
-    const execution = context.execution;
-    const call = context.toolCall;
-    if (!execution && !call)
-      return '<section class="panel tool-renderer-panel"><div class="empty">Tool execution details are not available.</div></section>';
-    const name = execution?.toolName ?? call?.name ?? 'Tool';
-    const status = execution?.status ?? context.result?.status ?? 'pending';
-    const args = execution?.arguments ?? call?.arguments;
-    const result = execution?.result ?? context.result?.result;
-    const failure = execution?.error ?? context.result?.error;
-    const failed = Boolean(failure || status === 'failed' || status === 'interrupted');
-    const resultText = failure
-      ? failure
-      : status === 'interrupted'
-        ? 'Execution was interrupted. Side effects may be partial or unknown. Inspect before retrying.'
-        : status === 'pending' || status === 'running'
-          ? status === 'running'
-            ? 'Running in the selected Executor…'
-            : 'Waiting for approval or Executor…'
-          : result === undefined
-            ? 'No result returned.'
-            : typeof result === 'string'
-              ? result
-              : JSON.stringify(result, null, 2);
+  function permissionResultActions() {
+    const execution = context.toolResult ?? context.execution;
     const approval = currentApproval();
-    const awaiting = status === 'pending' && approval?.status === 'pending';
+    const awaiting = execution?.status === 'pending' && approval?.status === 'pending';
+    if (!awaiting) return '';
     const review = approval?.reviewer;
-    const reviewerBoundary = Boolean(review);
-    return `<section class="panel tool-renderer-panel"><article class="card${failed ? ' has-error' : ''}">
-      <div class="card-header"><strong>${escape(name)}</strong><span class="status ${escape(status)} ${awaiting ? 'pending' : ''}">${escape(awaiting ? 'awaiting approval' : status)}</span></div>
-      ${args === undefined ? '' : `<section class="tool-section"><div class="tool-section-heading">Arguments</div><pre>${escape(JSON.stringify(args, null, 2))}</pre></section>`}
+    return `<section class="permission-result-actions pico-ui-section" aria-label="Permission decision">
       ${review ? `<div class="review-result"><strong>${escape(review.outcome === 'allow' ? 'Auto-review allowed' : review.outcome === 'deny' ? 'Auto-review denied' : 'Auto-review unavailable')}</strong><span>${escape(review.reason)}</span>${review.model ? `<small>Reviewer model: ${escape(review.model)}</small>` : ''}</div>` : ''}
-      <section class="tool-section"><div class="tool-section-heading">Result</div><pre class="${failed ? 'result-error' : ''}">${escape(resultText)}</pre></section>
-      ${awaiting ? `<div class="actions">${reviewerBoundary ? '' : '<label class="remember"><input id="remember" type="checkbox" /> Allow this tool in this Thread</label>'}<button class="deny" data-decision="deny" ${busy ? 'disabled' : ''}>Deny</button><button class="allow" data-decision="allow" ${busy ? 'disabled' : ''}>Allow once</button></div>` : ''}
-      ${error ? `<div class="error">${escape(error)}</div>` : ''}
-    </article></section>`;
+      ${error ? `<div class="pico-ui-error">${escape(error)}</div>` : ''}
+      <div class="pico-ui-actions">
+        ${review ? '' : '<label class="remember"><input class="pico-ui-control" id="remember" type="checkbox" /> Allow this tool in this Thread</label>'}
+        <button class="pico-ui-button pico-ui-button--danger" data-decision="deny" ${busy ? 'disabled' : ''}>Deny</button>
+        <button class="pico-ui-button pico-ui-button--primary" data-decision="allow" ${busy ? 'disabled' : ''}>Allow once</button>
+      </div>
+    </section>`;
   }
 
   function draw() {
-    root.innerHTML = init?.viewId === 'ToolPermissions' ? toolbar() : renderer();
+    root.innerHTML = init?.viewId === 'ToolPermissions' ? toolbar() : permissionResultActions();
     if (init?.viewId === 'ToolPermissions') {
       root.querySelectorAll('select[data-tool]').forEach((select) => {
         select.addEventListener('change', async () => {
@@ -234,7 +213,7 @@
   }
 
   function approvalId() {
-    return context.execution?.id ?? '';
+    return context.toolResult?.executionId ?? context.execution?.id ?? '';
   }
 
   function accept(message) {
@@ -246,7 +225,7 @@
       if (message.ok) handler.resolve(message.value);
       else handler.reject(new Error(message.error));
     } else if (message.type === 'pico:plugin-ui:context') {
-      const nextThreadId = message.context?.thread?.id ?? null;
+      const nextThreadId = message.context?.threadId ?? message.context?.thread?.id ?? null;
       if (nextThreadId !== renderedThreadId) {
         toolsExpanded = false;
         setPopover(false);

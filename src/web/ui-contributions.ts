@@ -12,11 +12,11 @@ export function uiContributionsAt(
   );
 }
 
-export function toolRendererForCall(
+export function toolResultForCall(
   contributions: readonly UiContribution[],
   toolName: string,
 ): UiContribution | undefined {
-  return uiContributionsAt(contributions, 'tool.renderer').find(
+  return uiContributionsAt(contributions, 'tool.result').find(
     (contribution) => contribution.toolNames === undefined || contribution.toolNames.includes(toolName),
   );
 }
