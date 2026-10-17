@@ -533,7 +533,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [pluginPageSelection, setPluginPageSelection] = useState<{ pluginId: string; pageId: string } | null>(null);
   const [pluginManagerOpen, setPluginManagerOpen] = useState(false);
   const [memoryManagerOpen, setMemoryManagerOpen] = useState(false);
-  const [memoryPageSelection, setMemoryPageSelection] = useState<'project' | 'global'>('project');
   const [pluginActionId, setPluginActionId] = useState<string | null>(null);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newThreadOpen, setNewThreadOpen] = useState(false);
@@ -1544,8 +1543,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   };
 
   const openPluginPage = (pluginId: string, pageId: string): void => {
-    if (pluginId === 'pico.project-context' || pluginId === 'pico.global-memory') {
-      setMemoryPageSelection(pluginId === 'pico.project-context' ? 'project' : 'global');
+    if (pluginId === 'pico.global-memory') {
       setMemoryManagerOpen(true);
       setPluginManagerOpen(false);
       setPluginPageSelection(null);
@@ -1628,10 +1626,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     pluginInfo?.pages.filter(
       (page) => page.pluginId === 'pico.project-context' || page.pluginId === 'pico.global-memory',
     ) ?? [];
-  const selectedMemoryPage =
-    memoryPages.find(
-      (page) => page.pluginId === (memoryPageSelection === 'project' ? 'pico.project-context' : 'pico.global-memory'),
-    ) ?? memoryPages[0];
+  const selectedMemoryPage = memoryPages.find((page) => page.pluginId === 'pico.global-memory');
   const isRegisteredPluginPage = (pluginId: string, pageId: string): boolean =>
     Boolean(pluginInfo?.pages.some((page) => page.pluginId === pluginId && page.id === pageId));
 
@@ -2523,7 +2518,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   setMemoryManagerOpen(false);
                 }}
               >
-                Default
+                Provider
               </button>
               <button
                 type="button"
@@ -2610,25 +2605,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             </section>
           ) : memoryManagerOpen ? (
             <section className="plugin-settings-page memory-settings-page" aria-label="Memory management">
-              <div className="memory-scope-tabs" role="tablist" aria-label="Memory scope">
-                {(['project', 'global'] as const).map((scope) => {
-                  const page = memoryPages.find(
-                    (item) => item.pluginId === (scope === 'project' ? 'pico.project-context' : 'pico.global-memory'),
-                  );
-                  return page ? (
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={selectedMemoryPage?.pluginId === page.pluginId}
-                      className={`button ${selectedMemoryPage?.pluginId === page.pluginId ? 'button-soft' : 'button-quiet'}`}
-                      key={page.pluginId}
-                      onClick={() => setMemoryPageSelection(scope)}
-                    >
-                      {scope === 'project' ? 'Project' : 'Global'}
-                    </button>
-                  ) : null;
-                })}
-              </div>
               {selectedMemoryPage && pluginUiContext ? (
                 <PluginWebView
                   key={`${selectedMemoryPage.pluginId}:${selectedMemoryPage.entry}:${selectedMemoryPage.id}`}
@@ -2641,7 +2617,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   runCommand={runPluginCommand}
                 />
               ) : (
-                <p className="field-note">Enable the relevant Memory plugin in Plugins to manage this scope.</p>
+                <p className="field-note">Enable Global Memory in Plugins to manage global memories.</p>
               )}
             </section>
           ) : pluginPageSelection ? (
