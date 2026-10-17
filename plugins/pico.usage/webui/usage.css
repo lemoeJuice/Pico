@@ -1,11 +1,10 @@
 :root {
   color-scheme: light;
   font:
-    13px/1.55 'DM Sans',
-    ui-sans-serif,
+    13px/1.55 ui-sans-serif,
     system-ui,
     sans-serif;
-  color: #28332e;
+  color: var(--pico-ui-text);
   background: transparent;
 }
 * {
@@ -26,23 +25,19 @@ select {
   margin: auto;
 }
 .heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
   margin: 0 0 14px;
 }
 h1 {
   margin: 0;
-  color: #3d4e42;
-  font-family: 'DM Serif Display', Georgia, serif;
+  color: var(--pico-ui-text);
+  font-family: inherit;
   font-size: 24px;
   font-weight: 400;
   letter-spacing: -0.02em;
 }
 .subtle,
 .muted {
-  color: #8e9a90;
+  color: var(--pico-ui-muted);
   font-size: 11px;
 }
 .subtle {
@@ -54,10 +49,6 @@ h1 {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
   margin: 12px 0 15px;
-  padding: 14px;
-  border: 1px solid #e6eae4;
-  border-radius: 14px;
-  background: #fbfcfa;
 }
 .filters label,
 .rate-form label {
@@ -65,46 +56,16 @@ h1 {
   min-width: 0;
   flex-direction: column;
   gap: 5px;
-  color: #627066;
+  color: var(--pico-ui-muted);
   font-size: 10px;
   font-weight: 600;
 }
-input,
-select {
-  width: 100%;
-  min-width: 0;
-  min-height: 36px;
-  padding: 0 10px;
-  border: 1px solid #e4eae2;
-  border-radius: 9px;
-  color: #46564b;
-  background: #fff;
-  font-size: 11px;
-  font-weight: 400;
-}
 input::placeholder {
-  color: #a0aaa1;
+  color: var(--pico-ui-muted);
 }
-button {
+.filters button,
+.rate-form button {
   align-self: end;
-  min-height: 34px;
-  padding: 0 13px;
-  border: 1px solid #e3ece3;
-  border-radius: 10px;
-  color: #5f7967;
-  background: #f1f6f1;
-  font-size: 11px;
-  font-weight: 600;
-  cursor: pointer;
-}
-button.primary {
-  color: #fff;
-  border-color: #4d735b;
-  background: linear-gradient(135deg, #648a6d, #4d735b);
-}
-button:disabled {
-  opacity: 0.58;
-  cursor: not-allowed;
 }
 .cards {
   display: grid;
@@ -114,44 +75,27 @@ button:disabled {
 }
 .coverage-note {
   margin: 10px 2px -8px;
-  color: #758279;
+  color: var(--pico-ui-muted);
   font-size: 10px;
 }
-.card,
-.section {
-  border: 1px solid #e6eae4;
-  border-radius: 13px;
-  background: #fbfcfa;
-}
-.card {
+.metric-card {
   min-width: 0;
-  padding: 11px 12px;
-  color: #758279;
-  font-size: 10px;
-}
-.card strong {
-  display: block;
-  margin-top: 4px;
-  color: #3d4e42;
-  font-size: 17px;
-  font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 .coverage {
   display: block;
   margin-top: 3px;
-  color: #8e9a90;
+  color: var(--pico-ui-muted);
   font-size: 9px;
   font-weight: 400;
 }
 .section {
   margin: 12px 0;
-  padding: 14px;
 }
 .section h2 {
   margin: 0 0 10px;
-  color: #3d4e42;
-  font-family: 'DM Serif Display', Georgia, serif;
+  color: var(--pico-ui-text);
+  font-family: inherit;
   font-size: 18px;
   font-weight: 400;
 }
@@ -163,7 +107,7 @@ button:disabled {
 .groups > div > strong {
   display: block;
   margin-bottom: 6px;
-  color: #738078;
+  color: var(--pico-ui-muted);
   font-size: 10px;
   font-weight: 650;
 }
@@ -175,7 +119,7 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   gap: 10px;
-  color: #46564b;
+  color: var(--pico-ui-text);
   font-size: 10px;
 }
 .group-row span:first-child {
@@ -195,21 +139,21 @@ table {
 th,
 td {
   padding: 8px;
-  border-bottom: 1px solid #edf0eb;
+  border-bottom: 1px solid var(--pico-ui-border);
   text-align: left;
   vertical-align: top;
 }
 th {
-  color: #758279;
+  color: var(--pico-ui-muted);
   font-size: 9px;
   font-weight: 650;
   white-space: nowrap;
 }
 td {
-  color: #46564b;
+  color: var(--pico-ui-text);
 }
 .attempt {
-  color: #758279;
+  color: var(--pico-ui-muted);
 }
 .rate-list {
   display: grid;
@@ -220,24 +164,14 @@ td {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border-top: 1px solid #edf0eb;
+  border-top: 1px solid var(--pico-ui-border);
   padding-top: 8px;
-  color: #46564b;
+  color: var(--pico-ui-text);
   font-size: 10px;
 }
 .notice {
   margin: 8px 0;
-  padding: 9px 11px;
-  border: 1px solid #eee6d7;
-  border-radius: 10px;
-  color: #756542;
-  background: #fbf7ee;
   font-size: 10px;
-}
-.error {
-  margin: 8px 0;
-  color: #a23c35;
-  font-size: 11px;
 }
 @media (max-width: 700px) {
   .filters,

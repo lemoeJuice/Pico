@@ -47,24 +47,24 @@
   function render() {
     if (!root) return;
     const threadId = context.thread?.id;
-    root.innerHTML = `<section class="panel">
-      <div class="heading"><span>Memory</span><label class="toggle auto-toggle"><span>Auto memory</span><input id="auto" type="checkbox" aria-label="Automatic memory" ${autoEnabled ? 'checked' : ''} ${busy ? 'disabled' : ''}></label></div>
+    root.innerHTML = `<section class="pico-ui-panel panel">
+      <div class="pico-ui-heading heading"><span>Memory</span><label class="toggle auto-toggle"><span>Auto memory</span><input id="auto" type="checkbox" aria-label="Automatic memory" ${autoEnabled ? 'checked' : ''} ${busy ? 'disabled' : ''}></label></div>
       <div class="muted">Global memories apply across Projects. Project Context remains scoped to its Project.</div>
-      <form class="form" id="add"><textarea name="text" maxlength="1200" required placeholder="Add a durable preference or general fact…" aria-label="Memory text"></textarea><select name="category" aria-label="Category"><option value="preference">Preference</option><option value="fact">Fact</option><option value="collaboration">Collaboration</option><option value="other">Other</option></select><button ${busy ? 'disabled' : ''}>Add</button></form>
-      <div class="search"><input id="search" value="${escape(search)}" placeholder="Search memories…" aria-label="Search memories"></div>
-      ${error ? `<div class="error" role="alert">${escape(error)}</div>` : ''}
+      <form class="form" id="add"><textarea class="pico-ui-control" name="text" maxlength="1200" required placeholder="Add a durable preference or general fact…" aria-label="Memory text"></textarea><select class="pico-ui-control" name="category" aria-label="Category"><option value="preference">Preference</option><option value="fact">Fact</option><option value="collaboration">Collaboration</option><option value="other">Other</option></select><button class="pico-ui-button" ${busy ? 'disabled' : ''}>Add</button></form>
+      <div class="search"><input class="pico-ui-control" id="search" value="${escape(search)}" placeholder="Search memories…" aria-label="Search memories"></div>
+      ${error ? `<div class="pico-ui-error error" role="alert">${escape(error)}</div>` : ''}
       <div class="items">${
         items
           .map(
-            (item) => `<article class="item">
-        <div class="row"><span class="tag">${escape(item.category)} · ${Math.round(item.confidence * 100)}%</span><label class="toggle"><input type="checkbox" data-pin="${escape(item.id)}" ${item.pinned ? 'checked' : ''} ${busy ? 'disabled' : ''}> Pin</label></div>
+            (item) => `<article class="pico-ui-list-item item">
+        <div class="row"><span class="pico-ui-tag tag">${escape(item.category)} · ${Math.round(item.confidence * 100)}%</span><label class="toggle"><input type="checkbox" data-pin="${escape(item.id)}" ${item.pinned ? 'checked' : ''} ${busy ? 'disabled' : ''}> Pin</label></div>
         <div class="item-text">${escape(item.text)}</div>
         ${item.applicability ? `<div class="muted">Applies: ${escape(item.applicability)}</div>` : ''}
         ${item.sources?.length ? `<div class="sources muted">Sources: ${item.sources.map((source) => `${escape(source.threadId)} #${escape(source.seq)}`).join(' · ')}</div>` : '<div class="sources muted">Manual entry</div>'}
-        <div class="actions"><button type="button" data-edit="${escape(item.id)}" ${busy ? 'disabled' : ''}>Edit</button><button type="button" data-delete="${escape(item.id)}" ${busy ? 'disabled' : ''}>Delete</button></div>
+        <div class="pico-ui-actions actions"><button class="pico-ui-button" type="button" data-edit="${escape(item.id)}" ${busy ? 'disabled' : ''}>Edit</button><button class="pico-ui-button" type="button" data-delete="${escape(item.id)}" ${busy ? 'disabled' : ''}>Delete</button></div>
       </article>`,
           )
-          .join('') || '<div class="empty">No matching Global Memory entries.</div>'
+          .join('') || '<div class="pico-ui-empty empty">No matching Global Memory entries.</div>'
       }</div>
     </section>`;
     root.querySelector('#search')?.addEventListener('input', (event) => {

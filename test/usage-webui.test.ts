@@ -186,10 +186,10 @@ it('uses project and Thread names in linked Usage filters and report rows', asyn
   expect(html).toContain('By Project');
   expect(html).toContain('Garden project');
   expect(html).toContain(
-    '<div class="card">Input tokens<strong>10</strong><span class="coverage">Partial · 1/2 calls</span></div>',
+    '<div class="card metric-card pico-ui-metric-card">Input tokens<strong>10</strong><span class="coverage">Partial · 1/2 calls</span></div>',
   );
   expect(html).toContain('Token totals include reported values only; missing values are excluded, never estimated.');
-  expect(html).toContain('<div class="card">Estimated cost<strong>unknown</strong>');
+  expect(html).toContain('<div class="card metric-card pico-ui-metric-card">Estimated cost<strong>unknown</strong>');
   expect(html).not.toMatch(/<input[^>]+name="(?:projectId|threadId)"/);
   expect(html).not.toContain('>thread-1<');
   expect(html).not.toContain('>project-1<');
@@ -198,7 +198,7 @@ it('uses project and Thread names in linked Usage filters and report rows', asyn
   projectSelect.value = 'project-2';
   listeners.get('projectId:change')?.({ currentTarget: projectSelect });
   expect(html).toContain('<option value="thread-2" >Build notes</option>');
-  expect(html.match(/<select name="threadId">.*?<\/select>/)?.[0]).not.toContain('thread-1');
+  expect(html.match(/<select[^>]*name="threadId"[^>]*>.*?<\/select>/)?.[0]).not.toContain('thread-1');
   expect(requests.at(-1)?.path).toBe('/api/plugins/pico.usage/report?projectId=project-2');
 
   fields.provider!.value = 'provider-b';

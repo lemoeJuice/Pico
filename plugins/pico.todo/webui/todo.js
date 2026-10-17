@@ -23,7 +23,7 @@
     const threadId = context.thread?.id;
     if (!threadId) {
       root.innerHTML =
-        '<section class="panel"><strong>Todo</strong><p class="empty">Select a Thread to manage its checklist.</p></section>';
+        '<section class="pico-ui-panel panel"><strong>Todo</strong><p class="pico-ui-empty empty">Select a Thread to manage its checklist.</p></section>';
       return;
     }
     const open = items.filter((item) => item.status === 'open');
@@ -33,19 +33,19 @@
         b.priority - a.priority ||
         a.createdAt.localeCompare(b.createdAt),
     );
-    root.innerHTML = `<section class="panel">
-      <div class="heading"><strong>TODO</strong><span class="count">${open.length} open</span></div>
-      <form class="form"><input name="title" maxlength="240" placeholder="Add a short-term action…" aria-label="New Todo" required><button ${pending ? 'disabled' : ''}>Add</button></form>
-      ${error ? `<div class="error" role="alert">${escape(error)}</div>` : ''}
+    root.innerHTML = `<section class="pico-ui-panel panel">
+      <div class="pico-ui-heading heading"><strong>TODO</strong><span class="count">${open.length} open</span></div>
+      <form class="form"><input class="pico-ui-control" name="title" maxlength="240" placeholder="Add a short-term action…" aria-label="New Todo" required><button class="pico-ui-button" ${pending ? 'disabled' : ''}>Add</button></form>
+      ${error ? `<div class="pico-ui-error error" role="alert">${escape(error)}</div>` : ''}
       <div class="items">${
         ordered
           .map(
-            (item) => `<div class="item ${item.status === 'done' ? 'done' : ''}">
+            (item) => `<div class="item pico-ui-list-item ${item.status === 'done' ? 'done' : ''}">
         <input type="checkbox" data-id="${escape(item.id)}" ${item.status === 'done' ? 'checked' : ''} ${pending ? 'disabled' : ''} aria-label="Mark ${escape(item.title)} ${item.status === 'done' ? 'open' : 'done'}">
         <span class="title">${escape(item.title)}${item.nextAction ? `<small class="muted"><br>Next: ${escape(item.nextAction)}</small>` : ''}${item.sourceMessageSeq ? `<small class="muted"><br>Source message #${item.sourceMessageSeq}</small>` : ''}</span>
-        <span class="item-actions"><span class="priority">${item.priority}/5</span><button type="button" data-edit="${escape(item.id)}" aria-label="Edit ${escape(item.title)}" ${pending ? 'disabled' : ''}>Edit</button></span></div>`,
+        <span class="pico-ui-actions item-actions"><span class="pico-ui-tag priority">${item.priority}/5</span><button class="pico-ui-button" type="button" data-edit="${escape(item.id)}" aria-label="Edit ${escape(item.title)}" ${pending ? 'disabled' : ''}>Edit</button></span></div>`,
           )
-          .join('') || '<p class="empty">No Todo items yet.</p>'
+          .join('') || '<p class="pico-ui-empty empty">No Todo items yet.</p>'
       }</div>
       <span class="muted">Agent updates are saved automatically. Completed items stay in the list.</span>
     </section>`;

@@ -80,25 +80,25 @@
   function toolbar() {
     port?.postMessage({ type: 'pico:plugin-ui:toolbar-state', badgeCount: Math.min(999, data.tools.length) });
     if (!context.thread)
-      return '<section class="panel toolbar-panel"><div class="permission-menu"><div class="permission-popover"><div class="popover-heading"><strong>Tool permissions</strong><span>Saved for this Thread</span></div><div class="empty">Choose a Thread to review its tools.</div></div></div></section>';
+      return '<section class="panel pico-ui-panel toolbar-panel"><div class="permission-menu"><div class="permission-popover"><div class="popover-heading pico-ui-heading"><strong>Tool permissions</strong><span>Saved for this Thread</span></div><div class="pico-ui-empty empty">Choose a Thread to review its tools.</div></div></div></section>';
     const rows = data.tools
       .map(
         (tool) => `
-      <label class="permission-row">
+        <label class="permission-row pico-ui-list-item">
         <span><strong>${escape(tool.name)}</strong><small>${escape(tool.description)}</small></span>
-        <select data-tool="${escape(tool.name)}" aria-label="${escape(tool.name)} permission">
+        <select class="pico-ui-control" data-tool="${escape(tool.name)}" aria-label="${escape(tool.name)} permission">
           ${['allow', 'ask', 'deny'].map((policy) => `<option value="${policy}" ${tool.policy === policy ? 'selected' : ''}>${policy[0].toUpperCase()}${policy.slice(1)}</option>`).join('')}
         </select>
       </label>`,
       )
       .join('');
-    return `<section class="panel toolbar-panel">
+    return `<section class="panel pico-ui-panel toolbar-panel">
       <div class="permission-menu">
         <div class="permission-popover" role="dialog" aria-label="Tool permissions">
-          <div class="popover-heading"><strong>Tool permissions</strong><span>Saved for this Thread</span></div>
-          <label class="reviewer-toggle"><span><strong>Auto-review</strong><small>Use an independent reviewer for tools set to Ask</small></span><input type="checkbox" data-reviewer ${data.autoReview ? 'checked' : ''} /></label>
-          ${error ? `<div class="error">${escape(error)}</div>` : ''}
-          <div class="tools">${rows || '<div class="empty">Tool definitions will appear after the next Model projection.</div>'}</div>
+          <div class="popover-heading pico-ui-heading"><strong>Tool permissions</strong><span>Saved for this Thread</span></div>
+          <label class="reviewer-toggle pico-ui-card"><span><strong>Auto-review</strong><small>Use an independent reviewer for tools set to Ask</small></span><input type="checkbox" data-reviewer ${data.autoReview ? 'checked' : ''} /></label>
+          ${error ? `<div class="pico-ui-error">${escape(error)}</div>` : ''}
+          <div class="tools pico-ui-section">${rows || '<div class="pico-ui-empty empty">Tool definitions will appear after the next Model projection.</div>'}</div>
         </div>
       </div>
     </section>`;

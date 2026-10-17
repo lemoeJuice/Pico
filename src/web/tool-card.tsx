@@ -45,17 +45,21 @@ export function ToolCard({
               : 'Waiting for the Executor…';
   return (
     <article
-      className={`conversation-detail-card tool-card tool-${status}${hasError ? ' tool-has-error' : ''}`}
+      className={`conversation-detail-card pico-ui-card tool-card tool-${status}${hasError ? ' tool-has-error' : ''}`}
       data-phase={preview ? 'generating' : status}
     >
-      <div className="tool-card-heading">
+      <div className="tool-card-heading pico-ui-heading">
         <span className="tool-name">{call.name}</span>
-        <span className={`tool-status status-${status}`}>{preview ? 'Generating' : status}</span>
+        <span className={`tool-status pico-ui-status status-${status}`} data-status={status}>
+          {preview ? 'Generating' : status}
+        </span>
       </div>
       <div className="tool-card-body">
         <section className="conversation-detail-row tool-detail">
           <div className="tool-detail-heading">Arguments</div>
-          <pre>{preview ? preview.argumentsText || 'Waiting for arguments…' : toJson(call.arguments)}</pre>
+          <pre className="pico-ui-preview">
+            {preview ? preview.argumentsText || 'Waiting for arguments…' : toJson(call.arguments)}
+          </pre>
         </section>
         <section className="conversation-detail-row tool-detail">
           <div className="tool-detail-heading">
@@ -64,11 +68,11 @@ export function ToolCard({
               <span className="subtle-inline">· {new Date(execution.updatedAt).toLocaleTimeString()}</span>
             ) : null}
           </div>
-          <pre className={`tool-output${hasError ? ' tool-output-error' : ''}`}>{resultText}</pre>
+          <pre className={`pico-ui-preview tool-output${hasError ? ' tool-output-error' : ''}`}>{resultText}</pre>
           {modelGuidance ? (
             <>
               <div className="tool-detail-heading tool-model-guidance-heading">Model guidance</div>
-              <pre className="tool-model-guidance">{modelGuidance}</pre>
+              <pre className="pico-ui-preview tool-model-guidance">{modelGuidance}</pre>
             </>
           ) : null}
           {resultActions}

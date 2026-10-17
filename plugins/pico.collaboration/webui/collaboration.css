@@ -1,14 +1,5 @@
 :root {
   color-scheme: light;
-  font:
-    14px/1.45 'DM Sans',
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    'Segoe UI',
-    sans-serif;
-  color: #27332b;
   background: transparent;
 }
 * {
@@ -37,7 +28,6 @@ body {
 }
 .count,
 .muted {
-  color: #68766d;
   font-size: 12px;
   font-weight: 400;
 }
@@ -48,9 +38,6 @@ body {
 .child {
   align-items: flex-start;
   padding: 9px;
-  border: 1px solid #dce5de;
-  border-radius: 10px;
-  background: color-mix(in srgb, Canvas 94%, #7ea18a);
 }
 .child-main {
   min-width: 0;
@@ -61,14 +48,9 @@ body {
 }
 .meta {
   margin-top: 3px;
-  color: #68766d;
   font-size: 11px;
 }
 .state {
-  padding: 2px 7px;
-  border-radius: 999px;
-  color: #526258;
-  background: #e8eee9;
   white-space: nowrap;
   font-size: 10px;
 }
@@ -77,45 +59,12 @@ body {
   gap: 7px;
   margin-top: 9px;
 }
-input,
-textarea,
-button {
-  font: inherit;
-}
 textarea {
   width: 100%;
   min-height: 58px;
   resize: vertical;
-  padding: 8px;
-  color: inherit;
-  background: #fff;
-  border: 1px solid #cbd5cc;
-  border-radius: 8px;
-}
-button {
-  padding: 5px 8px;
-  color: inherit;
-  background: #fff;
-  border: 1px solid #cbd5cc;
-  border-radius: 7px;
-  cursor: pointer;
-}
-button:hover {
-  background: #f3f7f3;
-}
-button:disabled {
-  opacity: 0.55;
-  cursor: default;
 }
 .actions {
   justify-content: flex-start;
   margin-top: 7px;
-}
-.empty,
-.error {
-  padding: 9px;
-  border: 1px solid #ecc7c2;
-  border-radius: 8px;
-  background: #fff3f1;
-  color: #923d39;
 }

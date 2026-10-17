@@ -1,26 +1,18 @@
 :root {
-  color-scheme: light;
-  font:
-    14px/1.5 'DM Sans',
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    'Segoe UI',
-    sans-serif;
-  color: var(--pico-ui-text);
-  background: transparent;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  --pico-ui-bg: #f8faf7;
-  --pico-ui-panel: #ffffff;
-  --pico-ui-text: #27332b;
-  --pico-ui-muted: #68766d;
-  --pico-ui-border: #dce5de;
-  --pico-ui-accent: #587a60;
+  --pico-ui-bg: #f4f6f2;
+  --pico-ui-panel: #fbfcfa;
+  --pico-ui-text: #28332e;
+  --pico-ui-muted: #7a867f;
+  --pico-ui-border: #e6eae4;
+  --pico-ui-accent: #4d745f;
   --pico-ui-success: #688570;
   --pico-ui-error: #946b5d;
+  --pico-ui-warning: #745a20;
+  --pico-ui-warning-subtle: #f8edcf;
+  --pico-ui-info: #4d6079;
+  --pico-ui-info-subtle: #e8edf4;
+  --pico-ui-focus: #587a60;
+  --pico-ui-control-track: #e5e9e5;
 }
 
 *,
@@ -29,13 +21,26 @@
   box-sizing: border-box;
 }
 
-body {
+body.pico-ui-root {
   margin: 0;
+  color: var(--pico-ui-text);
+  background: transparent;
+  font:
+    14px/1.5 'DM Sans',
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
 }
 
-button,
-select,
-input {
+body.pico-ui-root button,
+body.pico-ui-root select,
+body.pico-ui-root input {
   font: inherit;
 }
 
@@ -107,14 +112,24 @@ input {
 
 .pico-ui-status[data-status='success'],
 .pico-ui-status[data-status='completed'],
-.pico-ui-status[data-status='allowed'] {
+.pico-ui-status[data-status='allowed'],
+.pico-ui-status[data-status='running'],
+.pico-ui-status[data-status='active'] {
   color: var(--pico-ui-success);
   background: color-mix(in srgb, var(--pico-ui-success) 13%, white);
 }
 
+.pico-ui-status[data-status='pending'],
+.pico-ui-status[data-status='paused'],
+.pico-ui-status[data-status='needs_input'] {
+  color: var(--pico-ui-warning);
+  background: var(--pico-ui-warning-subtle);
+}
+
 .pico-ui-status[data-status='failed'],
 .pico-ui-status[data-status='error'],
-.pico-ui-status[data-status='denied'] {
+.pico-ui-status[data-status='denied'],
+.pico-ui-status[data-status='interrupted'] {
   color: var(--pico-ui-error);
   background: color-mix(in srgb, var(--pico-ui-error) 12%, white);
 }
@@ -165,6 +180,16 @@ input {
   background: var(--pico-ui-panel);
   border: 1px solid var(--pico-ui-border);
   border-radius: 7px;
+}
+
+.pico-ui-control:is(input, textarea) {
+  width: 100%;
+}
+
+.pico-ui-control:focus-visible,
+.pico-ui-button:focus-visible {
+  outline: 2px solid var(--pico-ui-focus);
+  outline-offset: 2px;
 }
 
 .pico-ui-empty,

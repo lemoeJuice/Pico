@@ -1,14 +1,5 @@
 :root {
   color-scheme: light;
-  font:
-    14px/1.45 'DM Sans',
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    'Segoe UI',
-    sans-serif;
-  color: #27332b;
   background: transparent;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -25,12 +16,11 @@ body {
   overflow: visible;
 }
 .goal-panel {
-  padding: 10px 12px;
   display: grid;
   gap: 10px;
+  padding: 10px 12px;
 }
 .heading,
-.actions,
 .status-row {
   display: flex;
   align-items: center;
@@ -40,39 +30,8 @@ body {
 .heading strong {
   font-size: 13px;
 }
-.muted,
-.empty {
-  color: #68766d;
+.muted {
   font-size: 12px;
-}
-.card {
-  border: 1px solid #dce5de;
-  border-radius: 10px;
-  padding: 10px;
-  display: grid;
-  gap: 8px;
-  background: color-mix(in srgb, Canvas 94%, #7ea18a);
-}
-.status {
-  border-radius: 999px;
-  background: #e8eee9;
-  padding: 2px 8px;
-  color: #526258;
-  font-size: 11px;
-  text-transform: capitalize;
-}
-.status.active {
-  color: #25613c;
-  background: #e2f1e6;
-}
-.status.paused,
-.status.needs_input {
-  color: #765100;
-  background: #fff0ca;
-}
-.status.completed {
-  color: #315c87;
-  background: #e6eff8;
 }
 .goal-text {
   font-size: 13px;
@@ -84,43 +43,12 @@ body {
   gap: 3px;
 }
 .detail small {
-  color: #68766d;
   font-size: 11px;
 }
 .detail p {
   margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-button,
-input,
-textarea {
-  font: inherit;
-  color: inherit;
-}
-button {
-  cursor: pointer;
-  border: 1px solid #cbd5cc;
-  border-radius: 8px;
-  padding: 6px 9px;
-  background: #fff;
-  font-size: 12px;
-}
-button.primary {
-  color: white;
-  background: #28633e;
-  border-color: #28633e;
-}
-button.danger {
-  color: #923d39;
-}
-button:disabled {
-  cursor: wait;
-  opacity: 0.6;
-}
-.actions {
-  justify-content: flex-start;
-  flex-wrap: wrap;
 }
 .form {
   display: grid;
@@ -129,31 +57,17 @@ button:disabled {
 label {
   display: grid;
   gap: 4px;
-  color: #526258;
   font-size: 11px;
-}
-input,
-textarea {
-  width: 100%;
-  border: 1px solid #cbd5cc;
-  border-radius: 8px;
-  padding: 8px;
-  background: #fff;
-  font-size: 12px;
 }
 textarea {
   resize: vertical;
   min-height: 58px;
 }
-.error {
-  border: 1px solid #ecc7c2;
-  border-radius: 8px;
-  background: #fff3f1;
-  color: #923d39;
-  padding: 8px;
-  font-size: 12px;
+.actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
 }
 .evidence {
-  border-top: 1px solid #e4ebe5;
+  border-top: 1px solid var(--pico-ui-border, #e4ebe5);
   padding-top: 7px;
 }

@@ -1,15 +1,6 @@
 :root {
-  color-scheme: light;
-  font:
-    13px/1.45 'DM Sans',
-    ui-sans-serif,
-    system-ui,
-    -apple-system,
-    BlinkMacSystemFont,
-    'Segoe UI',
-    sans-serif;
-  color: #28332e;
-  background: #fbfcfa;
+  color-scheme: light dark;
+  background: transparent;
 }
 * {
   box-sizing: border-box;
@@ -17,40 +8,6 @@
 body {
   margin: 0;
   padding: 12px;
-}
-button,
-input,
-textarea,
-select {
-  font: inherit;
-  color: inherit;
-}
-button {
-  border: 1px solid #d9dfe0;
-  border-radius: 7px;
-  background: #fbfcfa;
-  padding: 6px 10px;
-  cursor: pointer;
-}
-button:hover {
-  background: #f0f4ef;
-}
-button:disabled {
-  opacity: 0.55;
-  cursor: wait;
-}
-input,
-textarea,
-select {
-  width: 100%;
-  border: 1px solid #d9dfe0;
-  border-radius: 7px;
-  background: #fff;
-  padding: 8px 9px;
-}
-textarea {
-  min-height: 72px;
-  resize: vertical;
 }
 .panel {
   max-width: 760px;
@@ -71,7 +28,6 @@ textarea {
 }
 .muted,
 .source {
-  color: #7a867f;
   font-size: 11px;
 }
 .search,
@@ -99,14 +55,14 @@ textarea {
   flex: 0 0 auto;
   margin: 0;
   padding: 2px;
-  background: #e5e9e5;
+  background: var(--pico-ui-control-track, #e5e9e5);
   border: 0;
   border-radius: 999px;
   cursor: pointer;
   transition: background 0.15s ease;
 }
 .auto-toggle input:checked {
-  background: #77937d;
+  background: var(--pico-ui-accent, #77937d);
 }
 .auto-toggle input::after {
   position: absolute;
@@ -124,7 +80,7 @@ textarea {
   transform: translateX(12px);
 }
 .auto-toggle input:focus-visible {
-  outline: 2px solid #587a60;
+  outline: 2px solid var(--pico-ui-focus, #587a60);
   outline-offset: 2px;
 }
 .auto-toggle input:disabled {
@@ -137,9 +93,6 @@ textarea {
   margin-top: 14px;
 }
 .item {
-  border: 1px solid #e6eae4;
-  border-radius: 9px;
-  background: #fff;
   padding: 11px;
 }
 .item-text {
@@ -150,13 +103,6 @@ textarea {
   justify-content: space-between;
   margin-bottom: 7px;
 }
-.tag {
-  color: #385a49;
-  border-radius: 99px;
-  background: #e8f0e9;
-  padding: 2px 8px;
-  font-size: 10px;
-}
 .actions {
   justify-content: flex-end;
   margin-top: 8px;
@@ -165,15 +111,7 @@ textarea {
   margin-top: 7px;
 }
 .error {
-  color: #a33d3d;
   margin: 8px 0;
-}
-.empty {
-  border: 1px dashed #d7dfd7;
-  border-radius: 8px;
-  color: #7a867f;
-  padding: 18px;
-  text-align: center;
 }
 @media (max-width: 520px) {
   .form {

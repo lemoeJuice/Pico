@@ -160,7 +160,7 @@ function AccountPage({ api, onError, onNotice }: PluginUiProps): ReactElement {
 
   return (
     <section className="form-stack">
-      <div className="chatgpt-account-card">
+      <div className="chatgpt-account-card pico-ui-card">
         <strong>CHATGPT ACCOUNT</strong>
         <p className="field-note">
           Sign in with ChatGPT to use models available to your account. OAuth returns to 127.0.0.1, so the browser and
@@ -168,14 +168,16 @@ function AccountPage({ api, onError, onNotice }: PluginUiProps): ReactElement {
         </p>
         {status?.connected ? (
           <>
-            <span className="chatgpt-account-label">Connected as {status.accountLabel ?? 'ChatGPT account'}</span>
+            <span className="chatgpt-account-label pico-ui-status" data-status="success">
+              Connected as {status.accountLabel ?? 'ChatGPT account'}
+            </span>
             <span className="field-note">
               {models.length} available model{models.length === 1 ? '' : 's'}
             </span>
-            <div className="form-actions chatgpt-account-actions">
+            <div className="form-actions pico-ui-actions chatgpt-account-actions">
               <button
                 type="button"
-                className="button button-soft"
+                className="button button-soft pico-ui-button"
                 onClick={() => void refresh(true)}
                 disabled={loading}
               >
@@ -183,7 +185,7 @@ function AccountPage({ api, onError, onNotice }: PluginUiProps): ReactElement {
               </button>
               <button
                 type="button"
-                className="button button-quiet"
+                className="button button-quiet pico-ui-button"
                 onClick={() => void disconnect()}
                 disabled={loading}
               >
@@ -192,13 +194,18 @@ function AccountPage({ api, onError, onNotice }: PluginUiProps): ReactElement {
             </div>
           </>
         ) : (
-          <button type="button" className="button button-primary" onClick={() => void connect()} disabled={loading}>
+          <button
+            type="button"
+            className="button button-primary pico-ui-button pico-ui-button--primary"
+            onClick={() => void connect()}
+            disabled={loading}
+          >
             {loading ? 'Loading…' : 'Continue with ChatGPT'}
           </button>
         )}
       </div>
       {error ? (
-        <p className="field-note" role="alert">
+        <p className="pico-ui-error" role="alert">
           {error}
         </p>
       ) : null}
@@ -289,10 +296,14 @@ function ChatGptPlanComposerModel({
   if (!status?.connected) {
     return (
       <div className="chatgpt-composer-controls">
-        <select aria-label="Model" disabled>
+        <select className="pico-ui-control" aria-label="Model" disabled>
           <option>{loading ? 'Loading models…' : 'Connect ChatGPT account'}</option>
         </select>
-        <button type="button" className="button button-quiet" onClick={() => openPage('pico.chatgpt-plan', 'account')}>
+        <button
+          type="button"
+          className="button button-quiet pico-ui-button"
+          onClick={() => openPage('pico.chatgpt-plan', 'account')}
+        >
           Connect
         </button>
       </div>
@@ -303,7 +314,7 @@ function ChatGptPlanComposerModel({
   return (
     <div className="chatgpt-composer-controls">
       <select
-        className="chatgpt-model-select"
+        className="chatgpt-model-select pico-ui-control"
         aria-label="Model"
         value={models.some((choice) => choice.slug === settings.model) ? settings.model : ''}
         onChange={(event) => void selectModel(event.target.value)}
@@ -321,7 +332,7 @@ function ChatGptPlanComposerModel({
         ))}
       </select>
       <select
-        className="chatgpt-reasoning-select"
+        className="chatgpt-reasoning-select pico-ui-control"
         aria-label="Reasoning effort"
         value={preferences.reasoningEffort}
         onChange={(event) =>
@@ -343,7 +354,7 @@ function ChatGptPlanComposerModel({
         role="switch"
         aria-label="Fast mode"
         aria-checked={preferences.fastMode}
-        className={`chatgpt-fast-control ${preferences.fastMode ? 'enabled' : ''}`}
+        className={`chatgpt-fast-control pico-ui-button ${preferences.fastMode ? 'enabled' : ''}`}
         onClick={() => void savePreferences({ ...preferences, fastMode: !preferences.fastMode })}
         disabled={saving}
       >

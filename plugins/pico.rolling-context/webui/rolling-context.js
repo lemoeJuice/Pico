@@ -54,7 +54,7 @@
     if (!root) return;
     if (!context.thread?.id) {
       root.innerHTML =
-        '<section class="panel"><strong>Rolling Context</strong><p class="empty">Select a Thread to inspect its context.</p></section>';
+        '<section class="pico-ui-panel panel"><strong>Rolling Context</strong><p class="pico-ui-empty empty">Select a Thread to inspect its context.</p></section>';
       return;
     }
     const cards = [...segments]
@@ -65,28 +65,30 @@
           .map((item) => `<li>${escape(item.from)} → ${escape(item.to)} · ${escape(item.reason)}</li>`)
           .join('');
         const actions = [
-          segment.tier !== 'hot' ? `<button data-action="pin" data-id="${escape(segment.id)}">Pin hot</button>` : '',
+          segment.tier !== 'hot'
+            ? `<button class="pico-ui-button" data-action="pin" data-id="${escape(segment.id)}">Pin hot</button>`
+            : '',
           segment.tier !== 'warm' && segment.summary
-            ? `<button data-action="warm" data-id="${escape(segment.id)}">Manual warm</button>`
+            ? `<button class="pico-ui-button" data-action="warm" data-id="${escape(segment.id)}">Manual warm</button>`
             : '',
           segment.tier === 'warm'
-            ? `<button data-action="cold" data-id="${escape(segment.id)}">Move cold</button>`
+            ? `<button class="pico-ui-button" data-action="cold" data-id="${escape(segment.id)}">Move cold</button>`
             : '',
           segment.summaryStatus !== 'completed'
-            ? `<button data-action="retry-summary" data-id="${escape(segment.id)}">Retry summary</button>`
+            ? `<button class="pico-ui-button" data-action="retry-summary" data-id="${escape(segment.id)}">Retry summary</button>`
             : '',
-          `<button data-open="${segment.startSeq}">Jump to source</button>`,
+          `<button class="pico-ui-button" data-open="${segment.startSeq}">Jump to source</button>`,
         ]
           .filter(Boolean)
           .join('');
-        return `<article class="segment">
-        <div class="segment-head"><strong>Canonical #${segment.startSeq}–#${segment.endSeq}</strong><span class="tier ${escape(segment.tier)}">${escape(segment.tier)}</span></div>
+        return `<article class="pico-ui-card segment">
+        <div class="segment-head"><strong>Canonical #${segment.startSeq}–#${segment.endSeq}</strong><span class="pico-ui-tag tier ${escape(segment.tier)}">${escape(segment.tier)}</span></div>
         <span class="muted">${escape(segment.id)} · SHA-256 ${escape(segment.sourceHash)} · summary ${escape(segment.summaryStatus)} · ${segment.sourceRecordIds?.length || 0} records</span>
-        ${segment.summary ? `<details><summary>Direct summary · ${escape(segment.summaryVersion)}</summary><div class="summary">${escape(segment.summary)}</div></details>` : ''}
-        <details data-source-details="${escape(segment.id)}"><summary data-source="${escape(segment.id)}">${sourceById.has(segment.id) ? 'Canonical source' : 'Load exact Canonical source'}</summary>${sourceById.has(segment.id) ? `<div class="source">${escape(sourceById.get(segment.id))}</div>` : ''}</details>
+        ${segment.summary ? `<details class="pico-ui-disclosure"><summary>Direct summary · ${escape(segment.summaryVersion)}</summary><div class="pico-ui-preview summary">${escape(segment.summary)}</div></details>` : ''}
+        <details class="pico-ui-disclosure" data-source-details="${escape(segment.id)}"><summary data-source="${escape(segment.id)}">${sourceById.has(segment.id) ? 'Canonical source' : 'Load exact Canonical source'}</summary>${sourceById.has(segment.id) ? `<div class="pico-ui-preview source">${escape(sourceById.get(segment.id))}</div>` : ''}</details>
         <div class="muted">Evaluator: ${escape(evaluator.status)} · ${escape(evaluator.recommendation || 'no recommendation')} · ${escape(evaluator.reason || 'not evaluated')} · expected savings ${evaluator.expectedSavings ?? 'unknown'} · cache data ${evaluator.cacheCostDataKnown ? 'known' : 'unknown'}</div>
-        <details><summary>Tier transition history (${segment.transitions?.length || 0})</summary><ul>${transitions || '<li>No changes yet.</li>'}</ul></details>
-        <div class="actions">${actions}</div>
+        <details class="pico-ui-disclosure"><summary>Tier transition history (${segment.transitions?.length || 0})</summary><ul>${transitions || '<li>No changes yet.</li>'}</ul></details>
+        <div class="pico-ui-actions actions">${actions}</div>
       </article>`;
       })
       .join('');
@@ -94,22 +96,22 @@
       .reverse()
       .map(({ executionId, attempt }) => {
         const providerRequests = attempt.providerRequests || [];
-        return `<article class="segment">
-        <div class="segment-head"><strong>Model Execution ${escape(executionId)}</strong><span class="tier">${escape(attempt.status)}</span></div>
+        return `<article class="pico-ui-card segment">
+        <div class="segment-head"><strong>Model Execution ${escape(executionId)}</strong><span class="pico-ui-tag tier">${escape(attempt.status)}</span></div>
         <span class="muted">Request ${escape(attempt.id)} · ${escape(attempt.prompt?.model || 'model unknown')} · ${escape(attempt.createdAt)}</span>
-        <details><summary>Exact prompt sent to Model Adapter</summary><pre class="source">${escape(JSON.stringify(attempt.prompt, null, 2))}</pre></details>
-        <details><summary>Provider attempts (${providerRequests.length})</summary><pre class="source">${escape(JSON.stringify(providerRequests, null, 2))}</pre></details>
-        ${attempt.error ? `<div class="error">${escape(attempt.error)}</div>` : ''}
+        <details class="pico-ui-disclosure"><summary>Exact prompt sent to Model Adapter</summary><pre class="pico-ui-preview source">${escape(JSON.stringify(attempt.prompt, null, 2))}</pre></details>
+        <details class="pico-ui-disclosure"><summary>Provider attempts (${providerRequests.length})</summary><pre class="pico-ui-preview source">${escape(JSON.stringify(providerRequests, null, 2))}</pre></details>
+        ${attempt.error ? `<div class="pico-ui-error error">${escape(attempt.error)}</div>` : ''}
       </article>`;
       })
       .join('');
-    root.innerHTML = `<section class="panel">
-      <div class="heading"><strong>ROLLING CONTEXT</strong><span class="muted">${segments.length} segment(s)</span></div>
+    root.innerHTML = `<section class="pico-ui-panel panel">
+      <div class="pico-ui-heading heading"><strong>ROLLING CONTEXT</strong><span class="muted">${segments.length} segment(s)</span></div>
       <div class="muted">Canonical History stays intact. Automatic warm is disabled when provider cache cost data is unknown.</div>
-      <div class="toolbar"><button data-global="refresh" ${pending ? 'disabled' : ''}>Refresh / summarize sealed turns</button><button data-global="compact-all" ${pending ? 'disabled' : ''}>Manual compact summaries</button></div>
-      ${error ? `<div class="error" role="alert">${escape(error)}</div>` : ''}
-      <div>${cards || '<p class="empty">No sealed complete turn blocks yet. A turn becomes eligible after a later user turn closes it.</p>'}</div>
-      <details><summary>Actual Model Inputs (${inputs.length})</summary><div class="input-list">${inputCards || '<p class="empty">No recorded Model Inputs for this Thread yet.</p>'}</div></details>
+      <div class="toolbar"><button class="pico-ui-button" data-global="refresh" ${pending ? 'disabled' : ''}>Refresh / summarize sealed turns</button><button class="pico-ui-button" data-global="compact-all" ${pending ? 'disabled' : ''}>Manual compact summaries</button></div>
+      ${error ? `<div class="pico-ui-error error" role="alert">${escape(error)}</div>` : ''}
+      <div>${cards || '<p class="pico-ui-empty empty">No sealed complete turn blocks yet. A turn becomes eligible after a later user turn closes it.</p>'}</div>
+      <details class="pico-ui-disclosure"><summary>Actual Model Inputs (${inputs.length})</summary><div class="input-list">${inputCards || '<p class="pico-ui-empty empty">No recorded Model Inputs for this Thread yet.</p>'}</div></details>
     </section>`;
     if (root && port && !resizeFrame) {
       resizeFrame = requestAnimationFrame(() => {

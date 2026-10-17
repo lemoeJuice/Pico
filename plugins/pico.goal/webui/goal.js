@@ -52,21 +52,21 @@
   function form() {
     const current = goal ?? {};
     return `<form class="form" id="goal-form">
-      <label>Goal<textarea name="text" required maxlength="8000" placeholder="Describe the result you want">${escape(current.text)}</textarea></label>
-      <label>Constraints<textarea name="constraints" maxlength="4000" placeholder="Optional constraints, boundaries, or preferences">${escape(current.constraints)}</textarea></label>
-      <label>Completion criteria<textarea name="completionCriteria" required maxlength="4000" placeholder="What evidence will show this is complete?">${escape(current.completionCriteria)}</textarea></label>
-      <div class="actions"><button class="primary" type="submit" ${busy ? 'disabled' : ''}>${goal ? 'Save Goal' : 'Start Goal'}</button><button type="button" data-action="cancel">Cancel</button></div>
+      <label>Goal<textarea class="pico-ui-control" name="text" required maxlength="8000" placeholder="Describe the result you want">${escape(current.text)}</textarea></label>
+      <label>Constraints<textarea class="pico-ui-control" name="constraints" maxlength="4000" placeholder="Optional constraints, boundaries, or preferences">${escape(current.constraints)}</textarea></label>
+      <label>Completion criteria<textarea class="pico-ui-control" name="completionCriteria" required maxlength="4000" placeholder="What evidence will show this is complete?">${escape(current.completionCriteria)}</textarea></label>
+      <div class="pico-ui-actions actions"><button class="pico-ui-button pico-ui-button--primary primary" type="submit" ${busy ? 'disabled' : ''}>${goal ? 'Save Goal' : 'Start Goal'}</button><button class="pico-ui-button" type="button" data-action="cancel">Cancel</button></div>
     </form>`;
   }
   function panel() {
     if (!context.thread)
-      return '<section class="goal-panel"><div class="empty">Select a Thread to manage its Goal.</div></section>';
+      return '<section class="pico-ui-panel goal-panel"><div class="pico-ui-empty empty">Select a Thread to manage its Goal.</div></section>';
     if (editing || !goal || goal.status === 'cleared')
-      return `<section class="goal-panel"><div class="heading"><strong>${goal ? 'Edit Goal' : 'Set a Goal'}</strong></div>${form()}</section>`;
+      return `<section class="pico-ui-panel goal-panel"><div class="pico-ui-heading heading"><strong>${goal ? 'Edit Goal' : 'Set a Goal'}</strong></div>${form()}</section>`;
     const canResume = ['paused', 'needs_input'].includes(goal.status);
-    return `<section class="goal-panel">
-      <div class="heading"><strong>Goal</strong><span class="status ${escape(goal.status)}">${escape(goal.status)}</span></div>
-      <article class="card">
+    return `<section class="pico-ui-panel goal-panel">
+      <div class="pico-ui-heading heading"><strong>Goal</strong><span class="pico-ui-status status ${escape(goal.status)}" data-status="${escape(goal.status)}">${escape(goal.status)}</span></div>
+      <article class="pico-ui-card card">
         <div class="goal-text">${escape(goal.text)}</div>
         ${goal.constraints ? `<div class="detail"><small>Constraints</small><p>${escape(goal.constraints)}</p></div>` : ''}
         <div class="detail"><small>Completion criteria</small><p>${escape(goal.completionCriteria)}</p></div>
@@ -74,11 +74,11 @@
         ${goal.blocker ? `<div class="detail"><small>${goal.status === 'needs_input' ? 'Needs input' : 'Pause reason'}</small><p>${escape(goal.blocker)}</p></div>` : ''}
         ${goal.evidence ? `<div class="detail evidence"><small>Completion evidence · ${escape(goal.evidence.kind)} ${escape(goal.evidence.id)}</small><p>${escape(goal.evidence.summary)}</p></div>` : ''}
       </article>
-      <div class="actions">
-        ${goal.status !== 'completed' ? `<button data-action="edit">Edit</button>${goal.status === 'active' ? '<button data-action="pause">Pause</button>' : ''}${canResume ? '<button class="primary" data-action="resume">Resume</button>' : ''}` : ''}
-        <button class="danger" data-action="clear">Clear</button>
+      <div class="pico-ui-actions actions">
+        ${goal.status !== 'completed' ? `<button class="pico-ui-button" data-action="edit">Edit</button>${goal.status === 'active' ? '<button class="pico-ui-button" data-action="pause">Pause</button>' : ''}${canResume ? '<button class="pico-ui-button pico-ui-button--primary primary" data-action="resume">Resume</button>' : ''}` : ''}
+        <button data-action="clear" class="pico-ui-button pico-ui-button--danger danger">Clear</button>
       </div>
-      ${error ? `<div class="error">${escape(error)}</div>` : ''}
+      ${error ? `<div class="pico-ui-error error">${escape(error)}</div>` : ''}
     </section>`;
   }
   function draw() {
