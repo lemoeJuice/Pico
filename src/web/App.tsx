@@ -70,6 +70,7 @@ import { conversationTimeline } from './conversation-timeline.js';
 import { PluginWebView } from './plugin-web-view.js';
 import { appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from './history-pages.js';
 import {
+  Archive,
   ArrowRight,
   ArrowUpRight,
   Box,
@@ -93,6 +94,7 @@ import {
   Settings,
   Sparkles,
   Square,
+  Trash2,
   UserRound,
   X,
 } from 'lucide-react';
@@ -455,6 +457,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [pluginPageSelection, setPluginPageSelection] = useState<{ pluginId: string; pageId: string } | null>(null);
   const [pluginManagerOpen, setPluginManagerOpen] = useState(false);
   const [memoryManagerOpen, setMemoryManagerOpen] = useState(false);
+  const [archivedThreadsOpen, setArchivedThreadsOpen] = useState(false);
+  const [archivedThreads, setArchivedThreads] = useState<Thread[]>([]);
+  const [archivedThreadsLoading, setArchivedThreadsLoading] = useState(false);
+  const [archivedThreadActionId, setArchivedThreadActionId] = useState<string | null>(null);
   const [pluginActionId, setPluginActionId] = useState<string | null>(null);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [threadInfoOpen, setThreadInfoOpen] = useState(false);
@@ -516,7 +522,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const followLatest = useRef(true);
   const snapshotRequest = useRef(0);
   const projectThreadVersions = useRef(new Map<string, number>());
+  const archivedThreadVersion = useRef(0);
   const activeProjectId = useRef(projectId);
+  const activeThreadsRef = useRef(threads);
+  activeThreadsRef.current = threads;
   const threadUpdateVersions = useRef(new Map<string, number>());
   const snapshotVersions = useRef(new Map<string, number>());
   const pendingMessageIds = useRef<PendingMessageIds>(composerState.current.pendingMessages);
@@ -733,14 +742,62 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         () => true,
       );
       if (values) {
-        setThreadsByProject((current) => ({ ...current, [id]: values }));
-        if (activeProjectId.current === id) setThreads(values);
+        const activeThreads = values.filter((thread) => !thread.archivedAt && !thread.deletedAt);
+        setThreadsByProject((current) => ({ ...current, [id]: activeThreads }));
+        if (activeProjectId.current === id) setThreads(activeThreads);
+        return activeThreads;
       }
       return values;
     } catch (caught) {
       projectThreadLoads.current.delete(id);
       throw caught;
     }
+  }, []);
+
+  const syncThreadLists = useCallback((updated: Thread): void => {
+    projectThreadVersions.current.set(
+      updated.projectId,
+      (projectThreadVersions.current.get(updated.projectId) ?? 0) + 1,
+    );
+    archivedThreadVersion.current += 1;
+    const isActive = !updated.archivedAt && !updated.deletedAt;
+    const isArchived = Boolean(updated.archivedAt) && !updated.deletedAt;
+
+    setThreadsByProject((current) => {
+      const projectThreads = current[updated.projectId] ?? [];
+      return {
+        ...current,
+        [updated.projectId]: isActive
+          ? upsertProjectThread(projectThreads, updated, updated.projectId)
+          : projectThreads.filter((thread) => thread.id !== updated.id),
+      };
+    });
+    setThreads((current) =>
+      isActive
+        ? upsertProjectThread(current, updated, activeProjectId.current)
+        : current.filter((thread) => thread.id !== updated.id),
+    );
+    setArchivedThreads((current) =>
+      isArchived
+        ? upsertProjectThread(current, updated, updated.projectId)
+        : current.filter((thread) => thread.id !== updated.id),
+    );
+
+    if (!isActive && activeThreadId.current === updated.id) {
+      const next = activeThreadsRef.current.find(
+        (thread) =>
+          thread.id !== updated.id &&
+          thread.projectId === updated.projectId &&
+          !thread.archivedAt &&
+          !thread.deletedAt,
+      );
+      setThreadId(next?.id ?? null);
+    }
+    setSnapshot((current) => {
+      if (current?.thread.id !== updated.id) return current;
+      if (!isActive) return null;
+      return { ...current, thread: updated };
+    });
   }, []);
 
   const refreshSelected = useCallback(() => {
@@ -808,6 +865,32 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       });
     }
   }, [loadProjectThreads, projectId, projects]);
+
+  useEffect(() => {
+    if (!settingsOpen || !archivedThreadsOpen) return;
+    let alive = true;
+    setArchivedThreadsLoading(true);
+    setError('');
+    void fetchStableSnapshot(
+      () => api<{ threads: Thread[] }>('/api/threads/archived'),
+      () => archivedThreadVersion.current,
+      () => alive,
+    )
+      .then((result) => {
+        if (alive && result) {
+          setArchivedThreads(result.threads.filter((thread) => thread.archivedAt && !thread.deletedAt));
+        }
+      })
+      .catch((caught: unknown) => {
+        if (alive) setError(caught instanceof Error ? caught.message : String(caught));
+      })
+      .finally(() => {
+        if (alive) setArchivedThreadsLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [archivedThreadsOpen, settingsOpen]);
 
   useEffect(() => {
     let current = true;
@@ -947,11 +1030,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             );
             noteSnapshotChange(created.id);
             noteSnapshotChange(created.parentThreadId);
-            setThreadsByProject((current) => ({
-              ...current,
-              [created.projectId]: upsertProjectThread(current[created.projectId] ?? [], created, created.projectId),
-            }));
-            setThreads((items) => upsertProjectThread(items, created, activeProjectId.current));
+            if (created.archivedAt || created.deletedAt) {
+              syncThreadLists(created);
+            } else {
+              setThreadsByProject((current) => ({
+                ...current,
+                [created.projectId]: upsertProjectThread(current[created.projectId] ?? [], created, created.projectId),
+              }));
+              setThreads((items) => upsertProjectThread(items, created, activeProjectId.current));
+            }
             setSnapshot((current) =>
               current && created.parentThreadId === current.thread.id
                 ? { ...current, children: [created, ...current.children.filter((item) => item.id !== created.id)] }
@@ -961,19 +1048,18 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         } else if (event.type === 'thread.updated') {
           const updated = event.thread as Thread | undefined;
           if (updated) {
-            projectThreadVersions.current.set(
-              updated.projectId,
-              (projectThreadVersions.current.get(updated.projectId) ?? 0) + 1,
-            );
             threadUpdateVersions.current.set(updated.id, (threadUpdateVersions.current.get(updated.id) ?? 0) + 1);
             noteSnapshotChange(updated.id);
             noteSnapshotChange(updated.parentThreadId);
-            setThreadsByProject((current) => ({
-              ...current,
-              [updated.projectId]: upsertProjectThread(current[updated.projectId] ?? [], updated, updated.projectId),
-            }));
-            setThreads((items) => upsertProjectThread(items, updated, activeProjectId.current));
-            setSnapshot((current) => (current?.thread.id === updated.id ? { ...current, thread: updated } : current));
+            syncThreadLists(updated);
+          }
+        } else if (event.type === 'thread.hidden') {
+          const hidden = event.thread as Thread | undefined;
+          if (hidden) {
+            threadUpdateVersions.current.set(hidden.id, (threadUpdateVersions.current.get(hidden.id) ?? 0) + 1);
+            noteSnapshotChange(hidden.id);
+            noteSnapshotChange(hidden.parentThreadId);
+            syncThreadLists(hidden);
           }
         } else if (event.type === 'record') {
           const record = event.record as CanonicalRecord | undefined;
@@ -1133,7 +1219,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       if (timer) window.clearTimeout(timer);
       socket?.close();
     };
-  }, [acceptMessage, noteSnapshotChange, observeModelExecutions, settleModelExecution]);
+  }, [acceptMessage, noteSnapshotChange, observeModelExecutions, settleModelExecution, syncThreadLists]);
 
   useEffect(() => {
     followLatest.current = true;
@@ -1285,17 +1371,75 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         method: 'PATCH',
         body: JSON.stringify({ title: threadTitleDraft }),
       });
-      setThreadsByProject((current) => ({
-        ...current,
-        [updated.projectId]: upsertProjectThread(current[updated.projectId] ?? [], updated, updated.projectId),
-      }));
-      setThreads((items) => upsertProjectThread(items, updated, activeProjectId.current));
-      setSnapshot((current) => (current?.thread.id === updated.id ? { ...current, thread: updated } : current));
+      syncThreadLists(updated);
       setThreadInfoOpen(false);
     } catch (caught) {
       setThreadInfoError(caught instanceof Error ? caught.message : 'Could not rename this Thread.');
     } finally {
       setThreadTitleSaving(false);
+    }
+  };
+
+  const archiveSelectedThread = async (): Promise<void> => {
+    if (!selectedThread || threadTitleSaving) return;
+    setThreadInfoError('');
+    setThreadTitleSaving(true);
+    try {
+      const updated = await api<Thread>(`/api/threads/${encodeURIComponent(selectedThread.id)}/archive`, {
+        method: 'POST',
+        body: '{}',
+      });
+      syncThreadLists(updated);
+      setThreadInfoOpen(false);
+    } catch (caught) {
+      setThreadInfoError(caught instanceof Error ? caught.message : 'Could not archive this Thread.');
+    } finally {
+      setThreadTitleSaving(false);
+    }
+  };
+
+  const restoreArchivedThread = async (thread: Thread): Promise<void> => {
+    setError('');
+    setArchivedThreadActionId(thread.id);
+    try {
+      const updated = await api<Thread>(`/api/threads/${encodeURIComponent(thread.id)}/unarchive`, {
+        method: 'POST',
+        body: '{}',
+      });
+      syncThreadLists(updated);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not restore this Thread.');
+    } finally {
+      setArchivedThreadActionId(null);
+    }
+  };
+
+  const deleteArchivedThread = async (thread: Thread): Promise<void> => {
+    const confirmed = window.confirm(
+      `Delete “${thread.title}”? This hides the Thread from Pico. Its history records will remain retained.`,
+    );
+    if (!confirmed) return;
+    setError('');
+    setArchivedThreadActionId(thread.id);
+    try {
+      const response = await api<unknown>(`/api/threads/${encodeURIComponent(thread.id)}`, { method: 'DELETE' });
+      const updated =
+        response && typeof response === 'object' && 'id' in response ? (response as Thread) : null;
+      if (updated) {
+        syncThreadLists(updated);
+      } else {
+        archivedThreadVersion.current += 1;
+        setArchivedThreads((current) => current.filter((item) => item.id !== thread.id));
+        setThreadsByProject((current) => ({
+          ...current,
+          [thread.projectId]: (current[thread.projectId] ?? []).filter((item) => item.id !== thread.id),
+        }));
+        setThreads((current) => current.filter((item) => item.id !== thread.id));
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not hide this Thread from Pico.');
+    } finally {
+      setArchivedThreadActionId(null);
     }
   };
 
@@ -1762,8 +1906,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     if (projectThreads === undefined) {
       return <div className="sidebar-empty project-thread-empty">Loading Threads…</div>;
     }
+    const visibleThreads = projectThreads.filter((thread) => !thread.archivedAt && !thread.deletedAt);
+    const visibleThreadIds = new Set(visibleThreads.map((thread) => thread.id));
     const childrenByParent = new Map<string, Thread[]>();
-    for (const thread of projectThreads) {
+    for (const thread of visibleThreads) {
       if (!thread.parentThreadId) continue;
       const children = childrenByParent.get(thread.parentThreadId) ?? [];
       children.push(thread);
@@ -1780,7 +1926,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         {(childrenByParent.get(thread.id) ?? []).map((nested) => renderThreadTree(nested, true, depth + 1))}
       </div>
     );
-    const roots = projectThreads.filter((thread) => !thread.parentThreadId);
+    const roots = visibleThreads.filter((thread) => !thread.parentThreadId || !visibleThreadIds.has(thread.parentThreadId));
     return roots.length ? (
       <div className="project-thread-list">{roots.map((thread) => renderThreadTree(thread))}</div>
     ) : (
@@ -2487,19 +2633,22 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       {settingsOpen ? (
         <Modal
           title={
-            memoryManagerOpen
-              ? 'Memory'
-              : pluginManagerOpen
-                ? 'Plugins'
-                : pluginPageSelection
-                  ? 'Plugin settings'
-                  : 'Model connections'
+            archivedThreadsOpen
+              ? 'Archived Threads'
+              : memoryManagerOpen
+                ? 'Memory'
+                : pluginManagerOpen
+                  ? 'Plugins'
+                  : pluginPageSelection
+                    ? 'Plugin settings'
+                    : 'Model connections'
           }
           onClose={() => {
             setSettingsOpen(false);
             setPluginPageSelection(null);
             setPluginManagerOpen(false);
             setMemoryManagerOpen(false);
+            setArchivedThreadsOpen(false);
           }}
           error={error}
           onDismissError={() => setError('')}
@@ -2508,11 +2657,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             <nav className="plugin-settings-pages" aria-label="Plugin settings pages">
               <button
                 type="button"
-                className={`button ${!pluginPageSelection && !pluginManagerOpen && !memoryManagerOpen ? 'button-soft' : 'button-quiet'}`}
+                className={`button ${!pluginPageSelection && !pluginManagerOpen && !memoryManagerOpen && !archivedThreadsOpen ? 'button-soft' : 'button-quiet'}`}
                 onClick={() => {
                   setPluginPageSelection(null);
                   setPluginManagerOpen(false);
                   setMemoryManagerOpen(false);
+                  setArchivedThreadsOpen(false);
                 }}
               >
                 Provider
@@ -2524,6 +2674,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   setPluginPageSelection(null);
                   setPluginManagerOpen(true);
                   setMemoryManagerOpen(false);
+                  setArchivedThreadsOpen(false);
                 }}
               >
                 Plugins
@@ -2536,21 +2687,35 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     setPluginManagerOpen(false);
                     setPluginPageSelection(null);
                     setMemoryManagerOpen(true);
+                    setArchivedThreadsOpen(false);
                   }}
                 >
                   Memory
                 </button>
               ) : null}
+              <button
+                type="button"
+                className={`button ${archivedThreadsOpen ? 'button-soft' : 'button-quiet'}`}
+                onClick={() => {
+                  setPluginManagerOpen(false);
+                  setPluginPageSelection(null);
+                  setMemoryManagerOpen(false);
+                  setArchivedThreadsOpen(true);
+                }}
+              >
+                Archived Threads
+              </button>
               {pluginInfo.pages
                 .filter((page) => page.pluginId !== 'pico.project-context' && page.pluginId !== 'pico.global-memory')
                 .map((page) => (
                   <button
                     type="button"
-                    className={`button ${!pluginManagerOpen && !memoryManagerOpen && pluginPageSelection?.pluginId === page.pluginId && pluginPageSelection.pageId === page.id ? 'button-soft' : 'button-quiet'}`}
+                    className={`button ${!pluginManagerOpen && !memoryManagerOpen && !archivedThreadsOpen && pluginPageSelection?.pluginId === page.pluginId && pluginPageSelection.pageId === page.id ? 'button-soft' : 'button-quiet'}`}
                     key={`${page.pluginId}:${page.id}`}
                     onClick={() => {
                       setPluginManagerOpen(false);
                       setMemoryManagerOpen(false);
+                      setArchivedThreadsOpen(false);
                       setPluginPageSelection({ pluginId: page.pluginId, pageId: page.id });
                     }}
                     title={page.description}
@@ -2560,7 +2725,59 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 ))}
             </nav>
           ) : null}
-          {pluginManagerOpen ? (
+          {archivedThreadsOpen ? (
+            <section className="plugin-settings-page archived-threads-page" aria-label="Archived Threads">
+              <p className="form-intro">Archived Threads are hidden from the active project lists.</p>
+              <p className="field-note archived-threads-retention">
+                Delete hides a Thread from Pico. Its history records remain retained.
+              </p>
+              {archivedThreadsLoading && archivedThreads.length === 0 ? (
+                <p className="field-note">Loading archived Threads…</p>
+              ) : archivedThreads.length === 0 ? (
+                <p className="field-note">No archived Threads.</p>
+              ) : (
+                <div className="archived-thread-list">
+                  {archivedThreads.map((thread) => {
+                    const projectName = projects.find((project) => project.id === thread.projectId)?.name ?? 'Project';
+                    return (
+                      <article className="archived-thread-card" key={thread.id}>
+                        <div className="archived-thread-copy">
+                          <strong>{thread.title}</strong>
+                          <span>{projectName}</span>
+                          <small>
+                            {executorLabel(thread)} · {thread.workspacePath || 'No workspace'}
+                          </small>
+                          {thread.archivedAt ? (
+                            <small>Archived {new Date(thread.archivedAt).toLocaleString()}</small>
+                          ) : null}
+                        </div>
+                        <div className="archived-thread-actions">
+                          <button
+                            type="button"
+                            className="button button-quiet"
+                            disabled={archivedThreadActionId !== null}
+                            onClick={() => void restoreArchivedThread(thread)}
+                          >
+                            <RotateCcw size={12} aria-hidden="true" />
+                            Restore
+                          </button>
+                          <button
+                            type="button"
+                            className="button button-quiet archived-thread-delete"
+                            disabled={archivedThreadActionId !== null}
+                            onClick={() => void deleteArchivedThread(thread)}
+                          >
+                            <Trash2 size={12} aria-hidden="true" />
+                            Delete
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          ) : pluginManagerOpen ? (
             <section className="plugin-settings-page plugin-manager" aria-label="Plugin management">
               <p className="form-intro">
                 Turning a plugin off unloads it. Turn it back on to reload it; plugin state is preserved.
@@ -2803,6 +3020,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 <code>{selectedThread.workspacePath || 'No workspace'}</code>
               </div>
             </div>
+            <button
+              type="button"
+              className="button button-quiet thread-info-archive"
+              disabled={threadTitleSaving || Boolean(selectedThread.archivedAt) || Boolean(selectedThread.deletedAt)}
+              onClick={() => void archiveSelectedThread()}
+            >
+              <Archive size={13} aria-hidden="true" />
+              Archive Thread
+            </button>
             <div className="form-actions">
               <button
                 type="button"

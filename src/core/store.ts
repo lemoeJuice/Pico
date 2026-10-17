@@ -167,7 +167,9 @@ export class PicoStore {
         created_by_agent INTEGER NOT NULL DEFAULT 0,
         pause_requested INTEGER NOT NULL DEFAULT 0,
         pause_reason TEXT,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        archived_at TEXT,
+        deleted_at TEXT
       );
       CREATE INDEX IF NOT EXISTS threads_project_created ON threads(project_id, created_at);
       CREATE TABLE IF NOT EXISTS thread_create_requests (
@@ -272,6 +274,7 @@ export class PicoStore {
     `);
     this.migrateRemoteExecutorBindings();
     this.migrateRuntimeExecutorKind();
+    this.migrateThreadVisibility();
     migrateLegacyPermissions(this.db);
   }
 
@@ -353,6 +356,16 @@ export class PicoStore {
     }
     const violations = this.db.prepare('PRAGMA foreign_key_check').all();
     if (violations.length > 0) throw new Error('Executor migration left foreign-key violations.');
+  }
+
+  private migrateThreadVisibility(): void {
+    const columns = this.db.prepare('PRAGMA table_info(threads)').all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'archived_at')) {
+      this.db.exec('ALTER TABLE threads ADD COLUMN archived_at TEXT;');
+    }
+    if (!columns.some((column) => column.name === 'deleted_at')) {
+      this.db.exec('ALTER TABLE threads ADD COLUMN deleted_at TEXT;');
+    }
   }
 
   close(): void {
@@ -522,6 +535,8 @@ export class PicoStore {
         pauseRequested: false,
         pauseReason: null,
         createdAt,
+        archivedAt: null,
+        deletedAt: null,
         state: 'idle',
       };
     });
@@ -546,30 +561,66 @@ export class PicoStore {
     return this.getThread(threadId);
   }
 
+  archiveThread(threadId: string, archivedAt = isoNow()): Thread | null {
+    this.db
+      .prepare('UPDATE threads SET archived_at = ? WHERE id = ? AND deleted_at IS NULL')
+      .run(archivedAt, threadId);
+    return this.getThread(threadId);
+  }
+
+  unarchiveThread(threadId: string): Thread | null {
+    this.db
+      .prepare('UPDATE threads SET archived_at = NULL WHERE id = ? AND deleted_at IS NULL')
+      .run(threadId);
+    return this.getThread(threadId);
+  }
+
+  hideArchivedThread(threadId: string, deletedAt = isoNow()): Thread | null {
+    this.db
+      .prepare('UPDATE threads SET deleted_at = ? WHERE id = ? AND archived_at IS NOT NULL AND deleted_at IS NULL')
+      .run(deletedAt, threadId);
+    return this.getThread(threadId);
+  }
+
   listThreads(projectId?: string): Thread[] {
-    const rows = (
-      projectId
-        ? this.db
-            .prepare(
-              `
+    const rows = (projectId
+      ? this.db
+          .prepare(
+            `
           SELECT t.*, e.kind AS executor_kind, e.label AS executor_label,
                  e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote
           FROM threads t JOIN executors e ON e.id = t.executor_id
-          WHERE t.project_id = ? ORDER BY t.created_at DESC
-        `,
-            )
-            .all(projectId)
-        : this.db
-            .prepare(
-              `
-          SELECT t.*, e.kind AS executor_kind, e.label AS executor_label,
-                 e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote
-          FROM threads t JOIN executors e ON e.id = t.executor_id
+          WHERE t.project_id = ? AND t.archived_at IS NULL AND t.deleted_at IS NULL
           ORDER BY t.created_at DESC
         `,
-            )
-            .all()
-    ) as SqlRow[];
+          )
+          .all(projectId)
+      : this.db
+          .prepare(
+            `
+          SELECT t.*, e.kind AS executor_kind, e.label AS executor_label,
+                 e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote
+          FROM threads t JOIN executors e ON e.id = t.executor_id
+          WHERE t.archived_at IS NULL AND t.deleted_at IS NULL
+          ORDER BY t.created_at DESC
+        `,
+          )
+          .all()) as SqlRow[];
+    return rows.map((row) => this.threadFromRow(row));
+  }
+
+  listArchivedThreads(): Thread[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT t.*, e.kind AS executor_kind, e.label AS executor_label,
+               e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote
+        FROM threads t JOIN executors e ON e.id = t.executor_id
+        WHERE t.archived_at IS NOT NULL AND t.deleted_at IS NULL
+        ORDER BY t.archived_at DESC, t.created_at DESC
+      `,
+      )
+      .all() as SqlRow[];
     return rows.map((row) => this.threadFromRow(row));
   }
 
@@ -588,6 +639,8 @@ export class PicoStore {
       pauseRequested: row.pause_requested === 1,
       pauseReason: typeof row.pause_reason === 'string' ? row.pause_reason : null,
       createdAt: String(row.created_at),
+      archivedAt: typeof row.archived_at === 'string' ? row.archived_at : null,
+      deletedAt: typeof row.deleted_at === 'string' ? row.deleted_at : null,
       state: row.pause_requested === 1 ? 'paused' : 'idle',
     };
   }

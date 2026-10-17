@@ -1770,6 +1770,54 @@ button:disabled {
   border-radius: 12px;
   background: var(--surface-raised, #fff);
 }
+.archived-threads-retention {
+  margin: -9px 0 12px;
+  line-height: 1.6;
+}
+.archived-thread-list {
+  display: grid;
+  gap: 9px;
+  max-height: min(56dvh, 590px);
+  overflow: auto;
+  padding-right: 3px;
+}
+.archived-thread-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 13px;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-raised, #fff);
+}
+.archived-thread-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+.archived-thread-copy strong {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+.archived-thread-copy span,
+.archived-thread-copy small {
+  color: var(--muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.archived-thread-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.archived-thread-delete {
+  color: #9a5b53;
+  border-color: #f0dfdb;
+}
 .plugin-manager-copy {
   min-width: 0;
 }
@@ -2377,6 +2425,9 @@ button:disabled {
 .thread-info-details code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+.thread-info-archive {
+  align-self: flex-start;
+}
 .remote-token-form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2791,6 +2842,13 @@ button:disabled {
   }
   .form-actions .field-note {
     max-width: 145px;
+  }
+  .archived-thread-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .archived-thread-actions {
+    justify-content: flex-end;
   }
   .icon-button,
   .icon-button.small {

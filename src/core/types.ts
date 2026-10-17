@@ -38,6 +38,8 @@ export interface Thread {
   pauseRequested: boolean;
   pauseReason: string | null;
   createdAt: string;
+  archivedAt?: string | null;
+  deletedAt?: string | null;
   state: ThreadState;
 }
 

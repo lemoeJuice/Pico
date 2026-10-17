@@ -222,6 +222,9 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     const projectId = typeof request.query.projectId === 'string' ? request.query.projectId : undefined;
     response.json(runtime.listThreads(projectId));
   });
+  app.get('/api/threads/archived', (_request, response) => {
+    response.json({ threads: runtime.listArchivedThreads() });
+  });
   app.get('/api/threads/:threadId', (request, response) => {
     const beforeSeqValue = request.query.beforeSeq;
     if (beforeSeqValue !== undefined && typeof beforeSeqValue !== 'string') {
@@ -235,6 +238,15 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   app.patch('/api/threads/:threadId', (request, response) => {
     const body = bodyObject(request);
     response.json(runtime.updateThreadTitle(request.params.threadId!, requiredText(body, 'title')));
+  });
+  app.post('/api/threads/:threadId/archive', (request, response) => {
+    response.json(runtime.archiveThread(request.params.threadId!));
+  });
+  app.post('/api/threads/:threadId/unarchive', (request, response) => {
+    response.json(runtime.unarchiveThread(request.params.threadId!));
+  });
+  app.delete('/api/threads/:threadId', (request, response) => {
+    response.json(runtime.hideArchivedThread(request.params.threadId!));
   });
   app.get('/api/threads/:threadId/tools', async (request, response) => {
     response.json({ tools: await runtime.listThreadTools(request.params.threadId!) });

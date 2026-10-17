@@ -427,6 +427,7 @@ export class PicoRuntime {
   private readonly executionListeners = new Set<(execution: Execution) => void>();
   private storeUnsubscribers: Array<() => void> = [];
   private readonly loops = new Map<string, Promise<void>>();
+  private readonly inFlightThreadOperations = new Map<string, number>();
   private readonly modelSignals = new Map<string, AbortController>();
   private readonly pluginModelCallsInFlight = new Map<
     string,
@@ -482,8 +483,8 @@ export class PicoRuntime {
         binding: (threadId) => this.store.executorForThread(threadId),
         create: (projectId, executorKind, title, options = {}) => {
           if (options.parentThreadId) {
-            const parent = this.store.getThread(options.parentThreadId);
-            if (!parent || parent.projectId !== projectId)
+            const parent = this.requireUnarchivedThread(options.parentThreadId);
+            if (parent.projectId !== projectId)
               throw new Error('Parent Thread must belong to the same Project');
           }
           const thread = this.store.createThread(projectId, executorKind, title, options);
@@ -491,9 +492,9 @@ export class PicoRuntime {
           return thread;
         },
         send: (senderThreadId, targetId, content, messageId) => {
-          const sender = this.store.getThread(senderThreadId);
-          const target = this.store.getThread(targetId);
-          if (!sender || !target || sender.projectId !== target.projectId) {
+          const sender = this.requireUnarchivedThread(senderThreadId);
+          const target = this.requireUnarchivedThread(targetId);
+          if (sender.projectId !== target.projectId) {
             throw new Error('Target Thread must belong to the same Project');
           }
           if (sender.id === target.id) throw new Error('Cannot send a message to the current Thread');
@@ -795,6 +796,84 @@ export class PicoRuntime {
     return this.store.listThreads(projectId).map((thread) => this.getThread(thread.id) ?? thread);
   }
 
+  listArchivedThreads(): Thread[] {
+    return this.store.listArchivedThreads().map((thread) => this.getThread(thread.id) ?? thread);
+  }
+
+  archiveThread(threadId: string): Thread {
+    const current = this.store.getThread(threadId);
+    if (!current) throw new Error('Thread not found.');
+    if (current.deletedAt) throw new Error('This Thread is hidden and cannot be archived.');
+    this.assertThreadNotRunning(threadId);
+    if (current.archivedAt) return this.getThread(threadId)!;
+    const thread = this.store.archiveThread(threadId);
+    if (!thread) throw new Error('Thread not found.');
+    const updated = this.getThread(threadId)!;
+    this.publish({ type: 'thread.updated', thread: updated });
+    return updated;
+  }
+
+  unarchiveThread(threadId: string): Thread {
+    const current = this.store.getThread(threadId);
+    if (!current) throw new Error('Thread not found.');
+    if (current.deletedAt) throw new Error('This Thread is hidden and cannot be restored.');
+    this.assertThreadNotRunning(threadId);
+    if (!current.archivedAt) return this.getThread(threadId)!;
+    const thread = this.store.unarchiveThread(threadId);
+    if (!thread) throw new Error('Thread not found.');
+    const updated = this.getThread(threadId)!;
+    this.publish({ type: 'thread.updated', thread: updated });
+    return updated;
+  }
+
+  hideArchivedThread(threadId: string): Thread {
+    const current = this.store.getThread(threadId);
+    if (!current) throw new Error('Thread not found.');
+    if (!current.archivedAt || current.deletedAt) {
+      throw new Error('Only an archived Thread can be hidden.');
+    }
+    this.assertThreadNotRunning(threadId);
+    const thread = this.store.hideArchivedThread(threadId);
+    if (!thread?.deletedAt) throw new Error('Only an archived Thread can be hidden.');
+    const hidden = this.getThread(threadId)!;
+    this.publish({ type: 'thread.hidden', thread: hidden });
+    return hidden;
+  }
+
+  private assertThreadNotRunning(threadId: string): void {
+    if (
+      this.loops.has(threadId) ||
+      this.store.listActiveExecutions(threadId).length > 0 ||
+      (this.inFlightThreadOperations.get(threadId) ?? 0) > 0
+    ) {
+      throw new Error('Wait for this Thread to stop running before changing its archive state.');
+    }
+  }
+
+  private beginThreadOperation(threadId: string): () => void {
+    this.inFlightThreadOperations.set(threadId, (this.inFlightThreadOperations.get(threadId) ?? 0) + 1);
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      const remaining = (this.inFlightThreadOperations.get(threadId) ?? 1) - 1;
+      if (remaining > 0) this.inFlightThreadOperations.set(threadId, remaining);
+      else this.inFlightThreadOperations.delete(threadId);
+    };
+  }
+
+  private requireUnarchivedThread(threadId: string): Thread {
+    const thread = this.store.getThread(threadId);
+    if (!thread) throw new Error('Thread not found');
+    if (thread.deletedAt !== undefined && thread.deletedAt !== null) {
+      throw new Error('This Thread is hidden from Pico.');
+    }
+    if (thread.archivedAt !== undefined && thread.archivedAt !== null) {
+      throw new Error('This Thread is archived. Restore it before continuing.');
+    }
+    return thread;
+  }
+
   getSnapshot(threadId: string, beforeSeq?: number): ThreadSnapshot | null {
     if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 1)) {
       throw new Error('beforeSeq must be a positive safe integer.');
@@ -1076,8 +1155,7 @@ export class PicoRuntime {
   }
 
   async submit(threadId: string, id: string, content: string): Promise<SubmitResult> {
-    const thread = this.store.getThread(threadId);
-    if (!thread) throw new Error('Thread not found');
+    const thread = this.requireUnarchivedThread(threadId);
     if (content.trimStart().startsWith('/')) {
       const commandText = content.trim();
       const requestHash = createHash('sha256').update(`${threadId}\0${id}`).digest('hex');
@@ -1106,19 +1184,24 @@ export class PicoRuntime {
           },
         };
       }
-      const command = await this.commands.execute(commandText, {
-        thread: this.getThread(threadId),
-        projectId: thread.projectId,
-      });
-      if (command) {
-        this.store.appendCanonical(threadId, completedId, 'plugin', {
-          pluginId: 'pico.commands',
-          action: 'invocation-completed',
-          requestHash,
-          commandHash,
-          result: command,
+      const endOperation = this.beginThreadOperation(threadId);
+      try {
+        const command = await this.commands.execute(commandText, {
+          thread: this.getThread(threadId),
+          projectId: thread.projectId,
         });
-        return { accepted: true, duplicate: false, command };
+        if (command) {
+          this.store.appendCanonical(threadId, completedId, 'plugin', {
+            pluginId: 'pico.commands',
+            action: 'invocation-completed',
+            requestHash,
+            commandHash,
+            result: command,
+          });
+          return { accepted: true, duplicate: false, command };
+        }
+      } finally {
+        endOperation();
       }
     }
     const result = this.postMessage(thread, id, {
@@ -1134,6 +1217,7 @@ export class PicoRuntime {
     id: string,
     payload: MessagePayload,
   ): { record: CanonicalRecord<MessagePayload>; inserted: boolean } {
+    this.requireUnarchivedThread(thread.id);
     const result = this.store.appendMessage(thread.id, id, payload);
     if (result.inserted) {
       if (!thread.pauseRequested) this.startLoop(thread.id);
@@ -1143,16 +1227,14 @@ export class PicoRuntime {
   }
 
   pause(threadId: string): Thread {
-    const thread = this.store.getThread(threadId);
-    if (!thread) throw new Error('Thread not found');
+    this.requireUnarchivedThread(threadId);
     this.store.setPause(threadId, true, 'Paused by user. Current model and tool executions are allowed to settle.');
     this.publishThreadUpdate(threadId);
     return this.getThread(threadId)!;
   }
 
   private pauseForPlugin(threadId: string, reason: string): Thread {
-    const thread = this.store.getThread(threadId);
-    if (!thread) throw new Error('Thread not found');
+    this.requireUnarchivedThread(threadId);
     const cleanedReason = reason.trim().slice(0, 500) || 'Paused by a workflow plugin.';
     this.store.setPause(threadId, true, cleanedReason);
     this.publishThreadUpdate(threadId);
@@ -1160,8 +1242,7 @@ export class PicoRuntime {
   }
 
   private resumeForPlugin(threadId: string): Thread {
-    const thread = this.store.getThread(threadId);
-    if (!thread) throw new Error('Thread not found');
+    this.requireUnarchivedThread(threadId);
     this.store.setPause(threadId, false);
     this.publishThreadUpdate(threadId);
     this.startLoop(threadId);
@@ -1169,8 +1250,7 @@ export class PicoRuntime {
   }
 
   continue(threadId: string): Thread {
-    const thread = this.store.getThread(threadId);
-    if (!thread) throw new Error('Thread not found');
+    this.requireUnarchivedThread(threadId);
     this.store.setPause(threadId, false);
     this.publishThreadUpdate(threadId);
     this.startLoop(threadId);
@@ -1178,8 +1258,7 @@ export class PicoRuntime {
   }
 
   retryModelExecution(threadId: string, sourceExecutionId: string): { execution: Execution; thread: Thread } {
-    const thread = this.store.getThread(threadId);
-    if (!thread) throw new Error('Thread not found');
+    this.requireUnarchivedThread(threadId);
     const source = this.store.getExecution(sourceExecutionId);
     if (!source || source.threadId !== threadId || source.kind !== 'model') {
       throw new Error('Model Execution not found in this Thread.');
@@ -1316,7 +1395,14 @@ export class PicoRuntime {
   private startLoop(threadId: string): void {
     if (this.shuttingDown || this.loops.has(threadId)) return;
     const thread = this.store.getThread(threadId);
-    if (!thread || (thread.pauseRequested && !this.latestActiveBatch(threadId))) return;
+    if (
+      !thread ||
+      (thread.archivedAt !== undefined && thread.archivedAt !== null) ||
+      (thread.deletedAt !== undefined && thread.deletedAt !== null) ||
+      (thread.pauseRequested && !this.latestActiveBatch(threadId))
+    ) {
+      return;
+    }
     const task = Promise.resolve()
       .then(() => this.driveThread(threadId))
       .catch((error: unknown) => {
@@ -2083,8 +2169,7 @@ export class PicoRuntime {
       throw new Error('Plugin model calls require a stable idempotency key.');
     }
     if (!request.threadId) throw new Error('Plugin model calls require a Thread context.');
-    const thread = this.store.getThread(request.threadId);
-    if (!thread) throw new Error('Thread not found');
+    const thread = this.requireUnarchivedThread(request.threadId);
     if (request.projectId && request.projectId !== thread.projectId) {
       throw new Error('Plugin model call Project must match its Thread.');
     }
@@ -2110,10 +2195,12 @@ export class PicoRuntime {
       );
     }
 
+    const endOperation = this.beginThreadOperation(thread.id);
     const pending = this.runPluginModelCall(pluginId, thread, request);
     this.pluginModelCallsInFlight.set(key, pending);
     return pending.finally(() => {
       if (this.pluginModelCallsInFlight.get(key) === pending) this.pluginModelCallsInFlight.delete(key);
+      endOperation();
     });
   }
 
