@@ -111,7 +111,7 @@ select {
   gap: 7px;
 }
 
-.chatgpt-composer-controls select {
+body.pico-ui-root .chatgpt-composer-controls select {
   width: auto;
   min-width: 0;
   height: var(--pico-composer-control-height, 32px);
@@ -134,7 +134,7 @@ select {
   min-height: var(--pico-composer-control-height, 32px);
 }
 
-.chatgpt-fast-control {
+body.pico-ui-root .chatgpt-fast-control {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
