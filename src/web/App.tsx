@@ -3002,10 +3002,24 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           onDismissError={() => setThreadInfoError('')}
         >
           <form className="form-stack" onSubmit={(event) => void updateThreadTitle(event)}>
-            <label>
-              Thread name
-              <input value={threadTitleDraft} onChange={(event) => setThreadTitleDraft(event.target.value)} autoFocus />
-            </label>
+            <div className="thread-info-name-field">
+              <label htmlFor="thread-info-name">Thread name</label>
+              <div className="thread-info-name-row">
+                <input
+                  id="thread-info-name"
+                  value={threadTitleDraft}
+                  onChange={(event) => setThreadTitleDraft(event.target.value)}
+                  autoFocus
+                />
+                <button
+                  type="submit"
+                  className="button button-primary"
+                  disabled={threadTitleSaving || !threadTitleDraft.trim()}
+                >
+                  {threadTitleSaving ? 'Saving…' : 'Save name'}
+                </button>
+              </div>
+            </div>
             <div className="thread-info-details">
               <div>
                 <span>Project</span>
@@ -3020,16 +3034,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 <code>{selectedThread.workspacePath || 'No workspace'}</code>
               </div>
             </div>
-            <button
-              type="button"
-              className="button button-quiet thread-info-archive"
-              disabled={threadTitleSaving || Boolean(selectedThread.archivedAt) || Boolean(selectedThread.deletedAt)}
-              onClick={() => void archiveSelectedThread()}
-            >
-              <Archive size={13} aria-hidden="true" />
-              Archive Thread
-            </button>
-            <div className="form-actions">
+            <div className="thread-info-secondary-actions">
+              <button
+                type="button"
+                className="button button-quiet thread-info-archive"
+                disabled={threadTitleSaving || Boolean(selectedThread.archivedAt) || Boolean(selectedThread.deletedAt)}
+                onClick={() => void archiveSelectedThread()}
+              >
+                <Archive size={13} aria-hidden="true" />
+                Archive Thread
+              </button>
               <button
                 type="button"
                 className="button button-quiet"
@@ -3037,9 +3051,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 onClick={() => setThreadInfoOpen(false)}
               >
                 Cancel
-              </button>
-              <button className="button button-primary" disabled={threadTitleSaving || !threadTitleDraft.trim()}>
-                {threadTitleSaving ? 'Saving…' : 'Save name'}
               </button>
             </div>
           </form>

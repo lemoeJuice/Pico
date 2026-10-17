@@ -824,6 +824,9 @@ button:disabled {
   position: relative;
   font-size: 10px;
 }
+.executor-error:has(.executor-error-details[open]) {
+  z-index: 7;
+}
 .executor-error-details summary {
   color: #8e5f51;
   cursor: pointer;
@@ -2407,6 +2410,32 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: 12px;
 }
+.thread-info-name-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+.thread-info-name-field {
+  display: grid;
+  gap: 8px;
+}
+.modal .thread-info-name-row input {
+  height: 34px;
+  min-height: 34px;
+  min-width: 0;
+}
+.modal .thread-info-name-row .button {
+  height: 34px;
+  min-height: 34px;
+  white-space: nowrap;
+}
+.thread-info-secondary-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
 .thread-info-details > div {
   display: grid;
   gap: 4px;
@@ -2424,9 +2453,6 @@ button:disabled {
 }
 .thread-info-details code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-.thread-info-archive {
-  align-self: flex-start;
 }
 .remote-token-form {
   display: grid;
