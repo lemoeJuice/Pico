@@ -137,3 +137,34 @@ describe('Thread-scoped assistant streaming drafts', () => {
     expect(canAppendAssistantDelta(nextStep.active, nextStep.unavailable, 'thread-a', 'new-execution')).toBe(true);
   });
 });
+
+it('merges reasoning and interleaved tool previews without losing text or leaking across executions', async () => {
+  const { appendAssistantPreview } = await import('../src/web/assistant-drafts.js');
+  let drafts = appendAssistantPreview({}, 'thread', 'execution', { type: 'reasoning', delta: 'Inspecting' });
+  drafts = appendAssistantPreview(drafts, 'thread', 'execution', {
+    type: 'tool',
+    call: { index: 1, name: 'read', argumentsText: '{' },
+  });
+  drafts = appendAssistantDraft(drafts, 'thread', 'execution', 'Hello');
+  drafts = appendAssistantPreview(drafts, 'thread', 'execution', {
+    type: 'tool',
+    call: { index: 0, name: 'shell', argumentsText: '{}' },
+  });
+  drafts = appendAssistantPreview(drafts, 'thread', 'execution', {
+    type: 'tool',
+    call: { index: 1, argumentsText: '{"path":"a"}' },
+  });
+  expect(drafts.thread).toMatchObject({
+    text: 'Hello',
+    reasoningSummary: 'Inspecting',
+    tools: [
+      { index: 0, name: 'shell' },
+      { index: 1, name: 'read', argumentsText: '{"path":"a"}' },
+    ],
+  });
+  expect(appendAssistantPreview(drafts, 'thread', 'next', { type: 'reasoning', delta: 'New' }).thread).toEqual({
+    executionId: 'next',
+    text: '',
+    reasoningSummary: 'New',
+  });
+});

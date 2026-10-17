@@ -36,6 +36,7 @@ import { threadCanBeInterrupted } from './thread-controls.js';
 import { executorStatusFromProbe } from './executor-status.js';
 import {
   appendAssistantDraft,
+  appendAssistantPreview,
   assistantStreamsAfterDisconnect,
   assistantDraftForThread,
   canAppendAssistantDelta,
@@ -52,6 +53,20 @@ import {
   type PluginUiEvent,
   type PluginUiProps,
 } from '../plugins/ui-protocol.js';
+import { ToolCard } from './tool-card.js';
+import { reasoningSummaryMarkdown } from './reasoning-summary.js';
+import { Markdown } from './markdown.js';
+import { ComposerUsage } from './usage-summary.js';
+import {
+  modelExecutionGroups,
+  selectedAttemptIndex,
+  modelExecutionCanRetry,
+  modelExecutionProjectionThrough,
+  assistantRecordHasVisibleResult,
+  type ModelExecutionGroup,
+  type ModelExecutionVariant,
+} from './model-execution-groups.js';
+import { conversationTimeline } from './conversation-timeline.js';
 import { PluginWebView } from './plugin-web-view.js';
 import { appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from './history-pages.js';
 import {
@@ -189,39 +204,6 @@ function recordPayload<T>(record: CanonicalRecord): T {
   return record.payload as unknown as T;
 }
 
-interface ModelExecutionVariant {
-  execution: Execution;
-  assistantRecord: CanonicalRecord | null;
-}
-
-interface ModelExecutionGroup {
-  projectionThrough: number;
-  variants: ModelExecutionVariant[];
-}
-
-function assistantRecordHasVisibleResult(record: CanonicalRecord | null): boolean {
-  if (!record) return false;
-  const payload = recordPayload<AssistantPayload>(record);
-  return (
-    (typeof payload.content === 'string' && payload.content.trim().length > 0) ||
-    (Array.isArray(payload.toolCalls) && payload.toolCalls.length > 0)
-  );
-}
-
-function modelExecutionCanRetry(variant: ModelExecutionVariant): boolean {
-  if (variant.execution.status === 'failed' || variant.execution.status === 'interrupted') return true;
-  return (
-    variant.execution.status === 'completed' &&
-    Boolean(variant.assistantRecord) &&
-    !assistantRecordHasVisibleResult(variant.assistantRecord)
-  );
-}
-
-function modelExecutionProjectionThrough(execution: Execution): number | null {
-  const projectionThrough = execution.arguments?.projectionThrough;
-  return typeof projectionThrough === 'number' && Number.isSafeInteger(projectionThrough) ? projectionThrough : null;
-}
-
 function modelExecutionModelId(execution: Execution): string | null {
   const argumentModel = execution.arguments?.model;
   if (typeof argumentModel === 'string' && argumentModel.trim()) return argumentModel;
@@ -230,19 +212,6 @@ function modelExecutionModelId(execution: Execution): string | null {
     if (typeof resultModel === 'string' && resultModel.trim()) return resultModel;
   }
   return null;
-}
-
-function messageIdAtProjection(records: readonly CanonicalRecord[], projectionThrough: number): string | null {
-  for (let index = records.length - 1; index >= 0; index -= 1) {
-    const record = records[index]!;
-    if (record.kind === 'message' && record.seq <= projectionThrough) return record.id;
-  }
-  return null;
-}
-
-function modelExecutionMessageId(execution: Execution, records: readonly CanonicalRecord[]): string | null {
-  const projectionThrough = modelExecutionProjectionThrough(execution);
-  return projectionThrough === null ? null : messageIdAtProjection(records, projectionThrough);
 }
 
 function ExecutorPill({
@@ -463,59 +432,6 @@ function PluginContributionView({
   );
 }
 
-function ToolCard({
-  call,
-  execution,
-  result,
-}: {
-  call: ToolCall;
-  execution: Execution | undefined;
-  result: ToolResultPayload | undefined;
-}) {
-  const status = execution?.status ?? 'pending';
-  const hasError = Boolean(execution?.error || result?.status === 'failed' || result?.status === 'interrupted');
-  const outcomeUnconfirmed = execution?.error?.includes('The Executor did not confirm an outcome.') ?? false;
-  const resultText =
-    result?.status === 'interrupted'
-      ? `The tool was interrupted. Its side effects may be partial or unknown. Inspect the workspace before retrying.${result.error ? `\n\n${result.error}` : ''}`
-      : result?.status === 'failed'
-        ? (result.error ?? 'Tool failed.')
-        : result
-          ? toJson(result.result)
-          : execution?.error
-            ? `${execution.error}${execution.status === 'pending' && !outcomeUnconfirmed ? '\n\nContinue this Thread to retry the same Execution.' : ''}`
-            : execution?.status === 'running'
-              ? 'Running in the selected Executor…'
-              : 'Waiting for the Executor…';
-  return (
-    <details
-      className={`tool-card tool-${execution?.status ?? 'pending'}${hasError ? ' tool-has-error' : ''}`}
-      open={hasError}
-    >
-      <summary>
-        <ChevronRight className="tool-chevron" size={14} aria-hidden="true" />
-        <span className="tool-name">{call.name}</span>
-        <span className={`tool-status status-${execution?.status ?? 'pending'}`}>{status}</span>
-      </summary>
-      <div className="tool-card-body">
-        <details className="tool-detail">
-          <summary>Arguments</summary>
-          <pre>{toJson(call.arguments)}</pre>
-        </details>
-        <details className="tool-detail" open={hasError}>
-          <summary>
-            Result{' '}
-            {execution?.updatedAt ? (
-              <span className="subtle-inline">· {new Date(execution.updatedAt).toLocaleTimeString()}</span>
-            ) : null}
-          </summary>
-          <pre className={`tool-output${hasError ? ' tool-output-error' : ''}`}>{resultText}</pre>
-        </details>
-      </div>
-    </details>
-  );
-}
-
 export function App({ authRequired = false, onSignOut }: { authRequired?: boolean; onSignOut?(): Promise<void> }) {
   const composerState = useRef<ComposerState | null>(null);
   if (composerState.current === null) composerState.current = readComposerState();
@@ -688,6 +604,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const selectedThreadSending = selectedThread ? sendingThreadIds.has(selectedThread.id) : false;
   const activeNotice = noticeForThread(threadId, threadNotices, notice);
   const assistantDraft = assistantDraftForThread(assistantDrafts, threadId);
+  const assistantPreview = threadId ? assistantDrafts[threadId] : undefined;
   const filteredCommands = useMemo(() => {
     if (!draft.startsWith('/')) return [];
     const token = draft.slice(1).split(/\s/)[0]?.toLowerCase() ?? '';
@@ -1117,6 +1034,37 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           }
           setAssistantDrafts((current) => appendAssistantDraft(current, draftThreadId, executionId, delta));
         } else if (
+          (event.type === 'model.reasoning_summary.delta' || event.type === 'model.tool_call.preview') &&
+          typeof event.threadId === 'string' &&
+          typeof event.executionId === 'string'
+        ) {
+          const { threadId: previewThreadId, executionId } = event;
+          if (
+            !canAppendAssistantDelta(
+              activeModelExecutions.current,
+              unavailableModelExecutions.current,
+              previewThreadId,
+              executionId,
+            )
+          )
+            return;
+          if (event.type === 'model.reasoning_summary.delta' && typeof event.delta === 'string') {
+            const delta = event.delta;
+            setAssistantDrafts((current) =>
+              appendAssistantPreview(current, previewThreadId, executionId, { type: 'reasoning', delta }),
+            );
+          } else if (typeof event.index === 'number' && typeof event.argumentsText === 'string') {
+            const call = {
+              index: event.index,
+              argumentsText: event.argumentsText,
+              ...(typeof event.id === 'string' ? { id: event.id } : {}),
+              ...(typeof event.name === 'string' ? { name: event.name } : {}),
+            };
+            setAssistantDrafts((current) =>
+              appendAssistantPreview(current, previewThreadId, executionId, { type: 'tool', call }),
+            );
+          }
+        } else if (
           event.type === 'model.draft-ended' &&
           typeof event.threadId === 'string' &&
           typeof event.executionId === 'string'
@@ -1183,7 +1131,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   useEffect(() => {
     const list = listRef.current;
     if (list && followLatest.current) list.scrollTop = list.scrollHeight;
-  }, [threadId, activeSnapshot?.records.length, activeSnapshot?.executions, assistantDraft]);
+  }, [threadId, activeSnapshot?.records.length, activeSnapshot?.executions, assistantDraft, assistantPreview]);
 
   const sendMessage = async (content = draft): Promise<void> => {
     const clean = content.trim();
@@ -1764,47 +1712,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
   const records = activeSnapshot?.records ?? [];
   const executions = activeSnapshot?.executions ?? [];
-  const assistantRecordsByExecutionId = new Map<string, CanonicalRecord>();
-  for (const record of records) {
-    if (record.kind === 'assistant') assistantRecordsByExecutionId.set(record.id.replace(/:assistant$/, ''), record);
-  }
-  const variantsByMessageAndProjection = new Map<string, Map<number, ModelExecutionVariant[]>>();
-  for (const execution of executions) {
-    if (execution.kind !== 'model') continue;
-    const projectionThrough = modelExecutionProjectionThrough(execution);
-    if (projectionThrough === null) continue;
-    const messageId = modelExecutionMessageId(execution, records);
-    if (!messageId) continue;
-    const assistantRecord =
-      execution.status === 'completed' ? (assistantRecordsByExecutionId.get(execution.id) ?? null) : null;
-    if (execution.status === 'completed' && !assistantRecord) continue;
-    const byProjection = variantsByMessageAndProjection.get(messageId) ?? new Map<number, ModelExecutionVariant[]>();
-    const variants = byProjection.get(projectionThrough) ?? [];
-    variants.push({ execution, assistantRecord });
-    byProjection.set(projectionThrough, variants);
-    variantsByMessageAndProjection.set(messageId, byProjection);
-  }
-  const modelExecutionGroupsByMessageId = new Map<string, ModelExecutionGroup[]>();
-  const groupedAssistantRecordIds = new Set<string>();
-  for (const [messageId, groupsByProjection] of variantsByMessageAndProjection) {
-    const groups: ModelExecutionGroup[] = [];
-    for (const [projectionThrough, variants] of groupsByProjection) {
-      variants.sort(
-        (left, right) =>
-          left.execution.createdAt.localeCompare(right.execution.createdAt) ||
-          left.execution.id.localeCompare(right.execution.id),
-      );
-      const needsAttemptGroup =
-        variants.length > 1 ||
-        variants.some((variant) => variant.execution.status !== 'completed' || modelExecutionCanRetry(variant));
-      if (!needsAttemptGroup) continue;
-      groups.push({ projectionThrough, variants });
-      for (const variant of variants) {
-        if (variant.assistantRecord) groupedAssistantRecordIds.add(variant.assistantRecord.id);
-      }
-    }
-    if (groups.length > 0) modelExecutionGroupsByMessageId.set(messageId, groups);
-  }
+  const { groups: executionGroups, groupedAssistantRecordIds } = modelExecutionGroups(records, executions);
   const renderProjectThreads = (project: Project): ReactNode => {
     const projectThreads = threadsByProject[project.id];
     if (projectThreads === undefined) {
@@ -1838,9 +1746,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const renderedRecords = records.filter(
     (record) => record.kind === 'message' || (record.kind === 'assistant' && !groupedAssistantRecordIds.has(record.id)),
   );
-  const timeline = [
-    ...renderedRecords.map((record) => ({ type: 'record' as const, at: record.createdAt, record })),
-  ].sort((left, right) => left.at.localeCompare(right.at));
+  const timeline = conversationTimeline(renderedRecords, executionGroups);
   const currentState = selectedThread?.state ?? 'idle';
   const pauseReason = visiblePauseReason(currentState, selectedThread?.pauseReason ?? null, [error, activeNotice]);
 
@@ -2241,13 +2147,26 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   </button>
                 ) : null}
                 {timeline.map((item) =>
-                  item.record.kind === 'message' ? (
+                  item.type === 'group' ? (
+                    <ModelExecutionBranchGroup
+                      key={`group:${item.group.projectionThrough}`}
+                      group={item.group}
+                      threadId={selectedThread.id}
+                      unavailableModelExecutionIds={unavailableModelExecutionIds}
+                      executions={executions}
+                      records={records}
+                      renderTool={renderToolView}
+                      onRetryModelExecution={retryModelExecution}
+                      retryDisabled={currentState === 'running' || currentState === 'pausing'}
+                      draftExecutionId={assistantDrafts[selectedThread.id]?.executionId}
+                    />
+                  ) : item.record.kind === 'message' ? (
                     <MessageBubble
                       key={item.record.id}
                       record={item.record}
                       thread={selectedThread}
                       threadId={selectedThread.id}
-                      modelExecutionGroups={modelExecutionGroupsByMessageId.get(item.record.id) ?? []}
+                      modelExecutionGroups={[]}
                       unavailableModelExecutionIds={unavailableModelExecutionIds}
                       executions={executions}
                       records={records}
@@ -2267,7 +2186,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     />
                   ),
                 )}
-                {assistantDraft ? (
+                {assistantPreview ? (
                   <div className="assistant-message draft-message">
                     <div className="assistant-avatar">
                       <Sparkles size={13} aria-hidden="true" />
@@ -2276,14 +2195,26 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       <div className="message-author">
                         Pico <span className="typing-label">writing</span>
                       </div>
-                      <div className="markdown-like">
-                        {assistantDraft}
-                        <span className="cursor-block" />
-                      </div>
+                      {assistantPreview.reasoningSummary ? (
+                        <Reasoning text={assistantPreview.reasoningSummary} />
+                      ) : null}
+                      {assistantDraft ? <Markdown>{assistantDraft}</Markdown> : null}
+                      {assistantPreview.tools?.map((call) => (
+                        <div className="tool-preview" key={call.index}>
+                          <div className="tool-preview-heading">
+                            <LoaderCircle size={12} aria-hidden="true" />
+                            <strong>{call.name ?? 'Tool call'}</strong>
+                            <span>Preparing arguments…</span>
+                          </div>
+                          <pre>{call.argumentsText || 'Waiting for arguments…'}</pre>
+                          <span className="subtle-inline">Result · waiting for execution</span>
+                        </div>
+                      ))}
+                      <span className="cursor-block" />
                     </div>
                   </div>
                 ) : null}
-                {renderedRecords.length === 0 && !assistantDraft ? (
+                {renderedRecords.length === 0 && !assistantPreview ? (
                   <div className="empty-thread">
                     <div className="empty-orbit">
                       <Sparkles size={19} aria-hidden="true" />
@@ -2401,15 +2332,20 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   </div>
                 </div>
               </div>
-              {settings?.model ? (
-                <div className="composer-caption">
-                  {settings.model} <span>·</span> Responses stream as they arrive
-                </div>
-              ) : (
-                <button className="composer-caption setup-caption" onClick={() => setSettingsOpen(true)}>
-                  Choose a model in Settings to start a conversation <ArrowRight size={12} aria-hidden="true" />
-                </button>
-              )}
+              <div className="composer-caption composer-meta">
+                <ComposerUsage
+                  threadId={selectedThread.id}
+                  revision={`${records.at(-1)?.id ?? ''}:${executions.filter((item) => item.status === 'completed' || item.status === 'failed').length}`}
+                  enabled={Boolean(pluginInfo?.plugins.some((plugin) => plugin.id === 'pico.usage'))}
+                />
+                {settings?.model ? (
+                  <span className="composer-model-name">{settings.model}</span>
+                ) : (
+                  <button className="setup-caption composer-model-name" onClick={() => setSettingsOpen(true)}>
+                    Choose a model <ArrowRight size={12} aria-hidden="true" />
+                  </button>
+                )}
+              </div>
             </div>
           </>
         )}
@@ -3099,7 +3035,9 @@ function ModelExecutionBranchGroup({
   renderTool,
   onRetryModelExecution,
   retryDisabled,
+  draftExecutionId,
 }: {
+  draftExecutionId?: string | undefined;
   group: ModelExecutionGroup;
   threadId: string;
   unavailableModelExecutionIds: ReadonlySet<string>;
@@ -3109,28 +3047,28 @@ function ModelExecutionBranchGroup({
   onRetryModelExecution(threadId: string, executionId: string): Promise<Execution>;
   retryDisabled: boolean;
 }) {
-  const [selectedExecutionId, setSelectedExecutionId] = useState<string | null>(null);
+  const [attemptSelection, setAttemptSelection] = useState<{ id: string; latestId: string } | null>(null);
   const [retryingExecutionId, setRetryingExecutionId] = useState<string | null>(null);
   const [retryError, setRetryError] = useState('');
-  const selectedIndex = selectedExecutionId
-    ? group.variants.findIndex((variant) => variant.execution.id === selectedExecutionId)
-    : -1;
-  const currentIndex = selectedIndex >= 0 ? selectedIndex : group.variants.length - 1;
+  const currentIndex = selectedAttemptIndex(group, attemptSelection);
+  const selectAttempt = (id: string): void =>
+    setAttemptSelection({ id, latestId: group.variants.at(-1)!.execution.id });
   const variant = group.variants[currentIndex];
   if (!variant) return null;
+  const requestThrough = modelExecutionProjectionThrough(variant.execution) ?? group.projectionThrough;
   const retryable =
     modelExecutionCanRetry(variant) &&
-    !records.some((record) => record.kind === 'message' && record.seq > group.projectionThrough) &&
+    !records.some((record) => record.kind === 'message' && record.seq > requestThrough) &&
     !executions.some((execution) => {
       const laterProjection = modelExecutionProjectionThrough(execution);
-      return execution.kind === 'model' && laterProjection !== null && laterProjection > group.projectionThrough;
+      return execution.kind === 'model' && laterProjection !== null && laterProjection > requestThrough;
     });
   const handleRetry = async (): Promise<void> => {
     setRetryingExecutionId(variant.execution.id);
     setRetryError('');
     try {
       const nextExecution = await onRetryModelExecution(threadId, variant.execution.id);
-      setSelectedExecutionId(nextExecution.id);
+      setAttemptSelection({ id: nextExecution.id, latestId: nextExecution.id });
     } catch (caught) {
       setRetryError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -3146,7 +3084,7 @@ function ModelExecutionBranchGroup({
             aria-label="Previous generation attempt"
             title="Previous generation attempt"
             disabled={currentIndex === 0 || retryingExecutionId !== null}
-            onClick={() => setSelectedExecutionId(group.variants[currentIndex - 1]!.execution.id)}
+            onClick={() => selectAttempt(group.variants[currentIndex - 1]!.execution.id)}
           >
             <ChevronLeft size={14} aria-hidden="true" />
           </button>
@@ -3158,7 +3096,7 @@ function ModelExecutionBranchGroup({
             aria-label="Next generation attempt"
             title="Next generation attempt"
             disabled={currentIndex === group.variants.length - 1 || retryingExecutionId !== null}
-            onClick={() => setSelectedExecutionId(group.variants[currentIndex + 1]!.execution.id)}
+            onClick={() => selectAttempt(group.variants[currentIndex + 1]!.execution.id)}
           >
             <ChevronRight size={14} aria-hidden="true" />
           </button>
@@ -3184,6 +3122,11 @@ function ModelExecutionBranchGroup({
       ) : null}
     </div>
   );
+
+  if (!variant.assistantRecord && variant.execution.id === draftExecutionId) {
+    if (group.variants.length === 1) return null;
+    return <div className="model-execution-branch-group live-attempt-controls">{attemptActions}</div>;
+  }
 
   return (
     <div className="model-execution-branch-group">
@@ -3263,7 +3206,7 @@ function ModelInputDisclosure({
   const [modelInputsError, setModelInputsError] = useState('');
   return (
     <details
-      className="projection-card"
+      className="conversation-detail-card projection-card"
       onToggle={(event) => {
         if (!event.currentTarget.open || modelInputs !== null || modelInputsLoading) return;
         setModelInputsLoading(true);
@@ -3277,7 +3220,7 @@ function ModelInputDisclosure({
       }}
     >
       <summary>
-        <ChevronRight className="projection-chevron" size={13} aria-hidden="true" /> Model input
+        <ChevronRight className="detail-chevron projection-chevron" size={13} aria-hidden="true" /> Model input
       </summary>
       <p className="projection-note">
         The exact prompt passed to the model adapter, plus provider request metadata. Transport logs omit credentials,
@@ -3295,9 +3238,9 @@ function ModelInputDisclosure({
         </p>
       ) : null}
       {modelInputs?.map((attempt, index) => (
-        <details className="projection-attempt" key={attempt.id}>
+        <details className="conversation-detail-row projection-attempt" key={attempt.id}>
           <summary>
-            <ChevronRight className="projection-chevron" size={13} aria-hidden="true" />
+            <ChevronRight className="detail-chevron projection-chevron" size={13} aria-hidden="true" />
             Attempt {index + 1} · {attempt.status}
           </summary>
           {attempt.error ? <p className="projection-error">{attempt.error}</p> : null}
@@ -3313,9 +3256,9 @@ function ModelInputDisclosure({
             <p className="projection-note">Discarded partial stream: {attempt.partialOutputCharacters} characters.</p>
           ) : null}
           {(attempt.providerRequests ?? []).map((request, requestIndex) => (
-            <details className="projection-attempt" key={request.id}>
+            <details className="conversation-detail-row projection-attempt" key={request.id}>
               <summary>
-                <ChevronRight className="projection-chevron" size={13} aria-hidden="true" />
+                <ChevronRight className="detail-chevron projection-chevron" size={13} aria-hidden="true" />
                 Provider request {requestIndex + 1} · {request.outcome}
                 {request.status ? ` · HTTP ${request.status}` : ''}
               </summary>
@@ -3411,6 +3354,15 @@ function ModelExecutionRecord({
   );
 }
 
+function Reasoning({ text }: { text: string }) {
+  return (
+    <details className="reasoning-summary" open>
+      <summary>Thinking summary</summary>
+      <Markdown>{reasoningSummaryMarkdown(text)}</Markdown>
+    </details>
+  );
+}
+
 function AssistantBubble({
   record,
   executions,
@@ -3433,17 +3385,6 @@ function AssistantBubble({
   const calls = assistant.toolCalls ?? [];
   const executionId = record.id.replace(/:assistant$/, '');
   const completionNote = assistant.finishReason === 'length' ? '· output limit reached' : null;
-  const usage = assistant.usage;
-  const usageLabel =
-    usage && Object.keys(usage).length > 0
-      ? [
-          usage.inputTokens === undefined ? null : `${usage.inputTokens.toLocaleString()} in`,
-          usage.outputTokens === undefined ? null : `${usage.outputTokens.toLocaleString()} out`,
-          usage.totalTokens === undefined ? null : `${usage.totalTokens.toLocaleString()} total`,
-        ]
-          .filter(Boolean)
-          .join(' / ')
-      : null;
   return (
     <div className="assistant-message">
       <button
@@ -3459,14 +3400,13 @@ function AssistantBubble({
       <div className="message-body">
         <div className="message-author">
           Pico {assistant.model ? <span className="model-label">· {assistant.model}</span> : null}
-          <span className="subtle-inline">· {new Date(record.createdAt).toLocaleTimeString()}</span>
-          {usageLabel ? <span className="usage-label">· {usageLabel} tokens</span> : null}
           {completionNote ? <span className="completion-label">{completionNote}</span> : null}
         </div>
         {emptyOutput ? (
           <p className="model-execution-empty-output">This Model Step completed without a visible response.</p>
         ) : null}
-        {assistant.content ? <div className="markdown-like">{assistant.content}</div> : null}
+        {assistant.reasoningSummary ? <Reasoning text={assistant.reasoningSummary} /> : null}
+        {assistant.content ? <Markdown>{assistant.content}</Markdown> : null}
         {calls.length > 0 ? (
           <div className="tool-group">
             <div className="tool-group-label">
