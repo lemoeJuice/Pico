@@ -541,6 +541,7 @@ export class PluginHost {
     };
     const subscriptions: Array<() => void> = [];
     const context: PluginContext = {
+      projects: { ...this.services.projects },
       threads: {
         ...this.services.threads,
         create: (projectId, executorKind, title, options = {}) =>

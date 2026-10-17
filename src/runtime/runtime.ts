@@ -457,6 +457,7 @@ export class PicoRuntime {
     );
     this.remoteHostExecutor = new RemoteHostExecutor(store, (execution) => this.executionChanged(execution));
     const services: PluginServices = {
+      projects: { list: () => this.listProjects() },
       threads: {
         get: (threadId) => this.store.getThread(threadId),
         list: (projectId) => this.listThreads(projectId),

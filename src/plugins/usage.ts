@@ -179,7 +179,19 @@ function matches(row: UsageRow, filter: UsageFilter): boolean {
   );
 }
 
-function sum(rows: UsageRow[]): Record<string, number | null> {
+const tokenDimensions = [
+  'inputTokens',
+  'outputTokens',
+  'totalTokens',
+  'cachedInputTokens',
+  'cacheWriteTokens',
+  'reasoningTokens',
+] as const;
+
+type UsageDimension = (typeof tokenDimensions)[number];
+type UsageCoverage = Record<UsageDimension | 'usage', { reported: number; total: number }>;
+
+function sum(rows: UsageRow[]): { totals: Record<string, number | null>; coverage: UsageCoverage } {
   const totals: Record<string, number | null> = {
     inputTokens: 0,
     outputTokens: 0,
@@ -189,35 +201,47 @@ function sum(rows: UsageRow[]): Record<string, number | null> {
     reasoningTokens: 0,
     estimatedCost: 0,
   };
+  const reported: Record<UsageDimension, number> = {
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    cachedInputTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+  };
+  let reportedUsageCalls = 0;
   for (const row of rows) {
-    for (const key of [
-      'inputTokens',
-      'outputTokens',
-      'totalTokens',
-      'cachedInputTokens',
-      'cacheWriteTokens',
-      'reasoningTokens',
-    ] as const) {
+    if (row.usage) reportedUsageCalls += 1;
+    for (const key of tokenDimensions) {
       const value = row.usage?.[key];
-      if (value === undefined) totals[key] = null;
-      else if (totals[key] !== null) totals[key] = (totals[key] ?? 0) + value;
+      if (value !== undefined) {
+        reported[key] += 1;
+        totals[key] = (totals[key] ?? 0) + value;
+      }
     }
     if (row.estimatedCost === null) totals.estimatedCost = null;
     else if (totals.estimatedCost !== null) totals.estimatedCost = (totals.estimatedCost ?? 0) + row.estimatedCost;
   }
-  return totals;
+  const coverage = Object.fromEntries(
+    tokenDimensions.map((key) => [key, { reported: reported[key], total: rows.length }]),
+  ) as UsageCoverage;
+  coverage.usage = { reported: reportedUsageCalls, total: rows.length };
+  for (const key of tokenDimensions) {
+    if (reported[key] === 0 && rows.length > 0) totals[key] = null;
+  }
+  return { totals, coverage };
 }
 
 function groupBy(
   rows: UsageRow[],
   key: (row: UsageRow) => string,
-): Array<{ key: string; count: number; totals: Record<string, number | null> }> {
+): Array<{ key: string; count: number; totals: Record<string, number | null>; coverage: UsageCoverage }> {
   const groups = new Map<string, UsageRow[]>();
   for (const row of rows) {
     const name = key(row);
     groups.set(name, [...(groups.get(name) ?? []), row]);
   }
-  return [...groups.entries()].map(([name, values]) => ({ key: name, count: values.length, totals: sum(values) }));
+  return [...groups.entries()].map(([name, values]) => ({ key: name, count: values.length, ...sum(values) }));
 }
 
 function parseFilter(query: URLSearchParams): UsageFilter {
@@ -246,10 +270,12 @@ function buildReport(context: PluginContext, state: PluginContext['state'], filt
   const rows = [...main, ...auxiliary]
     .filter((row) => matches(row, filter))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const aggregate = sum(rows);
   const byTime = groupBy(rows, (row) => row.createdAt.slice(0, 10));
   return {
     rows,
-    totals: sum(rows),
+    totals: aggregate.totals,
+    coverage: aggregate.coverage,
     counts: {
       completedMainCalls: rows.filter((row) => row.kind === 'main' && row.status === 'completed').length,
       auxiliaryCalls: rows.filter((row) => row.kind === 'auxiliary').length,
@@ -288,6 +314,10 @@ export const usagePlugin: PicoPlugin = {
       const value = state.get<unknown>('rates', []);
       return Array.isArray(value) ? value.filter(validRate) : [];
     };
+    http.register('GET', '/catalog', () => ({
+      projects: context.projects.list().map(({ id, name }) => ({ id, name })),
+      threads: context.threads.list().map(({ id, projectId, title }) => ({ id, projectId, title })),
+    }));
     http.register('GET', '/report', ({ query }) => buildReport(context, state, parseFilter(query)));
     http.register('PUT', '/rates', ({ body }) => {
       const data = requestObject({ body, query: new URLSearchParams(), origin: null });

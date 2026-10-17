@@ -1,10 +1,13 @@
-import type { Execution, ExecutorBinding, ExecutorKind, Thread, ToolDefinition } from '../core/types.js';
+import type { Execution, ExecutorBinding, ExecutorKind, Project, Thread, ToolDefinition } from '../core/types.js';
 import type { ModelPrompt, ModelResponse } from '../runtime/model.js';
 import type { PluginModelCallRecord } from '../core/store.js';
 import type { ModelInputAttempt } from '../runtime/runtime.js';
 
 /** Domain operations available to workflow plugins, independent of Runtime implementation. */
 export interface PluginServices {
+  projects: {
+    list(): Project[];
+  };
   threads: {
     get(threadId: string): Thread | null;
     list(projectId?: string): Thread[];
@@ -66,6 +69,7 @@ const unavailable = (): never => {
   throw new Error('Workflow services are not configured for this plugin host');
 };
 export const unavailablePluginServices: PluginServices = {
+  projects: { list: unavailable },
   threads: {
     get: unavailable,
     list: unavailable,

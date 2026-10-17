@@ -10,6 +10,7 @@
   let error = '';
   let busy = false;
   const query = new URLSearchParams(location.search);
+  let catalog = { projects: [], threads: [] };
   let filters = {
     threadId: query.get('threadId') || '',
     projectId: query.get('projectId') || '',
@@ -45,6 +46,56 @@
     for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value);
     return params.size ? `?${params}` : '';
   }
+  function readFilters(form) {
+    const values = Object.fromEntries(new FormData(form).entries());
+    return Object.fromEntries(
+      ['threadId', 'projectId', 'provider', 'model', 'purpose', 'from', 'to'].map((key) => [key, values[key] || '']),
+    );
+  }
+  function projectOptions() {
+    return catalog.projects
+      .map(
+        (project) =>
+          `<option value="${escape(project.id)}" ${filters.projectId === project.id ? 'selected' : ''}>${escape(project.name)}</option>`,
+      )
+      .join('');
+  }
+  function threadOptions() {
+    return catalog.threads
+      .filter((thread) => !filters.projectId || thread.projectId === filters.projectId)
+      .map(
+        (thread) =>
+          `<option value="${escape(thread.id)}" ${filters.threadId === thread.id ? 'selected' : ''}>${escape(thread.title || 'Untitled thread')}</option>`,
+      )
+      .join('');
+  }
+  function projectLabel(id) {
+    return catalog.projects.find((project) => project.id === id)?.name || 'Unknown project';
+  }
+  function threadLabel(id) {
+    return catalog.threads.find((thread) => thread.id === id)?.title || 'Unknown thread';
+  }
+  function coverageText(coverage) {
+    if (!coverage) return 'No data';
+    const state = coverage.reported === 0 ? 'No data' : coverage.reported < coverage.total ? 'Partial' : 'Known';
+    return `${state} · ${coverage.reported}/${coverage.total} calls`;
+  }
+  function metricCoverage(key) {
+    return `<span class="coverage">${escape(coverageText(report?.coverage?.[key]))}</span>`;
+  }
+  async function loadCatalog() {
+    try {
+      const value = await api('/catalog');
+      catalog = {
+        projects: Array.isArray(value.projects) ? value.projects : [],
+        threads: Array.isArray(value.threads) ? value.threads : [],
+      };
+      render();
+    } catch (reason) {
+      error = reason instanceof Error ? reason.message : String(reason);
+      render();
+    }
+  }
   async function refresh() {
     if (!port) return;
     busy = true;
@@ -59,13 +110,13 @@
       render();
     }
   }
-  function group(title, rows) {
+  function group(title, rows, label = (key) => key) {
     return `<div><strong>${escape(title)}</strong><div class="group-list">${
       (rows || [])
         .slice(0, 12)
         .map(
           (row) =>
-            `<div class="group-row"><span>${escape(row.key)}</span><span>${fmt(row.totals.inputTokens)} in / ${fmt(row.totals.outputTokens)} out</span></div>`,
+            `<div class="group-row"><span>${escape(label(row.key))}</span><span>${fmt(row.totals.inputTokens)} in / ${fmt(row.totals.outputTokens)} out</span></div><small class="coverage">In ${escape(coverageText(row.coverage?.inputTokens))} · Out ${escape(coverageText(row.coverage?.outputTokens))}</small>`,
         )
         .join('') || '<span class="muted">No calls</span>'
     }</div></div>`;
@@ -76,10 +127,11 @@
     const rows = report?.rows || [];
     root.innerHTML = `<div class="panel">
       <div class="heading"><div><h1>Usage</h1><div class="subtle">Committed main calls and Runtime-tracked auxiliary model calls</div></div><button id="refresh" ${busy ? 'disabled' : ''}>Refresh</button></div>
-      <form id="filters" class="filters"><input name="threadId" placeholder="Thread ID" value="${escape(filters.threadId)}"><input name="projectId" placeholder="Project ID" value="${escape(filters.projectId)}"><input name="provider" placeholder="Provider" value="${escape(filters.provider)}"><input name="model" placeholder="Model" value="${escape(filters.model)}"><input name="purpose" placeholder="Purpose" value="${escape(filters.purpose)}"><input name="from" type="date" aria-label="From" value="${escape(filters.from)}"><input name="to" type="date" aria-label="To" value="${escape(filters.to)}"><button class="primary" ${busy ? 'disabled' : ''}>Apply filters</button></form>
+      <form id="filters" class="filters"><label>Project<select name="projectId"><option value="" ${filters.projectId ? '' : 'selected'}>All projects</option>${projectOptions()}</select></label><label>Thread<select name="threadId"><option value="" ${filters.threadId ? '' : 'selected'}>All threads</option>${threadOptions()}</select></label><label>Provider<input name="provider" placeholder="Any provider" value="${escape(filters.provider)}"></label><label>Model<input name="model" placeholder="Any model" value="${escape(filters.model)}"></label><label>Purpose<input name="purpose" placeholder="Any purpose" value="${escape(filters.purpose)}"></label><label>From<input name="from" type="date" aria-label="From" value="${escape(filters.from)}"></label><label>To<input name="to" type="date" aria-label="To" value="${escape(filters.to)}"></label><button class="primary" ${busy ? 'disabled' : ''}>Apply filters</button></form>
       ${error ? `<div class="error" role="alert">${escape(error)}</div>` : ''}
-      <div class="cards"><div class="card">Input tokens<strong>${fmt(totals.inputTokens)}</strong></div><div class="card">Output tokens<strong>${fmt(totals.outputTokens)}</strong></div><div class="card">Cache read<strong>${fmt(totals.cachedInputTokens)}</strong></div><div class="card">Cache write<strong>${fmt(totals.cacheWriteTokens)}</strong></div><div class="card">Reasoning<strong>${fmt(totals.reasoningTokens)}</strong></div><div class="card">Estimated cost<strong>${money(totals.estimatedCost, rows.find((r) => r.currency)?.currency)}</strong></div><div class="card">Main calls<strong>${fmt(report?.counts.completedMainCalls)}</strong></div><div class="card">Auxiliary calls<strong>${fmt(report?.counts.auxiliaryCalls)}</strong></div><div class="card">Provider attempts<strong>${fmt(report?.counts.providerAttempts)}</strong></div></div>
-      <section class="section"><h2>Breakdown</h2><div class="groups">${group('By Thread', report?.groups.thread)}${group('By Project', report?.groups.project)}${group('By Provider', report?.groups.provider)}${group('By Model', report?.groups.model)}${group('By Purpose', report?.groups.purpose)}${group('By day', report?.groups.day)}</div></section>
+      <div class="coverage-note">Token totals include reported values only; missing values are excluded, never estimated.</div>
+      <div class="cards"><div class="card">Input tokens<strong>${fmt(totals.inputTokens)}</strong>${metricCoverage('inputTokens')}</div><div class="card">Output tokens<strong>${fmt(totals.outputTokens)}</strong>${metricCoverage('outputTokens')}</div><div class="card">Cache read<strong>${fmt(totals.cachedInputTokens)}</strong>${metricCoverage('cachedInputTokens')}</div><div class="card">Cache write<strong>${fmt(totals.cacheWriteTokens)}</strong>${metricCoverage('cacheWriteTokens')}</div><div class="card">Reasoning<strong>${fmt(totals.reasoningTokens)}</strong>${metricCoverage('reasoningTokens')}</div><div class="card">Estimated cost<strong>${money(totals.estimatedCost, rows.find((r) => r.currency)?.currency)}</strong><span class="coverage">Unknown if any call or required price is unknown</span></div><div class="card">Main calls<strong>${fmt(report?.counts.completedMainCalls)}</strong></div><div class="card">Auxiliary calls<strong>${fmt(report?.counts.auxiliaryCalls)}</strong></div><div class="card">Provider attempts<strong>${fmt(report?.counts.providerAttempts)}</strong></div></div>
+      <section class="section"><h2>Breakdown</h2><div class="groups">${group('By Thread', report?.groups.thread, threadLabel)}${group('By Project', report?.groups.project, projectLabel)}${group('By Provider', report?.groups.provider)}${group('By Model', report?.groups.model)}${group('By Purpose', report?.groups.purpose)}${group('By day', report?.groups.day)}</div></section>
       <section class="section"><h2>Model calls</h2><div class="table-wrap"><table><thead><tr><th>Time</th><th>Kind / purpose</th><th>Provider / model</th><th>Thread</th><th>Status / tokens</th><th>Cost</th><th>Attempts</th></tr></thead><tbody>${
         rows
           .slice()
@@ -87,7 +139,7 @@
           .slice(0, 300)
           .map(
             (row) =>
-              `<tr><td>${escape(new Date(row.createdAt).toLocaleString())}</td><td>${escape(row.kind)}<br>${escape(row.purpose)}</td><td>${escape(row.provider)}<br>${escape(row.model)}</td><td>${escape(row.threadId || '—')}</td><td>${escape(row.status)}<br>${fmt(row.usage?.inputTokens)} in / ${fmt(row.usage?.outputTokens)} out</td><td>${escape(money(row.estimatedCost, row.currency))}</td><td class="attempt">${row.attempts?.map((a) => `${escape(a.outcome || 'attempt')} · ${escape(a.model || '')}`).join('<br>') || '—'}</td></tr>`,
+              `<tr><td>${escape(new Date(row.createdAt).toLocaleString())}</td><td>${escape(row.kind)}<br>${escape(row.purpose)}</td><td>${escape(row.provider)}<br>${escape(row.model)}</td><td>${escape(row.threadId ? threadLabel(row.threadId) : '—')}</td><td>${escape(row.status)}<br>${fmt(row.usage?.inputTokens)} in / ${fmt(row.usage?.outputTokens)} out</td><td>${escape(money(row.estimatedCost, row.currency))}</td><td class="attempt">${row.attempts?.map((a) => `${escape(a.outcome || 'attempt')} · ${escape(a.model || '')}`).join('<br>') || '—'}</td></tr>`,
           )
           .join('') || '<tr><td colspan="7" class="muted">No calls match the selected filters.</td></tr>'
       }</tbody></table></div><div class="muted">Showing up to 300 calls. Main-call provider and retry telemetry are unavailable in the current Runtime service.</div></section>
@@ -97,10 +149,20 @@
     root.querySelector('#refresh')?.addEventListener('click', () => void refresh());
     root.querySelector('#filters')?.addEventListener('submit', (event) => {
       event.preventDefault();
-      const values = Object.fromEntries(new FormData(event.currentTarget).entries());
-      filters = Object.fromEntries(
-        ['threadId', 'projectId', 'provider', 'model', 'purpose', 'from', 'to'].map((key) => [key, values[key] || '']),
-      );
+      filters = readFilters(event.currentTarget);
+      void refresh();
+    });
+    root.querySelector('[name="projectId"]')?.addEventListener('change', (event) => {
+      filters = readFilters(root.querySelector('#filters'));
+      filters.projectId = event.currentTarget.value;
+      filters.threadId = '';
+      render();
+      void refresh();
+    });
+    root.querySelector('[name="threadId"]')?.addEventListener('change', (event) => {
+      filters = readFilters(root.querySelector('#filters'));
+      filters.threadId = event.currentTarget.value;
+      render();
       void refresh();
     });
     root.querySelector('#rate-form')?.addEventListener('submit', async (event) => {
@@ -161,8 +223,8 @@
       }
     };
     port.start();
-    if (context.thread?.id) filters.threadId = context.thread.id;
-    if (context.thread?.projectId) filters.projectId = context.thread.projectId;
+    render();
+    void loadCatalog();
     void refresh();
   });
 })();

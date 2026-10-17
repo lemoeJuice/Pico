@@ -8,9 +8,10 @@ function harness() {
   const values = new Map<string, unknown>();
   const calls: PluginModelCallRecord[] = [];
   const records = new Map<string, CanonicalRecord[]>();
-  const thread = { id: 'thread-1', projectId: 'project-1' } as Thread;
+  const thread = { id: 'thread-1', projectId: 'project-1', title: 'Current thread' } as Thread;
   const routes = new Map<string, (request: { body: unknown; query: URLSearchParams }) => unknown>();
   const context = {
+    projects: { list: () => [{ id: 'project-1', name: 'Example project' }] },
     threads: { list: () => [thread] },
     canonical: { list: (threadId: string) => records.get(threadId) ?? [] },
     models: {
@@ -84,6 +85,90 @@ describe('Usage plugin', () => {
     expect(result.totals.outputTokens).toBe(30);
     expect(result.groups.purpose.map((group: { key: string }) => group.key)).toEqual(['main-model', 'rolling-summary']);
     expect(result.rows[0].estimatedCost).toBeNull();
+  });
+
+  it('sums only reported token dimensions and exposes per-dimension coverage', () => {
+    const env = harness();
+    env.records.set(env.thread.id, [
+      {
+        id: 'model-known:assistant',
+        threadId: env.thread.id,
+        seq: 1,
+        kind: 'assistant',
+        createdAt: '2026-06-01T00:00:00.000Z',
+        payload: {
+          content: 'done',
+          toolCalls: [],
+          batchId: null,
+          projectionThrough: 0,
+          model: 'main-x',
+          usage: { inputTokens: 100, outputTokens: 20 },
+        },
+      } as CanonicalRecord,
+    ]);
+    const auxiliary: PluginModelCallRecord = {
+      id: 'aux-known',
+      pluginId: 'pico.todo',
+      idempotencyKey: 'known',
+      threadId: env.thread.id,
+      projectId: env.thread.projectId,
+      purpose: 'todo-review',
+      provider: 'provider-a',
+      model: 'reviewer-x',
+      prompt: {},
+      status: 'completed',
+      response: {},
+      usage: { inputTokens: 30 },
+      attempts: [],
+      error: null,
+      createdAt: '2026-06-01T00:01:00.000Z',
+      updatedAt: '2026-06-01T00:01:00.000Z',
+    };
+    env.calls.push(
+      auxiliary,
+      { ...auxiliary, id: 'aux-missing', idempotencyKey: 'missing', usage: null },
+      {
+        ...auxiliary,
+        id: 'aux-priced',
+        idempotencyKey: 'priced',
+        usage: { inputTokens: 50, outputTokens: 10 },
+      },
+    );
+    env.routes.get('PUT /rates')!({
+      body: {
+        rate: {
+          id: 'rate-reviewer',
+          provider: 'provider-a',
+          model: 'reviewer-x',
+          currency: 'USD',
+          effectiveAt: '2026-01-01T00:00:00.000Z',
+          inputPerMillion: 1,
+          outputPerMillion: 2,
+        },
+      },
+      query: new URLSearchParams(),
+    });
+
+    const result = env.report();
+    expect(result.totals).toMatchObject({ inputTokens: 180, outputTokens: 30, estimatedCost: null });
+    expect(result.coverage).toMatchObject({
+      usage: { reported: 3, total: 4 },
+      inputTokens: { reported: 3, total: 4 },
+      outputTokens: { reported: 2, total: 4 },
+    });
+    expect(result.groups.thread[0]).toMatchObject({
+      totals: { inputTokens: 180, outputTokens: 30, estimatedCost: null },
+      coverage: { inputTokens: { reported: 3, total: 4 } },
+    });
+  });
+
+  it('returns project names and Thread titles for Usage filter options', () => {
+    const env = harness();
+    const catalog = env.routes.get('GET /catalog')!({ body: null, query: new URLSearchParams() });
+    expect(catalog).toEqual({
+      projects: [{ id: 'project-1', name: 'Example project' }],
+      threads: [{ id: 'thread-1', projectId: 'project-1', title: 'Current thread' }],
+    });
   });
 
   it('prices only when all observed dimensions have an effective rate', () => {
