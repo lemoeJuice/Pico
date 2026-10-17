@@ -1692,6 +1692,7 @@ button:disabled {
 .composer-plugin-controls {
   display: flex;
   flex: 0 1 clamp(260px, 48%, 390px);
+  margin-right: auto;
   transform: translateX(-3px);
   max-width: 100%;
   min-width: 0;
@@ -1919,7 +1920,7 @@ button:disabled {
 .composer-footer {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 8px;
   flex-wrap: nowrap;
   padding-top: 6px;
