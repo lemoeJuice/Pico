@@ -540,6 +540,12 @@ export class PicoStore {
     return row ? this.threadFromRow(row) : null;
   }
 
+  updateThreadTitle(threadId: string, title: string): Thread | null {
+    const result = this.db.prepare('UPDATE threads SET title = ? WHERE id = ?').run(title, threadId);
+    if (Number(result.changes) === 0) return null;
+    return this.getThread(threadId);
+  }
+
   listThreads(projectId?: string): Thread[] {
     const rows = (
       projectId

@@ -161,7 +161,11 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   app.get('/api/projects', (_request, response) => response.json(runtime.listProjects()));
   app.post('/api/projects', async (request, response) => {
     const body = bodyObject(request);
-    const project = await runtime.createProject(requiredText(body, 'name'), requiredText(body, 'workspacePath'));
+    if (body.name !== undefined && typeof body.name !== 'string') throw new Error('name must be a string');
+    const project = await runtime.createProject(
+      typeof body.name === 'string' ? body.name : undefined,
+      requiredText(body, 'workspacePath'),
+    );
     response.status(201).json(project);
   });
   app.get('/api/projects/:projectId/threads', (request, response) => {
@@ -227,6 +231,10 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     const snapshot = runtime.getSnapshot(request.params.threadId!, beforeSeq);
     if (!snapshot) return notFound(response, 'Thread not found');
     response.json(snapshot);
+  });
+  app.patch('/api/threads/:threadId', (request, response) => {
+    const body = bodyObject(request);
+    response.json(runtime.updateThreadTitle(request.params.threadId!, requiredText(body, 'title')));
   });
   app.get('/api/threads/:threadId/tools', async (request, response) => {
     response.json({ tools: await runtime.listThreadTools(request.params.threadId!) });

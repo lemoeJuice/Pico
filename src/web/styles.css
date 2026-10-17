@@ -2351,6 +2351,32 @@ button:disabled {
 .remote-connection-item code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+.thread-info-details {
+  display: grid;
+  gap: 11px;
+  padding: 13px 14px;
+  background: #f8faf7;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.thread-info-details > div {
+  display: grid;
+  gap: 4px;
+}
+.thread-info-details span {
+  color: var(--muted);
+  font-size: 9px;
+}
+.thread-info-details strong,
+.thread-info-details code {
+  color: #526257;
+  font-size: 11px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.thread-info-details code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 .remote-token-form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

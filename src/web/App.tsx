@@ -79,6 +79,7 @@ import {
   GitBranch,
   Folder,
   FolderOpen,
+  Info,
   LoaderCircle,
   LogOut,
   Menu,
@@ -149,6 +150,11 @@ function readComposerState(): ComposerState {
   } catch {
     return parseComposerState(null);
   }
+}
+
+function workspaceDirectoryName(path: string): string {
+  const normalized = path.trim().replace(/[\\/]+$/, '');
+  return normalized.split(/[\\/]/).filter(Boolean).at(-1) ?? 'Project';
 }
 
 function persistComposerState(state: ComposerState): void {
@@ -451,6 +457,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [memoryManagerOpen, setMemoryManagerOpen] = useState(false);
   const [pluginActionId, setPluginActionId] = useState<string | null>(null);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [threadInfoOpen, setThreadInfoOpen] = useState(false);
+  const [threadTitleDraft, setThreadTitleDraft] = useState('');
+  const [threadTitleSaving, setThreadTitleSaving] = useState(false);
+  const [threadInfoError, setThreadInfoError] = useState('');
   const [newThreadOpen, setNewThreadOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [desktopSidebarCollapsed, setDesktopSidebarCollapsed] = useState(false);
@@ -616,6 +626,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const composerModelContributions = uiContributionsAt(uiContributions, 'composer.model', settings?.provider);
   const sidebarPanels = uiContributionsAt(uiContributions, 'sidebar.panel');
   const toolRenderers = uiContributionsAt(uiContributions, 'tool.renderer');
+  const newProjectWorkspacePath = newProjectPath || defaultWorkspace;
+  const suggestedNewProjectName = workspaceDirectoryName(newProjectWorkspacePath);
 
   const loadThreadTools = useCallback(async (targetThreadId: string): Promise<void> => {
     setThreadToolsLoading(true);
@@ -1238,10 +1250,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     event.preventDefault();
     setBusy(true);
     setError('');
+    const workspacePath = newProjectPath || defaultWorkspace;
     try {
       const project = await api<Project>('/api/projects', {
         method: 'POST',
-        body: JSON.stringify({ name: newProjectName, workspacePath: newProjectPath || defaultWorkspace }),
+        body: JSON.stringify({ name: newProjectName.trim() || workspaceDirectoryName(workspacePath), workspacePath }),
       });
       setProjects((items) => [project, ...items]);
       projectThreadLoads.current.add(project.id);
@@ -1259,6 +1272,30 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const updateThreadTitle = async (event: FormEvent): Promise<void> => {
+    event.preventDefault();
+    if (!selectedThread) return;
+    setThreadInfoError('');
+    setThreadTitleSaving(true);
+    try {
+      const updated = await api<Thread>(`/api/threads/${encodeURIComponent(selectedThread.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ title: threadTitleDraft }),
+      });
+      setThreadsByProject((current) => ({
+        ...current,
+        [updated.projectId]: upsertProjectThread(current[updated.projectId] ?? [], updated, updated.projectId),
+      }));
+      setThreads((items) => upsertProjectThread(items, updated, activeProjectId.current));
+      setSnapshot((current) => (current?.thread.id === updated.id ? { ...current, thread: updated } : current));
+      setThreadInfoOpen(false);
+    } catch (caught) {
+      setThreadInfoError(caught instanceof Error ? caught.message : 'Could not rename this Thread.');
+    } finally {
+      setThreadTitleSaving(false);
     }
   };
 
@@ -2096,6 +2133,21 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     </div>
                   ) : null}
                 </div>
+                <button
+                  type="button"
+                  className="button button-quiet plugin-action"
+                  title="Thread info"
+                  aria-haspopup="dialog"
+                  onClick={() => {
+                    setThreadTitleDraft(selectedThread.title);
+                    setThreadInfoError('');
+                    setThreadInfoOpen(true);
+                    setToolsMenuOpen(false);
+                  }}
+                >
+                  <Info size={14} aria-hidden="true" />
+                  Info
+                </button>
                 {toolbarContributions.map((item) => (
                   <PluginContributionView
                     key={item.id}
@@ -2688,9 +2740,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             <label>
               Project name
               <input
-                value={newProjectName}
+                value={newProjectName || suggestedNewProjectName}
                 onChange={(event) => setNewProjectName(event.target.value)}
-                placeholder="Pico, notes, research…"
                 autoFocus
               />
             </label>
@@ -2708,8 +2759,56 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             </button>
             <div className="form-actions">
               <span className="field-note">The selected Executor receives access to this folder.</span>
-              <button className="button button-primary" disabled={busy || !newProjectName.trim()}>
+              <button className="button button-primary" disabled={busy || !newProjectWorkspacePath.trim()}>
                 {busy ? 'Creating…' : 'Create Project'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      ) : null}
+
+      {threadInfoOpen && selectedThread ? (
+        <Modal
+          title="Thread info"
+          contextLabel="PICO · THREAD DETAILS"
+          onClose={() => setThreadInfoOpen(false)}
+          error={threadInfoError}
+          onDismissError={() => setThreadInfoError('')}
+        >
+          <form className="form-stack" onSubmit={(event) => void updateThreadTitle(event)}>
+            <label>
+              Thread name
+              <input
+                value={threadTitleDraft}
+                onChange={(event) => setThreadTitleDraft(event.target.value)}
+                autoFocus
+              />
+            </label>
+            <div className="thread-info-details">
+              <div>
+                <span>Project</span>
+                <strong>{selectedProject?.name ?? '—'}</strong>
+              </div>
+              <div>
+                <span>Executor</span>
+                <strong>{executorLabel(selectedThread)}</strong>
+              </div>
+              <div>
+                <span>Workspace folder</span>
+                <code>{selectedThread.workspacePath || 'No workspace'}</code>
+              </div>
+            </div>
+            <div className="form-actions">
+              <button
+                type="button"
+                className="button button-quiet"
+                disabled={threadTitleSaving}
+                onClick={() => setThreadInfoOpen(false)}
+              >
+                Cancel
+              </button>
+              <button className="button button-primary" disabled={threadTitleSaving || !threadTitleDraft.trim()}>
+                {threadTitleSaving ? 'Saving…' : 'Save name'}
               </button>
             </div>
           </form>

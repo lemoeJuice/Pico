@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { realpath, stat } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 import type {
   AssistantPayload,
   CanonicalRecord,
@@ -677,16 +677,15 @@ export class PicoRuntime {
     if (thread) this.publish({ type: 'thread.updated', thread });
   }
 
-  createProject(name: string, workspacePath: string): Promise<Project> {
+  createProject(name: string | undefined, workspacePath: string): Promise<Project> {
     return this.createProjectChecked(name, workspacePath);
   }
 
-  private async createProjectChecked(name: string, workspacePath: string): Promise<Project> {
-    const cleanedName = name.trim();
-    if (!cleanedName) throw new Error('Project name is required');
+  private async createProjectChecked(name: string | undefined, workspacePath: string): Promise<Project> {
     const path = await realpath(resolve(workspacePath.trim()));
     const info = await stat(path);
     if (!info.isDirectory()) throw new Error('Workspace path must be a directory');
+    const cleanedName = name?.trim() || basename(path) || 'Project';
     return this.store.createProject(cleanedName, path);
   }
 
@@ -697,6 +696,15 @@ export class PicoRuntime {
   createThread(projectId: string, executorKind: Thread['executorKind'], title = 'New thread'): Thread {
     const thread = this.store.createThread(projectId, executorKind, title.trim() || 'New thread');
     this.publish({ type: 'thread.created', thread });
+    return thread;
+  }
+
+  updateThreadTitle(threadId: string, title: string): Thread {
+    const cleanedTitle = title.trim();
+    if (!cleanedTitle) throw new Error('Thread name is required.');
+    const thread = this.store.updateThreadTitle(threadId, cleanedTitle);
+    if (!thread) throw new Error('Thread not found');
+    this.publish({ type: 'thread.updated', thread });
     return thread;
   }
 
