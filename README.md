@@ -24,6 +24,8 @@ NODE_ENV=production npm start
 
 The build compiles the Runtime server and static web client, and bundles the standalone Executor agent as `dist/executor-agent.mjs`. Production startup does not need the development TypeScript or Vite server.
 
+The Runtime and standalone Executor can also be started independently with the executable launch scripts. Run `npm run build` first, then use `./scripts/start-runtime.sh [bind-address]` for the Runtime or `./scripts/start-executor.sh` for the Executor. For example, `./scripts/start-runtime.sh 0.0.0.0` binds the Web UI to all interfaces; without an argument, the Runtime uses `PICO_HOST` or defaults to `127.0.0.1`. Binding beyond loopback requires `PICO_ACCESS_TOKEN` to be set.
+
 Host, Container, and Remote Host use the same standalone Executor agent and HTTP protocol; their connection and lifecycle setup differs. Host starts the agent on the local machine, Container installs and runs it inside the persistent container for the Thread's workspace, and Remote Host connects to an agent started separately on the workspace machine. The Pico package version is the target version of its bundled Executor agent. Executor versions are checked when opening a Thread. Compatible older versions remain usable and show an update prompt; an incompatible version is disconnected until updated. Updates are started manually from that prompt. The toolbar **Update** button only reopens it.
 
 ### Connect a Remote Host Executor
