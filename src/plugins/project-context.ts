@@ -514,7 +514,7 @@ export const projectContextPlugin: PicoPlugin = {
     ui.contribute({
       slot: 'thread.toolbar',
       id: 'project-context',
-      label: 'Project Context',
+      label: 'Project Memory',
       description: 'Browse and manage shared Project Memory.',
       entry: 'webui',
       component: 'ProjectContextPanel',

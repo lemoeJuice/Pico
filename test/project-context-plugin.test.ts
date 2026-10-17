@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { CanonicalRecord, Thread } from '../src/core/types.js';
+import type { CanonicalRecord, Thread, UiContribution } from '../src/core/types.js';
 import type { PluginContext } from '../src/plugins/host.js';
 import { formatProjectMemory, projectContextPlugin, selectProjectMemories } from '../src/plugins/project-context.js';
 import type { ProjectionInput } from '../src/runtime/stages.js';
@@ -11,6 +11,7 @@ function harness() {
     string,
     (args: Record<string, unknown>, context: { executionId: string; thread?: Thread }) => unknown
   >();
+  const contributions: UiContribution[] = [];
   const routes = new Map<string, (request: { body: unknown; query: URLSearchParams }) => unknown>();
   const commands = new Map<
     string,
@@ -53,7 +54,11 @@ function harness() {
         commands.set(command.name, command);
       },
     },
-    ui: { contribute() {} },
+    ui: {
+      contribute(contribution: UiContribution) {
+        contributions.push(contribution);
+      },
+    },
     http: {
       register(method: string, path: string, handler: (request: { body: unknown; query: URLSearchParams }) => unknown) {
         routes.set(`${method} ${path}`, handler);
@@ -114,10 +119,28 @@ function harness() {
     if (!implementation) throw new Error(`Tool not found: ${name}`);
     return implementation(args, { executionId, thread });
   };
-  return { context, threads, records, tools, routes, commands, values, getProjection: () => project, runTool };
+  return {
+    context,
+    threads,
+    records,
+    tools,
+    routes,
+    commands,
+    contributions,
+    values,
+    getProjection: () => project,
+    runTool,
+  };
 }
 
 describe('Project Context plugin', () => {
+  it('labels its Thread toolbar contribution Project Memory', () => {
+    const env = harness();
+    expect(env.contributions).toEqual([
+      expect.objectContaining({ slot: 'thread.toolbar', id: 'project-context', label: 'Project Memory' }),
+    ]);
+  });
+
   it('stores sourced, project-scoped notes and is idempotent on tool retries', () => {
     const env = harness();
     env.records.set('thread-a', [
