@@ -868,6 +868,10 @@ button:disabled {
   align-items: center;
   gap: 7px;
 }
+.conversation-actions .plugin-action {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 .button {
   display: inline-flex;
   align-items: center;
@@ -983,7 +987,7 @@ button:disabled {
   z-index: 20;
   flex-direction: column;
   overflow: hidden;
-  max-height: min(460px, calc(100vh - 100px));
+  max-height: calc(100vh - 100px);
 }
 .plugin-toolbar-popover > .plugin-web-view-component {
   flex: 1 1 auto;

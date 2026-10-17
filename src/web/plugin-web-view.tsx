@@ -112,7 +112,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
     if (popoverOpenRef.current) {
       portRef.current?.postMessage({
         type: 'pico:plugin-ui:popover-viewport',
-        maxHeight: Math.min(460, Math.max(120, window.innerHeight - rect.bottom - 20)),
+        maxHeight: availablePopoverHeight(rect.top, rect.height),
       });
     }
   };
@@ -201,7 +201,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       const message = event.data as { type?: unknown; height?: unknown } | null;
       if (isPluginUiPopoverMessage(popoverMessage)) {
         if (!toolbarPopover) return;
-        const height = Math.max(80, Math.min(460, Math.ceil(popoverMessage.height) + 4, availablePopoverHeight()));
+        const height = Math.max(80, Math.min(Math.ceil(popoverMessage.height) + 4, availablePopoverHeight()));
         if (popoverMessage.open) toolbarContentHeight.current = height;
         setToolbarPopover(popoverMessage.open ? { width: 360, height } : null);
         return;
@@ -212,7 +212,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       }
       if (message?.type === 'pico:plugin-ui:resize' && typeof message.height === 'number') {
         if (toolbarPopover) {
-          const height = Math.max(80, Math.min(460, Math.ceil(message.height) + 4, availablePopoverHeight()));
+          const height = Math.max(80, Math.min(Math.ceil(message.height) + 4, availablePopoverHeight()));
           toolbarContentHeight.current = height;
           setPopover((previous) => (previous ? { width: 360, height } : previous));
           return;
@@ -263,7 +263,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       hostPort.postMessage({
         type: 'pico:plugin-ui:toolbar-toggle',
         open: popoverOpenRef.current,
-        maxHeight: Math.min(480, availablePopoverHeight()),
+        maxHeight: availablePopoverHeight(),
       });
     }
     for (const queued of current.current.events ?? []) {
@@ -355,7 +355,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
           const rect = toolbarAnchor.current?.getBoundingClientRect();
           if (rect) setAnchorPosition({ left: rect.left, top: rect.top, height: rect.height });
           if (nextOpen) {
-            const maxHeight = Math.min(460, availablePopoverHeight(rect?.top, rect?.height));
+            const maxHeight = availablePopoverHeight(rect?.top, rect?.height);
             setToolbarPopover({
               width: 360,
               height: Math.max(80, Math.min(toolbarContentHeight.current, maxHeight)),
@@ -366,7 +366,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
           portRef.current?.postMessage({
             type: 'pico:plugin-ui:toolbar-toggle',
             open: nextOpen,
-            maxHeight: Math.min(460, availablePopoverHeight(rect?.top, rect?.height)),
+            maxHeight: availablePopoverHeight(rect?.top, rect?.height),
           });
         }}
       >

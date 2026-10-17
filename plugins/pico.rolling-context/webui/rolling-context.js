@@ -10,6 +10,15 @@
   let error = '';
   const sourceById = new Map();
   const requests = new Map();
+  let resizeFrame = 0;
+  const resizeObserver = new ResizeObserver(() => {
+    if (!root || !port || resizeFrame) return;
+    resizeFrame = requestAnimationFrame(() => {
+      resizeFrame = 0;
+      port?.postMessage({ type: 'pico:plugin-ui:resize', height: root.getBoundingClientRect().height });
+    });
+  });
+  if (root) resizeObserver.observe(root);
   const request = (action, value = {}) =>
     new Promise((resolve, reject) => {
       const id = `rolling-ui-${++seq}`;
@@ -102,6 +111,12 @@
       <div>${cards || '<p class="empty">No sealed complete turn blocks yet. A turn becomes eligible after a later user turn closes it.</p>'}</div>
       <details><summary>Actual Model Inputs (${inputs.length})</summary><div class="input-list">${inputCards || '<p class="empty">No recorded Model Inputs for this Thread yet.</p>'}</div></details>
     </section>`;
+    if (root && port && !resizeFrame) {
+      resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = 0;
+        port?.postMessage({ type: 'pico:plugin-ui:resize', height: root.getBoundingClientRect().height });
+      });
+    }
     root
       .querySelectorAll('[data-global]')
       .forEach((button) => button.addEventListener('click', () => void act(button.dataset.global)));
