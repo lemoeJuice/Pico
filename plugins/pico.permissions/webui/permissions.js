@@ -130,23 +130,35 @@
     const execution = context.execution;
     const call = context.toolCall;
     if (!execution && !call)
-      return '<section class="panel"><div class="empty">Tool execution details are not available.</div></section>';
+      return '<section class="panel tool-renderer-panel"><div class="empty">Tool execution details are not available.</div></section>';
     const name = execution?.toolName ?? call?.name ?? 'Tool';
     const status = execution?.status ?? context.result?.status ?? 'pending';
     const args = execution?.arguments ?? call?.arguments;
     const result = execution?.result ?? context.result?.result;
     const failure = execution?.error ?? context.result?.error;
+    const failed = Boolean(failure || status === 'failed' || status === 'interrupted');
+    const resultText = failure
+      ? failure
+      : status === 'interrupted'
+        ? 'Execution was interrupted. Side effects may be partial or unknown. Inspect before retrying.'
+        : status === 'pending' || status === 'running'
+          ? status === 'running'
+            ? 'Running in the selected Executor…'
+            : 'Waiting for approval or Executor…'
+          : result === undefined
+            ? 'No result returned.'
+            : typeof result === 'string'
+              ? result
+              : JSON.stringify(result, null, 2);
     const approval = currentApproval();
     const awaiting = status === 'pending' && approval?.status === 'pending';
     const review = approval?.reviewer;
     const reviewerBoundary = Boolean(review);
-    return `<section class="panel"><article class="card">
-      <div class="card-header"><strong>${escape(name)}</strong><span class="status ${awaiting ? 'pending' : ''}">${escape(awaiting ? 'awaiting approval' : status)}</span></div>
-      ${args === undefined ? '' : `<details ${awaiting ? 'open' : ''}><summary>Arguments</summary><pre>${escape(JSON.stringify(args, null, 2))}</pre></details>`}
-      ${failure ? `<div class="error">${escape(failure)}</div>` : ''}
+    return `<section class="panel tool-renderer-panel"><article class="card${failed ? ' has-error' : ''}">
+      <div class="card-header"><strong>${escape(name)}</strong><span class="status ${escape(status)} ${awaiting ? 'pending' : ''}">${escape(awaiting ? 'awaiting approval' : status)}</span></div>
+      ${args === undefined ? '' : `<section class="tool-section"><div class="tool-section-heading">Arguments</div><pre>${escape(JSON.stringify(args, null, 2))}</pre></section>`}
       ${review ? `<div class="review-result"><strong>${escape(review.outcome === 'allow' ? 'Auto-review allowed' : review.outcome === 'deny' ? 'Auto-review denied' : 'Auto-review unavailable')}</strong><span>${escape(review.reason)}</span>${review.model ? `<small>Reviewer model: ${escape(review.model)}</small>` : ''}</div>` : ''}
-      ${status === 'interrupted' ? '<div class="muted">Execution was interrupted. Side effects may be partial or unknown.</div>' : ''}
-      ${result === undefined ? '' : `<details><summary>Result</summary><pre>${escape(typeof result === 'string' ? result : JSON.stringify(result, null, 2))}</pre></details>`}
+      <section class="tool-section"><div class="tool-section-heading">Result</div><pre class="${failed ? 'result-error' : ''}">${escape(resultText)}</pre></section>
       ${awaiting ? `<div class="actions">${reviewerBoundary ? '' : '<label class="remember"><input id="remember" type="checkbox" /> Allow this tool in this Thread</label>'}<button class="deny" data-decision="deny" ${busy ? 'disabled' : ''}>Deny</button><button class="allow" data-decision="allow" ${busy ? 'disabled' : ''}>Allow once</button></div>` : ''}
       ${error ? `<div class="error">${escape(error)}</div>` : ''}
     </article></section>`;

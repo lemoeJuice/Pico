@@ -130,12 +130,25 @@ button:disabled {
   font-size: 11px;
 }
 .card {
-  border: 1px solid #dce5de;
+  width: 100%;
+  margin: 0;
+  border: 1px solid #e9eee7;
   border-radius: 10px;
-  padding: 10px;
+  padding: 9px 11px;
   display: grid;
-  gap: 8px;
-  background: color-mix(in srgb, Canvas 94%, #7ea18a);
+  gap: 0;
+  color: #78857b;
+  background: rgba(248, 250, 247, 0.82);
+}
+.tool-renderer-panel {
+  padding: 0;
+  gap: 0;
+  color: #78857b;
+  font:
+    10px/1.5 'DM Sans',
+    ui-sans-serif,
+    system-ui,
+    sans-serif;
 }
 .card-header {
   display: flex;
@@ -143,15 +156,41 @@ button:disabled {
   justify-content: space-between;
   gap: 8px;
 }
+.card-header strong {
+  color: #819084;
+  font-size: 10px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
 .status {
   border-radius: 999px;
   background: #e8eee9;
-  padding: 2px 8px;
-  font-size: 11px;
+  padding: 3px 7px;
+  color: #89958b;
+  font-size: 9px;
+  white-space: nowrap;
+  text-transform: capitalize;
 }
 .status.pending {
-  background: #fff0ca;
-  color: #765100;
+  background: #f7f2e9;
+  color: #987c5a;
+}
+.status.running,
+.status.completed,
+.status.allowed {
+  background: #edf4ed;
+  color: #688570;
+}
+.status.failed,
+.status.interrupted,
+.card.has-error .status {
+  background: #f9efeb;
+  color: #946b5d;
+}
+.card.has-error {
+  color: #946b5d;
+  background: #fff7f4;
+  border-color: #ecd9d2;
 }
 pre {
   margin: 0;
@@ -167,6 +206,32 @@ pre {
 details {
   border-top: 1px solid #e4ebe5;
   padding-top: 6px;
+}
+.tool-renderer-panel .tool-section {
+  margin-top: 8px;
+  border-top: 1px solid #edf0eb;
+  padding-top: 8px;
+}
+.tool-section-heading {
+  color: #819084;
+  font-size: 10px;
+  font-weight: 600;
+}
+.card.has-error .tool-section-heading {
+  color: #946b5d;
+}
+.tool-renderer-panel pre {
+  margin: 7px 0 0;
+  padding: 10px;
+  color: #68746a;
+  background: #f2f5f1;
+  border-radius: 7px;
+  font-size: 9px;
+  line-height: 1.55;
+}
+.tool-renderer-panel .result-error {
+  color: #946b5d;
+  background: #fff1ec;
 }
 .actions {
   display: flex;
