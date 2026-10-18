@@ -124,12 +124,14 @@ function rateFor(rates: UsageRate[], provider: string, model: string): UsageRate
 export function estimateUsageCost(usage: TokenUsage | null, rate: UsageRate | null): number | null {
   if (!usage || !rate || usage.inputTokens === undefined || usage.outputTokens === undefined) return null;
   const cached = usage.cachedInputTokens ?? 0;
-  if (cached > usage.inputTokens) return null;
+  const cacheWrite = usage.cacheWriteTokens ?? 0;
+  if (cached + cacheWrite > usage.inputTokens) return null;
   if (cached > 0 && rate.cachedInputPerMillion === undefined) return null;
-  if ((usage.cacheWriteTokens ?? 0) > 0 && rate.cacheWritePerMillion === undefined) return null;
-  const regularInput = usage.inputTokens - cached;
+  if (cacheWrite > 0 && rate.cacheWritePerMillion === undefined) return null;
+  // Cache read and write counts are subsets of inputTokens, so remove both before pricing ordinary input.
+  const regularInput = usage.inputTokens - cached - cacheWrite;
   const cacheInputCost = cached * (rate.cachedInputPerMillion ?? rate.inputPerMillion);
-  const cacheWriteCost = (usage.cacheWriteTokens ?? 0) * (rate.cacheWritePerMillion ?? 0);
+  const cacheWriteCost = cacheWrite * (rate.cacheWritePerMillion ?? 0);
   return (
     (regularInput * rate.inputPerMillion +
       cacheInputCost +

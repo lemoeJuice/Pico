@@ -48,11 +48,24 @@ function readUsage(value: unknown): TokenUsage | null {
   const input = typeof usage.input_tokens === 'number' ? usage.input_tokens : undefined;
   const output = typeof usage.output_tokens === 'number' ? usage.output_tokens : undefined;
   const total = typeof usage.total_tokens === 'number' ? usage.total_tokens : undefined;
-  if (input === undefined && output === undefined && total === undefined) return null;
+  const inputDetails = object(usage.input_tokens_details);
+  const cached = typeof inputDetails?.cached_tokens === 'number' ? inputDetails.cached_tokens : undefined;
+  const cacheWrite =
+    typeof inputDetails?.cache_write_tokens === 'number' ? inputDetails.cache_write_tokens : undefined;
+  if (
+    input === undefined &&
+    output === undefined &&
+    total === undefined &&
+    cached === undefined &&
+    cacheWrite === undefined
+  )
+    return null;
   return {
     ...(input === undefined ? {} : { inputTokens: input }),
     ...(output === undefined ? {} : { outputTokens: output }),
     ...(total === undefined ? {} : { totalTokens: total }),
+    ...(cached === undefined ? {} : { cachedInputTokens: cached }),
+    ...(cacheWrite === undefined ? {} : { cacheWriteTokens: cacheWrite }),
   };
 }
 

@@ -78,17 +78,51 @@ function toWireMessages(prompt: ModelPrompt): Array<Record<string, unknown>> {
   return messages;
 }
 
-function usageFrom(value: unknown): TokenUsage | null {
+function usageFrom(value: unknown, models: string[]): TokenUsage | null {
   if (!value || typeof value !== 'object') return null;
   const usage = value as Record<string, unknown>;
   const inputTokens = typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : undefined;
   const outputTokens = typeof usage.completion_tokens === 'number' ? usage.completion_tokens : undefined;
   const totalTokens = typeof usage.total_tokens === 'number' ? usage.total_tokens : undefined;
-  if (inputTokens === undefined && outputTokens === undefined && totalTokens === undefined) return null;
+  const rawPromptDetails = usage.prompt_tokens_details;
+  const promptDetails =
+    rawPromptDetails && typeof rawPromptDetails === 'object' && !Array.isArray(rawPromptDetails)
+      ? (rawPromptDetails as Record<string, unknown>)
+      : null;
+  const cachedInputTokens =
+    typeof promptDetails?.cached_tokens === 'number' ? promptDetails.cached_tokens : undefined;
+  const cacheWriteTokens =
+    typeof promptDetails?.cache_write_tokens === 'number' ? promptDetails.cache_write_tokens : undefined;
+  const deepSeekUsage = models.some(isDeepSeekModelId);
+  const deepSeekCacheHits =
+    deepSeekUsage && typeof usage.prompt_cache_hit_tokens === 'number'
+      ? usage.prompt_cache_hit_tokens
+      : undefined;
+  // DeepSeek misses are ordinary input tokens; the API does not report them as cache writes.
+  const deepSeekCacheMisses =
+    deepSeekUsage && typeof usage.prompt_cache_miss_tokens === 'number'
+      ? usage.prompt_cache_miss_tokens
+      : undefined;
+  const resolvedInputTokens =
+    inputTokens ??
+    (deepSeekCacheHits !== undefined && deepSeekCacheMisses !== undefined
+      ? deepSeekCacheHits + deepSeekCacheMisses
+      : undefined);
+  const resolvedCachedInputTokens = cachedInputTokens ?? deepSeekCacheHits;
+  if (
+    resolvedInputTokens === undefined &&
+    outputTokens === undefined &&
+    totalTokens === undefined &&
+    resolvedCachedInputTokens === undefined &&
+    cacheWriteTokens === undefined
+  )
+    return null;
   return {
-    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(resolvedInputTokens === undefined ? {} : { inputTokens: resolvedInputTokens }),
     ...(outputTokens === undefined ? {} : { outputTokens }),
     ...(totalTokens === undefined ? {} : { totalTokens }),
+    ...(resolvedCachedInputTokens === undefined ? {} : { cachedInputTokens: resolvedCachedInputTokens }),
+    ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
   };
 }
 
@@ -192,7 +226,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
             arguments: parseToolArguments(typeof fn?.arguments === 'string' ? fn.arguments : '{}', name),
           };
         }),
-        usage: usageFrom(value.usage),
+        usage: usageFrom(value.usage, [prompt.model, responseModel]),
         model: responseModel,
         finishReason: typeof choices?.[0]?.finish_reason === 'string' ? (choices[0]!.finish_reason as string) : null,
       };
@@ -234,7 +268,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
         throw new Error('Model provider sent invalid streaming JSON');
       }
       if (typeof chunk.model === 'string') actualModel = chunk.model;
-      usage = usageFrom(chunk.usage) ?? usage;
+      usage = usageFrom(chunk.usage, [prompt.model, actualModel]) ?? usage;
       const choices = chunk.choices as Array<Record<string, unknown>> | undefined;
       const choice = choices?.[0];
       if (!choice) return;
