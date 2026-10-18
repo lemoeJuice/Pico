@@ -4,9 +4,12 @@ type Coverage = { reported?: unknown; total?: unknown };
 type UsageReport = {
   totals?: Record<string, unknown>;
   coverage?: Record<string, Coverage>;
+  rows?: Array<{
+    usage?: { inputTokens?: unknown; cachedInputTokens?: unknown } | null;
+  }>;
 };
 
-type Summary = { input: string; output: string; cached: string; cacheRate: string };
+type Summary = { input: string; output: string; cached: string; cacheRate: string; cacheCoverage: string };
 
 function coverageFor(report: UsageReport, key: string): Coverage | undefined {
   return report.coverage?.[key];
@@ -27,27 +30,28 @@ function formatCount(report: UsageReport, key: string): string {
 }
 
 export function formatUsageSummary(report: UsageReport): Summary {
-  const input = report.totals?.inputTokens;
-  const cached = report.totals?.cachedInputTokens;
-  const inputCoverage = coverageFor(report, 'inputTokens');
-  const cachedCoverage = coverageFor(report, 'cachedInputTokens');
-  const fullyCovered = (coverage: Coverage | undefined) =>
-    typeof coverage?.reported === 'number' &&
-    typeof coverage.total === 'number' &&
-    coverage.reported === coverage.total;
-  const cacheRate =
-    typeof input === 'number' &&
-    typeof cached === 'number' &&
-    input > 0 &&
-    fullyCovered(inputCoverage) &&
-    fullyCovered(cachedCoverage)
-      ? `${((cached / input) * 100).toFixed(1)}%`
-      : '—';
+  const rows = report.rows ?? [];
+  const cacheRows = rows.flatMap((row) => {
+    const inputTokens = row.usage?.inputTokens;
+    const cachedInputTokens = row.usage?.cachedInputTokens;
+    return typeof inputTokens === 'number' &&
+      Number.isFinite(inputTokens) &&
+      inputTokens >= 0 &&
+      typeof cachedInputTokens === 'number' &&
+      Number.isFinite(cachedInputTokens) &&
+      cachedInputTokens >= 0
+      ? [{ inputTokens, cachedInputTokens }]
+      : [];
+  });
+  const input = cacheRows.reduce((total, row) => total + row.inputTokens, 0);
+  const cached = cacheRows.reduce((total, row) => total + row.cachedInputTokens, 0);
+  const cacheRate = input > 0 ? `${((cached / input) * 100).toFixed(1)}%` : '—';
   return {
     input: formatCount(report, 'inputTokens'),
     output: formatCount(report, 'outputTokens'),
     cached: formatCount(report, 'cachedInputTokens'),
     cacheRate,
+    cacheCoverage: `${cacheRows.length}/${rows.length}`,
   };
 }
 
@@ -92,7 +96,9 @@ export function ComposerUsage({ threadId, revision, enabled }: ComposerUsageProp
       <span>In {summary.input}</span>
       <span>Out {summary.output}</span>
       <span>Cache {summary.cached}</span>
-      <span>Hit {summary.cacheRate}</span>
+      <span title="Calls reporting both input and cache read">
+        Hit {summary.cacheRate} · {summary.cacheCoverage}
+      </span>
     </div>
   );
 }
