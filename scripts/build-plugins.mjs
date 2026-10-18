@@ -1,4 +1,5 @@
 import { build } from 'esbuild';
+import { build as buildWebUi } from 'vite';
 
 const plugins = [
   ['pico.collaboration', 'src/plugins/collaboration.ts', 'collaborationPlugin'],
@@ -26,3 +27,5 @@ await Promise.all(
     }),
   ),
 );
+
+await buildWebUi({ configFile: 'plugins/pico.model-parameters/vite.config.ts' });

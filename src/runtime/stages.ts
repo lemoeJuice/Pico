@@ -7,7 +7,7 @@ import type {
   ToolCall,
   ToolDefinition,
 } from '../core/types.js';
-import type { ModelPrompt, ModelRequestTrace, ModelStreamEvent } from './model.js';
+import type { ModelPrompt, ModelRequestParameters, ModelRequestTrace, ModelStreamEvent } from './model.js';
 
 export interface StepInput {
   thread: Thread;
@@ -41,7 +41,10 @@ export interface ProjectionProvenance {
 export interface ModelStageInput {
   thread: Thread;
   provider: ModelProvider;
+  /** Public routing identity only; excludes API keys and other credentials. */
+  modelTarget?: { provider: string; baseUrl: string; model: string };
   prompt: ModelPrompt;
+  requestParameters?: ModelRequestParameters;
   signal: AbortSignal;
   onText(delta: string): void;
   onEvent?(event: ModelStreamEvent): void;

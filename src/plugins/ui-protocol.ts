@@ -127,12 +127,17 @@ export interface PluginUiInitMessage {
   viewId: string;
   uiSlot?: PluginUiSlot;
   controlHeightPx?: number;
+  popover?: boolean;
   settings: PublicSettings;
   context: PluginUiContext;
 }
 
-export function pluginUiLayoutForSlot(uiSlot?: PluginUiSlot): Pick<PluginUiInitMessage, 'uiSlot' | 'controlHeightPx'> {
+export function pluginUiLayoutForSlot(
+  uiSlot?: PluginUiSlot,
+  popover = false,
+): Pick<PluginUiInitMessage, 'uiSlot' | 'controlHeightPx' | 'popover'> {
   if (!uiSlot) return {};
+  if (uiSlot === 'composer.model' && popover) return { uiSlot, popover: true };
   return uiSlot === 'composer.model' ? { uiSlot, controlHeightPx: PLUGIN_COMPOSER_CONTROL_HEIGHT_PX } : { uiSlot };
 }
 

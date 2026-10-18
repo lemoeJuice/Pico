@@ -52,6 +52,13 @@ export interface ModelPrompt {
   temperature: number;
 }
 
+/** Provider fields selected and validated by the model-parameters manager plugin. */
+export interface ModelRequestParameters {
+  fields: Record<string, unknown>;
+  /** null means the provider/model does not accept temperature for this request. */
+  temperature?: number | null;
+}
+
 export interface ModelResponse {
   content: string;
   /** Provider-supplied reasoning summary text only; never inferred from hidden reasoning tokens. */
@@ -74,6 +81,7 @@ export interface ModelAdapter {
     onText: (delta: string) => void,
     requestTrace?: ModelRequestTrace,
     onEvent?: (event: ModelStreamEvent) => void,
+    requestParameters?: ModelRequestParameters,
   ): Promise<ModelResponse>;
 }
 
@@ -143,6 +151,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
     onText: (delta: string) => void,
     requestTrace?: ModelRequestTrace,
     onEvent?: (event: ModelStreamEvent) => void,
+    requestParameters?: ModelRequestParameters,
   ): Promise<ModelResponse> {
     if (!prompt.model.trim()) throw new Error('Choose a model in Settings before sending a message.');
     const headers: Record<string, string> = {
@@ -164,7 +173,9 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
       signal,
       body: JSON.stringify({
         model: prompt.model,
-        temperature: prompt.temperature,
+        ...(requestParameters?.temperature === null
+          ? {}
+          : { temperature: requestParameters?.temperature ?? prompt.temperature }),
         stream: true,
         stream_options: { include_usage: true },
         messages: toWireMessages(prompt),
@@ -173,6 +184,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
           function: { name: tool.name, description: tool.description, parameters: tool.parameters },
         })),
         parallel_tool_calls: true,
+        ...requestParameters?.fields,
       }),
     });
     if (providerAttemptId) {

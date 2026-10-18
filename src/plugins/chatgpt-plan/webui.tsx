@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import type { PluginUiProps } from '../ui-protocol.js';
-import type { ChatGptModelChoice, ChatGptReasoningEffort } from './types.js';
+import type { ChatGptModelChoice } from './types.js';
 
 const apiRoot = '/api/plugins/pico.chatgpt-plan';
 
@@ -13,33 +13,6 @@ type SignInMessage = {
   status: 'connected' | 'failed';
   message: string;
 };
-type Preferences = { reasoningEffort: ChatGptReasoningEffort; fastMode: boolean };
-
-const defaultPreferences: Preferences = { reasoningEffort: 'auto', fastMode: false };
-const reasoningEffortLabels: Record<ChatGptReasoningEffort, string> = {
-  auto: 'Default',
-  none: 'None',
-  minimal: 'Minimal',
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High',
-  xhigh: 'Extra high',
-  max: 'Maximum',
-};
-
-function reasoningEffortsFor(model: ChatGptModelChoice | undefined): ChatGptReasoningEffort[] {
-  if (!model) return ['auto'];
-  const slug = model.slug.toLowerCase();
-  const flagshipEfforts: ChatGptReasoningEffort[] = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'];
-  const fullEfforts: ChatGptReasoningEffort[] = ['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max'];
-
-  if (/^gpt-6-astra(?:-|$)/.test(slug) || /^gpt-6\.1-sol(?:-|$)/.test(slug)) return flagshipEfforts;
-  if (/^gpt-6-(?:sol|luna)(?:-|$)/.test(slug) || /^gpt-5\.6-(?:sol|terra|luna)(?:-|$)/.test(slug)) {
-    return fullEfforts;
-  }
-  return ['auto', 'low', 'medium', 'high'];
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -222,34 +195,21 @@ function ChatGptPlanComposerModel({
 }: PluginUiProps): ReactElement | null {
   const [status, setStatus] = useState<AccountStatus | null>(null);
   const [models, setModels] = useState<ChatGptModelChoice[]>([]);
-  const [preferences, setPreferences] = useState<Preferences>(defaultPreferences);
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
 
   const loadProviderData = useCallback(async (): Promise<void> => {
     setLoading(true);
     try {
-      const [accountResult, preferencesResult] = await Promise.allSettled([
-        api<AccountStatus>(`${apiRoot}/status`),
-        api<Preferences>(`${apiRoot}/preferences`),
-      ]);
-      if (accountResult.status === 'rejected') onError(errorMessage(accountResult.reason));
-      else if (preferencesResult.status === 'rejected') onError(errorMessage(preferencesResult.reason));
-      if (preferencesResult.status === 'fulfilled') {
-        setPreferences({ ...defaultPreferences, ...preferencesResult.value });
-      }
-      if (accountResult.status === 'fulfilled') {
-        const account = accountResult.value;
-        setStatus(account);
-        if (account.connected) {
-          try {
-            setModels(await api<ChatGptModelChoice[]>(`${apiRoot}/models`));
-          } catch (caught) {
-            onError(errorMessage(caught));
-          }
-        } else {
-          setModels([]);
+      const account = await api<AccountStatus>(`${apiRoot}/status`);
+      setStatus(account);
+      if (account.connected) {
+        try {
+          setModels(await api<ChatGptModelChoice[]>(`${apiRoot}/models`));
+        } catch (caught) {
+          onError(errorMessage(caught));
         }
+      } else {
+        setModels([]);
       }
     } catch (caught) {
       onError(errorMessage(caught));
@@ -262,28 +222,9 @@ function ChatGptPlanComposerModel({
     if (settings.provider === 'chatgpt-plan') void loadProviderData();
   }, [settings.provider, loadProviderData]);
 
-  const savePreferences = async (next: Preferences): Promise<void> => {
-    setPreferences(next);
-    setSaving(true);
-    try {
-      const saved = await api<Preferences>(`${apiRoot}/preferences`, {
-        method: 'PUT',
-        body: JSON.stringify(next),
-      });
-      setPreferences({ ...defaultPreferences, ...saved });
-    } catch (caught) {
-      onError(errorMessage(caught));
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const selectModel = async (model: string): Promise<void> => {
-    const supportedEfforts = reasoningEffortsFor(models.find((choice) => choice.slug === model));
-    const resetEffort = !supportedEfforts.includes(preferences.reasoningEffort);
     try {
       await updateModelSettings({ provider: 'chatgpt-plan', model });
-      if (resetEffort) await savePreferences({ ...preferences, reasoningEffort: 'auto' });
     } catch (caught) {
       onError(errorMessage(caught));
     }
@@ -310,7 +251,6 @@ function ChatGptPlanComposerModel({
     );
   }
 
-  const supportedEfforts = reasoningEffortsFor(models.find((choice) => choice.slug === settings.model));
   return (
     <div className="chatgpt-composer-controls">
       <select
@@ -331,36 +271,6 @@ function ChatGptPlanComposerModel({
           </option>
         ))}
       </select>
-      <select
-        className="chatgpt-reasoning-select pico-ui-control"
-        aria-label="Reasoning effort"
-        value={preferences.reasoningEffort}
-        onChange={(event) =>
-          void savePreferences({
-            ...preferences,
-            reasoningEffort: event.target.value as Preferences['reasoningEffort'],
-          })
-        }
-        disabled={saving}
-      >
-        {supportedEfforts.map((effort) => (
-          <option key={effort} value={effort}>
-            {reasoningEffortLabels[effort]}
-          </option>
-        ))}
-      </select>
-      <button
-        type="button"
-        role="switch"
-        aria-label="Fast mode"
-        aria-checked={preferences.fastMode}
-        className={`chatgpt-fast-control pico-ui-button ${preferences.fastMode ? 'enabled' : ''}`}
-        onClick={() => void savePreferences({ ...preferences, fastMode: !preferences.fastMode })}
-        disabled={saving}
-      >
-        <span>Fast mode</span>
-        <i aria-hidden="true" />
-      </button>
     </div>
   );
 }

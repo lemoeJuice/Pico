@@ -1603,7 +1603,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     setError('');
     const body: Partial<ModelSettings> = {
       baseUrl: modelForm.baseUrl,
-      temperature: Number(modelForm.temperature),
       provider: modelForm.provider,
     };
     // Switching providers must not carry the previous provider's model into its saved selection.
@@ -1805,7 +1804,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         body: JSON.stringify({
           baseUrl: modelForm.baseUrl,
           model: modelForm.model,
-          temperature: Number(modelForm.temperature),
           apiKey: '',
         }),
       });
@@ -2483,6 +2481,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                               viewType="component"
                               viewId={item.component}
                               uiSlot={item.slot}
+                              controlLabel={item.label}
+                              controlClassName="composer-plugin-action"
+                              supportsPopover={item.supportsPopover}
                               events={pluginEvents}
                               {...pluginUiContext}
                               isRegisteredPage={isRegisteredPluginPage}
@@ -2909,19 +2910,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                         type="password"
                         placeholder={modelForm.hasApiKey ? 'Saved · enter a new key to replace' : 'sk-…'}
                         autoComplete="new-password"
-                      />
-                    </label>
-                    <label className="temperature-label">
-                      Temperature <span>{Number(modelForm.temperature).toFixed(1)}</span>
-                      <input
-                        type="range"
-                        min="0"
-                        max="2"
-                        step="0.1"
-                        value={modelForm.temperature}
-                        onChange={(event) =>
-                          setModelForm((form) => ({ ...form, temperature: Number(event.target.value) }))
-                        }
                       />
                     </label>
                   </>

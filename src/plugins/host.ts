@@ -196,7 +196,7 @@ export class PluginHost {
   private readonly candidateErrors = new Map<string, { source: string; error: string }>();
   private readonly enablement = new Map<string, boolean>();
   private readonly lifecycleQueues = new Map<string, Promise<void>>();
-  private readonly requiredPlugins = new Set(['pico.workspace', 'pico.commands']);
+  private readonly requiredPlugins = new Set(['pico.workspace', 'pico.commands', 'pico.model-parameters']);
   private readonly forcedDisabled = new Set<string>();
   private shutdownStarted = false;
   private importSequence = 0;
@@ -632,9 +632,11 @@ export class PluginHost {
           if (
             (contribution.supportsPopover !== undefined && typeof contribution.supportsPopover !== 'boolean') ||
             (contribution.supportsPopover &&
-              (contribution.slot !== 'thread.toolbar' || !contribution.entry || !contribution.component))
+              (!['thread.toolbar', 'composer.model'].includes(contribution.slot) ||
+                !contribution.entry ||
+                !contribution.component))
           ) {
-            throw new Error('Toolbar popovers require a Web UI component in the thread.toolbar slot.');
+            throw new Error('Popover controls require a Web UI component in thread.toolbar or composer.model.');
           }
           this.contributions.push({ ...contribution, pluginId: plugin.id, id: `${plugin.id}:${contribution.id}` });
         },

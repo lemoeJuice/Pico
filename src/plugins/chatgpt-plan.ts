@@ -5,38 +5,7 @@ import type { ModelStageInput } from '../runtime/stages.js';
 import type { ModelResponse } from '../runtime/model.js';
 import { ChatGptPlanAuth } from './chatgpt-plan/auth.js';
 import { ChatGptResponsesAdapter } from './chatgpt-plan/model.js';
-import {
-  defaultChatGptPlanPreferences,
-  type ChatGptPlanPreferences,
-  type ChatGptReasoningEffort,
-} from './chatgpt-plan/types.js';
 import type { PicoPlugin, PluginHttpRequest } from './host.js';
-
-const reasoningEfforts = new Set<ChatGptReasoningEffort>([
-  'auto',
-  'none',
-  'minimal',
-  'low',
-  'medium',
-  'high',
-  'xhigh',
-  'max',
-]);
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
-}
-
-function readPreferences(get: <T>(key: string, fallback: T) => T): ChatGptPlanPreferences {
-  const value: unknown = get('preferences', defaultChatGptPlanPreferences);
-  if (!isObject(value)) return defaultChatGptPlanPreferences;
-  return {
-    reasoningEffort: reasoningEfforts.has(value.reasoningEffort as ChatGptReasoningEffort)
-      ? (value.reasoningEffort as ChatGptReasoningEffort)
-      : 'auto',
-    fastMode: value.fastMode === true,
-  };
-}
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (character) => {
@@ -106,11 +75,11 @@ export function createChatGptPlanPlugin(): PicoPlugin {
         input.recordModelInput(input.prompt, input.provider);
         return model.complete(
           input.prompt,
-          readPreferences(context.state.get),
           input.signal,
           input.onText,
           input.requestTrace,
           input.onEvent,
+          input.requestParameters,
         );
       });
 
@@ -220,21 +189,6 @@ export function createChatGptPlanPlugin(): PicoPlugin {
         }
       });
       context.http.register('DELETE', '/account', async () => await auth!.signOut());
-      context.http.register('GET', '/preferences', () => readPreferences(context.state.get));
-      context.http.register('PUT', '/preferences', (request) => {
-        if (!isObject(request.body)) throw new Error('Preferences must be a JSON object.');
-        const effort = request.body.reasoningEffort;
-        if (!reasoningEfforts.has(effort as ChatGptReasoningEffort)) {
-          throw new Error('Unsupported ChatGPT reasoning effort.');
-        }
-        if (typeof request.body.fastMode !== 'boolean') throw new Error('fastMode must be a boolean.');
-        const preferences: ChatGptPlanPreferences = {
-          reasoningEffort: effort as ChatGptReasoningEffort,
-          fastMode: request.body.fastMode,
-        };
-        context.state.set('preferences', preferences);
-        return preferences;
-      });
     },
     async deactivate() {
       await Promise.all([...callbackServers].map((server) => closeCallbackServer(server)));

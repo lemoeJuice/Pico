@@ -1,4 +1,5 @@
 import type { PicoPlugin } from './host.js';
+import { modelParametersPlugin } from './model-parameters/index.js';
 
 export const workspacePlugin: PicoPlugin = {
   id: 'pico.workspace',
@@ -73,4 +74,4 @@ export const helpPlugin: PicoPlugin = {
   },
 };
 
-export const builtinPlugins: PicoPlugin[] = [workspacePlugin, helpPlugin];
+export const builtinPlugins: PicoPlugin[] = [workspacePlugin, helpPlugin, modelParametersPlugin];

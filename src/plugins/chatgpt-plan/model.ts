@@ -1,7 +1,13 @@
 import type { TokenUsage, ToolCall, ToolDefinition } from '../../core/types.js';
 import type { ChatGptPlanAuth } from './auth.js';
-import type { ModelPrompt, ModelRequestTrace, ModelResponse, ModelStreamEvent, ProviderRequestSummary } from '../../runtime/model.js';
-import type { ChatGptPlanPreferences } from './types.js';
+import type {
+  ModelPrompt,
+  ModelRequestParameters,
+  ModelRequestTrace,
+  ModelResponse,
+  ModelStreamEvent,
+  ProviderRequestSummary,
+} from '../../runtime/model.js';
 
 const responsesUrl = 'https://api.openai.com/v1/responses';
 
@@ -182,11 +188,11 @@ export class ChatGptResponsesAdapter {
 
   async complete(
     prompt: ModelPrompt,
-    preferences: ChatGptPlanPreferences,
     signal: AbortSignal,
     onText: (delta: string) => void,
     requestTrace?: ModelRequestTrace,
     onEvent?: (event: ModelStreamEvent) => void,
+    requestParameters?: ModelRequestParameters,
   ): Promise<ModelResponse> {
     if (!prompt.model.trim()) throw new Error('Choose a ChatGPT model in Settings before sending a message.');
     const body: Record<string, unknown> = {
@@ -197,11 +203,8 @@ export class ChatGptResponsesAdapter {
       stream: true,
       parallel_tool_calls: true,
       tools: responseTools(prompt.tools),
-      reasoning: {
-        summary: 'auto',
-        ...(preferences.reasoningEffort === 'auto' ? {} : { effort: preferences.reasoningEffort }),
-      },
-      ...(preferences.fastMode ? { service_tier: 'fast' } : {}),
+      reasoning: { summary: 'auto' },
+      ...requestParameters?.fields,
     };
     let accessToken = await this.auth.accessToken(false, requestTrace);
     let tracedRequest = await this.requestTraced(body, accessToken, signal, requestTrace, 1);

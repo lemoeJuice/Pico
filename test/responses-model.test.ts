@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ChatGptResponsesAdapter } from '../src/plugins/chatgpt-plan/model.js';
 import type { ChatGptPlanAuth } from '../src/plugins/chatgpt-plan/auth.js';
 import type { ModelPrompt, ModelRequestTrace } from '../src/runtime/model.js';
-import type { ChatGptPlanPreferences } from '../src/plugins/chatgpt-plan/types.js';
 
 describe('ChatGPT Responses adapter', () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -73,11 +72,11 @@ describe('ChatGPT Responses adapter', () => {
     const adapter = new ChatGptResponsesAdapter(auth);
     const result = await adapter.complete(
       prompt,
-      { reasoningEffort: 'high', fastMode: true } satisfies ChatGptPlanPreferences,
       new AbortController().signal,
       (delta) => deltas.push(delta),
       requestTrace,
       (event) => events.push(event),
+      { fields: { reasoning: { summary: 'auto', effort: 'high' }, service_tier: 'fast' } },
     );
 
     expect(accessToken).toHaveBeenCalledWith(false, requestTrace);
@@ -167,7 +166,6 @@ describe('ChatGPT Responses adapter', () => {
 
     const result = await adapter.complete(
       { system: '', model: 'selected-model', temperature: 0.2, turns: [], tools: [] },
-      { reasoningEffort: 'auto', fastMode: false } satisfies ChatGptPlanPreferences,
       new AbortController().signal,
       () => undefined,
       undefined,
@@ -241,7 +239,6 @@ describe('ChatGPT Responses adapter', () => {
     await expect(
       adapter.complete(
         { system: '', model: 'selected-model', temperature: 0.2, turns: [], tools: [] },
-        { reasoningEffort: 'auto', fastMode: false } satisfies ChatGptPlanPreferences,
         new AbortController().signal,
         (delta) => deltas.push(delta),
         undefined,
@@ -264,7 +261,6 @@ describe('ChatGPT Responses adapter', () => {
   });
 
   it('rejects empty completed responses and function calls with unfinished arguments', async () => {
-    const settings = { reasoningEffort: 'auto', fastMode: false } satisfies ChatGptPlanPreferences;
     const prompt: ModelPrompt = { system: '', model: 'selected-model', temperature: 0.2, turns: [], tools: [] };
     const auth = {
       accessToken: async () => 'oauth-access-token',
@@ -282,7 +278,7 @@ describe('ChatGPT Responses adapter', () => {
     );
     const emptyAdapter = new ChatGptResponsesAdapter(auth);
     await expect(
-      emptyAdapter.complete(prompt, settings, new AbortController().signal, () => undefined),
+      emptyAdapter.complete(prompt, new AbortController().signal, () => undefined),
     ).rejects.toThrow('without text or tool calls');
 
     vi.stubGlobal(
@@ -307,7 +303,7 @@ describe('ChatGPT Responses adapter', () => {
     );
     const incompleteCallAdapter = new ChatGptResponsesAdapter(auth);
     await expect(
-      incompleteCallAdapter.complete(prompt, settings, new AbortController().signal, () => undefined),
+      incompleteCallAdapter.complete(prompt, new AbortController().signal, () => undefined),
     ).rejects.toThrow('without completing its arguments');
   });
 
@@ -326,7 +322,6 @@ describe('ChatGPT Responses adapter', () => {
     await expect(
       adapter.complete(
         { system: '', model: 'selected-model', temperature: 0.2, turns: [], tools: [] },
-        { reasoningEffort: 'auto', fastMode: false } satisfies ChatGptPlanPreferences,
         new AbortController().signal,
         () => undefined,
       ),
@@ -335,7 +330,6 @@ describe('ChatGPT Responses adapter', () => {
 
   it('treats output-token exhaustion as a limit result and other incomplete responses as failures', async () => {
     const prompt: ModelPrompt = { system: '', model: 'selected-model', temperature: 0.2, turns: [], tools: [] };
-    const settings = { reasoningEffort: 'auto', fastMode: false } satisfies ChatGptPlanPreferences;
 
     vi.stubGlobal(
       'fetch',
@@ -356,7 +350,7 @@ describe('ChatGPT Responses adapter', () => {
       accessToken: async () => 'oauth-access-token',
     } as unknown as ChatGptPlanAuth);
     await expect(
-      adapter.complete(prompt, settings, new AbortController().signal, () => undefined),
+      adapter.complete(prompt, new AbortController().signal, () => undefined),
     ).resolves.toMatchObject({ content: 'partial but complete stream', finishReason: 'length' });
 
     vi.stubGlobal(
@@ -374,7 +368,7 @@ describe('ChatGPT Responses adapter', () => {
       accessToken: async () => 'oauth-access-token',
     } as unknown as ChatGptPlanAuth);
     await expect(
-      incompleteAdapter.complete(prompt, settings, new AbortController().signal, () => undefined),
+      incompleteAdapter.complete(prompt, new AbortController().signal, () => undefined),
     ).rejects.toThrow('response was incomplete (content_filter)');
   });
 
@@ -396,7 +390,6 @@ describe('ChatGPT Responses adapter', () => {
     await expect(
       adapter.complete(
         { system: '', model: 'selected-model', temperature: 0.2, turns: [], tools: [] },
-        { reasoningEffort: 'auto', fastMode: false } satisfies ChatGptPlanPreferences,
         new AbortController().signal,
         () => undefined,
       ),
@@ -420,7 +413,6 @@ describe('ChatGPT Responses adapter', () => {
     await expect(
       adapter.complete(
         { system: '', model: 'selected-model', temperature: 0.2, turns: [], tools: [] },
-        { reasoningEffort: 'high', fastMode: false } satisfies ChatGptPlanPreferences,
         new AbortController().signal,
         () => undefined,
         trace,

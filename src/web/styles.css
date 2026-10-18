@@ -1692,6 +1692,7 @@ button:disabled {
 .composer-plugin-controls {
   display: flex;
   flex: 0 1 clamp(260px, 48%, 390px);
+  flex-wrap: wrap;
   margin-right: auto;
   transform: translateX(-3px);
   max-width: 100%;
@@ -1721,8 +1722,9 @@ button:disabled {
   min-height: 0;
 }
 .composer-plugin-controls .plugin-web-view-component {
-  flex: 1 1 100%;
-  min-width: 0;
+  flex: 1 1 140px;
+  width: auto;
+  min-width: 120px;
   height: var(--pico-composer-control-height, 32px);
 }
 .plugin-settings-pages {
@@ -2288,19 +2290,6 @@ button:disabled {
   font-size: 9px;
   overflow-wrap: anywhere;
 }
-.temperature-label {
-  display: grid !important;
-  grid-template-columns: 1fr auto;
-  align-items: center;
-}
-.temperature-label span {
-  color: #8c9b8d;
-}
-.temperature-label input {
-  grid-column: 1 / -1;
-  width: 100%;
-  accent-color: #698e70;
-}
 .chatgpt-account-card {
   display: flex;
   flex-direction: column;
@@ -2325,33 +2314,6 @@ button:disabled {
 .chatgpt-account-actions {
   justify-content: flex-start;
   margin-top: 0;
-}
-.chatgpt-fast-control {
-  display: flex !important;
-  flex-direction: row !important;
-  align-items: center;
-  gap: 10px !important;
-  padding: 11px 12px;
-  background: #fbfcfa;
-  border: 1px solid #e9eee7;
-  border-radius: 10px;
-  cursor: pointer;
-}
-.form-stack .chatgpt-fast-control input {
-  width: 15px;
-  min-width: 15px;
-  min-height: 15px;
-  margin: 0;
-  padding: 0;
-  accent-color: #698e70;
-}
-.chatgpt-fast-control span {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.chatgpt-fast-control small {
-  line-height: 1.5;
 }
 .executor-choice-grid {
   display: grid;

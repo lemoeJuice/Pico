@@ -588,6 +588,23 @@ export class PicoRuntime {
       this.options.executorPluginDirectory ? { pluginDirectory: this.options.executorPluginDirectory } : {},
     );
     this.executorPluginLoadErrors = executorPluginLoad.errors;
+    const modelParameterMigrationComplete = this.store.getPluginState('pico.model-parameters', 'chatgptPreferencesV1Migrated', false);
+    if (!modelParameterMigrationComplete) {
+      const oldPreferences: unknown = this.store.getPluginState('pico.chatgpt-plan', 'preferences', null);
+      if (oldPreferences && typeof oldPreferences === 'object' && !Array.isArray(oldPreferences)) {
+        const value = oldPreferences as Record<string, unknown>;
+        const migrated = {
+          ...(typeof value.reasoningEffort === 'string' ? { reasoningEffort: value.reasoningEffort } : {}),
+          ...(typeof value.fastMode === 'boolean' ? { fastMode: value.fastMode } : {}),
+        };
+        this.store.transaction(() => {
+          this.store.setPluginState('pico.model-parameters', 'legacyChatGptPreferences', migrated);
+          this.store.setPluginState('pico.model-parameters', 'chatgptPreferencesV1Migrated', true);
+        });
+      } else {
+        this.store.setPluginState('pico.model-parameters', 'chatgptPreferencesV1Migrated', true);
+      }
+    }
     await this.plugins.load([...builtinPlugins, ...this.additionalPlugins], [...disabled]);
     this.pluginLoadErrors = [...this.plugins.errors(), ...this.executorPluginLoadErrors];
     // A Runtime restart confirms its own unfinished model stream was lost. Pause the
@@ -1773,6 +1790,7 @@ export class PicoRuntime {
       const modelInput: ModelStageInput = {
         thread,
         provider: modelSettings.provider,
+        modelTarget: { provider: modelSettings.provider, baseUrl: modelSettings.baseUrl, model: prompt.model },
         prompt,
         signal: controller.signal,
         onText: (delta: string) => {
@@ -1796,6 +1814,7 @@ export class PicoRuntime {
             input.onText,
             input.requestTrace,
             input.onEvent,
+            input.requestParameters,
           );
         });
         if (requestId)

@@ -125,73 +125,9 @@ body.pico-ui-root .chatgpt-composer-controls select {
   flex: 1 1 138px;
 }
 
-.chatgpt-reasoning-select {
-  flex: 1 1 112px;
-}
-
 .chatgpt-composer-controls > .button {
   height: var(--pico-composer-control-height, 32px);
   min-height: var(--pico-composer-control-height, 32px);
-}
-
-body.pico-ui-root .chatgpt-fast-control {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: space-between;
-  height: var(--pico-composer-control-height, 32px);
-  min-height: var(--pico-composer-control-height, 32px);
-  gap: 8px;
-  padding: 0 9px;
-  color: var(--pico-ui-muted);
-  background: var(--pico-ui-panel);
-  border: 1px solid var(--pico-ui-border);
-  border-radius: 10px;
-  font: inherit;
-  font-size: 10px;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.chatgpt-fast-control i {
-  position: relative;
-  width: 27px;
-  height: 16px;
-  flex: 0 0 auto;
-  background: var(--pico-ui-border);
-  border-radius: 999px;
-  transition: background 140ms ease;
-}
-
-.chatgpt-fast-control i::after {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 12px;
-  height: 12px;
-  content: '';
-  background: white;
-  border-radius: 50%;
-  box-shadow: 0 1px 3px rgba(35, 53, 38, 0.16);
-  transition: transform 140ms ease;
-}
-
-.chatgpt-fast-control.enabled {
-  color: var(--pico-ui-success);
-  border-color: var(--pico-ui-accent);
-}
-
-.chatgpt-fast-control.enabled i {
-  background: var(--pico-ui-accent);
-}
-
-.chatgpt-fast-control.enabled i::after {
-  transform: translateX(11px);
-}
-
-.chatgpt-fast-control:disabled {
-  cursor: wait;
-  opacity: 0.62;
 }
 
 @media (max-width: 540px) {
