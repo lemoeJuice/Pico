@@ -2415,7 +2415,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                           preview={{ argumentsText: call.argumentsText }}
                         />
                       ))}
-                      <span className="cursor-block" />
+                      {!assistantPreview.tools?.some((call) => call.name === 'shell') ? (
+                        <span className="cursor-block" />
+                      ) : null}
                     </div>
                   </div>
                 ) : null}
