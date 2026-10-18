@@ -123,6 +123,22 @@
   function metricCoverage(key) {
     return `<span class="coverage">${escape(coverageText(report?.coverage?.[key]))}</span>`;
   }
+  function cacheHitMetrics(rows) {
+    const reported = rows.filter(
+      (row) =>
+        typeof row.usage?.inputTokens === 'number' &&
+        typeof row.usage?.cachedInputTokens === 'number',
+    );
+    const inputTokens = reported.reduce((total, row) => total + row.usage.inputTokens, 0);
+    const cachedInputTokens = reported.reduce((total, row) => total + row.usage.cachedInputTokens, 0);
+    const rate = inputTokens > 0 ? (cachedInputTokens / inputTokens) * 100 : null;
+    const formattedRate =
+      rate === null ? 'unknown' : `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(rate)}%`;
+    return {
+      rate: formattedRate,
+      coverage: coverageText({ reported: reported.length, total: rows.length }),
+    };
+  }
   async function loadCatalog() {
     try {
       const [value, options] = await Promise.all([api('/catalog'), api('/options')]);
@@ -167,6 +183,7 @@
     if (!root) return;
     const totals = report?.totals || {};
     const rows = report?.rows || [];
+    const cacheHit = cacheHitMetrics(rows);
     root.innerHTML = `<div class="panel pico-ui-panel">
       <div class="heading pico-ui-heading"><div><h1>Usage</h1><div class="subtle">Committed main calls and Runtime-tracked auxiliary model calls</div></div><button id="refresh" class="pico-ui-button" ${busy ? 'disabled' : ''}>Refresh</button></div>
       <form id="filters" class="filters pico-ui-panel">
@@ -181,7 +198,7 @@
       </form>
       ${error ? `<div class="error pico-ui-error" role="alert">${escape(error)}</div>` : ''}
       <div class="coverage-note">Token totals include reported values only; missing values are excluded, never estimated.</div>
-      <div class="cards"><div class="card metric-card pico-ui-metric-card">Input tokens<strong>${fmt(totals.inputTokens)}</strong>${metricCoverage('inputTokens')}</div><div class="card metric-card pico-ui-metric-card">Output tokens<strong>${fmt(totals.outputTokens)}</strong>${metricCoverage('outputTokens')}</div><div class="card metric-card pico-ui-metric-card">Cache read<strong>${fmt(totals.cachedInputTokens)}</strong>${metricCoverage('cachedInputTokens')}</div><div class="card metric-card pico-ui-metric-card">Cache write<strong>${fmt(totals.cacheWriteTokens)}</strong>${metricCoverage('cacheWriteTokens')}</div><div class="card metric-card pico-ui-metric-card">Reasoning<strong>${fmt(totals.reasoningTokens)}</strong>${metricCoverage('reasoningTokens')}</div><div class="card metric-card pico-ui-metric-card">Estimated cost<strong>${money(totals.estimatedCost, rows.find((r) => r.currency)?.currency)}</strong><span class="coverage">Unknown if any call or required price is unknown</span></div><div class="card metric-card pico-ui-metric-card">Main calls<strong>${fmt(report?.counts.completedMainCalls)}</strong></div><div class="card metric-card pico-ui-metric-card">Auxiliary calls<strong>${fmt(report?.counts.auxiliaryCalls)}</strong></div></div>
+      <div class="cards"><div class="card metric-card pico-ui-metric-card">Input tokens<strong>${fmt(totals.inputTokens)}</strong>${metricCoverage('inputTokens')}</div><div class="card metric-card pico-ui-metric-card">Output tokens<strong>${fmt(totals.outputTokens)}</strong>${metricCoverage('outputTokens')}</div><div class="card metric-card pico-ui-metric-card">Cache read<strong>${fmt(totals.cachedInputTokens)}</strong>${metricCoverage('cachedInputTokens')}</div><div class="card metric-card pico-ui-metric-card">Cache hit rate<strong>${escape(cacheHit.rate)}</strong><span class="coverage">${escape(cacheHit.coverage)}</span></div><div class="card metric-card pico-ui-metric-card">Reasoning<strong>${fmt(totals.reasoningTokens)}</strong>${metricCoverage('reasoningTokens')}</div><div class="card metric-card pico-ui-metric-card">Estimated cost<strong>${money(totals.estimatedCost, rows.find((r) => r.currency)?.currency)}</strong><span class="coverage">Unknown if any call or required price is unknown</span></div><div class="card metric-card pico-ui-metric-card">Main calls<strong>${fmt(report?.counts.completedMainCalls)}</strong></div><div class="card metric-card pico-ui-metric-card">Auxiliary calls<strong>${fmt(report?.counts.auxiliaryCalls)}</strong></div></div>
       <section class="section pico-ui-section"><h2>Breakdown</h2><div class="groups">${group('By Thread', report?.groups.thread, threadLabel)}${group('By Project', report?.groups.project, projectLabel)}${group('By Provider', report?.groups.provider)}${group('By Model', report?.groups.model)}${group('By Purpose', report?.groups.purpose)}${group('By day', report?.groups.day)}</div></section>
       <section class="section pico-ui-section"><h2>Model calls</h2><div class="table-wrap"><table><thead><tr><th>Time</th><th>Kind / purpose</th><th>Provider / model</th><th>Thread</th><th>Status / tokens</th><th>Cost</th><th>Attempts</th></tr></thead><tbody>${
         rows
