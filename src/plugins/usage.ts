@@ -7,7 +7,8 @@ export interface UsageRate {
   provider: string;
   model: string;
   currency: string;
-  effectiveAt: string;
+  /** Legacy field accepted when reading older saved rates; current rates ignore it. */
+  effectiveAt?: string;
   inputPerMillion: number;
   outputPerMillion: number;
   cachedInputPerMillion?: number;
@@ -73,7 +74,6 @@ function validRate(value: unknown): value is UsageRate {
     typeof rate.provider === 'string' &&
     typeof rate.model === 'string' &&
     typeof rate.currency === 'string' &&
-    typeof rate.effectiveAt === 'string' &&
     typeof rate.inputPerMillion === 'number' &&
     Number.isFinite(rate.inputPerMillion) &&
     rate.inputPerMillion >= 0 &&
@@ -87,12 +87,37 @@ function validRate(value: unknown): value is UsageRate {
   );
 }
 
-function effectiveRate(rates: UsageRate[], provider: string, model: string, createdAt: string): UsageRate | null {
-  return (
-    rates
-      .filter((rate) => rate.provider === provider && rate.model === model && rate.effectiveAt <= createdAt)
-      .sort((a, b) => b.effectiveAt.localeCompare(a.effectiveAt))[0] ?? null
-  );
+function currentRate(value: UsageRate): UsageRate {
+  return {
+    id: value.id,
+    provider: value.provider,
+    model: value.model,
+    currency: value.currency,
+    inputPerMillion: value.inputPerMillion,
+    outputPerMillion: value.outputPerMillion,
+    ...(value.cachedInputPerMillion === undefined ? {} : { cachedInputPerMillion: value.cachedInputPerMillion }),
+    ...(value.cacheWritePerMillion === undefined ? {} : { cacheWritePerMillion: value.cacheWritePerMillion }),
+  };
+}
+
+function normalizeRates(value: unknown): UsageRate[] {
+  const latestByPair = new Map<string, { rate: UsageRate; effectiveAt: string; index: number }>();
+  for (const [index, candidate] of (Array.isArray(value) ? value : []).entries()) {
+    if (!validRate(candidate)) continue;
+    const rate = currentRate(candidate);
+    const effectiveAt = typeof candidate.effectiveAt === 'string' ? candidate.effectiveAt : '';
+    const key = JSON.stringify([rate.provider, rate.model]);
+    const previous = latestByPair.get(key);
+    if (!previous || effectiveAt.localeCompare(previous.effectiveAt) >= 0)
+      latestByPair.set(key, { rate, effectiveAt, index });
+  }
+  return [...latestByPair.values()]
+    .sort((a, b) => a.index - b.index)
+    .map(({ rate }) => rate);
+}
+
+function rateFor(rates: UsageRate[], provider: string, model: string): UsageRate | null {
+  return rates.find((rate) => rate.provider === provider && rate.model === model) ?? null;
 }
 
 /** Returns null unless every observed token dimension can be priced from the selected rate. */
@@ -122,7 +147,7 @@ function canonicalUsageRows(context: PluginContext, threads: Thread[], rates: Us
       const assistant = object(record.payload) as unknown as AssistantPayload;
       const model = typeof assistant.model === 'string' && assistant.model ? assistant.model : 'unknown';
       const usage = usageValue(assistant.usage);
-      const rate = effectiveRate(rates, 'unknown', model, record.createdAt);
+      const rate = rateFor(rates, 'unknown', model);
       rows.push({
         id: record.id,
         kind: 'main',
@@ -147,7 +172,7 @@ function canonicalUsageRows(context: PluginContext, threads: Thread[], rates: Us
 
 function auxiliaryUsageRows(calls: PluginModelCallRecord[], rates: UsageRate[]): UsageRow[] {
   return calls.map((call) => {
-    const rate = effectiveRate(rates, call.provider, call.model, call.createdAt);
+    const rate = rateFor(rates, call.provider, call.model);
     return {
       id: call.id,
       kind: 'auxiliary',
@@ -244,6 +269,24 @@ function groupBy(
   return [...groups.entries()].map(([name, values]) => ({ key: name, count: values.length, ...sum(values) }));
 }
 
+function rateCatalog(context: PluginContext, rates: UsageRate[]) {
+  const threads = context.threads.list();
+  const rows = [
+    ...canonicalUsageRows(context, threads, rates),
+    ...auxiliaryUsageRows(context.models.history(), rates),
+  ];
+  const providerModels = new Map<string, { provider: string; model: string }>();
+  for (const { provider, model } of [...rows, ...rates]) {
+    providerModels.set(JSON.stringify([provider, model]), { provider, model });
+  }
+  return {
+    providerModels: [...providerModels.values()].sort(
+      (a, b) => a.provider.localeCompare(b.provider) || a.model.localeCompare(b.model),
+    ),
+    purposes: [...new Set(rows.map((row) => row.purpose.trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b)),
+  };
+}
+
 function parseFilter(query: URLSearchParams): UsageFilter {
   const filter: UsageFilter = {};
   for (const key of ['threadId', 'projectId', 'provider', 'model', 'purpose', 'from', 'to'] as const) {
@@ -255,7 +298,7 @@ function parseFilter(query: URLSearchParams): UsageFilter {
 
 function buildReport(context: PluginContext, state: PluginContext['state'], filter: UsageFilter) {
   const rates = state.get<unknown>('rates', []);
-  const validRates = Array.isArray(rates) ? rates.filter(validRate) : [];
+  const validRates = normalizeRates(rates);
   const threads = context.threads
     .list(filter.projectId)
     .filter((thread) => !filter.threadId || thread.id === filter.threadId);
@@ -281,7 +324,6 @@ function buildReport(context: PluginContext, state: PluginContext['state'], filt
       auxiliaryCalls: rows.filter((row) => row.kind === 'auxiliary').length,
       failedAuxiliaryCalls: rows.filter((row) => row.kind === 'auxiliary' && row.status === 'failed').length,
       interruptedAuxiliaryCalls: rows.filter((row) => row.kind === 'auxiliary' && row.status === 'interrupted').length,
-      providerAttempts: rows.reduce((count, row) => count + row.attempts.length, 0),
     },
     groups: {
       thread: groupBy(rows, (row) => row.threadId ?? 'unknown'),
@@ -295,7 +337,7 @@ function buildReport(context: PluginContext, state: PluginContext['state'], filt
     limitations: [
       'Main model calls use committed Canonical assistant usage. Failed main attempts and retries are not currently exposed by the plugin service.',
       'Main-call provider identity is unavailable in Canonical assistant records and is shown as unknown.',
-      'Cost is unknown until a matching, effective-dated rate is configured and all reported token dimensions can be priced.',
+      'Cost estimates use current provider/model rates for all calls, including historical calls; cost is unknown when a required price is missing.',
     ],
   };
 }
@@ -312,24 +354,28 @@ export const usagePlugin: PicoPlugin = {
     const { state, ui, http } = context;
     const readRates = (): UsageRate[] => {
       const value = state.get<unknown>('rates', []);
-      return Array.isArray(value) ? value.filter(validRate) : [];
+      const rates = normalizeRates(value);
+      if (JSON.stringify(value) !== JSON.stringify(rates)) state.set('rates', rates);
+      return rates;
     };
     http.register('GET', '/catalog', () => ({
       projects: context.projects.list().map(({ id, name }) => ({ id, name })),
       threads: context.threads.list().map(({ id, projectId, title }) => ({ id, projectId, title })),
     }));
+    http.register('GET', '/options', () => rateCatalog(context, readRates()));
     http.register('GET', '/report', ({ query }) => buildReport(context, state, parseFilter(query)));
     http.register('PUT', '/rates', ({ body }) => {
       const data = requestObject({ body, query: new URLSearchParams(), origin: null });
-      const candidate = data.rate;
-      if (!validRate(candidate))
-        throw new Error(
-          'A rate must include provider, model, currency, effectiveAt, and non-negative input/output rates.',
-        );
-      if (Number.isNaN(Date.parse(candidate.effectiveAt))) throw new Error('effectiveAt must be a valid date.');
-      const next = [...readRates().filter((rate) => rate.id !== candidate.id), candidate].sort((a, b) =>
-        a.effectiveAt.localeCompare(b.effectiveAt),
-      );
+      if (!validRate(data.rate))
+        throw new Error('A rate must include provider, model, currency, and non-negative input/output rates.');
+      const candidate = currentRate(data.rate);
+      const next = [
+        ...readRates().filter(
+          (rate) =>
+            rate.id !== candidate.id && (rate.provider !== candidate.provider || rate.model !== candidate.model),
+        ),
+        candidate,
+      ];
       state.set('rates', next);
       return { rates: next };
     });

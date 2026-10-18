@@ -1744,6 +1744,10 @@ button:disabled {
   min-height: 120px;
   padding: 2px 0 10px;
 }
+.archived-threads-page .form-intro,
+.archived-threads-page .field-note {
+  font-size: 11px;
+}
 .plugin-settings-page .plugin-web-view-page {
   height: 360px;
   max-height: min(62dvh, 620px);
@@ -3085,8 +3089,9 @@ button:disabled {
   margin: 0;
   color: inherit;
 }
-.composer-model-name {
+.composer-meta .composer-model-name {
   margin-left: auto !important;
+  font-size: 10px;
   text-align: right;
 }
 .tool-card-heading,
