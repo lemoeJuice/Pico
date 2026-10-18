@@ -1139,6 +1139,9 @@ button:disabled {
 .conversation-scroll-follow-latest {
   overflow-anchor: none;
 }
+.conversation-scroll-preserve-anchor {
+  overflow-anchor: none;
+}
 .timeline {
   display: flex;
   flex-direction: column;

@@ -1,5 +1,7 @@
 import {
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -143,6 +145,12 @@ type ExecutorStatusDetails = {
   targetVersion?: string | null;
   updateSupported?: boolean;
 };
+type ThinkingDisclosureContextValue = {
+  expanded: boolean;
+  toggle(expanded: boolean, summary: HTMLElement): void;
+};
+
+const ThinkingDisclosureContext = createContext<ThinkingDisclosureContextValue | null>(null);
 
 function readComposerState(): ComposerState {
   try {
@@ -484,6 +492,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [executorDetails, setExecutorDetails] = useState<ExecutorStatusDetails>({});
   const [dismissedExecutorNoticeKey, setDismissedExecutorNoticeKey] = useState<string | null>(null);
   const [dismissedPauseNoticeKey, setDismissedPauseNoticeKey] = useState<string | null>(null);
+  const [thinkingExpanded, setThinkingExpanded] = useState(true);
   const [executorUpdateOpen, setExecutorUpdateOpen] = useState(false);
   const [executorUpdateBusy, setExecutorUpdateBusy] = useState(false);
   const [executorUpdateError, setExecutorUpdateError] = useState('');
@@ -519,6 +528,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     hasApiKey: false,
   });
   const listRef = useRef<HTMLDivElement>(null);
+  const pendingThinkingScrollAdjustment = useRef<{
+    summary: HTMLElement;
+    summaryTop: number;
+    followLatest: boolean;
+  } | null>(null);
   const messageTextareaRef = useRef<HTMLTextAreaElement>(null);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
@@ -546,6 +560,51 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   activeThreadId.current = threadId;
   assistantDraftsRef.current = assistantDrafts;
   draftRef.current = { threadId, value: draft };
+
+  const toggleThinking = useCallback(
+    (expanded: boolean, summary: HTMLElement): void => {
+      if (expanded === thinkingExpanded) return;
+      const scroll = listRef.current;
+      if (scroll) {
+        const followingLatest = followLatest.current;
+        pendingThinkingScrollAdjustment.current = {
+          summary,
+          summaryTop: summary.getBoundingClientRect().top - scroll.getBoundingClientRect().top,
+          followLatest: followingLatest,
+        };
+        if (!followingLatest) scroll.classList.add('conversation-scroll-preserve-anchor');
+      }
+      setThinkingExpanded(expanded);
+    },
+    [thinkingExpanded],
+  );
+
+  const thinkingDisclosure = useMemo(
+    () => ({ expanded: thinkingExpanded, toggle: toggleThinking }),
+    [thinkingExpanded, toggleThinking],
+  );
+
+  useLayoutEffect(() => {
+    const pending = pendingThinkingScrollAdjustment.current;
+    if (!pending) return;
+    pendingThinkingScrollAdjustment.current = null;
+    const scroll = listRef.current;
+    if (!scroll) return;
+    if (pending.followLatest) {
+      scroll.classList.remove('conversation-scroll-preserve-anchor');
+      scroll.scrollTop = scroll.scrollHeight;
+      scroll.classList.add('conversation-scroll-follow-latest');
+      followLatest.current = true;
+      return;
+    }
+    if (!pending.summary.isConnected) {
+      scroll.classList.remove('conversation-scroll-preserve-anchor');
+      return;
+    }
+    const summaryTop = pending.summary.getBoundingClientRect().top - scroll.getBoundingClientRect().top;
+    scroll.scrollTop += summaryTop - pending.summaryTop;
+    scroll.classList.remove('conversation-scroll-preserve-anchor');
+  }, [thinkingExpanded]);
 
   useLayoutEffect(() => {
     const textarea = messageTextareaRef.current;
@@ -2378,103 +2437,106 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 event.currentTarget.classList.toggle('conversation-scroll-follow-latest', follow);
               }}
             >
-              <div className="timeline">
-                {activeSnapshot?.hasEarlierRecords ? (
-                  <button
-                    className="history-load-more"
-                    type="button"
-                    disabled={loadingEarlierThreadIds.has(selectedThread.id)}
-                    onClick={() => void loadEarlierRecords()}
-                  >
-                    {loadingEarlierThreadIds.has(selectedThread.id)
-                      ? 'Loading earlier messages…'
-                      : 'Load earlier history'}
-                  </button>
-                ) : null}
-                {timeline.map((item) =>
-                  item.type === 'group' ? (
-                    <ModelExecutionBranchGroup
-                      key={`group:${item.group.projectionThrough}`}
-                      group={item.group}
-                      threadId={selectedThread.id}
-                      unavailableModelExecutionIds={unavailableModelExecutionIds}
-                      executions={executions}
-                      records={records}
-                      renderTool={renderToolView}
-                      onRetryModelExecution={retryModelExecution}
-                      retryDisabled={currentState === 'running' || currentState === 'pausing'}
-                      draftExecutionId={assistantDrafts[selectedThread.id]?.executionId}
-                    />
-                  ) : item.record.kind === 'message' ? (
-                    <MessageBubble
-                      key={item.record.id}
-                      record={item.record}
-                      thread={selectedThread}
-                      threadId={selectedThread.id}
-                      modelExecutionGroups={[]}
-                      unavailableModelExecutionIds={unavailableModelExecutionIds}
-                      executions={executions}
-                      records={records}
-                      renderTool={renderToolView}
-                      onOpenThread={chooseThread}
-                      onRetryModelExecution={retryModelExecution}
-                      retryDisabled={currentState === 'running' || currentState === 'pausing'}
-                    />
-                  ) : (
-                    <AssistantBubble
-                      key={item.record.id}
-                      record={item.record}
-                      executions={executions}
-                      records={records}
-                      threadId={selectedThread.id}
-                      renderTool={renderToolView}
-                    />
-                  ),
-                )}
-                {assistantPreview ? (
-                  <div className="assistant-message draft-message">
-                    <div className="assistant-avatar">
-                      <Sparkles size={13} aria-hidden="true" />
-                    </div>
-                    <div className="message-body">
-                      <div className="message-author">
-                        Pico <span className="typing-label">writing</span>
+              <ThinkingDisclosureContext.Provider value={thinkingDisclosure}>
+                <div className="timeline">
+                  {activeSnapshot?.hasEarlierRecords ? (
+                    <button
+                      className="history-load-more"
+                      type="button"
+                      disabled={loadingEarlierThreadIds.has(selectedThread.id)}
+                      onClick={() => void loadEarlierRecords()}
+                    >
+                      {loadingEarlierThreadIds.has(selectedThread.id)
+                        ? 'Loading earlier messages…'
+                        : 'Load earlier history'}
+                    </button>
+                  ) : null}
+                  {timeline.map((item) =>
+                    item.type === 'group' ? (
+                      <ModelExecutionBranchGroup
+                        key={`group:${item.group.projectionThrough}`}
+                        group={item.group}
+                        threadId={selectedThread.id}
+                        unavailableModelExecutionIds={unavailableModelExecutionIds}
+                        executions={executions}
+                        records={records}
+                        renderTool={renderToolView}
+                        onRetryModelExecution={retryModelExecution}
+                        retryDisabled={currentState === 'running' || currentState === 'pausing'}
+                        draftExecutionId={assistantDrafts[selectedThread.id]?.executionId}
+                      />
+                    ) : item.record.kind === 'message' ? (
+                      <MessageBubble
+                        key={item.record.id}
+                        record={item.record}
+                        thread={selectedThread}
+                        threadId={selectedThread.id}
+                        modelExecutionGroups={[]}
+                        unavailableModelExecutionIds={unavailableModelExecutionIds}
+                        executions={executions}
+                        records={records}
+                        renderTool={renderToolView}
+                        onOpenThread={chooseThread}
+                        onRetryModelExecution={retryModelExecution}
+                        retryDisabled={currentState === 'running' || currentState === 'pausing'}
+                      />
+                    ) : (
+                      <AssistantBubble
+                        key={item.record.id}
+                        record={item.record}
+                        executions={executions}
+                        records={records}
+                        threadId={selectedThread.id}
+                        renderTool={renderToolView}
+                      />
+                    ),
+                  )}
+                  {assistantPreview ? (
+                    <div className="assistant-message draft-message">
+                      <div className="assistant-avatar">
+                        <Sparkles size={13} aria-hidden="true" />
                       </div>
-                      {assistantPreview.reasoningSummary ? (
-                        <Reasoning text={assistantPreview.reasoningSummary} />
-                      ) : null}
-                      {assistantDraft ? <Markdown>{assistantDraft}</Markdown> : null}
-                      {assistantPreview.tools?.map((call) => (
-                        <ToolCard
-                          key={call.id ?? `${assistantPreview.executionId}:${call.index}`}
-                          call={{
-                            id: call.id ?? `preview:${assistantPreview.executionId}:${call.index}`,
-                            name: call.name ?? 'Tool call',
-                            arguments: {},
-                          }}
-                          execution={undefined}
-                          result={undefined}
-                          preview={{ argumentsText: call.argumentsText }}
-                        />
-                      ))}
-                      {!assistantPreview.tools?.some((call) => call.name === 'shell') ? (
-                        <span className="cursor-block" />
-                      ) : null}
+                      <div className="message-body">
+                        <div className="message-author">
+                          Pico <span className="typing-label">writing</span>
+                        </div>
+                        {assistantPreview.reasoningSummary ? (
+                          <Reasoning text={assistantPreview.reasoningSummary} />
+                        ) : null}
+                        {assistantDraft ? <Markdown>{assistantDraft}</Markdown> : null}
+                        {assistantPreview.tools?.map((call) => (
+                          <ToolCard
+                            key={call.id ?? `${assistantPreview.executionId}:${call.index}`}
+                            call={{
+                              id: call.id ?? `preview:${assistantPreview.executionId}:${call.index}`,
+                              name: call.name ?? 'Tool call',
+                              arguments: {},
+                            }}
+                            execution={undefined}
+                            result={undefined}
+                            preview={{ argumentsText: call.argumentsText }}
+                          />
+                        ))}
+                        {!assistantPreview.tools?.some((call) => call.name === 'shell') ? (
+                          <span className="cursor-block" />
+                        ) : null}
+                      </div>
                     </div>
-                  </div>
-                ) : null}
-                {renderedRecords.length === 0 && !assistantPreview ? (
-                  <div className="empty-thread">
-                    <div className="empty-orbit">
-                      <Sparkles size={19} aria-hidden="true" />
+                  ) : null}
+                  {renderedRecords.length === 0 && !assistantPreview ? (
+                    <div className="empty-thread">
+                      <div className="empty-orbit">
+                        <Sparkles size={19} aria-hidden="true" />
+                      </div>
+                      <h2>A fresh Thread</h2>
+                      <p>
+                        Send a message to begin. This Thread is bound to the {executorLabel(selectedThread)}{' '}
+                        environment.
+                      </p>
                     </div>
-                    <h2>A fresh Thread</h2>
-                    <p>
-                      Send a message to begin. This Thread is bound to the {executorLabel(selectedThread)} environment.
-                    </p>
-                  </div>
-                ) : null}
-              </div>
+                  ) : null}
+                </div>
+              </ThinkingDisclosureContext.Provider>
             </div>
 
             <div className="composer-wrap">
@@ -3728,9 +3790,22 @@ function ModelExecutionRecord({
 }
 
 function Reasoning({ text }: { text: string }) {
+  const disclosure = useContext(ThinkingDisclosureContext);
+  const expanded = disclosure?.expanded ?? true;
   return (
-    <details className="reasoning-summary" open>
-      <summary>Thinking</summary>
+    <details className="reasoning-summary" open={expanded}>
+      <summary
+        onClick={
+          disclosure
+            ? (event) => {
+                event.preventDefault();
+                disclosure.toggle(!expanded, event.currentTarget);
+              }
+            : undefined
+        }
+      >
+        Thinking
+      </summary>
       <Markdown>{reasoningSummaryMarkdown(text)}</Markdown>
     </details>
   );
