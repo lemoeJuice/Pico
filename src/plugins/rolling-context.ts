@@ -314,11 +314,16 @@ function promptTurns(records: readonly CanonicalRecord[], thread: Thread): Promp
     } else if (record.kind === 'assistant') {
       const payload = object(record.payload);
       const calls = Array.isArray(payload.toolCalls) ? payload.toolCalls : [];
+      const reasoningContent =
+        payload.reasoningFormat === 'deepseek-content' && typeof payload.reasoningSummary === 'string'
+          ? payload.reasoningSummary
+          : undefined;
       if (calls.length) {
         turns.push({
           kind: 'assistant_tools',
           content: typeof payload.content === 'string' ? payload.content : '',
           calls: calls as ToolCall[],
+          ...(typeof reasoningContent === 'string' ? { reasoningContent } : {}),
         });
         for (const raw of calls) {
           const call = object(raw);
@@ -333,8 +338,13 @@ function promptTurns(records: readonly CanonicalRecord[], thread: Thread): Promp
             content: projectedToolResult(result as unknown as ToolResultPayload),
           });
         }
-      } else if (typeof payload.content === 'string' && payload.content)
-        turns.push({ kind: 'message', role: 'assistant', content: payload.content });
+      } else if ((typeof payload.content === 'string' && payload.content) || typeof reasoningContent === 'string')
+        turns.push({
+          kind: 'message',
+          role: 'assistant',
+          content: typeof payload.content === 'string' ? payload.content : '',
+          ...(typeof reasoningContent === 'string' ? { reasoningContent } : {}),
+        });
     } else if (record.kind === 'tool_result' && !consumed.has(record.id)) {
       const result = object(record.payload);
       turns.push({

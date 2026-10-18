@@ -3686,7 +3686,7 @@ function ModelExecutionRecord({
 function Reasoning({ text }: { text: string }) {
   return (
     <details className="reasoning-summary" open>
-      <summary>Thinking summary</summary>
+      <summary>Thinking</summary>
       <Markdown>{reasoningSummaryMarkdown(text)}</Markdown>
     </details>
   );

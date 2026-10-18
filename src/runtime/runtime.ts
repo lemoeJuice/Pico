@@ -1863,6 +1863,7 @@ export class PicoRuntime {
       const payload: AssistantPayload = {
         content: response.content,
         ...(response.reasoningSummary ? { reasoningSummary: response.reasoningSummary } : {}),
+        ...(response.reasoningFormat ? { reasoningFormat: response.reasoningFormat } : {}),
         toolCalls: calls,
         batchId,
         projectionThrough: through,
@@ -1938,8 +1939,15 @@ export class PicoRuntime {
         turns.push({ kind: 'message', role: 'user', content: projectMessageContent(message, thread) });
       } else if (record.kind === 'assistant') {
         const assistant = record.payload as unknown as AssistantPayload;
+        const reasoningContent =
+          assistant.reasoningFormat === 'deepseek-content' ? assistant.reasoningSummary : undefined;
         if (assistant.toolCalls.length > 0) {
-          turns.push({ kind: 'assistant_tools', content: assistant.content, calls: assistant.toolCalls });
+          turns.push({
+            kind: 'assistant_tools',
+            content: assistant.content,
+            calls: assistant.toolCalls,
+            ...(typeof reasoningContent === 'string' ? { reasoningContent } : {}),
+          });
           for (const call of assistant.toolCalls) {
             const result = assistant.batchId ? results.get(`${assistant.batchId}:${call.id}`) : undefined;
             if (result) {
@@ -1953,8 +1961,13 @@ export class PicoRuntime {
               });
             }
           }
-        } else if (assistant.content) {
-          turns.push({ kind: 'message', role: 'assistant', content: assistant.content });
+        } else if (assistant.content || typeof reasoningContent === 'string') {
+          turns.push({
+            kind: 'message',
+            role: 'assistant',
+            content: assistant.content,
+            ...(typeof reasoningContent === 'string' ? { reasoningContent } : {}),
+          });
         }
       } else if (record.kind === 'tool_result' && !consumedResults.has(record.id)) {
         const result = record.payload as unknown as ToolResultPayload;
