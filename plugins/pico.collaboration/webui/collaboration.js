@@ -7,6 +7,15 @@
   let children = [];
   let pending = false;
   let requests = new Map();
+  let resizeFrame = 0;
+  const resizeObserver = new ResizeObserver(() => {
+    if (!root || !port || resizeFrame) return;
+    resizeFrame = requestAnimationFrame(() => {
+      resizeFrame = 0;
+      port?.postMessage({ type: 'pico:plugin-ui:resize', height: root.getBoundingClientRect().height });
+    });
+  });
+  if (root) resizeObserver.observe(root);
   const api = (path, init) =>
     new Promise((resolve, reject) => {
       const id = `collaboration-${++sequence}`;
