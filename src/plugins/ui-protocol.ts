@@ -160,6 +160,7 @@ export interface PluginUiClient {
   subscribeContext(listener: (context: PluginUiContext) => void): () => void;
   subscribeEvents(listener: (event: PluginUiEvent) => void): () => void;
   resize(height: number): void;
+  /** Pass preferred content width for inline composer.model controls. */
   reportVisibility(visible: boolean, width?: number): void;
   close(): void;
 }

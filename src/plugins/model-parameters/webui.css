@@ -92,6 +92,18 @@ body.pico-ui-root .model-parameter-control select.model-parameter-reasoning {
   white-space: nowrap;
 }
 
+.model-parameter-controls-primary .model-parameter-toggle {
+  height: var(--pico-composer-control-height, 32px);
+  min-height: var(--pico-composer-control-height, 32px);
+  gap: 8px;
+  padding: 0 9px;
+  color: var(--pico-ui-muted);
+  background: var(--pico-ui-panel);
+  border: 1px solid var(--pico-ui-border);
+  border-radius: 10px;
+  font-size: 10px;
+}
+
 .model-parameter-switch {
   position: relative;
   width: 28px;

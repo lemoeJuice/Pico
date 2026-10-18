@@ -1722,7 +1722,7 @@ button:disabled {
   min-height: 0;
 }
 .composer-plugin-controls .plugin-web-view-component {
-  flex: 1 1 140px;
+  flex: 0 1 160px;
   width: auto;
   min-width: 120px;
   height: var(--pico-composer-control-height, 32px);
