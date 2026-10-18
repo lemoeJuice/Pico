@@ -27,7 +27,7 @@ import type {
   ToolResultPayload,
   UiContribution,
 } from '../core/types.js';
-import type { ModelInputAttempt, ThreadSnapshot, ThreadToolView } from '../runtime/runtime.js';
+import type { ModelInputAttempt, ThreadSnapshot, ThreadToolView } from '../contracts/runtime.js';
 import { isSessionExpired } from './session.js';
 import { visiblePauseReason } from './pause-reason.js';
 import { shouldSubmitOnEnter } from './composer-keys.js';

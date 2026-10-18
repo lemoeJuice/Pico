@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { ModelStageInput } from '../runtime/stages.js';
-import type { ModelResponse } from '../runtime/model.js';
+import type { ModelResponse } from '../contracts/model.js';
 import { ChatGptPlanAuth, RetryableChatGptAuthorizationExchange } from './chatgpt-plan/auth.js';
 import { ChatGptResponsesAdapter } from './chatgpt-plan/model.js';
 import type { PicoPlugin, PluginHttpRequest } from './host.js';

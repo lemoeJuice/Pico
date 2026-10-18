@@ -19,7 +19,16 @@ import type {
   ToolDefinition,
   ToolResultPayload,
 } from '../core/types.js';
-import { PicoStore, type PluginModelCallRecord } from '../core/store.js';
+import { PicoStore } from '../core/store.js';
+import type { PluginModelCallRecord } from '../contracts/store.js';
+import type {
+  ModelInputAttempt,
+  ModelInputResultSummary,
+  ProviderRequestAttempt,
+  SubmitResult,
+  ThreadSnapshot,
+  ThreadToolView,
+} from '../contracts/runtime.js';
 import { ExecutionPipelines } from '../core/pipeline.js';
 import { ContainerExecutor } from '../executor/container-executor.js';
 import { HostExecutor, requiresExternalExecutor, type ExecutorAdapter } from '../executor/executor.js';
@@ -34,16 +43,18 @@ import { CommandRegistry, PluginHost, type CommandResult, type PluginCatalogEntr
 import type { PluginServices } from '../plugins/services.js';
 import {
   OpenAiCompatibleAdapter,
-  type ModelRequestTrace,
   type ModelAdapter,
-  type ModelPrompt,
-  type ProviderRequestOutcome,
-  type ProviderRequestSummary,
-  type ProviderRequestStart,
-  type ProviderRequestResponse,
-  type ModelResponse,
-  type PromptTurn,
 } from './model.js';
+import type {
+  ModelPrompt,
+  ModelRequestTrace,
+  ModelResponse,
+  PromptTurn,
+  ProviderRequestOutcome,
+  ProviderRequestResponse,
+  ProviderRequestStart,
+  ProviderRequestSummary,
+} from '../contracts/model.js';
 import { assistantReasoningContent } from './reasoning.js';
 import type {
   ModelStageInput,
@@ -59,22 +70,6 @@ export interface RuntimeEvent {
   [key: string]: unknown;
 }
 
-export interface ThreadSnapshot {
-  thread: Thread;
-  records: CanonicalRecord[];
-  executions: Execution[];
-  children: Thread[];
-  hasEarlierRecords: boolean;
-  historyPageSize: number;
-}
-
-export interface ThreadToolView {
-  name: string;
-  description: string;
-  source: 'runtime' | 'executor';
-  enabled: boolean;
-}
-
 interface StoredThreadToolSurface {
   tools: ToolDefinition[];
   sources: Record<string, 'runtime' | 'executor'>;
@@ -84,12 +79,6 @@ const THREAD_TOOL_SURFACES_SETTING = 'thread-tool-surfaces';
 const DISABLED_THREAD_TOOLS_SETTING = 'disabled-thread-tools';
 
 export const THREAD_HISTORY_PAGE_SIZE = 100;
-
-export interface SubmitResult {
-  accepted: boolean;
-  duplicate?: boolean;
-  command?: CommandResult;
-}
 
 function commandResultFromRecord(
   record: CanonicalRecord | null,
@@ -118,47 +107,14 @@ function commandResultFromRecord(
   return command;
 }
 
-export interface ModelInputAttempt {
-  id: string;
-  prompt: ModelPrompt;
-  projectionProvenance?: ProjectionProvenance[];
-  status: 'running' | 'completed' | 'failed' | 'interrupted';
-  error?: string;
-  result?: ModelInputResultSummary;
-  partialOutputCharacters?: number;
-  providerRequests?: ProviderRequestAttempt[];
-  createdAt: string;
-}
-
-export interface ModelInputResultSummary {
-  textCharacters: number;
-  toolCallCount: number;
-  finishReason: string | null;
-  usage: TokenUsage | null;
-  empty: boolean;
-}
-
-export interface ProviderRequestAttempt extends ProviderRequestStart {
-  id: string;
-  status?: number;
-  contentType?: string | null;
-  providerRequestId?: string;
-  outcome: ProviderRequestOutcome | 'running';
-  durationMs?: number;
-  terminalEvent?: string;
-  errorCategory?: ProviderRequestSummary['errorCategory'];
-  errorCode?: string;
-  eventCounts?: Record<string, number>;
-  firstTextMs?: number;
-  deltaTextCharacters?: number;
-  outputTextCharacters?: number;
-  outputItemCounts?: Record<string, number>;
-  toolCallCount?: number;
-  finishReason?: string | null;
-  responseId?: string;
-  usage?: TokenUsage | null;
-  createdAt: string;
-}
+export type {
+  ModelInputAttempt,
+  ModelInputResultSummary,
+  ProviderRequestAttempt,
+  SubmitResult,
+  ThreadSnapshot,
+  ThreadToolView,
+} from '../contracts/runtime.js';
 
 function objectValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
@@ -227,11 +183,25 @@ function diagnosticUsage(value: unknown): TokenUsage | null {
   const inputTokens = count('inputTokens');
   const outputTokens = count('outputTokens');
   const totalTokens = count('totalTokens');
-  if (inputTokens === undefined && outputTokens === undefined && totalTokens === undefined) return null;
+  const cachedInputTokens = count('cachedInputTokens');
+  const cacheWriteTokens = count('cacheWriteTokens');
+  const reasoningTokens = count('reasoningTokens');
+  if (
+    inputTokens === undefined &&
+    outputTokens === undefined &&
+    totalTokens === undefined &&
+    cachedInputTokens === undefined &&
+    cacheWriteTokens === undefined &&
+    reasoningTokens === undefined
+  )
+    return null;
   return {
     ...(inputTokens === undefined ? {} : { inputTokens }),
     ...(outputTokens === undefined ? {} : { outputTokens }),
     ...(totalTokens === undefined ? {} : { totalTokens }),
+    ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
+    ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
+    ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
   };
 }
 
@@ -311,26 +281,19 @@ function safeModelError(error: unknown): string {
   const isError = error instanceof Error;
   const name = isError && /^[a-z][a-z0-9]{0,48}$/i.test(error.name) ? error.name : 'UnknownError';
   const explicitCode = objectValue(error)?.code;
-  const message = isError ? error.message : '';
-  const httpStatus = /^ChatGPT model request returned HTTP ([1-5][0-9]{2})\.$/.exec(message)?.[1];
-  const streamCode = /^ChatGPT model request failed \(([a-z0-9_.:-]{1,80})\)\.$/i.exec(message)?.[1];
   let cause: unknown = error;
   const visited = new Set<object>();
-  let networkCode: string | undefined;
+  let nestedCode: string | undefined;
   for (let depth = 0; depth < 5 && cause && typeof cause === 'object' && !visited.has(cause); depth += 1) {
     visited.add(cause);
     const rawCode = (cause as { code?: unknown }).code;
     if (typeof rawCode === 'string' && /^[a-z0-9_.:-]{1,80}$/i.test(rawCode)) {
-      networkCode = rawCode;
+      nestedCode = rawCode;
       break;
     }
     cause = (cause as { cause?: unknown }).cause;
   }
-  const code =
-    diagnosticLabel(explicitCode, 80) ??
-    (httpStatus ? `http_${httpStatus}` : undefined) ??
-    diagnosticLabel(streamCode, 80) ??
-    diagnosticLabel(networkCode, 80);
+  const code = diagnosticLabel(explicitCode, 80) ?? diagnosticLabel(nestedCode, 80);
   return code ? `Model request failed (${code}).` : `Model request failed (${name}).`;
 }
 
@@ -969,12 +932,12 @@ export class PicoRuntime {
     return this.listThreadTools(threadId);
   }
 
-  private appendProviderRequestDiagnostic(executionId: string, kind: string, detail: Record<string, unknown>): void {
+  private appendExecutionDiagnostic(executionId: string, kind: string, detail: Record<string, unknown>): void {
     try {
       this.store.appendExecutionLog(executionId, kind, detail);
     } catch {
       try {
-        console.warn('Provider request diagnostics could not be persisted.');
+        console.warn('Execution diagnostics could not be persisted.');
       } catch {
         // Diagnostic persistence is best-effort and must not change model execution.
       }
@@ -1714,6 +1677,18 @@ export class PicoRuntime {
     this.modelSignals.set(modelExecutionId, controller);
     let latestDraft = '';
     try {
+      const ignoredLegacyFields = projectionRecords.flatMap((record) => {
+        if (record.kind !== 'assistant') return [];
+        const payload = objectValue(record.payload);
+        return payload && Object.hasOwn(payload, 'reasoningFormat')
+          ? [{ recordId: record.id, field: 'reasoningFormat' }]
+          : [];
+      });
+      if (ignoredLegacyFields.length > 0) {
+        this.appendExecutionDiagnostic(modelExecutionId, 'model-input-incompatible-fields-ignored', {
+          records: ignoredLegacyFields,
+        });
+      }
       const toolSurface = await this.toolSurfaceFor(thread);
       const disabledTools = new Set(this.disabledThreadToolNames(thread.id));
       const enabledTools = toolSurface.tools.filter((tool) => !disabledTools.has(tool.name));
@@ -1764,7 +1739,7 @@ export class PicoRuntime {
         started: (details) => {
           recordModelInput(prompt, modelSettings.provider, projected.provenance);
           const providerAttemptId = randomUUID();
-          this.appendProviderRequestDiagnostic(modelExecutionId, 'provider-request-started', {
+          this.appendExecutionDiagnostic(modelExecutionId, 'provider-request-started', {
             requestId,
             providerAttemptId,
             ...sanitizeRequestStart(details),
@@ -1773,7 +1748,7 @@ export class PicoRuntime {
         },
         response: (providerAttemptId, details) => {
           if (!requestId || !providerAttemptId) return;
-          this.appendProviderRequestDiagnostic(modelExecutionId, 'provider-request-response', {
+          this.appendExecutionDiagnostic(modelExecutionId, 'provider-request-response', {
             requestId,
             providerAttemptId,
             ...sanitizeRequestResponse(details),
@@ -1781,7 +1756,7 @@ export class PicoRuntime {
         },
         settled: (providerAttemptId, details) => {
           if (!requestId || !providerAttemptId) return;
-          this.appendProviderRequestDiagnostic(modelExecutionId, 'provider-request-settled', {
+          this.appendExecutionDiagnostic(modelExecutionId, 'provider-request-settled', {
             requestId,
             providerAttemptId,
             ...sanitizeRequestSummary(details),

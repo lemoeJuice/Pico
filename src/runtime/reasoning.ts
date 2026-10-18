@@ -1,9 +1,6 @@
-/** Read replayable reasoning from current payloads and older DeepSeek payloads. */
+/** Read replayable reasoning from the current assistant payload contract. */
 export function assistantReasoningContent(payload: unknown): string | undefined {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
   const value = payload as Record<string, unknown>;
-  if (typeof value.reasoningContent === 'string') return value.reasoningContent;
-  if (value.reasoningFormat === 'deepseek-content' && typeof value.reasoningSummary === 'string')
-    return value.reasoningSummary;
-  return undefined;
+  return typeof value.reasoningContent === 'string' ? value.reasoningContent : undefined;
 }

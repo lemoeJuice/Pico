@@ -1,7 +1,7 @@
 import type { Execution, ExecutorBinding, ExecutorKind, Project, Thread, ToolDefinition } from '../core/types.js';
-import type { ModelPrompt, ModelResponse } from '../runtime/model.js';
-import type { PluginModelCallRecord } from '../core/store.js';
-import type { ModelInputAttempt } from '../runtime/runtime.js';
+import type { ModelPrompt, ModelResponse } from '../contracts/model.js';
+import type { PluginModelCallRecord } from '../contracts/store.js';
+import type { ModelInputAttempt } from '../contracts/runtime.js';
 
 /** Domain operations available to workflow plugins, independent of Runtime implementation. */
 export interface PluginServices {

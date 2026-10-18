@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { CanonicalRecord, MessagePayload, Thread, ToolCall, ToolResultPayload } from '../core/types.js';
-import type { ModelPrompt, PromptTurn } from '../runtime/model.js';
+import type { ModelPrompt, PromptTurn } from '../contracts/model.js';
 import { assistantReasoningContent } from '../runtime/reasoning.js';
 import type { ProjectionInput, ProjectionProvenance } from '../runtime/stages.js';
 import type { PicoPlugin, PluginContext, PluginHttpRequest } from './host.js';
@@ -448,7 +448,7 @@ export const rollingContextPlugin: PicoPlugin = {
   id: 'pico.rolling-context',
   name: 'Rolling Context',
   version: '0.1.0',
-  pipelinePriority: { projection: 10 },
+  pipelinePriority: { projection: 0 },
   activate(context) {
     const { canonical, pipelines, tools, http, commands, ui } = context;
     const list = (threadId: string): RollingSegment[] => getSegments(context, threadId);

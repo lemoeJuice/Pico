@@ -7,7 +7,10 @@ import type {
   ToolCall,
   ToolDefinition,
 } from '../core/types.js';
-import type { ModelPrompt, ModelRequestParameters, ModelRequestTrace, ModelStreamEvent } from './model.js';
+import type { ModelPrompt, ModelRequestParameters, ModelRequestTrace, ModelStreamEvent } from '../contracts/model.js';
+import type { ProjectionProvenance } from '../contracts/runtime.js';
+
+export type { ProjectionProvenance } from '../contracts/runtime.js';
 
 export interface StepInput {
   thread: Thread;
@@ -23,19 +26,6 @@ export interface ProjectionInput {
   tools: ToolDefinition[];
   toolSources?: Record<string, 'runtime' | 'executor'>;
   provenance?: ProjectionProvenance[];
-}
-
-export interface ProjectionProvenance {
-  id: string;
-  sourcePluginId: string;
-  label: string;
-  kind: 'canonical' | 'plugin' | 'rolling_segment';
-  disposition: 'raw' | 'summary' | 'omitted';
-  canonicalStartSeq?: number;
-  canonicalEndSeq?: number;
-  summaryVersion?: string;
-  turnIndex?: number;
-  reason?: string;
 }
 
 export interface ModelStageInput {

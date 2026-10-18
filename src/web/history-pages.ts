@@ -1,5 +1,5 @@
 import type { AssistantPayload, CanonicalRecord, Execution, ToolResultPayload } from '../core/types.js';
-import type { ThreadSnapshot } from '../runtime/runtime.js';
+import type { ThreadSnapshot } from '../contracts/runtime.js';
 
 function mergeById<T>(older: readonly T[], newer: readonly T[], idOf: (item: T) => string): T[] {
   const values = new Map(older.map((item) => [idOf(item), item]));

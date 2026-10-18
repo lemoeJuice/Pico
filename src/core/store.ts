@@ -21,6 +21,8 @@ import type {
   ToolCall,
   ToolResultPayload,
 } from './types.js';
+import type { PluginModelCallRecord } from '../contracts/store.js';
+export type { PluginModelCallRecord } from '../contracts/store.js';
 
 type SqlRow = Record<string, unknown>;
 
@@ -48,25 +50,6 @@ export interface ExecutionLogEntry {
   kind: string;
   detail: Record<string, unknown>;
   createdAt: string;
-}
-
-export interface PluginModelCallRecord {
-  id: string;
-  pluginId: string;
-  idempotencyKey: string;
-  threadId: string | null;
-  projectId: string | null;
-  purpose: string;
-  provider: string;
-  model: string;
-  prompt: unknown;
-  status: 'running' | 'completed' | 'failed' | 'interrupted';
-  response: unknown;
-  usage: TokenUsage | null;
-  attempts: Array<Record<string, unknown>>;
-  error: string | null;
-  createdAt: string;
-  updatedAt: string;
 }
 
 export interface CanonicalRecordPage {

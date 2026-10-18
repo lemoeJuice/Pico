@@ -1,5 +1,5 @@
 import type { AssistantPayload, Thread, TokenUsage } from '../core/types.js';
-import type { PluginModelCallRecord } from '../core/store.js';
+import type { PluginModelCallRecord } from '../contracts/store.js';
 import type { PicoPlugin, PluginContext, PluginHttpRequest } from './host.js';
 
 export interface UsageRate {

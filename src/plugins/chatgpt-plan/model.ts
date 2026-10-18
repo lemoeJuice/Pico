@@ -7,7 +7,7 @@ import type {
   ModelResponse,
   ModelStreamEvent,
   ProviderRequestSummary,
-} from '../../runtime/model.js';
+} from '../../contracts/model.js';
 
 const responsesUrl = 'https://api.openai.com/v1/responses';
 
@@ -163,6 +163,21 @@ function errorCodeFrom(error: unknown): string | undefined {
   return undefined;
 }
 
+function withProviderErrorCode(error: unknown, code: string | undefined): unknown {
+  if (error instanceof Error && error.name === 'AbortError') return error;
+  const resolvedCode = errorCodeFrom(error) ?? (code && /^[a-z0-9_.:-]{1,80}$/i.test(code) ? code : undefined);
+  if (!resolvedCode) return error;
+  if (object(error)?.code === resolvedCode) return error;
+  const message = error instanceof Error ? error.message : 'ChatGPT model request failed.';
+  const tagged = Object.assign(new Error(message), { cause: error, code: resolvedCode });
+  if (error instanceof Error) tagged.name = error.name;
+  return tagged;
+}
+
+function providerError(message: string, code: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
+}
+
 function outputItemCounts(response: Record<string, unknown>): Record<string, number> {
   const counts: Record<string, number> = {};
   if (!Array.isArray(response.output)) return counts;
@@ -206,7 +221,12 @@ export class ChatGptResponsesAdapter {
       reasoning: { summary: 'auto' },
       ...requestParameters?.fields,
     };
-    let accessToken = await this.auth.accessToken(false, requestTrace);
+    let accessToken: string;
+    try {
+      accessToken = await this.auth.accessToken(false, requestTrace);
+    } catch (error) {
+      throw withProviderErrorCode(error, 'auth');
+    }
     let tracedRequest = await this.requestTraced(body, accessToken, signal, requestTrace, 1);
     // A token may be revoked between the proactive refresh check and this request.
     if (tracedRequest.response.status === 401) {
@@ -221,7 +241,7 @@ export class ChatGptResponsesAdapter {
           errorCategory: 'http',
           errorCode: 'http_401',
         });
-        throw error;
+        throw withProviderErrorCode(error, 'http_401');
       }
       tracedRequest.settle({
         outcome: 'retrying',
@@ -242,7 +262,7 @@ export class ChatGptResponsesAdapter {
         errorCategory: 'http',
         errorCode: `http_${response.status}`,
       });
-      throw new Error(`ChatGPT model request returned HTTP ${response.status}.`);
+      throw providerError(`ChatGPT model request returned HTTP ${response.status}.`, `http_${response.status}`);
     }
     if (!response.body) {
       tracedRequest.settle({
@@ -252,7 +272,7 @@ export class ChatGptResponsesAdapter {
         errorCategory: 'protocol',
         errorCode: 'empty_stream',
       });
-      throw new Error('ChatGPT returned an empty Responses stream.');
+      throw providerError('ChatGPT returned an empty Responses stream.', 'empty_stream');
     }
 
     let reader: ReadableStreamDefaultReader<Uint8Array>;
@@ -266,7 +286,7 @@ export class ChatGptResponsesAdapter {
         errorCategory: interrupted ? 'aborted' : 'protocol',
         errorCode: interrupted ? 'aborted' : 'invalid_stream',
       });
-      throw error;
+      throw withProviderErrorCode(error, interrupted ? undefined : 'invalid_stream');
     }
     const decoder = new TextDecoder();
     let buffer = '';
@@ -494,7 +514,7 @@ export class ChatGptResponsesAdapter {
         ...(firstTextMs === undefined ? {} : { firstTextMs }),
         deltaTextCharacters,
       });
-      throw error;
+      throw withProviderErrorCode(error, interrupted ? undefined : (failureCode ?? errorCodeFrom(error) ?? 'transport'));
     }
     await reader.cancel().catch(() => undefined);
     try {
@@ -604,7 +624,7 @@ export class ChatGptResponsesAdapter {
         ...(firstTextMs === undefined ? {} : { firstTextMs }),
         deltaTextCharacters,
       });
-      throw error;
+      throw withProviderErrorCode(error, interrupted ? undefined : (failureCode ?? errorCodeFrom(error) ?? 'response_failed'));
     }
   }
 
@@ -650,7 +670,7 @@ export class ChatGptResponsesAdapter {
           ? { errorCode: interrupted ? 'aborted' : errorCodeFrom(error)! }
           : {}),
       });
-      throw error;
+      throw withProviderErrorCode(error, interrupted ? undefined : (errorCodeFrom(error) ?? 'transport'));
     }
   }
 

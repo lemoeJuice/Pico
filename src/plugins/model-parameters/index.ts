@@ -1,6 +1,6 @@
 import type { ModelParameterSelection, ModelParameterTarget } from './types.js';
 import type { ModelStageInput } from '../../runtime/stages.js';
-import type { ModelResponse } from '../../runtime/model.js';
+import type { ModelResponse } from '../../contracts/model.js';
 import type { PicoPlugin } from '../host.js';
 import {
   controlsForTarget,

@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, randomBytes, randomUUID, verify } from 'node:crypto';
-import type { ModelRequestTrace } from '../../runtime/model.js';
+import type { ModelRequestTrace } from '../../contracts/model.js';
 import type { ChatGptModelChoice } from './types.js';
 
 const authIssuer = 'https://auth.openai.com';

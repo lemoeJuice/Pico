@@ -1,7 +1,7 @@
 import type { PicoPlugin, PluginContext } from './host.js';
 import type { Execution, Thread, ToolDefinition, UiContribution } from '../core/types.js';
 import type { ProjectionInput, ToolInvocationInput } from '../runtime/stages.js';
-import type { ModelPrompt } from '../runtime/model.js';
+import type { ModelPrompt } from '../contracts/model.js';
 
 type PermissionPolicy = 'allow' | 'deny' | 'ask';
 type ApprovalStatus = PermissionApproval['status'];
