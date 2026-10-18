@@ -35,7 +35,7 @@ body.pico-plugin-popover {
 
 .plugin-ui-component[data-pico-ui-slot='composer.model'] {
   display: flex;
-  width: 100%;
+  width: max-content;
   height: var(--pico-composer-control-height, 32px);
   align-items: center;
   padding: 0;
@@ -43,6 +43,7 @@ body.pico-plugin-popover {
 
 .plugin-ui-popover.plugin-ui-component[data-pico-ui-slot='composer.model'] {
   display: block;
+  width: 100%;
   height: auto;
   min-height: 100%;
   padding: 12px;
@@ -50,7 +51,7 @@ body.pico-plugin-popover {
 
 .model-parameter-controls {
   display: flex;
-  width: 100%;
+  width: max-content;
   min-width: 0;
   align-items: center;
   gap: 7px;
@@ -79,6 +80,9 @@ body.pico-ui-root .model-parameter-control select {
   min-height: var(--pico-composer-control-height, 32px);
   padding: 0 8px;
   font-size: 10px;
+}
+body.pico-ui-root .model-parameter-control select.model-parameter-reasoning {
+  font-weight: 400;
 }
 
 .model-parameter-toggle {
@@ -125,6 +129,7 @@ body.pico-ui-root .model-parameter-control select {
 }
 
 .model-parameter-controls-others {
+  width: 100%;
   align-items: stretch;
   flex-direction: column;
   gap: 12px;

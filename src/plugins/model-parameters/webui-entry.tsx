@@ -34,6 +34,23 @@ function PluginView({
     reportSize();
     return () => observer.disconnect();
   }, [client]);
+  useEffect(() => {
+    const element = wrapper.current;
+    if (!element) return;
+    const reportVisibility = (): void => client.reportVisibility(
+      element.childElementCount > 0,
+      init.popover ? undefined : Math.ceil(element.getBoundingClientRect().width),
+    );
+    const mutationObserver = new MutationObserver(reportVisibility);
+    const resizeObserver = new ResizeObserver(reportVisibility);
+    mutationObserver.observe(element, { childList: true, subtree: true });
+    resizeObserver.observe(element);
+    reportVisibility();
+    return () => {
+      mutationObserver.disconnect();
+      resizeObserver.disconnect();
+    };
+  }, [client, init.popover]);
 
   if (!Component) return <p>This model parameter view is not available.</p>;
   return (

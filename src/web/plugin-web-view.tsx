@@ -7,6 +7,7 @@ import {
   isPluginUiPopoverMessage,
   isPluginUiRequest,
   isPluginUiToolbarStateMessage,
+  isPluginUiVisibilityMessage,
   pluginUiLayoutForSlot,
   pluginUiEventMatchesPlugin,
   samePluginUiContext,
@@ -78,8 +79,14 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
   const [anchorPosition, setAnchorPosition] = useState<{ left: number; top: number; height: number } | null>(null);
   const [popover, setPopover] = useState<{ width: number; height: number } | null>(null);
   const [badgeCount, setBadgeCount] = useState<number | null>(null);
+  const [inlineVisible, setInlineVisible] = useState(true);
+  const [inlineWidth, setInlineWidth] = useState<number | null>(null);
 
   const src = pluginUiUrl(props.pluginId, props.entry, props.viewType, props.viewId);
+  useEffect(() => {
+    setInlineVisible(true);
+    setInlineWidth(null);
+  }, [src]);
   const layout = pluginUiLayoutForSlot(props.uiSlot);
   const hostPopover =
     props.viewType === 'component' &&
@@ -225,6 +232,13 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
         setBadgeCount(popoverMessage.badgeCount);
         return;
       }
+      if (isPluginUiVisibilityMessage(popoverMessage)) {
+        if (current.current.viewType === 'component' && current.current.uiSlot === 'composer.model' && !hostPopover) {
+          setInlineVisible(popoverMessage.visible);
+          setInlineWidth(popoverMessage.width === undefined ? null : Math.ceil(popoverMessage.width));
+        }
+        return;
+      }
       if (message?.type === 'pico:plugin-ui:resize' && typeof message.height === 'number') {
         if (hostPopover) {
           const height = Math.max(80, Math.min(Math.ceil(message.height) + 4, availablePopoverHeight()));
@@ -346,7 +360,11 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
           ? { display: popover ? 'block' : 'none', width: '100%', height: '100%' }
           : layout.controlHeightPx === undefined
             ? undefined
-            : { height: `${layout.controlHeightPx}px` }
+            : {
+                height: `${layout.controlHeightPx}px`,
+                ...(inlineWidth === null ? {} : { width: `${inlineWidth}px`, minWidth: 0, flex: '0 1 auto' }),
+                ...(inlineVisible ? {} : { display: 'none' }),
+              }
       }
       title={`${props.pluginId} ${props.viewType} ${props.viewId}`}
       src={src}

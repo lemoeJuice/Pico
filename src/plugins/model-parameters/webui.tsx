@@ -40,20 +40,27 @@ function Control({
   disabled: boolean;
   onChange(value: ModelParameterValue): void;
 }): ReactElement {
+  const isPrimaryReasoningChoice = control.id === 'reasoningEffort' && control.group === 'primary';
+
   if (control.kind === 'select') {
     return (
       <label className="model-parameter-control">
-        <span>{control.label}</span>
+        {isPrimaryReasoningChoice ? null : <span>{control.label}</span>}
         <select
-          className="pico-ui-control"
+          className={`pico-ui-control${isPrimaryReasoningChoice ? ' model-parameter-reasoning' : ''}`}
           aria-label={control.label}
           value={typeof value === 'string' ? value : String(control.defaultValue ?? '')}
           disabled={disabled}
           onChange={(event) => onChange(event.target.value)}
         >
+          {isPrimaryReasoningChoice ? (
+            <option value="" disabled>
+              reasoning...
+            </option>
+          ) : null}
           {control.options?.map((option) => (
             <option value={option.value} key={option.value}>
-              {option.label}
+              {isPrimaryReasoningChoice ? option.value.toLowerCase() : option.label}
             </option>
           ))}
         </select>

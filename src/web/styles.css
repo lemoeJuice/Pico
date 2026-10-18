@@ -1691,7 +1691,7 @@ button:disabled {
 }
 .composer-plugin-controls {
   display: flex;
-  flex: 0 1 clamp(260px, 48%, 390px);
+  flex: 0 1 auto;
   flex-wrap: wrap;
   margin-right: auto;
   transform: translateX(-3px);

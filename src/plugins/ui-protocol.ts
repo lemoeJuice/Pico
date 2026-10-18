@@ -25,6 +25,19 @@ export interface PluginUiToolbarStateMessage {
   badgeCount: number;
 }
 
+export interface PluginUiVisibilityMessage {
+  type: 'pico:plugin-ui:visibility';
+  visible: boolean;
+  width?: number;
+}
+
+export function isPluginUiVisibilityMessage(value: unknown): value is PluginUiVisibilityMessage {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const message = value as Record<string, unknown>;
+  return message.type === 'pico:plugin-ui:visibility' && typeof message.visible === 'boolean' &&
+    (message.width === undefined || (typeof message.width === 'number' && Number.isFinite(message.width) && message.width >= 0));
+}
+
 export function isPluginUiPopoverMessage(value: unknown): value is PluginUiPopoverMessage {
   if (!value || typeof value !== 'object') return false;
   const message = value as Record<string, unknown>;
@@ -147,6 +160,7 @@ export interface PluginUiClient {
   subscribeContext(listener: (context: PluginUiContext) => void): () => void;
   subscribeEvents(listener: (event: PluginUiEvent) => void): () => void;
   resize(height: number): void;
+  reportVisibility(visible: boolean, width?: number): void;
   close(): void;
 }
 
@@ -285,6 +299,9 @@ export function createPluginUiClient(
     },
     resize(height) {
       if (!closed && Number.isFinite(height)) port.postMessage({ type: 'pico:plugin-ui:resize', height });
+    },
+    reportVisibility(visible, width) {
+      if (!closed) port.postMessage({ type: 'pico:plugin-ui:visibility', visible, ...(width === undefined ? {} : { width }) });
     },
     close() {
       if (closed) return;
