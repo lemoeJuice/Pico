@@ -482,6 +482,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [executorConnected, setExecutorConnected] = useState<boolean | null>(null);
   const [executorError, setExecutorError] = useState<string | null>(null);
   const [executorDetails, setExecutorDetails] = useState<ExecutorStatusDetails>({});
+  const [dismissedExecutorNoticeKey, setDismissedExecutorNoticeKey] = useState<string | null>(null);
+  const [dismissedPauseNoticeKey, setDismissedPauseNoticeKey] = useState<string | null>(null);
   const [executorUpdateOpen, setExecutorUpdateOpen] = useState(false);
   const [executorUpdateBusy, setExecutorUpdateBusy] = useState(false);
   const [executorUpdateError, setExecutorUpdateError] = useState('');
@@ -1937,6 +1939,37 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const timeline = conversationTimeline(renderedRecords, executionGroups);
   const currentState = selectedThread?.state ?? 'idle';
   const pauseReason = visiblePauseReason(currentState, selectedThread?.pauseReason ?? null, [error, activeNotice]);
+  const executorNoticeKey =
+    selectedThread && executorConnected === false && executorError
+      ? JSON.stringify([
+          selectedThread.id,
+          executorError,
+          executorDetails.compatible ?? null,
+          executorDetails.updateAvailable ?? null,
+          executorDetails.executorVersion ?? null,
+          executorDetails.targetVersion ?? null,
+        ])
+      : null;
+  const pauseNoticeKey =
+    selectedThread &&
+    (currentState === 'paused' || currentState === 'pausing') &&
+    selectedThread.pauseReason
+      ? JSON.stringify([selectedThread.id, selectedThread.pauseReason])
+      : null;
+  const showExecutorNotice = executorNoticeKey !== null && dismissedExecutorNoticeKey !== executorNoticeKey;
+  const showPauseNotice = pauseReason !== null && pauseNoticeKey !== null && dismissedPauseNoticeKey !== pauseNoticeKey;
+
+  useEffect(() => {
+    if (dismissedExecutorNoticeKey !== null && dismissedExecutorNoticeKey !== executorNoticeKey) {
+      setDismissedExecutorNoticeKey(null);
+    }
+  }, [dismissedExecutorNoticeKey, executorNoticeKey]);
+
+  useEffect(() => {
+    if (dismissedPauseNoticeKey !== null && dismissedPauseNoticeKey !== pauseNoticeKey) {
+      setDismissedPauseNoticeKey(null);
+    }
+  }, [dismissedPauseNoticeKey, pauseNoticeKey]);
 
   return (
     <div
@@ -2115,7 +2148,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           )}
         </header>
 
-        {selectedThread && executorConnected === false && executorError ? (
+        {showExecutorNotice && selectedThread && executorError && executorNoticeKey ? (
           <div className="banner banner-error executor-error" role="status">
             <div className="executor-error-copy">
               <strong>
@@ -2143,12 +2176,21 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 <summary>Diagnostics</summary>
                 <pre>{executorError}</pre>
               </details>
+              <button
+                type="button"
+                onClick={() => setDismissedExecutorNoticeKey(executorNoticeKey)}
+              >
+                Dismiss
+              </button>
             </div>
           </div>
         ) : null}
-        {pauseReason ? (
+        {pauseReason && showPauseNotice && pauseNoticeKey ? (
           <div className="banner banner-notice pause-reason" role="status">
             <span>{pauseReason}</span>
+            <button type="button" onClick={() => setDismissedPauseNoticeKey(pauseNoticeKey)}>
+              Dismiss
+            </button>
           </div>
         ) : null}
         {error ? (
