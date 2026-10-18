@@ -71,6 +71,8 @@ interface IdentityClaims {
 
 class UnusableChatGptRefreshToken extends Error {}
 
+export class RetryableChatGptAuthorizationExchange extends Error {}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
@@ -224,14 +226,84 @@ export class ChatGptPlanAuth {
     return { authorizationUrl: url.toString() };
   }
 
-  async completeSignIn(callback: URLSearchParams, redirectUri: string): Promise<ChatGptAccountStatus> {
+  parseCallbackUrl(callbackUrl: string, redirectUri: string): URLSearchParams {
+    if (callbackUrl.length > 8192) throw new Error('ChatGPT callback URL is too long.');
+
+    let callback: URL;
+    let redirect: URL;
+    try {
+      callback = new URL(callbackUrl.trim());
+      redirect = new URL(redirectUri);
+    } catch {
+      throw new Error('Paste the full ChatGPT callback URL from the browser address bar.');
+    }
+
+    if (
+      callback.protocol !== 'http:' ||
+      callback.username ||
+      callback.password ||
+      callback.hash ||
+      callback.origin !== redirect.origin ||
+      callback.pathname !== redirect.pathname
+    ) {
+      throw new Error('This callback URL does not match the active ChatGPT sign-in attempt.');
+    }
+
+    const states = callback.searchParams.getAll('state');
+    const codes = callback.searchParams.getAll('code');
+    const errors = callback.searchParams.getAll('error');
+    const clientIds = callback.searchParams.getAll('client_id');
+    if (
+      states.length !== 1 ||
+      codes.length > 1 ||
+      errors.length > 1 ||
+      clientIds.length > 1 ||
+      (clientIds.length === 1 && !clientIds[0]) ||
+      Boolean(codes.length) === Boolean(errors.length)
+    ) {
+      throw new Error('The ChatGPT callback URL is incomplete or malformed.');
+    }
+
+    if (!this.hasPendingAuthorization(states[0] ?? null, redirectUri)) {
+      throw new Error('This ChatGPT sign-in attempt expired or did not match. Start again.');
+    }
+
+    return callback.searchParams;
+  }
+
+  hasPendingAuthorization(state: string | null, redirectUri: string): boolean {
+    if (!state) return false;
+    const attempt = this.pending.get(state);
+    return Boolean(attempt && attempt.redirectUri === redirectUri && attempt.createdAt + 10 * 60_000 > this.now());
+  }
+
+  async completeSignIn(
+    callback: URLSearchParams,
+    redirectUri: string,
+    options: { allowTransportRetry?: boolean } = {},
+  ): Promise<ChatGptAccountStatus> {
     const state = callback.get('state');
     const attempt = state ? this.pending.get(state) : undefined;
     if (!attempt || attempt.redirectUri !== redirectUri || attempt.createdAt + 10 * 60_000 <= this.now()) {
       throw new Error('ChatGPT sign-in expired or did not match this authorization attempt. Start again.');
     }
-    this.pending.delete(attempt.state);
+    const codes = callback.getAll('code');
+    const errors = callback.getAll('error');
+    const clientIds = callback.getAll('client_id');
+    if (
+      callback.getAll('state').length !== 1 ||
+      codes.length > 1 ||
+      errors.length > 1 ||
+      clientIds.length > 1 ||
+      (clientIds.length === 1 && !clientIds[0]) ||
+      Boolean(codes.length) === Boolean(errors.length) ||
+      (codes.length === 1 && !codes[0]) ||
+      (errors.length === 1 && !errors[0])
+    ) {
+      throw new Error('The ChatGPT callback is incomplete or malformed.');
+    }
     if (callback.get('error')) {
+      this.pending.delete(attempt.state);
       if (callback.get('error') === 'access_denied') throw new Error('ChatGPT sign-in was cancelled.');
       throw new Error('ChatGPT sign-in was not completed.');
     }
@@ -239,21 +311,37 @@ export class ChatGptPlanAuth {
     const code = stringField(callback.get('code'), 'authorization code');
     const callbackClientId = callback.get('client_id');
     let clientId = attempt.clientId;
-    if (attempt.clientId === 'dynamic_agent_client') {
-      clientId = stringField(callbackClientId, 'registered client ID');
-      if (clientId === 'dynamic_agent_client') throw new Error('ChatGPT did not finish registering Pico. Start again.');
-    } else if (callbackClientId && callbackClientId !== attempt.clientId) {
-      throw new Error('ChatGPT returned a different client registration. Start sign-in again.');
+    try {
+      if (attempt.clientId === 'dynamic_agent_client') {
+        clientId = stringField(callbackClientId, 'registered client ID');
+        if (clientId === 'dynamic_agent_client') {
+          throw new Error('ChatGPT did not finish registering Pico. Start again.');
+        }
+      } else if (callbackClientId && callbackClientId !== attempt.clientId) {
+        throw new Error('ChatGPT returned a different client registration. Start sign-in again.');
+      }
+    } catch (error) {
+      this.pending.delete(attempt.state);
+      throw error;
     }
 
-    const tokenResponse = await this.exchangeToken({
-      grant_type: 'authorization_code',
-      client_id: clientId,
-      code,
-      code_verifier: attempt.verifier,
-      redirect_uri: attempt.redirectUri,
-      resource,
-    });
+    let tokenResponse: TokenResponse;
+    try {
+      tokenResponse = await this.exchangeToken({
+        grant_type: 'authorization_code',
+        client_id: clientId,
+        code,
+        code_verifier: attempt.verifier,
+        redirect_uri: attempt.redirectUri,
+        resource,
+      });
+    } catch (error) {
+      if (!(error instanceof RetryableChatGptAuthorizationExchange && options.allowTransportRetry !== false)) {
+        this.pending.delete(attempt.state);
+      }
+      throw error;
+    }
+    this.pending.delete(attempt.state);
     const accessToken = stringField(tokenResponse.access_token, 'access token');
     const refreshToken = stringField(tokenResponse.refresh_token, 'refresh token');
     const idToken = stringField(tokenResponse.id_token, 'identity token');
@@ -499,6 +587,11 @@ export class ChatGptPlanAuth {
         errorCategory: aborted ? 'aborted' : 'transport',
         ...(errorCode ? { errorCode } : {}),
       });
+      if (fields.grant_type === 'authorization_code') {
+        throw new RetryableChatGptAuthorizationExchange(
+          'The ChatGPT token request did not return a response. You can retry it once; if the authorization code was already used, start a new sign-in.',
+        );
+      }
       throw error;
     }
     if (providerAttemptId) {
