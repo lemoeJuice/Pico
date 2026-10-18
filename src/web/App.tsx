@@ -3789,7 +3789,7 @@ function ModelExecutionRecord({
   );
 }
 
-function Reasoning({ text }: { text: string }) {
+function Reasoning({ text, label = 'Thinking' }: { text: string; label?: string }) {
   const disclosure = useContext(ThinkingDisclosureContext);
   const expanded = disclosure?.expanded ?? true;
   return (
@@ -3804,7 +3804,7 @@ function Reasoning({ text }: { text: string }) {
             : undefined
         }
       >
-        Thinking
+        {label}
       </summary>
       <Markdown>{reasoningSummaryMarkdown(text)}</Markdown>
     </details>
@@ -3853,7 +3853,22 @@ function AssistantBubble({
         {emptyOutput ? (
           <p className="model-execution-empty-output">This Model Step completed without a visible response.</p>
         ) : null}
-        {assistant.reasoningSummary ? <Reasoning text={assistant.reasoningSummary} /> : null}
+        {assistant.reasoningSummary ? (
+          <Reasoning
+            text={assistant.reasoningSummary}
+            label={
+              assistant.reasoningContent && assistant.reasoningContent !== assistant.reasoningSummary
+                ? 'Thinking summary'
+                : 'Thinking'
+            }
+          />
+        ) : null}
+        {assistant.reasoningContent && assistant.reasoningContent !== assistant.reasoningSummary ? (
+          <Reasoning
+            text={assistant.reasoningContent}
+            label={assistant.reasoningSummary ? 'Reasoning content' : 'Thinking'}
+          />
+        ) : null}
         {assistant.content ? <Markdown>{assistant.content}</Markdown> : null}
         {calls.length > 0 ? (
           <div className="tool-group">

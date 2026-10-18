@@ -62,9 +62,10 @@ export interface ModelRequestParameters {
 
 export interface ModelResponse {
   content: string;
-  /** Provider-supplied reasoning text, including DeepSeek's reasoning_content field. */
+  /** Provider-supplied reasoning text intended for display. */
   reasoningSummary?: string;
-  reasoningFormat?: 'deepseek-content';
+  /** Provider-supplied reasoning state retained for adapters that support replay. */
+  reasoningContent?: string;
   toolCalls: ToolCall[];
   usage: TokenUsage | null;
   model: string;
@@ -221,12 +222,13 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
       const content = typeof message.content === 'string' ? message.content : '';
       if (content) onText(content);
       const responseModel = typeof value.model === 'string' ? value.model : prompt.model;
-      const hasDeepSeekReasoning =
+      const reasoningContent =
         (isDeepSeekModelId(prompt.model) || isDeepSeekModelId(responseModel)) &&
-        typeof message.reasoning_content === 'string';
-      const reasoningSummary = hasDeepSeekReasoning
-        ? (message.reasoning_content as string)
-        : typeof message.reasoning_summary === 'string'
+        typeof message.reasoning_content === 'string'
+          ? (message.reasoning_content as string)
+          : undefined;
+      const reasoningSummary =
+        typeof message.reasoning_summary === 'string'
           ? message.reasoning_summary
           : typeof message.reasoning_summary_text === 'string'
             ? message.reasoning_summary_text
@@ -235,7 +237,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
       const result: ModelResponse = {
         content,
         ...(reasoningSummary ? { reasoningSummary } : {}),
-        ...(hasDeepSeekReasoning ? { reasoningFormat: 'deepseek-content' as const } : {}),
+        ...(reasoningContent ? { reasoningContent } : {}),
         toolCalls: calls.map((item, index) => {
           const fn = item.function as Record<string, unknown> | undefined;
           const name = typeof fn?.name === 'string' ? fn.name : '';
@@ -266,7 +268,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
     let buffer = '';
     let content = '';
     let reasoningSummary = '';
-    let hasDeepSeekReasoning = false;
+    let reasoningContent = '';
     let usage: TokenUsage | null = null;
     let actualModel = prompt.model;
     let finishReason: string | null = null;
@@ -303,7 +305,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
         typeof delta.reasoning_content === 'string'
           ? delta.reasoning_content
           : undefined;
-      if (deepSeekReasoningDelta !== undefined) hasDeepSeekReasoning = true;
+      if (deepSeekReasoningDelta !== undefined) reasoningContent += deepSeekReasoningDelta;
       const reasoningDelta =
         deepSeekReasoningDelta !== undefined
           ? deepSeekReasoningDelta
@@ -313,7 +315,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
               ? delta.reasoning_summary
               : undefined;
       if (reasoningDelta) {
-        reasoningSummary += reasoningDelta;
+        if (deepSeekReasoningDelta === undefined) reasoningSummary += reasoningDelta;
         onEvent?.({ type: 'reasoning_summary.delta', delta: reasoningDelta });
       }
       const chunks = Array.isArray(delta.tool_calls) ? (delta.tool_calls as Array<Record<string, unknown>>) : [];
@@ -368,7 +370,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
     const result = {
       content,
       ...(reasoningSummary ? { reasoningSummary } : {}),
-      ...(hasDeepSeekReasoning ? { reasoningFormat: 'deepseek-content' as const } : {}),
+      ...(reasoningContent ? { reasoningContent } : {}),
       toolCalls,
       usage,
       model: actualModel,

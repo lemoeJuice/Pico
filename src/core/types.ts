@@ -81,9 +81,10 @@ export interface ToolCall {
 
 export interface AssistantPayload {
   content: string;
-  /** Legacy property name; stores provider-supplied reasoning text when available. */
+  /** Provider-supplied reasoning text for display. */
   reasoningSummary?: string;
-  reasoningFormat?: 'deepseek-content';
+  /** Provider-supplied reasoning content retained for adapters that support replay. */
+  reasoningContent?: string;
   toolCalls: ToolCall[];
   batchId: string | null;
   projectionThrough: number;

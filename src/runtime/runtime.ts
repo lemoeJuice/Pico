@@ -44,6 +44,7 @@ import {
   type ModelResponse,
   type PromptTurn,
 } from './model.js';
+import { assistantReasoningContent } from './reasoning.js';
 import type {
   ModelStageInput,
   ProjectionInput,
@@ -1863,7 +1864,7 @@ export class PicoRuntime {
       const payload: AssistantPayload = {
         content: response.content,
         ...(response.reasoningSummary ? { reasoningSummary: response.reasoningSummary } : {}),
-        ...(response.reasoningFormat ? { reasoningFormat: response.reasoningFormat } : {}),
+        ...(response.reasoningContent ? { reasoningContent: response.reasoningContent } : {}),
         toolCalls: calls,
         batchId,
         projectionThrough: through,
@@ -1939,8 +1940,7 @@ export class PicoRuntime {
         turns.push({ kind: 'message', role: 'user', content: projectMessageContent(message, thread) });
       } else if (record.kind === 'assistant') {
         const assistant = record.payload as unknown as AssistantPayload;
-        const reasoningContent =
-          assistant.reasoningFormat === 'deepseek-content' ? assistant.reasoningSummary : undefined;
+        const reasoningContent = assistantReasoningContent(assistant);
         if (assistant.toolCalls.length > 0) {
           turns.push({
             kind: 'assistant_tools',

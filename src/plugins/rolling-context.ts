@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { CanonicalRecord, MessagePayload, Thread, ToolCall, ToolResultPayload } from '../core/types.js';
 import type { ModelPrompt, PromptTurn } from '../runtime/model.js';
+import { assistantReasoningContent } from '../runtime/reasoning.js';
 import type { ProjectionInput, ProjectionProvenance } from '../runtime/stages.js';
 import type { PicoPlugin, PluginContext, PluginHttpRequest } from './host.js';
 
@@ -314,10 +315,7 @@ function promptTurns(records: readonly CanonicalRecord[], thread: Thread): Promp
     } else if (record.kind === 'assistant') {
       const payload = object(record.payload);
       const calls = Array.isArray(payload.toolCalls) ? payload.toolCalls : [];
-      const reasoningContent =
-        payload.reasoningFormat === 'deepseek-content' && typeof payload.reasoningSummary === 'string'
-          ? payload.reasoningSummary
-          : undefined;
+      const reasoningContent = assistantReasoningContent(payload);
       if (calls.length) {
         turns.push({
           kind: 'assistant_tools',
