@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { DEFAULT_THREAD_TITLE } from './types.js';
 import type {
   AssistantPayload,
   CanonicalKind,
@@ -414,7 +415,7 @@ export class PicoStore {
   createThread(
     projectId: string,
     executorKind: ExecutorKind,
-    title = 'New thread',
+    title = DEFAULT_THREAD_TITLE,
     options: {
       parentThreadId?: string | null;
       createdByAgent?: boolean;

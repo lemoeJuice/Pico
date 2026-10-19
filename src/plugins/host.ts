@@ -69,7 +69,10 @@ interface RegisteredPluginPage extends PluginPageContribution {
   pluginId: string;
 }
 
-export interface PluginContext extends Omit<PluginServices, 'models' | 'continuations'> {
+export interface PluginContext extends Omit<PluginServices, 'models' | 'continuations' | 'threads'> {
+  threads: Omit<PluginServices['threads'], 'updateTitle'> & {
+    updateTitle(threadId: string, title: string): Thread;
+  };
   tools: {
     register(
       definition: ToolDefinition,
@@ -544,6 +547,7 @@ export class PluginHost {
       projects: { ...this.services.projects },
       threads: {
         ...this.services.threads,
+        updateTitle: (threadId, title) => this.services.threads.updateTitle(plugin.id, threadId, title),
         create: (projectId, executorKind, title, options = {}) =>
           this.services.threads.create(projectId, executorKind, title, {
             ...options,

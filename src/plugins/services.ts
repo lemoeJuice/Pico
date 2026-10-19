@@ -11,6 +11,7 @@ export interface PluginServices {
   threads: {
     get(threadId: string): Thread | null;
     list(projectId?: string): Thread[];
+    updateTitle(pluginId: string, threadId: string, title: string): Thread;
     tools(threadId: string): Promise<Array<ToolDefinition & { source: 'runtime' | 'executor' }>>;
     binding(threadId: string): ExecutorBinding | null;
     create(
@@ -73,6 +74,7 @@ export const unavailablePluginServices: PluginServices = {
   threads: {
     get: unavailable,
     list: unavailable,
+    updateTitle: unavailable,
     tools: unavailable,
     binding: unavailable,
     create: unavailable,

@@ -16,7 +16,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { PicoRuntime } from './runtime/runtime.js';
 import { currentExecutorVersion } from './executor/bundle.js';
 import { PicoStore } from './core/store.js';
-import type { ExecutorKind, ModelSettings } from './core/types.js';
+import { DEFAULT_THREAD_TITLE, type ExecutorKind, type ModelSettings } from './core/types.js';
 
 function bodyObject(request: Request): Record<string, unknown> {
   if (!request.body || typeof request.body !== 'object' || Array.isArray(request.body)) {
@@ -196,7 +196,7 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     if (body.remoteConnectionId !== undefined && (typeof body.remoteConnectionId !== 'string' || kind !== 'host')) {
       throw new Error('Remote Executor Threads must use Host execution kind.');
     }
-    const title = typeof body.title === 'string' ? body.title : 'New thread';
+    const title = typeof body.title === 'string' ? body.title : DEFAULT_THREAD_TITLE;
     const thread =
       typeof body.remoteConnectionId === 'string'
         ? await runtime.createRemoteThread(

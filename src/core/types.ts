@@ -6,6 +6,8 @@ export type MessageRole = 'user' | 'assistant';
 export type MessageSource = 'user' | 'agent' | 'child';
 export type CanonicalKind = 'message' | 'assistant' | 'tool_result' | 'plugin';
 
+export const DEFAULT_THREAD_TITLE = 'New thread';
+
 export interface Project {
   id: string;
   name: string;

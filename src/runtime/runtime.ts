@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { realpath, stat } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
+import { DEFAULT_THREAD_TITLE } from '../core/types.js';
 import type {
   AssistantPayload,
   CanonicalRecord,
@@ -435,6 +436,7 @@ export class PicoRuntime {
       threads: {
         get: (threadId) => this.store.getThread(threadId),
         list: (projectId) => this.listThreads(projectId),
+        updateTitle: (pluginId, threadId, title) => this.updateThreadTitleFromPlugin(pluginId, threadId, title),
         tools: async (threadId) => {
           const thread = this.store.getThread(threadId);
           if (!thread) throw new Error('Thread not found');
@@ -684,8 +686,12 @@ export class PicoRuntime {
     return this.store.listProjects();
   }
 
-  createThread(projectId: string, executorKind: Thread['executorKind'], title = 'New thread'): Thread {
-    const thread = this.store.createThread(projectId, executorKind, title.trim() || 'New thread');
+  createThread(
+    projectId: string,
+    executorKind: Thread['executorKind'],
+    title = DEFAULT_THREAD_TITLE,
+  ): Thread {
+    const thread = this.store.createThread(projectId, executorKind, title.trim() || DEFAULT_THREAD_TITLE);
     this.publish({ type: 'thread.created', thread });
     return thread;
   }
@@ -693,9 +699,45 @@ export class PicoRuntime {
   updateThreadTitle(threadId: string, title: string): Thread {
     const cleanedTitle = title.trim();
     if (!cleanedTitle) throw new Error('Thread name is required.');
-    const thread = this.store.updateThreadTitle(threadId, cleanedTitle);
-    if (!thread) throw new Error('Thread not found');
-    this.publish({ type: 'thread.updated', thread });
+    let changed = false;
+    const thread = this.store.transaction(() => {
+      const previous = this.store.getThread(threadId);
+      if (!previous) throw new Error('Thread not found');
+      if (previous.title === cleanedTitle) return previous;
+      const updated = this.store.updateThreadTitle(threadId, cleanedTitle);
+      if (!updated) throw new Error('Thread not found');
+      changed = true;
+      this.store.appendPluginRecord(threadId, 'pico.core', {
+        action: 'thread-title-updated',
+        actor: 'user',
+        previousTitle: previous.title,
+        title: cleanedTitle,
+      });
+      return updated;
+    });
+    if (changed) this.publish({ type: 'thread.updated', thread });
+    return thread;
+  }
+
+  private updateThreadTitleFromPlugin(pluginId: string, threadId: string, title: string): Thread {
+    const cleanedTitle = title.trim().replace(/\s+/g, ' ').slice(0, 100).trim();
+    if (!cleanedTitle) throw new Error('Thread name is required.');
+    let changed = false;
+    const thread = this.store.transaction(() => {
+      const previous = this.store.getThread(threadId);
+      if (!previous) throw new Error('Thread not found');
+      if (previous.title === cleanedTitle) return previous;
+      const updated = this.store.updateThreadTitle(threadId, cleanedTitle);
+      if (!updated) throw new Error('Thread not found');
+      changed = true;
+      this.store.appendPluginRecord(threadId, pluginId, {
+        action: 'thread-title-updated',
+        previousTitle: previous.title,
+        title: cleanedTitle,
+      });
+      return updated;
+    });
+    if (changed) this.publish({ type: 'thread.updated', thread });
     return thread;
   }
 
@@ -740,7 +782,7 @@ export class PicoRuntime {
     projectId: string,
     connectionId: string,
     remoteWorkspacePath: string,
-    title = 'New thread',
+    title = DEFAULT_THREAD_TITLE,
   ): Promise<Thread> {
     if (!this.store.getProject(projectId)) throw new Error('Project not found.');
     const connection = this.store.getRemoteExecutorConnection(connectionId);
@@ -750,7 +792,7 @@ export class PicoRuntime {
       connection.accessToken,
       remoteWorkspacePath,
     );
-    const thread = this.store.createThread(projectId, 'host', title.trim() || 'New thread', {
+    const thread = this.store.createThread(projectId, 'host', title.trim() || DEFAULT_THREAD_TITLE, {
       remoteConnectionId: connection.id,
       workspacePath,
     });

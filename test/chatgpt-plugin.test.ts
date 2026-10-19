@@ -19,6 +19,12 @@ describe('ChatGPT provider plugin', () => {
     const state = new Map<string, unknown>();
     const context: PluginContext = {
       ...unavailablePluginServices,
+      threads: {
+        ...unavailablePluginServices.threads,
+        updateTitle: () => {
+          throw new Error('not used by this test');
+        },
+      },
       tools: { register: () => undefined },
       models: {
         complete: async () => {
