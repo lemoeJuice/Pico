@@ -10,7 +10,7 @@
   let context = { thread: null };
   let sequence = 0;
   let requestId = 0;
-  let data = { tools: [], approvals: [], autoReview: false };
+  let data = { tools: [], approvals: [], autoReview: false, autoReviewDenials: false };
   let busy = false;
   let error = '';
   let toolsExpanded = false;
@@ -56,7 +56,7 @@
   async function refresh() {
     const threadId = context.threadId ?? context.thread?.id;
     if (!threadId) {
-      data = { tools: [], approvals: [], autoReview: false };
+      data = { tools: [], approvals: [], autoReview: false, autoReviewDenials: false };
       draw();
       return;
     }
@@ -68,6 +68,7 @@
         tools: Array.isArray(next.tools) ? next.tools : [],
         approvals: Array.isArray(next.approvals) ? next.approvals : [],
         autoReview: next.autoReview === true,
+        autoReviewDenials: next.autoReviewDenials === true,
       };
       error = '';
     } catch (reason) {
@@ -102,8 +103,15 @@
         <div class="permission-popover" role="dialog" aria-label="Tool permissions">
           <div class="popover-heading pico-ui-heading"><strong>Tool permissions</strong><span>Saved for this Thread</span></div>
           <section class="permission-auto-section" aria-label="Automatic review">
-            <div class="permission-auto-copy"><strong>Auto-review</strong><small>Use an independent reviewer for tools set to Ask</small></div>
-            <button type="button" class="permission-switch permission-switch--auto" role="switch" aria-checked="${data.autoReview}" aria-label="Auto-review" data-reviewer ${busy ? 'disabled' : ''}><span></span></button>
+            <div class="permission-auto-primary">
+              <div class="permission-auto-copy"><strong>Auto-review</strong><small>Use an independent reviewer for tools set to Ask</small></div>
+              <button type="button" class="permission-switch permission-switch--auto" role="switch" aria-checked="${data.autoReview}" aria-label="Auto-review" data-reviewer ${busy ? 'disabled' : ''}><span></span></button>
+            </div>
+            <div class="permission-auto-separator"></div>
+            <div class="permission-auto-denials">
+              <div class="permission-auto-copy"><strong>Apply reviewer denials directly</strong><small>Skip manual review for denials. A timeout fails temporarily without a decision; other reviewer errors still need human review.</small></div>
+              <button type="button" class="permission-switch" role="switch" aria-checked="${data.autoReviewDenials}" aria-label="Apply reviewer denials directly" data-reviewer-denials ${busy || !data.autoReview ? 'disabled' : ''}><span></span></button>
+            </div>
           </section>
           ${error ? `<div class="pico-ui-error">${escape(error)}</div>` : ''}
           <section class="permission-tool-section" aria-label="Per-tool defaults">
@@ -140,6 +148,11 @@
   function permissionResultActions() {
     const execution = context.toolResult ?? context.execution;
     const approval = currentApproval();
+    if (approval?.status === 'failed') {
+      return `<section class="permission-result-actions pico-ui-section" aria-label="Permission review failed">
+        <div class="permission-review-failure"><strong>Approval temporarily failed</strong><span>Reviewer timed out. No decision was made; this is not a denial.</span></div>
+      </section>`;
+    }
     const awaiting = execution?.status === 'pending' && approval?.status === 'pending';
     if (!awaiting) return '';
     const review = approval?.reviewer;
@@ -186,6 +199,22 @@
           busy = true;
           draw();
           await api('/reviewer', 'PUT', { threadId: context.thread.id, enabled });
+          await refresh();
+        } catch (reason) {
+          error = reason instanceof Error ? reason.message : String(reason);
+          draw();
+        } finally {
+          busy = false;
+          draw();
+        }
+      });
+      root.querySelector('[data-reviewer-denials]')?.addEventListener('click', async (event) => {
+        if (!context.thread || !data.autoReview) return;
+        const enabled = event.currentTarget.getAttribute('aria-checked') !== 'true';
+        try {
+          busy = true;
+          draw();
+          await api('/reviewer-denials', 'PUT', { threadId: context.thread.id, enabled });
           await refresh();
         } catch (reason) {
           error = reason instanceof Error ? reason.message : String(reason);

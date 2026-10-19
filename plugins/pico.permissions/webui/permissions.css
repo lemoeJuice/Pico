@@ -14,6 +14,21 @@
   padding: 2px;
 }
 
+.permission-review-failure {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 7px 9px;
+  background: color-mix(in srgb, #d3a14d 9%, white);
+  border-left: 3px solid #d3a14d;
+  font-size: 12px;
+}
+
+.permission-review-failure span {
+  color: var(--pico-ui-muted);
+  line-height: 1.4;
+}
+
 .permission-messages {
   display: flex;
   flex: 1 1 auto;
@@ -140,15 +155,26 @@
 }
 
 .permission-auto-section {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  display: grid;
+  gap: 9px;
   margin: 12px 2px 0;
   padding: 10px;
   background: color-mix(in srgb, var(--pico-ui-accent) 6%, var(--pico-ui-panel));
   border: 1px solid var(--pico-ui-border);
   border-radius: 10px;
+}
+
+.permission-auto-primary,
+.permission-auto-denials {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.permission-auto-denials {
+  padding-top: 9px;
+  border-top: 1px solid var(--pico-ui-border);
 }
 
 .permission-auto-copy {
@@ -169,6 +195,10 @@
 .review-result small {
   color: var(--pico-ui-muted);
   font-size: 11px;
+}
+
+.permission-auto-copy small {
+  line-height: 1.4;
 }
 
 .permission-switch {
