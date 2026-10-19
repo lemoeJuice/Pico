@@ -531,6 +531,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     hasApiKey: false,
   });
   const listRef = useRef<HTMLDivElement>(null);
+  const threadScrollbarRef = useRef<HTMLDivElement>(null);
+  const threadScrollbarThumbRef = useRef<HTMLDivElement>(null);
+  const threadScrollbarDrag = useRef<{ pointerId: number; pointerOffset: number } | null>(null);
+  const [threadScrollbar, setThreadScrollbar] = useState({
+    maxScroll: 0,
+    scrollTop: 0,
+    thumbHeight: 0,
+    thumbTop: 0,
+  });
   const pendingThinkingScrollAdjustment = useRef<{
     summary: HTMLElement;
     summaryTop: number;
@@ -684,6 +693,68 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     threads.find((thread) => thread.id === threadId && thread.projectId === projectId) ??
     null;
   const selectedThreadId = selectedThread?.id ?? null;
+  const syncThreadScrollbar = useCallback(() => {
+    const scroll = listRef.current;
+    const track = threadScrollbarRef.current;
+    if (!scroll || !track) {
+      setThreadScrollbar((current) =>
+        current.maxScroll === 0 && current.scrollTop === 0 && current.thumbHeight === 0 && current.thumbTop === 0
+          ? current
+          : { maxScroll: 0, scrollTop: 0, thumbHeight: 0, thumbTop: 0 },
+      );
+      return;
+    }
+
+    const trackHeight = track.clientHeight;
+    const maxScroll = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+    const scrollTop = Math.max(0, Math.min(maxScroll, scroll.scrollTop));
+    const thumbHeight =
+      maxScroll > 0 && trackHeight > 0
+        ? Math.min(
+            trackHeight,
+            Math.max(Math.min(36, trackHeight), (trackHeight * scroll.clientHeight) / scroll.scrollHeight),
+          )
+        : trackHeight;
+    const maxThumbTop = Math.max(0, trackHeight - thumbHeight);
+    const thumbTop = maxScroll > 0 ? (scrollTop / maxScroll) * maxThumbTop : 0;
+
+    setThreadScrollbar((current) =>
+      current.maxScroll === maxScroll &&
+      current.scrollTop === scrollTop &&
+      current.thumbHeight === thumbHeight &&
+      current.thumbTop === thumbTop
+        ? current
+        : { maxScroll, scrollTop, thumbHeight, thumbTop },
+    );
+  }, []);
+  useLayoutEffect(() => {
+    const scroll = listRef.current;
+    const track = threadScrollbarRef.current;
+    if (!scroll || !track) {
+      syncThreadScrollbar();
+      return undefined;
+    }
+
+    syncThreadScrollbar();
+    const observer = new ResizeObserver(syncThreadScrollbar);
+    observer.observe(scroll);
+    observer.observe(track);
+    if (scroll.firstElementChild instanceof HTMLElement) observer.observe(scroll.firstElementChild);
+    return () => observer.disconnect();
+  }, [selectedThreadId, syncThreadScrollbar]);
+  const scrollThreadFromPointer = (clientY: number, pointerOffset: number): void => {
+    const scroll = listRef.current;
+    const track = threadScrollbarRef.current;
+    if (!scroll || !track) return;
+    const trackHeight = track.clientHeight;
+    const thumbHeight = threadScrollbarThumbRef.current?.clientHeight ?? threadScrollbar.thumbHeight;
+    const maxThumbTop = Math.max(0, trackHeight - thumbHeight);
+    const maxScroll = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+    if (maxThumbTop === 0 || maxScroll === 0) return;
+    const trackTop = track.getBoundingClientRect().top;
+    const thumbTop = Math.max(0, Math.min(maxThumbTop, clientY - trackTop - pointerOffset));
+    scroll.scrollTop = (thumbTop / maxThumbTop) * maxScroll;
+  };
   const selectedThreadSending = selectedThread ? sendingThreadIds.has(selectedThread.id) : false;
   const activeNotice = noticeForThread(threadId, threadNotices, notice);
   const assistantDraft = assistantDraftForThread(assistantDrafts, threadId);
@@ -2447,115 +2518,205 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               </div>
             </div>
 
-            <div
-              className="conversation-scroll conversation-scroll-follow-latest"
-              ref={listRef}
-              onScroll={(event) => {
-                const follow = isNearScrollEnd(event.currentTarget);
-                followLatest.current = follow;
-                event.currentTarget.classList.toggle('conversation-scroll-follow-latest', follow);
-              }}
-            >
-              <ThinkingDisclosureContext.Provider value={thinkingDisclosure}>
-                <div className="timeline">
-                  {activeSnapshot?.hasEarlierRecords ? (
-                    <button
-                      className="history-load-more"
-                      type="button"
-                      disabled={loadingEarlierThreadIds.has(selectedThread.id)}
-                      onClick={() => void loadEarlierRecords()}
-                    >
-                      {loadingEarlierThreadIds.has(selectedThread.id)
-                        ? 'Loading earlier messages…'
-                        : 'Load earlier history'}
-                    </button>
-                  ) : null}
-                  {timeline.map((item) =>
-                    item.type === 'group' ? (
-                      <ModelExecutionBranchGroup
-                        key={`group:${item.group.projectionThrough}`}
-                        group={item.group}
-                        threadId={selectedThread.id}
-                        unavailableModelExecutionIds={unavailableModelExecutionIds}
-                        executions={executions}
-                        records={records}
-                        renderTool={renderToolView}
-                        onRetryModelExecution={retryModelExecution}
-                        retryDisabled={currentState === 'running' || currentState === 'pausing'}
-                        draftExecutionId={assistantDrafts[selectedThread.id]?.executionId}
-                      />
-                    ) : item.record.kind === 'message' ? (
-                      <MessageBubble
-                        key={item.record.id}
-                        record={item.record}
-                        thread={selectedThread}
-                        threadId={selectedThread.id}
-                        modelExecutionGroups={[]}
-                        unavailableModelExecutionIds={unavailableModelExecutionIds}
-                        executions={executions}
-                        records={records}
-                        renderTool={renderToolView}
-                        onOpenThread={chooseThread}
-                        onRetryModelExecution={retryModelExecution}
-                        retryDisabled={currentState === 'running' || currentState === 'pausing'}
-                      />
-                    ) : (
-                      <AssistantBubble
-                        key={item.record.id}
-                        record={item.record}
-                        executions={executions}
-                        records={records}
-                        threadId={selectedThread.id}
-                        renderTool={renderToolView}
-                      />
-                    ),
-                  )}
-                  {assistantPreview ? (
-                    <div className="assistant-message draft-message">
-                      <div className="assistant-avatar">
-                        <Sparkles size={13} aria-hidden="true" />
-                      </div>
-                      <div className="message-body">
-                        <div className="message-author">
-                          Pico <span className="typing-label">writing</span>
+            <div className="thread-scroll-container">
+              <div
+                id="thread-message-scroll"
+                className="conversation-scroll conversation-scroll-follow-latest"
+                ref={listRef}
+                role="region"
+                aria-label="Thread messages"
+                tabIndex={0}
+                onScroll={(event) => {
+                  const follow = isNearScrollEnd(event.currentTarget);
+                  followLatest.current = follow;
+                  event.currentTarget.classList.toggle('conversation-scroll-follow-latest', follow);
+                  syncThreadScrollbar();
+                }}
+              >
+                <ThinkingDisclosureContext.Provider value={thinkingDisclosure}>
+                  <div className="timeline">
+                    {activeSnapshot?.hasEarlierRecords ? (
+                      <button
+                        className="history-load-more"
+                        type="button"
+                        disabled={loadingEarlierThreadIds.has(selectedThread.id)}
+                        onClick={() => void loadEarlierRecords()}
+                      >
+                        {loadingEarlierThreadIds.has(selectedThread.id)
+                          ? 'Loading earlier messages…'
+                          : 'Load earlier history'}
+                      </button>
+                    ) : null}
+                    {timeline.map((item) =>
+                      item.type === 'group' ? (
+                        <ModelExecutionBranchGroup
+                          key={`group:${item.group.projectionThrough}`}
+                          group={item.group}
+                          threadId={selectedThread.id}
+                          unavailableModelExecutionIds={unavailableModelExecutionIds}
+                          executions={executions}
+                          records={records}
+                          renderTool={renderToolView}
+                          onRetryModelExecution={retryModelExecution}
+                          retryDisabled={currentState === 'running' || currentState === 'pausing'}
+                          draftExecutionId={assistantDrafts[selectedThread.id]?.executionId}
+                        />
+                      ) : item.record.kind === 'message' ? (
+                        <MessageBubble
+                          key={item.record.id}
+                          record={item.record}
+                          thread={selectedThread}
+                          threadId={selectedThread.id}
+                          modelExecutionGroups={[]}
+                          unavailableModelExecutionIds={unavailableModelExecutionIds}
+                          executions={executions}
+                          records={records}
+                          renderTool={renderToolView}
+                          onOpenThread={chooseThread}
+                          onRetryModelExecution={retryModelExecution}
+                          retryDisabled={currentState === 'running' || currentState === 'pausing'}
+                        />
+                      ) : (
+                        <AssistantBubble
+                          key={item.record.id}
+                          record={item.record}
+                          executions={executions}
+                          records={records}
+                          threadId={selectedThread.id}
+                          renderTool={renderToolView}
+                        />
+                      ),
+                    )}
+                    {assistantPreview ? (
+                      <div className="assistant-message draft-message">
+                        <div className="assistant-avatar">
+                          <Sparkles size={13} aria-hidden="true" />
                         </div>
-                        {assistantPreview.reasoningSummary ? (
-                          <Reasoning text={assistantPreview.reasoningSummary} />
-                        ) : null}
-                        {assistantDraft ? <Markdown>{assistantDraft}</Markdown> : null}
-                        {assistantPreview.tools?.map((call) => (
-                          <ToolCard
-                            key={call.id ?? `${assistantPreview.executionId}:${call.index}`}
-                            call={{
-                              id: call.id ?? `preview:${assistantPreview.executionId}:${call.index}`,
-                              name: call.name ?? 'Tool call',
-                              arguments: {},
-                            }}
-                            execution={undefined}
-                            result={undefined}
-                            preview={{ argumentsText: call.argumentsText }}
-                          />
-                        ))}
-                        {!assistantPreview.tools?.some((call) => call.name === 'shell') ? (
-                          <span className="cursor-block" />
-                        ) : null}
+                        <div className="message-body">
+                          <div className="message-author">
+                            Pico <span className="typing-label">writing</span>
+                          </div>
+                          {assistantPreview.reasoningSummary ? (
+                            <Reasoning text={assistantPreview.reasoningSummary} />
+                          ) : null}
+                          {assistantDraft ? <Markdown>{assistantDraft}</Markdown> : null}
+                          {assistantPreview.tools?.map((call) => (
+                            <ToolCard
+                              key={call.id ?? `${assistantPreview.executionId}:${call.index}`}
+                              call={{
+                                id: call.id ?? `preview:${assistantPreview.executionId}:${call.index}`,
+                                name: call.name ?? 'Tool call',
+                                arguments: {},
+                              }}
+                              execution={undefined}
+                              result={undefined}
+                              preview={{ argumentsText: call.argumentsText }}
+                            />
+                          ))}
+                          {!assistantPreview.tools?.some((call) => call.name === 'shell') ? (
+                            <span className="cursor-block" />
+                          ) : null}
+                        </div>
                       </div>
-                    </div>
-                  ) : null}
-                  {renderedRecords.length === 0 && !assistantPreview ? (
-                    <div className="empty-thread">
-                      <div className="empty-orbit">
-                        <Sparkles size={19} aria-hidden="true" />
+                    ) : null}
+                    {renderedRecords.length === 0 && !assistantPreview ? (
+                      <div className="empty-thread">
+                        <div className="empty-orbit">
+                          <Sparkles size={19} aria-hidden="true" />
+                        </div>
+                        <h2>A fresh Thread</h2>
+                        <p>
+                          Send a message to begin. This Thread is bound to the {executorLabel(selectedThread)}{' '}
+                          environment.
+                        </p>
                       </div>
-                      <h2>A fresh Thread</h2>
-                      <p>
-                        Send a message to begin. This Thread is bound to the {executorLabel(selectedThread)}{' '}
-                        environment.
-                      </p>
-                    </div>
-                  ) : null}
-                </div>
-              </ThinkingDisclosureContext.Provider>
+                    ) : null}
+                  </div>
+                </ThinkingDisclosureContext.Provider>
+              </div>
+              <div
+                ref={threadScrollbarRef}
+                className="thread-scrollbar"
+                role="scrollbar"
+                aria-label="Thread scroll position"
+                aria-controls="thread-message-scroll"
+                aria-orientation="vertical"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={
+                  threadScrollbar.maxScroll > 0
+                    ? Math.round((threadScrollbar.scrollTop / threadScrollbar.maxScroll) * 100)
+                    : 0
+                }
+                aria-valuetext={`${threadScrollbar.maxScroll > 0 ? Math.round((threadScrollbar.scrollTop / threadScrollbar.maxScroll) * 100) : 0}%`}
+                aria-hidden={threadScrollbar.maxScroll === 0}
+                tabIndex={threadScrollbar.maxScroll > 0 ? 0 : -1}
+                onPointerDown={(event) => {
+                  if (threadScrollbar.maxScroll === 0) return;
+                  const thumb = threadScrollbarThumbRef.current;
+                  const onThumb = thumb?.contains(event.target as Node) ?? false;
+                  const pointerOffset = onThumb
+                    ? event.clientY - thumb!.getBoundingClientRect().top
+                    : (thumb?.clientHeight ?? 0) / 2;
+                  threadScrollbarDrag.current = { pointerId: event.pointerId, pointerOffset };
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  if (!onThumb) scrollThreadFromPointer(event.clientY, pointerOffset);
+                  event.preventDefault();
+                }}
+                onPointerMove={(event) => {
+                  const drag = threadScrollbarDrag.current;
+                  if (drag?.pointerId === event.pointerId) {
+                    scrollThreadFromPointer(event.clientY, drag.pointerOffset);
+                  }
+                }}
+                onPointerUp={(event) => {
+                  if (threadScrollbarDrag.current?.pointerId === event.pointerId) {
+                    threadScrollbarDrag.current = null;
+                  }
+                }}
+                onPointerCancel={() => {
+                  threadScrollbarDrag.current = null;
+                }}
+                onKeyDown={(event) => {
+                  const scroll = listRef.current;
+                  if (!scroll) return;
+                  const page = Math.max(40, scroll.clientHeight);
+                  let nextScrollTop: number;
+                  switch (event.key) {
+                    case 'ArrowDown':
+                      nextScrollTop = scroll.scrollTop + 40;
+                      break;
+                    case 'ArrowUp':
+                      nextScrollTop = scroll.scrollTop - 40;
+                      break;
+                    case 'PageDown':
+                      nextScrollTop = scroll.scrollTop + page;
+                      break;
+                    case 'PageUp':
+                      nextScrollTop = scroll.scrollTop - page;
+                      break;
+                    case 'Home':
+                      nextScrollTop = 0;
+                      break;
+                    case 'End':
+                      nextScrollTop = threadScrollbar.maxScroll;
+                      break;
+                    default:
+                      return;
+                  }
+                  event.preventDefault();
+                  scroll.scrollTop = nextScrollTop;
+                }}
+              >
+                <div
+                  ref={threadScrollbarThumbRef}
+                  className="thread-scrollbar-thumb"
+                  style={{
+                    height: `${threadScrollbar.thumbHeight}px`,
+                    transform: `translateY(${threadScrollbar.thumbTop}px)`,
+                  }}
+                />
+              </div>
             </div>
 
             <div className="composer-wrap">
@@ -3424,7 +3585,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           ) : null}
         </Modal>
       ) : null}
-
     </div>
   );
 }

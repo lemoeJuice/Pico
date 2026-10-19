@@ -77,6 +77,11 @@
   overflow-wrap: anywhere;
 }
 
+.tool-card .tool-search-match {
+  max-height: none;
+  overflow: visible;
+}
+
 .tool-card .tool-long-field > pre {
   max-height: 300px;
 }
