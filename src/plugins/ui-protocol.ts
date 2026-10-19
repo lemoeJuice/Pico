@@ -134,6 +134,8 @@ export type PluginUiResponse =
 export interface PluginUiInitMessage {
   type: 'pico:plugin-ui:init';
   protocolVersion: number;
+  /** Correlates the iframe's ready response with the host's diagnostic record. */
+  attemptId?: string;
   pluginId: string;
   entry: string;
   viewType: 'page' | 'component';
@@ -160,6 +162,7 @@ export interface PluginUiClient {
   subscribeContext(listener: (context: PluginUiContext) => void): () => void;
   subscribeEvents(listener: (event: PluginUiEvent) => void): () => void;
   resize(height: number): void;
+  ready(attemptId?: string): void;
   /** Pass preferred content width for inline composer.model controls. */
   reportVisibility(visible: boolean, width?: number): void;
   close(): void;
@@ -258,6 +261,10 @@ export function createPluginUiClient(
   port.start();
 
   return {
+    ready(attemptId) {
+      if (typeof attemptId !== 'string' || closed) return;
+      port.postMessage({ type: 'pico:plugin-ui:ready', attemptId });
+    },
     props(currentSettings, currentContext = context) {
       settings = currentSettings;
       context = currentContext;

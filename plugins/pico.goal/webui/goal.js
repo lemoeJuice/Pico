@@ -172,6 +172,8 @@
     port.onmessage = (portEvent) => accept(portEvent.data);
     port.start();
     draw();
+    if (typeof init.attemptId === 'string')
+      port.postMessage({ type: 'pico:plugin-ui:ready', attemptId: init.attemptId });
     void refresh();
   });
 })();

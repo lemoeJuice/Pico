@@ -22,6 +22,7 @@ function PluginView({
   const Component = pluginWebUi.components[init.viewId as keyof typeof pluginWebUi.components];
 
   useEffect(() => () => client.close(), [client]);
+  useEffect(() => client.ready(init.attemptId), [client, init.attemptId]);
   useEffect(() => client.subscribeSettings(setSettings), [client]);
   useEffect(() => {
     document.body.classList.toggle('pico-plugin-popover', init.popover === true);

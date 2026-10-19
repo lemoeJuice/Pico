@@ -186,6 +186,9 @@
         void refresh();
     };
     port.start();
+    render();
+    if (typeof init.attemptId === 'string')
+      port.postMessage({ type: 'pico:plugin-ui:ready', attemptId: init.attemptId });
     void refresh();
   });
 })();

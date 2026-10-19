@@ -70,6 +70,7 @@ import {
 } from './model-execution-groups.js';
 import { conversationTimeline } from './conversation-timeline.js';
 import { PluginWebView } from './plugin-web-view.js';
+import { DeveloperSettings } from './developer-settings.js';
 import { appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from './history-pages.js';
 import {
   Archive,
@@ -466,6 +467,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [pluginManagerOpen, setPluginManagerOpen] = useState(false);
   const [memoryManagerOpen, setMemoryManagerOpen] = useState(false);
   const [archivedThreadsOpen, setArchivedThreadsOpen] = useState(false);
+  const [developerMenuOpen, setDeveloperMenuOpen] = useState(false);
   const [archivedThreads, setArchivedThreads] = useState<Thread[]>([]);
   const [archivedThreadsLoading, setArchivedThreadsLoading] = useState(false);
   const [archivedThreadActionId, setArchivedThreadActionId] = useState<string | null>(null);
@@ -2757,15 +2759,17 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       {settingsOpen ? (
         <Modal
           title={
-            archivedThreadsOpen
-              ? 'Archived Threads'
-              : memoryManagerOpen
-                ? 'Memory'
-                : pluginManagerOpen
-                  ? 'Plugins'
-                  : pluginPageSelection
-                    ? 'Plugin settings'
-                    : 'Model connections'
+            developerMenuOpen
+              ? 'Developer'
+              : archivedThreadsOpen
+                ? 'Archived Threads'
+                : memoryManagerOpen
+                  ? 'Memory'
+                  : pluginManagerOpen
+                    ? 'Plugins'
+                    : pluginPageSelection
+                      ? 'Plugin settings'
+                      : 'Model connections'
           }
           onClose={() => {
             setSettingsOpen(false);
@@ -2773,83 +2777,110 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             setPluginManagerOpen(false);
             setMemoryManagerOpen(false);
             setArchivedThreadsOpen(false);
+            setDeveloperMenuOpen(false);
           }}
           error={error}
           onDismissError={() => setError('')}
         >
-          {pluginInfo ? (
-            <nav className="plugin-settings-pages" aria-label="Plugin settings pages">
-              <button
-                type="button"
-                className={`button ${!pluginPageSelection && !pluginManagerOpen && !memoryManagerOpen && !archivedThreadsOpen ? 'button-soft' : 'button-quiet'}`}
-                onClick={() => {
-                  setPluginPageSelection(null);
-                  setPluginManagerOpen(false);
-                  setMemoryManagerOpen(false);
-                  setArchivedThreadsOpen(false);
-                }}
-              >
-                Provider
-              </button>
-              <button
-                type="button"
-                className={`button ${pluginManagerOpen ? 'button-soft' : 'button-quiet'}`}
-                onClick={() => {
-                  setPluginPageSelection(null);
-                  setPluginManagerOpen(true);
-                  setMemoryManagerOpen(false);
-                  setArchivedThreadsOpen(false);
-                }}
-              >
-                Plugins
-              </button>
-              {memoryPages.length > 0 ? (
+          <nav className="plugin-settings-pages" aria-label="Settings pages">
+            {pluginInfo ? (
+              <>
                 <button
                   type="button"
-                  className={`button ${memoryManagerOpen ? 'button-soft' : 'button-quiet'}`}
+                  className={`button ${!pluginPageSelection && !pluginManagerOpen && !memoryManagerOpen && !archivedThreadsOpen && !developerMenuOpen ? 'button-soft' : 'button-quiet'}`}
+                  onClick={() => {
+                    setPluginPageSelection(null);
+                    setPluginManagerOpen(false);
+                    setMemoryManagerOpen(false);
+                    setArchivedThreadsOpen(false);
+                    setDeveloperMenuOpen(false);
+                  }}
+                >
+                  Provider
+                </button>
+                <button
+                  type="button"
+                  className={`button ${pluginManagerOpen ? 'button-soft' : 'button-quiet'}`}
+                  onClick={() => {
+                    setPluginPageSelection(null);
+                    setPluginManagerOpen(true);
+                    setMemoryManagerOpen(false);
+                    setArchivedThreadsOpen(false);
+                    setDeveloperMenuOpen(false);
+                  }}
+                >
+                  Plugins
+                </button>
+                {memoryPages.length > 0 ? (
+                  <button
+                    type="button"
+                    className={`button ${memoryManagerOpen ? 'button-soft' : 'button-quiet'}`}
+                    onClick={() => {
+                      setPluginManagerOpen(false);
+                      setPluginPageSelection(null);
+                      setMemoryManagerOpen(true);
+                      setArchivedThreadsOpen(false);
+                      setDeveloperMenuOpen(false);
+                    }}
+                  >
+                    Memory
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className={`button ${archivedThreadsOpen ? 'button-soft' : 'button-quiet'}`}
                   onClick={() => {
                     setPluginManagerOpen(false);
                     setPluginPageSelection(null);
-                    setMemoryManagerOpen(true);
-                    setArchivedThreadsOpen(false);
+                    setMemoryManagerOpen(false);
+                    setArchivedThreadsOpen(true);
+                    setDeveloperMenuOpen(false);
                   }}
                 >
-                  Memory
+                  Archived Threads
                 </button>
-              ) : null}
-              <button
-                type="button"
-                className={`button ${archivedThreadsOpen ? 'button-soft' : 'button-quiet'}`}
-                onClick={() => {
-                  setPluginManagerOpen(false);
-                  setPluginPageSelection(null);
-                  setMemoryManagerOpen(false);
-                  setArchivedThreadsOpen(true);
-                }}
-              >
-                Archived Threads
-              </button>
-              {pluginInfo.pages
-                .filter((page) => page.pluginId !== 'pico.project-context' && page.pluginId !== 'pico.global-memory')
-                .map((page) => (
-                  <button
-                    type="button"
-                    className={`button ${!pluginManagerOpen && !memoryManagerOpen && !archivedThreadsOpen && pluginPageSelection?.pluginId === page.pluginId && pluginPageSelection.pageId === page.id ? 'button-soft' : 'button-quiet'}`}
-                    key={`${page.pluginId}:${page.id}`}
-                    onClick={() => {
-                      setPluginManagerOpen(false);
-                      setMemoryManagerOpen(false);
-                      setArchivedThreadsOpen(false);
-                      setPluginPageSelection({ pluginId: page.pluginId, pageId: page.id });
-                    }}
-                    title={page.description}
-                  >
-                    {page.label}
-                  </button>
-                ))}
-            </nav>
-          ) : null}
-          {archivedThreadsOpen ? (
+                {pluginInfo.pages
+                  .filter((page) => page.pluginId !== 'pico.project-context' && page.pluginId !== 'pico.global-memory')
+                  .map((page) => (
+                    <button
+                      type="button"
+                      className={`button ${!pluginManagerOpen && !memoryManagerOpen && !archivedThreadsOpen && !developerMenuOpen && pluginPageSelection?.pluginId === page.pluginId && pluginPageSelection.pageId === page.id ? 'button-soft' : 'button-quiet'}`}
+                      key={`${page.pluginId}:${page.id}`}
+                      onClick={() => {
+                        setPluginManagerOpen(false);
+                        setMemoryManagerOpen(false);
+                        setArchivedThreadsOpen(false);
+                        setDeveloperMenuOpen(false);
+                        setPluginPageSelection({ pluginId: page.pluginId, pageId: page.id });
+                      }}
+                      title={page.description}
+                    >
+                      {page.label}
+                    </button>
+                  ))}
+              </>
+            ) : null}
+            <button
+              type="button"
+              className={`button ${developerMenuOpen ? 'button-soft' : 'button-quiet'}`}
+              onClick={() => {
+                setPluginPageSelection(null);
+                setPluginManagerOpen(false);
+                setMemoryManagerOpen(false);
+                setArchivedThreadsOpen(false);
+                setDeveloperMenuOpen(true);
+              }}
+            >
+              Developer
+            </button>
+          </nav>
+          {developerMenuOpen ? (
+            <DeveloperSettings
+              plugins={pluginInfo?.plugins ?? []}
+              catalog={pluginInfo?.catalog ?? []}
+              pluginErrors={pluginInfo?.errors ?? []}
+            />
+          ) : archivedThreadsOpen ? (
             <section className="plugin-settings-page archived-threads-page" aria-label="Archived Threads">
               <p className="form-intro">Archived Threads are hidden from the active project lists.</p>
               <p className="field-note archived-threads-retention">
