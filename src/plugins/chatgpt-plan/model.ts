@@ -10,6 +10,18 @@ import type {
 } from '../../contracts/model.js';
 
 const responsesUrl = 'https://api.openai.com/v1/responses';
+const FETCH_FAILED_RETRY_INTERVAL_MS = 2_000;
+const MAX_FETCH_FAILED_RETRIES = 5;
+const RETRYABLE_FETCH_ERROR_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ETIMEDOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_SOCKET',
+]);
 
 function responseInput(prompt: ModelPrompt): Array<Record<string, unknown>> {
   return prompt.turns.flatMap((turn): Array<Record<string, unknown>> => {
@@ -176,6 +188,28 @@ function errorCodeFrom(error: unknown): string | undefined {
   return undefined;
 }
 
+function isRetryableFetchFailure(error: unknown): boolean {
+  const code = errorCodeFrom(error)?.toUpperCase();
+  if (code) return RETRYABLE_FETCH_ERROR_CODES.has(code);
+  return error instanceof TypeError && error.message.toLowerCase() === 'fetch failed';
+}
+
+function waitForFetchRetry(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    let timeout: ReturnType<typeof setTimeout>;
+    const onAbort = (): void => {
+      clearTimeout(timeout);
+      reject(new DOMException('The operation was aborted.', 'AbortError'));
+    };
+    timeout = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, FETCH_FAILED_RETRY_INTERVAL_MS);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 function withProviderErrorCode(error: unknown, code: string | undefined): unknown {
   if (error instanceof Error && error.name === 'AbortError') return error;
   const resolvedCode = errorCodeFrom(error) ?? (code && /^[a-z0-9_.:-]{1,80}$/i.test(code) ? code : undefined);
@@ -206,6 +240,11 @@ interface TracedRequest {
   response: Response;
   startedAt: number;
   settle(summary: ProviderRequestSummary): void;
+}
+
+interface ProviderRequestRetryState {
+  attempt: number;
+  retries: number;
 }
 
 export class ChatGptResponsesAdapter {
@@ -240,7 +279,8 @@ export class ChatGptResponsesAdapter {
     } catch (error) {
       throw withProviderErrorCode(error, 'auth');
     }
-    let tracedRequest = await this.requestTraced(body, accessToken, signal, requestTrace, 1);
+    const retryState: ProviderRequestRetryState = { attempt: 0, retries: 0 };
+    let tracedRequest = await this.requestTraced(body, accessToken, signal, requestTrace, retryState);
     // A token may be revoked between the proactive refresh check and this request.
     if (tracedRequest.response.status === 401) {
       await tracedRequest.response.body?.cancel().catch(() => undefined);
@@ -263,7 +303,7 @@ export class ChatGptResponsesAdapter {
         errorCategory: 'http',
         errorCode: 'http_401',
       });
-      tracedRequest = await this.requestTraced(body, accessToken, signal, requestTrace, 2);
+      tracedRequest = await this.requestTraced(body, accessToken, signal, requestTrace, retryState);
     }
     const response = tracedRequest.response;
     if (!response.ok) {
@@ -646,44 +686,54 @@ export class ChatGptResponsesAdapter {
     accessToken: string,
     signal: AbortSignal,
     trace: ModelRequestTrace | undefined,
-    attempt: number,
+    retryState: ProviderRequestRetryState,
   ): Promise<TracedRequest> {
-    const startedAt = Date.now();
-    const providerAttemptId =
-      trace?.started({
-        provider: 'chatgpt-plan',
-        protocol: 'https+sse',
-        endpoint: responsesUrl,
-        attempt,
-      }) ?? '';
-    let settled = false;
-    const settle = (summary: ProviderRequestSummary): void => {
-      if (settled) return;
-      settled = true;
-      if (providerAttemptId) trace?.settled(providerAttemptId, summary);
-    };
-    try {
-      const response = await this.request(body, accessToken, signal);
-      if (providerAttemptId) {
-        const providerRequestId = response.headers.get('x-request-id') ?? response.headers.get('openai-request-id');
-        trace?.response(providerAttemptId, {
-          status: response.status,
-          contentType: response.headers.get('content-type'),
-          ...(providerRequestId ? { providerRequestId } : {}),
+    while (true) {
+      const startedAt = Date.now();
+      const attempt = ++retryState.attempt;
+      const providerAttemptId =
+        trace?.started({
+          provider: 'chatgpt-plan',
+          protocol: 'https+sse',
+          endpoint: responsesUrl,
+          attempt,
+        }) ?? '';
+      let settled = false;
+      const settle = (summary: ProviderRequestSummary): void => {
+        if (settled) return;
+        settled = true;
+        if (providerAttemptId) trace?.settled(providerAttemptId, summary);
+      };
+      try {
+        const response = await this.request(body, accessToken, signal);
+        if (providerAttemptId) {
+          const providerRequestId = response.headers.get('x-request-id') ?? response.headers.get('openai-request-id');
+          trace?.response(providerAttemptId, {
+            status: response.status,
+            contentType: response.headers.get('content-type'),
+            ...(providerRequestId ? { providerRequestId } : {}),
+          });
+        }
+        return { response, startedAt, settle };
+      } catch (error) {
+        const interrupted = signal.aborted || (error instanceof Error && error.name === 'AbortError');
+        const retryableFetchFailure = isRetryableFetchFailure(error);
+        const shouldRetry =
+          !interrupted && retryState.retries < MAX_FETCH_FAILED_RETRIES && retryableFetchFailure;
+        const errorCode =
+          interrupted ? 'aborted' : errorCodeFrom(error) ?? (retryableFetchFailure ? 'fetch_failed' : undefined);
+        settle({
+          outcome: interrupted ? 'interrupted' : shouldRetry ? 'retrying' : 'failed',
+          durationMs: Date.now() - startedAt,
+          errorCategory: interrupted ? 'aborted' : 'transport',
+          ...(errorCode ? { errorCode } : {}),
         });
+        if (interrupted || !shouldRetry) {
+          throw withProviderErrorCode(error, interrupted ? undefined : (errorCode ?? 'transport'));
+        }
+        retryState.retries += 1;
+        await waitForFetchRetry(signal);
       }
-      return { response, startedAt, settle };
-    } catch (error) {
-      const interrupted = signal.aborted || (error instanceof Error && error.name === 'AbortError');
-      settle({
-        outcome: interrupted ? 'interrupted' : 'failed',
-        durationMs: Date.now() - startedAt,
-        errorCategory: interrupted ? 'aborted' : 'transport',
-        ...((interrupted ? 'aborted' : errorCodeFrom(error))
-          ? { errorCode: interrupted ? 'aborted' : errorCodeFrom(error)! }
-          : {}),
-      });
-      throw withProviderErrorCode(error, interrupted ? undefined : (errorCodeFrom(error) ?? 'transport'));
     }
   }
 
