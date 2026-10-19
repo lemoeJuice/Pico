@@ -1,6 +1,99 @@
 #root {
   width: 100%;
+  min-width: 0;
   overflow: visible;
+  container-type: inline-size;
+}
+
+.permission-result-actions {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+  max-width: 100%;
+  padding: 2px;
+}
+
+.permission-messages {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+}
+
+.permission-decisions {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  margin-left: auto;
+}
+
+.review-result {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  min-width: 0;
+  gap: 7px;
+  padding: 6px 8px;
+  background: color-mix(in srgb, #d3a14d 9%, white);
+  border-left: 3px solid #d3a14d;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.review-result strong,
+.review-result small {
+  flex: 0 0 auto;
+}
+
+.review-result span,
+.permission-messages > .pico-ui-error {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-result small {
+  max-width: 30%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.permission-messages > .pico-ui-error {
+  flex: 0 1 auto;
+  margin: 0;
+}
+
+@container (max-width: 520px) {
+  .permission-result-actions {
+    flex-wrap: wrap;
+  }
+
+  .permission-messages,
+  .permission-decisions {
+    flex: 0 0 100%;
+    width: 100%;
+  }
+
+  .permission-decisions {
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+
+  .permission-decisions .pico-ui-button {
+    min-height: 28px;
+    padding: 4px 7px;
+    font-size: 12px;
+  }
+}
+
+@container (max-width: 360px) {
+  .permission-decisions .pico-ui-button {
+    padding: 4px 5px;
+    font-size: 11px;
+  }
 }
 
 .toolbar-panel {
@@ -76,17 +169,8 @@
   accent-color: var(--pico-ui-accent);
 }
 
-.review-result {
-  display: grid;
-  gap: 3px;
-  padding: 6px 8px;
-  background: color-mix(in srgb, #d3a14d 9%, white);
-  border-left: 3px solid #d3a14d;
-  font-size: 12px;
-}
-
 .review-result span {
-  overflow-wrap: anywhere;
+  white-space: nowrap;
 }
 
 .tool-list-disclosure {
@@ -157,20 +241,4 @@
 .permission-row select {
   flex: 0 0 auto;
   font-size: 10px;
-}
-
-.remember {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-right: auto;
-  color: var(--pico-ui-muted);
-  font-size: 11px;
-}
-
-.remember .pico-ui-control {
-  min-width: 14px;
-  min-height: 14px;
-  margin: 0;
-  padding: 0;
 }

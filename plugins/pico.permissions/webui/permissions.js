@@ -133,12 +133,14 @@
     if (!awaiting) return '';
     const review = approval?.reviewer;
     return `<section class="permission-result-actions pico-ui-section" aria-label="Permission decision">
-      ${review ? `<div class="review-result"><strong>${escape(review.outcome === 'allow' ? 'Auto-review allowed' : review.outcome === 'deny' ? 'Auto-review denied' : 'Auto-review unavailable')}</strong><span>${escape(review.reason)}</span>${review.model ? `<small>Reviewer model: ${escape(review.model)}</small>` : ''}</div>` : ''}
-      ${error ? `<div class="pico-ui-error">${escape(error)}</div>` : ''}
-      <div class="pico-ui-actions">
-        ${review ? '' : '<label class="remember"><input class="pico-ui-control" id="remember" type="checkbox" /> Allow this tool in this Thread</label>'}
-        <button class="pico-ui-button pico-ui-button--danger" data-decision="deny" ${busy ? 'disabled' : ''}>Deny</button>
-        <button class="pico-ui-button pico-ui-button--primary" data-decision="allow" ${busy ? 'disabled' : ''}>Allow once</button>
+      ${review || error ? `<div class="permission-messages">
+        ${review ? `<div class="review-result"><strong>${escape(review.outcome === 'allow' ? 'Auto-review allowed' : review.outcome === 'deny' ? 'Auto-review denied' : 'Auto-review unavailable')}</strong><span class="review-reason" title="${escape(review.reason)}">${escape(review.reason)}</span>${review.model ? `<small title="${escape(review.model)}">Reviewer model: ${escape(review.model)}</small>` : ''}</div>` : ''}
+        ${error ? `<div class="pico-ui-error" title="${escape(error)}">${escape(error)}</div>` : ''}
+      </div>` : ''}
+      <div class="pico-ui-actions permission-decisions">
+        <button type="button" class="pico-ui-button pico-ui-button--danger" data-decision="deny" ${busy ? 'disabled' : ''}>Deny</button>
+        <button type="button" class="pico-ui-button pico-ui-button--primary" data-decision="allow" ${busy ? 'disabled' : ''}>Allow once</button>
+        ${review ? '' : `<button type="button" class="pico-ui-button" data-decision="allow" data-remember-for-thread="true" aria-label="Allow this tool in this Thread" title="Allow this tool in this Thread" ${busy ? 'disabled' : ''}>Allow in Thread</button>`}
       </div>
     </section>`;
   }
@@ -184,7 +186,7 @@
     root.querySelectorAll('button[data-decision]').forEach((button) => {
       button.addEventListener('click', async () => {
         if (!approvalId()) return;
-        const rememberForThread = Boolean(root.querySelector('#remember')?.checked);
+        const rememberForThread = button.getAttribute('data-remember-for-thread') === 'true';
         try {
           busy = true;
           draw();
