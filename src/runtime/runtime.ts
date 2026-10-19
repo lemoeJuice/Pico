@@ -1838,6 +1838,7 @@ export class PicoRuntime {
       const batchId = calls.length > 0 ? `${modelExecutionId}:batch` : null;
       const payload: AssistantPayload = {
         content: response.content,
+        provider: modelSettings.provider,
         ...(response.reasoningSummary ? { reasoningSummary: response.reasoningSummary } : {}),
         ...(response.reasoningContent ? { reasoningContent: response.reasoningContent } : {}),
         toolCalls: calls,

@@ -144,19 +144,38 @@ export function estimateUsageCost(usage: TokenUsage | null, rate: UsageRate | nu
 function canonicalUsageRows(context: PluginContext, threads: Thread[], rates: UsageRate[]): UsageRow[] {
   const rows: UsageRow[] = [];
   for (const thread of threads) {
-    for (const record of context.canonical.list(thread.id)) {
-      if (record.kind !== 'assistant') continue;
+    const canonicalRecords = context.canonical.list(thread.id);
+    const assistantRecords = canonicalRecords.filter((record) => record.kind === 'assistant');
+    if (assistantRecords.length === 0) continue;
+    const providersByAssistant = new Map<string, Set<string>>();
+    for (const record of canonicalRecords) {
+      if (record.kind !== 'plugin') continue;
+      const payload = object(record.payload);
+      if (payload.pluginId !== 'pico.usage' || payload.action !== 'main-provider-attributed') continue;
+      const assistantRecordId = typeof payload.assistantRecordId === 'string' ? payload.assistantRecordId : '';
+      const provider = typeof payload.provider === 'string' ? payload.provider.trim() : '';
+      if (assistantRecordId && provider && provider !== 'unknown') {
+        const providers = providersByAssistant.get(assistantRecordId) ?? new Set<string>();
+        providers.add(provider);
+        providersByAssistant.set(assistantRecordId, providers);
+      }
+    }
+    for (const record of assistantRecords) {
       const assistant = object(record.payload) as unknown as AssistantPayload;
       const model = typeof assistant.model === 'string' && assistant.model ? assistant.model : 'unknown';
       const usage = usageValue(assistant.usage);
-      const rate = rateFor(rates, 'unknown', model);
+      const providers = new Set(providersByAssistant.get(record.id) ?? []);
+      const assistantProvider = typeof assistant.provider === 'string' ? assistant.provider.trim() : '';
+      if (assistantProvider && assistantProvider !== 'unknown') providers.add(assistantProvider);
+      const provider = providers.size === 1 ? [...providers][0]! : 'unknown';
+      const rate = rateFor(rates, provider, model);
       rows.push({
         id: record.id,
         kind: 'main',
         status: 'completed',
         threadId: thread.id,
         projectId: thread.projectId,
-        provider: 'unknown',
+        provider,
         model,
         purpose: 'main-model',
         createdAt: record.createdAt,
@@ -337,8 +356,8 @@ function buildReport(context: PluginContext, state: PluginContext['state'], filt
     },
     rates: validRates,
     limitations: [
-      'Main model calls use committed Canonical assistant usage. Failed main attempts and retries are not currently exposed by the plugin service.',
-      'Main-call provider identity is unavailable in Canonical assistant records and is shown as unknown.',
+      'Main-call rows use committed Canonical assistant usage; failed attempts and retries are not included.',
+      'Provider identity comes from assistant Canonical metadata or an appended attribution from matching Model Execution telemetry; missing or conflicting data remain unknown.',
       'Cost estimates use current provider/model rates for all calls, including historical calls; cost is unknown when a required price is missing.',
     ],
   };

@@ -83,6 +83,8 @@ export interface AssistantPayload {
   content: string;
   /** Provider-supplied reasoning text for display. */
   reasoningSummary?: string;
+  /** Runtime-selected provider for this committed main-model response. */
+  provider?: ModelProvider;
   /** Provider-supplied reasoning content retained for adapters that support replay. */
   reasoningContent?: string;
   toolCalls: ToolCall[];

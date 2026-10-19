@@ -220,7 +220,7 @@
               `<tr><td>${escape(new Date(row.createdAt).toLocaleString())}</td><td>${escape(row.kind)}<br>${escape(row.purpose)}</td><td>${escape(row.provider)}<br>${escape(row.model)}</td><td>${escape(row.threadId ? threadLabel(row.threadId) : '—')}</td><td><span class="pico-ui-status" data-status="${escape(row.status)}">${escape(row.status)}</span><br>${fmt(row.usage?.inputTokens)} in / ${fmt(row.usage?.outputTokens)} out</td><td>${escape(money(row.estimatedCost, row.currency))}</td><td class="attempt">${row.attempts?.map((a) => `${escape(a.outcome || 'attempt')} · ${escape(a.model || '')}`).join('<br>') || '—'}</td></tr>`,
           )
           .join('') || '<tr><td colspan="7" class="muted pico-ui-empty">No calls match the selected filters.</td></tr>'
-      }</tbody></table></div><div class="muted">Showing up to 300 calls. Main-call provider and retry telemetry are unavailable in the current Runtime service.</div></section>
+      }</tbody></table></div><div class="muted">Showing up to 300 calls. Main-call rows use committed responses; failed attempts and retries are not included.</div></section>
       <section class="section pico-ui-section"><h2>Rates</h2><div class="notice pico-ui-panel">The current provider/model rates are used to estimate costs for all calls, including historical calls. Costs remain unknown if a required price is missing.</div><form id="rate-form" class="rate-form pico-ui-panel">
         <select class="pico-ui-control" name="provider" aria-label="Provider" required>${providerOptions('', 'Select provider', true)}</select>
         <select class="pico-ui-control" name="model" aria-label="Model" required disabled>${modelOptions('', '', 'Select model')}</select>
