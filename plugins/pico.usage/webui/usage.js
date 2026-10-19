@@ -139,6 +139,16 @@
       coverage: coverageText({ reported: reported.length, total: rows.length }),
     };
   }
+  function newRateId() {
+    if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+
+    // randomUUID is restricted to secure contexts; getRandomValues also works over HTTP.
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
   async function loadCatalog() {
     try {
       const [value, options] = await Promise.all([api('/catalog'), api('/options')]);
@@ -246,18 +256,24 @@
     });
     root.querySelector('#rate-form')?.addEventListener('submit', async (event) => {
       event.preventDefault();
-      const values = Object.fromEntries(new FormData(event.currentTarget).entries());
-      const rate = {
-        id: crypto.randomUUID(),
-        provider: values.provider,
-        model: values.model,
-        currency: values.currency,
-        inputPerMillion: Number(values.inputPerMillion),
-        outputPerMillion: Number(values.outputPerMillion),
-        ...(values.cachedInputPerMillion ? { cachedInputPerMillion: Number(values.cachedInputPerMillion) } : {}),
-        ...(values.cacheWritePerMillion ? { cacheWritePerMillion: Number(values.cacheWritePerMillion) } : {}),
-      };
+      const form = event.currentTarget;
+      const values = Object.fromEntries(new FormData(form).entries());
+      const submitButton = form.querySelector('button');
+      if (submitButton) {
+        submitButton.disabled = true;
+        submitButton.textContent = 'Saving rate…';
+      }
       try {
+        const rate = {
+          id: newRateId(),
+          provider: values.provider,
+          model: values.model,
+          currency: values.currency,
+          inputPerMillion: Number(values.inputPerMillion),
+          outputPerMillion: Number(values.outputPerMillion),
+          ...(values.cachedInputPerMillion ? { cachedInputPerMillion: Number(values.cachedInputPerMillion) } : {}),
+          ...(values.cacheWritePerMillion ? { cacheWritePerMillion: Number(values.cacheWritePerMillion) } : {}),
+        };
         await api('/rates', 'PUT', { rate });
         await refresh();
       } catch (reason) {
