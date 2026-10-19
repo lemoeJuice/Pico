@@ -83,22 +83,33 @@
       return '<section class="panel pico-ui-panel toolbar-panel"><div class="permission-menu"><div class="permission-popover"><div class="popover-heading pico-ui-heading"><strong>Tool permissions</strong><span>Saved for this Thread</span></div><div class="pico-ui-empty empty">Choose a Thread to review its tools.</div></div></div></section>';
     const rows = data.tools
       .map(
-        (tool) => `
-        <label class="permission-row pico-ui-list-item">
-        <span><strong>${escape(tool.name)}</strong><small>${escape(tool.description)}</small></span>
-        <select class="pico-ui-control" data-tool="${escape(tool.name)}" aria-label="${escape(tool.name)} permission">
-          ${['allow', 'ask', 'deny'].map((policy) => `<option value="${policy}" ${tool.policy === policy ? 'selected' : ''}>${policy[0].toUpperCase()}${policy.slice(1)}</option>`).join('')}
-        </select>
-      </label>`,
+        (tool) => {
+          const defaultAllow = tool.policy === 'allow';
+          const hidden = tool.policy === 'deny';
+          return `
+        <div class="permission-row pico-ui-list-item">
+          <span class="permission-tool-copy"><strong>${escape(tool.name)}</strong><small>${escape(tool.description)}</small></span>
+          <span class="permission-tool-setting">
+            <small class="permission-policy-state">${hidden ? 'Hidden' : defaultAllow ? 'Default allow' : 'Ask'}</small>
+            <button type="button" class="permission-switch" role="switch" aria-checked="${defaultAllow}" aria-label="Allow ${escape(tool.name)} by default" data-tool="${escape(tool.name)}" ${busy ? 'disabled' : ''}><span></span></button>
+          </span>
+        </div>`;
+        },
       )
       .join('');
     return `<section class="panel pico-ui-panel toolbar-panel">
       <div class="permission-menu">
         <div class="permission-popover" role="dialog" aria-label="Tool permissions">
           <div class="popover-heading pico-ui-heading"><strong>Tool permissions</strong><span>Saved for this Thread</span></div>
-          <label class="reviewer-toggle pico-ui-card"><span><strong>Auto-review</strong><small>Use an independent reviewer for tools set to Ask</small></span><input type="checkbox" data-reviewer ${data.autoReview ? 'checked' : ''} /></label>
+          <section class="permission-auto-section" aria-label="Automatic review">
+            <div class="permission-auto-copy"><strong>Auto-review</strong><small>Use an independent reviewer for tools set to Ask</small></div>
+            <button type="button" class="permission-switch permission-switch--auto" role="switch" aria-checked="${data.autoReview}" aria-label="Auto-review" data-reviewer ${busy ? 'disabled' : ''}><span></span></button>
+          </section>
           ${error ? `<div class="pico-ui-error">${escape(error)}</div>` : ''}
-          <div class="tools pico-ui-section">${rows || '<div class="pico-ui-empty empty">Tool definitions will appear after the next Model projection.</div>'}</div>
+          <section class="permission-tool-section" aria-label="Per-tool defaults">
+            <div class="permission-section-heading"><strong>Per-tool defaults</strong><small>On allows by default; off routes through Ask.</small></div>
+            <div class="tools pico-ui-section">${rows || '<div class="pico-ui-empty empty">Tool definitions will appear after the next Model projection.</div>'}</div>
+          </section>
         </div>
       </div>
     </section>`;
@@ -148,28 +159,32 @@
   function draw() {
     root.innerHTML = init?.viewId === 'ToolPermissions' ? toolbar() : permissionResultActions();
     if (init?.viewId === 'ToolPermissions') {
-      root.querySelectorAll('select[data-tool]').forEach((select) => {
-        select.addEventListener('change', async () => {
-          const target = select;
+      root.querySelectorAll('button[data-tool]').forEach((button) => {
+        button.addEventListener('click', async () => {
+          const target = button;
           const toolName = target.getAttribute('data-tool');
           if (!toolName || !context.thread) return;
+          const policy = target.getAttribute('aria-checked') === 'true' ? 'ask' : 'allow';
           try {
             busy = true;
-            await api('/rules', 'PUT', { threadId: context.thread.id, toolName, policy: target.value });
+            draw();
+            await api('/rules', 'PUT', { threadId: context.thread.id, toolName, policy });
             await refresh();
           } catch (reason) {
             error = reason instanceof Error ? reason.message : String(reason);
             draw();
           } finally {
             busy = false;
+            draw();
           }
         });
       });
-      root.querySelector('[data-reviewer]')?.addEventListener('change', async (event) => {
+      root.querySelector('[data-reviewer]')?.addEventListener('click', async (event) => {
         if (!context.thread) return;
-        const enabled = event.currentTarget.checked;
+        const enabled = event.currentTarget.getAttribute('aria-checked') !== 'true';
         try {
           busy = true;
+          draw();
           await api('/reviewer', 'PUT', { threadId: context.thread.id, enabled });
           await refresh();
         } catch (reason) {
@@ -177,6 +192,7 @@
           draw();
         } finally {
           busy = false;
+          draw();
         }
       });
       if (toolsExpanded) {

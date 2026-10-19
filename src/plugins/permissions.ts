@@ -459,6 +459,15 @@ export const permissionPlugin: PicoPlugin = {
       return next(input);
     });
 
+    ui.contribute({
+      slot: 'thread.toolbar',
+      id: 'tool-permissions',
+      label: 'Permissions',
+      description: 'Review tool policies and Auto-review for this Thread.',
+      entry: 'webui',
+      component: 'ToolPermissions',
+      supportsPopover: true,
+    });
     ui.contribute(permissionResultUi('permission-result-actions', 'PermissionResultActions'));
 
     http.register('GET', '/threads', async ({ query }) => {
