@@ -490,6 +490,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [executorConnected, setExecutorConnected] = useState<boolean | null>(null);
   const [executorError, setExecutorError] = useState<string | null>(null);
   const [executorDetails, setExecutorDetails] = useState<ExecutorStatusDetails>({});
+  const [dismissedPluginNoticeKey, setDismissedPluginNoticeKey] = useState<string | null>(null);
   const [dismissedExecutorNoticeKey, setDismissedExecutorNoticeKey] = useState<string | null>(null);
   const [dismissedPauseNoticeKey, setDismissedPauseNoticeKey] = useState<string | null>(null);
   const [thinkingExpanded, setThinkingExpanded] = useState(true);
@@ -2015,8 +2016,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     selectedThread.pauseReason
       ? JSON.stringify([selectedThread.id, selectedThread.pauseReason])
       : null;
+  const pluginNoticeKey = pluginInfo && pluginInfo.errors.length > 0 ? JSON.stringify(pluginInfo.errors) : null;
+  const showPluginNotice = pluginNoticeKey !== null && dismissedPluginNoticeKey !== pluginNoticeKey;
   const showExecutorNotice = executorNoticeKey !== null && dismissedExecutorNoticeKey !== executorNoticeKey;
   const showPauseNotice = pauseReason !== null && pauseNoticeKey !== null && dismissedPauseNoticeKey !== pauseNoticeKey;
+
+  useEffect(() => {
+    if (dismissedPluginNoticeKey !== null && dismissedPluginNoticeKey !== pluginNoticeKey) {
+      setDismissedPluginNoticeKey(null);
+    }
+  }, [dismissedPluginNoticeKey, pluginNoticeKey]);
 
   useEffect(() => {
     if (dismissedExecutorNoticeKey !== null && dismissedExecutorNoticeKey !== executorNoticeKey) {
@@ -2207,6 +2216,14 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           )}
         </header>
 
+        {showPluginNotice && pluginNoticeKey && pluginInfo ? (
+          <div className="banner banner-error plugin-load-notice" role="status">
+            <span>A plugin could not be loaded: {pluginInfo.errors.join(' · ')}</span>
+            <button type="button" onClick={() => setDismissedPluginNoticeKey(pluginNoticeKey)}>
+              Dismiss
+            </button>
+          </div>
+        ) : null}
         {showExecutorNotice && selectedThread && executorError && executorNoticeKey ? (
           <div className="banner banner-error executor-error" role="status">
             <div className="executor-error-copy">
@@ -3377,9 +3394,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         </Modal>
       ) : null}
 
-      {pluginInfo && pluginInfo.errors.length > 0 ? (
-        <div className="plugin-warning">A plugin could not be loaded: {pluginInfo.errors.join(' · ')}</div>
-      ) : null}
     </div>
   );
 }

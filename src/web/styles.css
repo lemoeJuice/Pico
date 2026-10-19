@@ -2509,19 +2509,9 @@ button:disabled {
   font-size: 9px;
   font-style: normal;
 }
-.plugin-warning {
-  position: fixed;
-  right: 14px;
-  bottom: 13px;
-  z-index: 15;
-  max-width: 360px;
-  padding: 9px 12px;
-  color: #936e4b;
-  background: #fbf5e9;
-  border: 1px solid #efe3cd;
-  border-radius: 10px;
-  box-shadow: var(--shadow);
-  font-size: 10px;
+.plugin-load-notice > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .mobile-scrim {
   display: none;
