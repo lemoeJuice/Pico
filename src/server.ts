@@ -35,18 +35,32 @@ function notFound(response: Response, message = 'Not found'): void {
   response.status(404).json({ error: message });
 }
 
-function pluginUiHeaders(response: Response): void {
+function pluginUiHeaders(request: Request, response: Response): void {
+  const host = request.get('host');
+  const protocol = request.protocol === 'https' ? 'https' : 'http';
+  let requestOrigin = '';
+  if (host && !/[/?#@\\]/.test(host)) {
+    try {
+      const parsedOrigin = new URL(`${protocol}://${host}`);
+      if (!parsedOrigin.username && !parsedOrigin.password && parsedOrigin.pathname === '/') {
+        requestOrigin = parsedOrigin.origin;
+      }
+    } catch {
+      // Keep the existing self-only policy if the request Host is malformed.
+    }
+  }
+  const appOrigin = requestOrigin && requestOrigin !== 'null' ? ` ${requestOrigin}` : '';
   response.set({
     'cache-control': 'no-cache',
     'content-security-policy':
-      "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'none'; form-action 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'",
+      `default-src 'none'; script-src 'self'${appOrigin}; style-src 'self'${appOrigin} 'unsafe-inline'; img-src 'self'${appOrigin} data: blob:; font-src 'self'${appOrigin} data:; connect-src 'none'; form-action 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'`,
     'referrer-policy': 'no-referrer',
     'x-content-type-options': 'nosniff',
   });
 }
 
-function pluginUiUnavailable(response: Response): void {
-  pluginUiHeaders(response);
+function pluginUiUnavailable(request: Request, response: Response): void {
+  pluginUiHeaders(request, response);
   response
     .status(200)
     .type('html')
@@ -95,11 +109,11 @@ async function servePluginUiAsset(runtime: PicoRuntime, request: Request, respon
     }
     if (!(await stat(safeFile)).isFile()) return notFound(response, 'Plugin UI asset not found');
   } catch {
-    if (segments.length === 1 && segments[0] === 'index.html') return pluginUiUnavailable(response);
+    if (segments.length === 1 && segments[0] === 'index.html') return pluginUiUnavailable(request, response);
     return notFound(response, 'Plugin UI asset not found');
   }
 
-  pluginUiHeaders(response);
+  pluginUiHeaders(request, response);
   response.sendFile(safeFile, (error) => {
     if (error && !response.headersSent) notFound(response, 'Plugin UI asset not found');
   });
