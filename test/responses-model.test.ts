@@ -9,9 +9,14 @@ describe('ChatGPT Responses adapter', () => {
   it('streams transient text and maps completed function calls, usage, and settings', async () => {
     let requestBody: Record<string, unknown> | undefined;
     let authorization = '';
+    let sessionIdHeader = '';
+    let threadIdHeader = '';
     vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
       requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      authorization = new Headers(init?.headers).get('authorization') ?? '';
+      const headers = new Headers(init?.headers);
+      authorization = headers.get('authorization') ?? '';
+      sessionIdHeader = headers.get('session-id') ?? '';
+      threadIdHeader = headers.get('thread-id') ?? '';
       const frames = [
         { type: 'response.reasoning_summary_text.delta', delta: 'Checking the path. ' },
         { type: 'response.output_text.delta', delta: 'Hel' },
@@ -77,6 +82,7 @@ describe('ChatGPT Responses adapter', () => {
       requestTrace,
       (event) => events.push(event),
       { fields: { reasoning: { summary: 'auto', effort: 'high' }, service_tier: 'fast' } },
+      'pico-thread-123',
     );
 
     expect(accessToken).toHaveBeenCalledWith(false, requestTrace);
@@ -87,12 +93,15 @@ describe('ChatGPT Responses adapter', () => {
       attempt: 1,
     });
     expect(authorization).toBe('Bearer oauth-access-token');
+    expect(sessionIdHeader).toBe('pico-thread-123');
+    expect(threadIdHeader).toBe('pico-thread-123');
     expect(requestBody).toMatchObject({
       model: 'selected-model',
       instructions: 'You are Pico.',
       store: false,
       stream: true,
       parallel_tool_calls: true,
+      prompt_cache_key: 'pico-thread-123',
       reasoning: { effort: 'high', summary: 'auto' },
       include: ['reasoning.encrypted_content'],
       service_tier: 'fast',
