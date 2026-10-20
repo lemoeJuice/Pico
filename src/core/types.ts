@@ -89,6 +89,8 @@ export interface AssistantPayload {
   provider?: ModelProvider;
   /** Provider-supplied reasoning content retained for adapters that support replay. */
   reasoningContent?: string;
+  /** Opaque adapter replay state; kept out of user-facing history and diagnostics. */
+  reasoningReplay?: unknown;
   toolCalls: ToolCall[];
   batchId: string | null;
   projectionThrough: number;

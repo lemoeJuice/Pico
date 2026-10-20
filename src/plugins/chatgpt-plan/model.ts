@@ -25,9 +25,14 @@ const RETRYABLE_FETCH_ERROR_CODES = new Set([
 
 function responseInput(prompt: ModelPrompt): Array<Record<string, unknown>> {
   return prompt.turns.flatMap((turn): Array<Record<string, unknown>> => {
-    if (turn.kind === 'message') return [{ role: turn.role, content: turn.content }];
+    if (turn.kind === 'message') {
+      if (turn.role !== 'assistant') return [{ role: turn.role, content: turn.content }];
+      const replay = reasoningItems(turn.reasoningReplay);
+      return [...replay, { role: turn.role, content: turn.content }];
+    }
     if (turn.kind === 'assistant_tools') {
       return [
+        ...reasoningItems(turn.reasoningReplay),
         ...(turn.content ? [{ role: 'assistant', content: turn.content }] : []),
         ...turn.calls.map((call) => ({
           type: 'function_call',
@@ -38,6 +43,14 @@ function responseInput(prompt: ModelPrompt): Array<Record<string, unknown>> {
       ];
     }
     return [{ type: 'function_call_output', call_id: turn.callId, output: turn.content }];
+  });
+}
+
+function reasoningItems(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const candidate = object(item);
+    return candidate?.type === 'reasoning' ? [candidate] : [];
   });
 }
 
@@ -99,14 +112,18 @@ function outputFrom(response: Record<string, unknown>, prompt: ModelPrompt): Mod
   const output = Array.isArray(response.output) ? response.output : [];
   let content = '';
   const reasoningSummaryParts: string[] = [];
+  const reasoningReplay: Array<Record<string, unknown>> = [];
   const toolCalls: ToolCall[] = [];
   for (const rawItem of output) {
     const item = object(rawItem);
     if (!item) continue;
-    if (item.type === 'reasoning' && Array.isArray(item.summary)) {
-      for (const rawPart of item.summary) {
-        const text = object(rawPart)?.text;
-        if (typeof text === 'string' && text.length > 0) reasoningSummaryParts.push(text);
+    if (item.type === 'reasoning') {
+      reasoningReplay.push(item);
+      if (Array.isArray(item.summary)) {
+        for (const rawPart of item.summary) {
+          const text = object(rawPart)?.text;
+          if (typeof text === 'string' && text.length > 0) reasoningSummaryParts.push(text);
+        }
       }
     } else if (item.type === 'message' && Array.isArray(item.content)) {
       for (const rawContent of item.content) {
@@ -127,6 +144,7 @@ function outputFrom(response: Record<string, unknown>, prompt: ModelPrompt): Mod
   return {
     content,
     ...(reasoningSummary ? { reasoningSummary } : {}),
+    ...(reasoningReplay.length > 0 ? { reasoningReplay } : {}),
     toolCalls,
     usage: readUsage(response.usage),
     model: typeof response.model === 'string' ? response.model : prompt.model,
@@ -139,6 +157,31 @@ function outputFrom(response: Record<string, unknown>, prompt: ModelPrompt): Mod
           ? 'tool_calls'
           : 'stop',
   };
+}
+
+function replayableReasoningItems(
+  response: Record<string, unknown>,
+  streamed: ReadonlyMap<number, Record<string, unknown>>,
+): Array<Record<string, unknown>> | undefined {
+  const output = Array.isArray(response.output) ? response.output : [];
+  const completedItems = output.flatMap((rawItem, outputIndex) => {
+    const item = object(rawItem);
+    if (item?.type !== 'reasoning') return [];
+    const streamedItem = streamed.get(outputIndex);
+    if (!streamedItem) return [item];
+    const merged = { ...streamedItem, ...item };
+    // Some streams put encrypted_content on output_item.done while the terminal
+    // response contains the rest of the canonical item. Preserve that payload.
+    if (typeof item.encrypted_content !== 'string' && typeof streamedItem.encrypted_content === 'string') {
+      merged.encrypted_content = streamedItem.encrypted_content;
+    }
+    return [merged];
+  });
+  const items =
+    completedItems.length > 0
+      ? completedItems
+      : [...streamed.entries()].sort(([left], [right]) => left - right).map(([, item]) => item);
+  return items.length > 0 ? items : undefined;
 }
 
 interface StreamedFunctionCall {
@@ -275,6 +318,7 @@ export class ChatGptResponsesAdapter {
       tools: responseTools(prompt.tools),
       reasoning: { summary: 'auto' },
       ...requestParameters?.fields,
+      include: ['reasoning.encrypted_content'],
       ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
     };
     let accessToken: string;
@@ -381,6 +425,7 @@ export class ChatGptResponsesAdapter {
       { outputIndex: number; contentIndex: number; order: number; text: string }
     >();
     const streamedFunctionCalls: StreamedFunctionCall[] = [];
+    const streamedReasoningItems = new Map<number, Record<string, unknown>>();
     const callsByItemId = new Map<string, StreamedFunctionCall>();
     const callsByOutputIndex = new Map<number, StreamedFunctionCall>();
     const getStreamedCall = (itemId?: string, outputIndex?: number): StreamedFunctionCall => {
@@ -531,6 +576,13 @@ export class ChatGptResponsesAdapter {
       } else if (value.type === 'response.output_item.done') {
         const item = object(value.item);
         if (item?.type === 'function_call') recordStreamedCall(value, item, true);
+        if (
+          item?.type === 'reasoning' &&
+          typeof value.output_index === 'number' &&
+          Number.isInteger(value.output_index)
+        ) {
+          streamedReasoningItems.set(value.output_index, item);
+        }
       } else if (value.type === 'response.completed') {
         terminalEvent = value.type;
         finalResponse = object(value.response);
@@ -611,6 +663,8 @@ export class ChatGptResponsesAdapter {
         }
       }
       const result = outputFrom(completedResponse, prompt);
+      const reasoningReplay = replayableReasoningItems(completedResponse, streamedReasoningItems);
+      if (reasoningReplay) result.reasoningReplay = reasoningReplay;
       if (!result.reasoningSummary && streamedReasoningSummary) result.reasoningSummary = streamedReasoningSummary;
       if (!result.content) result.content = streamedText();
 

@@ -7,7 +7,7 @@ import type { AssistantPayload, Execution } from '../src/core/types.js';
 import { PicoStore } from '../src/core/store.js';
 import type { PicoPlugin } from '../src/plugins/host.js';
 import { permissionPlugin } from '../src/plugins/permissions.js';
-import type { ModelAdapter, ModelResponse } from '../src/runtime/model.js';
+import type { ModelAdapter, ModelPrompt, ModelResponse } from '../src/runtime/model.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
 import type { ModelStageInput, ProjectionInput, StepInput, ToolBatchInput } from '../src/runtime/stages.js';
 import { threadCanBeInterrupted } from '../src/web/thread-controls.js';
@@ -108,6 +108,59 @@ describe('durable Thread runtime invariants', () => {
       expect(env.store.modelOutputForThread(thread.id)?.payload).toMatchObject({
         reasoningSummary: 'Checked the request and found the answer.',
       });
+    } finally {
+      unsubscribe();
+      await env.cleanup();
+    }
+  });
+
+  it('persists opaque reasoning replay for the next prompt but omits it from public history', async () => {
+    const reasoningReplay = [{ type: 'reasoning', id: 'rs_private', encrypted_content: 'opaque-payload' }];
+    const prompts: ModelPrompt[] = [];
+    const model: ModelAdapter = {
+      async complete(prompt) {
+        prompts.push(prompt);
+        return {
+          content: prompts.length === 1 ? 'First answer.' : 'Second answer.',
+          ...(prompts.length === 1 ? { reasoningReplay } : {}),
+          toolCalls: [],
+          usage: null,
+          model: 'test-model',
+          finishReason: 'stop',
+        };
+      },
+    };
+    const env = await setupRuntime(model);
+    env.runtime.updateModelSettings({ model: 'test-model' });
+    const thread = env.createThread();
+    const events: Array<Record<string, unknown>> = [];
+    const unsubscribe = env.runtime.subscribe((event) => events.push(event));
+    try {
+      await env.runtime.submit(thread.id, 'reasoning-first', 'First question.');
+      await env.runtime.drain();
+
+      expect(env.store.modelOutputForThread(thread.id)?.payload).toMatchObject({ reasoningReplay });
+      const firstSnapshot = env.runtime.getSnapshot(thread.id)!;
+      expect(firstSnapshot.records.find((record) => record.kind === 'assistant')?.payload).not.toHaveProperty(
+        'reasoningReplay',
+      );
+      const publicRecordEvent = events.find((event) => {
+        const record = event.record as { kind?: string } | undefined;
+        return event.type === 'record' && record?.kind === 'assistant';
+      });
+      expect(publicRecordEvent?.record).not.toHaveProperty('payload.reasoningReplay');
+
+      await env.runtime.submit(thread.id, 'reasoning-second', 'Follow-up question.');
+      await env.runtime.drain();
+      expect(prompts[1]?.turns).toContainEqual(
+        expect.objectContaining({ kind: 'message', role: 'assistant', reasoningReplay }),
+      );
+      const secondAssistant = env.store.modelOutputForThread(thread.id)!;
+      const secondExecutionId = secondAssistant.id.replace(/:assistant$/, '');
+      const diagnosticPrompt = env.runtime.getModelInputAttempts(thread.id, secondExecutionId)?.[0]?.prompt;
+      expect(
+        diagnosticPrompt?.turns.find((turn) => turn.kind === 'message' && turn.role === 'assistant'),
+      ).not.toHaveProperty('reasoningReplay');
     } finally {
       unsubscribe();
       await env.cleanup();

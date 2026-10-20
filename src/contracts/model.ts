@@ -39,8 +39,22 @@ export interface ModelRequestTrace {
 }
 
 export type PromptTurn =
-  | { kind: 'message'; role: 'user' | 'assistant'; content: string; reasoningContent?: string }
-  | { kind: 'assistant_tools'; content: string; calls: ToolCall[]; reasoningContent?: string }
+  | {
+      kind: 'message';
+      role: 'user' | 'assistant';
+      content: string;
+      reasoningContent?: string;
+      /** Opaque provider replay state. Core and projections must pass it through without interpreting it. */
+      reasoningReplay?: unknown;
+    }
+  | {
+      kind: 'assistant_tools';
+      content: string;
+      calls: ToolCall[];
+      reasoningContent?: string;
+      /** Opaque provider replay state. Core and projections must pass it through without interpreting it. */
+      reasoningReplay?: unknown;
+    }
   | { kind: 'tool_result'; callId: string; toolName: string; content: string };
 
 export interface ModelPrompt {
@@ -61,6 +75,8 @@ export interface ModelResponse {
   content: string;
   reasoningSummary?: string;
   reasoningContent?: string;
+  /** Opaque provider replay state. Core stores and projects it without interpreting it. */
+  reasoningReplay?: unknown;
   toolCalls: ToolCall[];
   usage: TokenUsage | null;
   model: string;

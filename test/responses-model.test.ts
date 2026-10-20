@@ -94,6 +94,7 @@ describe('ChatGPT Responses adapter', () => {
       stream: true,
       parallel_tool_calls: true,
       reasoning: { effort: 'high', summary: 'auto' },
+      include: ['reasoning.encrypted_content'],
       service_tier: 'fast',
     });
     expect(requestBody?.input).toEqual([
@@ -180,6 +181,96 @@ describe('ChatGPT Responses adapter', () => {
       '**Archive download timed out** during the request.\n\n**Clarifying no file created**\n\nA separate point.';
     expect(streamedSummary).toBe(expectedSummary);
     expect(result.reasoningSummary).toBe(expectedSummary);
+  });
+
+  it('replays the complete Responses reasoning item on a later tool-call turn', async () => {
+    const completedReasoning = {
+      type: 'reasoning',
+      id: 'rs_123',
+      summary: [{ type: 'summary_text', text: 'Inspecting the request.' }],
+    };
+    const streamedReasoning = { ...completedReasoning, encrypted_content: 'opaque-encrypted-reasoning' };
+    const requestBodies: Array<Record<string, unknown>> = [];
+    let requestIndex = 0;
+    vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      const frames =
+        requestIndex++ === 0
+          ? [
+              { type: 'response.output_item.done', output_index: 0, item: streamedReasoning },
+              {
+                type: 'response.completed',
+                response: {
+                  status: 'completed',
+                  output: [
+                    completedReasoning,
+                    { type: 'function_call', call_id: 'call_read', name: 'read_file', arguments: '{"path":"a.txt"}' },
+                  ],
+                },
+              },
+            ]
+          : [
+              {
+                type: 'response.completed',
+                response: {
+                  status: 'completed',
+                  output: [{ type: 'message', content: [{ type: 'output_text', text: 'Done.' }] }],
+                },
+              },
+            ];
+      return new Response(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''), {
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+    const adapter = new ChatGptResponsesAdapter({
+      accessToken: async () => 'oauth-access-token',
+    } as unknown as ChatGptPlanAuth);
+    const first = await adapter.complete(
+      {
+        system: 'System',
+        model: 'gpt-6-sol',
+        temperature: 0.2,
+        turns: [{ kind: 'message', role: 'user', content: 'Read a.txt.' }],
+        tools: [],
+      },
+      new AbortController().signal,
+      () => undefined,
+    );
+    expect(first.reasoningReplay).toEqual([streamedReasoning]);
+
+    await adapter.complete(
+      {
+        system: 'System',
+        model: 'gpt-6-sol',
+        temperature: 0.2,
+        turns: [
+          {
+            kind: 'assistant_tools',
+            content: '',
+            calls: [{ id: 'call_read', name: 'read_file', arguments: { path: 'a.txt' } }],
+            reasoningReplay: first.reasoningReplay,
+          },
+          { kind: 'tool_result', callId: 'call_read', toolName: 'read_file', content: 'contents' },
+          { kind: 'message', role: 'user', content: 'Summarize it.' },
+        ],
+        tools: [],
+      },
+      new AbortController().signal,
+      () => undefined,
+    );
+
+    expect(requestBodies[1]?.input).toEqual([
+      streamedReasoning,
+      {
+        type: 'function_call',
+        call_id: 'call_read',
+        name: 'read_file',
+        arguments: '{"path":"a.txt"}',
+      },
+      { type: 'function_call_output', call_id: 'call_read', output: 'contents' },
+      { role: 'user', content: 'Summarize it.' },
+    ]);
+    expect(requestBodies[1]?.include).toEqual(['reasoning.encrypted_content']);
   });
 
   it('recovers streamed text and function calls omitted from the completed response', async () => {

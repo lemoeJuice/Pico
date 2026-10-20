@@ -81,6 +81,25 @@ const DISABLED_THREAD_TOOLS_SETTING = 'disabled-thread-tools';
 
 export const THREAD_HISTORY_PAGE_SIZE = 100;
 
+function redactReasoningReplay<T>(record: CanonicalRecord<T>): CanonicalRecord<T> {
+  if (record.kind !== 'assistant') return record;
+  const payload = record.payload;
+  if (!payload || typeof payload !== 'object' || !('reasoningReplay' in payload)) return record;
+  const { reasoningReplay: _reasoningReplay, ...publicPayload } = payload as Record<string, unknown>;
+  return { ...record, payload: publicPayload as T };
+}
+
+function promptForDiagnostics(prompt: ModelPrompt): ModelPrompt {
+  return {
+    ...prompt,
+    turns: prompt.turns.map((turn): PromptTurn => {
+      if (turn.kind === 'tool_result') return turn;
+      const { reasoningReplay: _reasoningReplay, ...diagnosticTurn } = turn;
+      return diagnosticTurn;
+    }),
+  };
+}
+
 function commandResultFromRecord(
   record: CanonicalRecord | null,
   threadId: string,
@@ -656,7 +675,7 @@ export class PicoRuntime {
   }
 
   private publishRecord<T>(record: CanonicalRecord<T>): void {
-    this.publish({ type: 'record', record });
+    this.publish({ type: 'record', record: redactReasoningReplay(record) });
   }
 
   private executionChanged(execution: Execution): void {
@@ -914,7 +933,7 @@ export class PicoRuntime {
     });
     return {
       thread,
-      records: page.records,
+      records: page.records.map(redactReasoningReplay),
       executions,
       children: this.listThreads(thread.projectId).filter((candidate) => candidate.parentThreadId === threadId),
       hasEarlierRecords: page.hasEarlierRecords,
@@ -1772,7 +1791,7 @@ export class PicoRuntime {
         requestId = randomUUID();
         this.store.appendExecutionLog(modelExecutionId, 'model-input-requested', {
           requestId,
-          prompt: structuredClone(actualPrompt),
+          prompt: structuredClone(promptForDiagnostics(actualPrompt)),
           projectionProvenance: structuredClone(provenance ?? projected.provenance ?? []),
           provider,
         });
@@ -1883,6 +1902,7 @@ export class PicoRuntime {
         provider: modelSettings.provider,
         ...(response.reasoningSummary ? { reasoningSummary: response.reasoningSummary } : {}),
         ...(response.reasoningContent ? { reasoningContent: response.reasoningContent } : {}),
+        ...(response.reasoningReplay === undefined ? {} : { reasoningReplay: response.reasoningReplay }),
         toolCalls: calls,
         batchId,
         projectionThrough: through,
@@ -1965,6 +1985,7 @@ export class PicoRuntime {
             content: assistant.content,
             calls: assistant.toolCalls,
             ...(typeof reasoningContent === 'string' ? { reasoningContent } : {}),
+            ...(assistant.reasoningReplay === undefined ? {} : { reasoningReplay: assistant.reasoningReplay }),
           });
           for (const call of assistant.toolCalls) {
             const result = assistant.batchId ? results.get(`${assistant.batchId}:${call.id}`) : undefined;
@@ -1979,12 +2000,17 @@ export class PicoRuntime {
               });
             }
           }
-        } else if (assistant.content || typeof reasoningContent === 'string') {
+        } else if (
+          assistant.content ||
+          typeof reasoningContent === 'string' ||
+          assistant.reasoningReplay !== undefined
+        ) {
           turns.push({
             kind: 'message',
             role: 'assistant',
             content: assistant.content,
             ...(typeof reasoningContent === 'string' ? { reasoningContent } : {}),
+            ...(assistant.reasoningReplay === undefined ? {} : { reasoningReplay: assistant.reasoningReplay }),
           });
         }
       } else if (record.kind === 'tool_result' && !consumedResults.has(record.id)) {
@@ -2327,7 +2353,7 @@ export class PicoRuntime {
       },
     };
     const recordModelInput = (actualPrompt: ModelPrompt, provider: string): void => {
-      call = { ...call, prompt: structuredClone(actualPrompt), provider, model: actualPrompt.model };
+      call = { ...call, prompt: structuredClone(promptForDiagnostics(actualPrompt)), provider, model: actualPrompt.model };
       save();
     };
     const modelInput: ModelStageInput = {

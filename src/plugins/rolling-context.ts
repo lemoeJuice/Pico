@@ -322,6 +322,7 @@ function promptTurns(records: readonly CanonicalRecord[], thread: Thread): Promp
           content: typeof payload.content === 'string' ? payload.content : '',
           calls: calls as ToolCall[],
           ...(typeof reasoningContent === 'string' ? { reasoningContent } : {}),
+          ...(payload.reasoningReplay === undefined ? {} : { reasoningReplay: payload.reasoningReplay }),
         });
         for (const raw of calls) {
           const call = object(raw);
@@ -336,12 +337,17 @@ function promptTurns(records: readonly CanonicalRecord[], thread: Thread): Promp
             content: projectedToolResult(result as unknown as ToolResultPayload),
           });
         }
-      } else if ((typeof payload.content === 'string' && payload.content) || typeof reasoningContent === 'string')
+      } else if (
+        (typeof payload.content === 'string' && payload.content) ||
+        typeof reasoningContent === 'string' ||
+        payload.reasoningReplay !== undefined
+      )
         turns.push({
           kind: 'message',
           role: 'assistant',
           content: typeof payload.content === 'string' ? payload.content : '',
           ...(typeof reasoningContent === 'string' ? { reasoningContent } : {}),
+          ...(payload.reasoningReplay === undefined ? {} : { reasoningReplay: payload.reasoningReplay }),
         });
     } else if (record.kind === 'tool_result' && !consumed.has(record.id)) {
       const result = object(record.payload);
