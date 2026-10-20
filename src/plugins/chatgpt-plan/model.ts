@@ -58,11 +58,13 @@ function responseInput(prompt: ModelPrompt): Array<Record<string, unknown>> {
       group.push(next);
       index += 1;
     }
-    input.push(...group.map((result) => ({
-      type: 'function_call_output',
-      call_id: result.callId,
-      output: result.content,
-    })));
+    input.push(
+      ...group.map((result) => ({
+        type: 'function_call_output',
+        call_id: result.callId,
+        output: result.content,
+      })),
+    );
     for (const result of group) {
       if (!result.images?.length) continue;
       input.push({
@@ -109,8 +111,7 @@ function readUsage(value: unknown): TokenUsage | null {
   const total = typeof usage.total_tokens === 'number' ? usage.total_tokens : undefined;
   const inputDetails = object(usage.input_tokens_details);
   const cached = typeof inputDetails?.cached_tokens === 'number' ? inputDetails.cached_tokens : undefined;
-  const cacheWrite =
-    typeof inputDetails?.cache_write_tokens === 'number' ? inputDetails.cache_write_tokens : undefined;
+  const cacheWrite = typeof inputDetails?.cache_write_tokens === 'number' ? inputDetails.cache_write_tokens : undefined;
   if (
     input === undefined &&
     output === undefined &&
@@ -393,15 +394,7 @@ export class ChatGptResponsesAdapter {
         errorCategory: 'http',
         errorCode: 'http_401',
       });
-      tracedRequest = await this.requestTraced(
-        body,
-        accessToken,
-        signal,
-        requestTrace,
-        retryState,
-        threadId,
-        cacheKey,
-      );
+      tracedRequest = await this.requestTraced(body, accessToken, signal, requestTrace, retryState, threadId, cacheKey);
     }
     const response = tracedRequest.response;
     if (!response.ok) {
@@ -470,7 +463,8 @@ export class ChatGptResponsesAdapter {
         call = byItemId.order <= byOutputIndex.order ? byItemId : byOutputIndex;
         const duplicate = call === byItemId ? byOutputIndex : byItemId;
         if (call.itemId === undefined && duplicate.itemId !== undefined) call.itemId = duplicate.itemId;
-        if (call.outputIndex === undefined && duplicate.outputIndex !== undefined) call.outputIndex = duplicate.outputIndex;
+        if (call.outputIndex === undefined && duplicate.outputIndex !== undefined)
+          call.outputIndex = duplicate.outputIndex;
         if (call.callId === undefined && duplicate.callId !== undefined) call.callId = duplicate.callId;
         if (call.name === undefined && duplicate.name !== undefined) call.name = duplicate.name;
         if (duplicate.argumentsComplete && !call.argumentsComplete) {
@@ -508,14 +502,10 @@ export class ChatGptResponsesAdapter {
       item?: Record<string, unknown>,
       completeArguments = false,
     ): StreamedFunctionCall => {
-      const itemId = typeof event.item_id === 'string'
-        ? event.item_id
-        : typeof item?.id === 'string'
-          ? item.id
-          : undefined;
-      const outputIndex = typeof event.output_index === 'number' && Number.isInteger(event.output_index)
-        ? event.output_index
-        : undefined;
+      const itemId =
+        typeof event.item_id === 'string' ? event.item_id : typeof item?.id === 'string' ? item.id : undefined;
+      const outputIndex =
+        typeof event.output_index === 'number' && Number.isInteger(event.output_index) ? event.output_index : undefined;
       const call = getStreamedCall(itemId, outputIndex);
       if (typeof item?.call_id === 'string') call.callId = item.call_id;
       if (typeof item?.name === 'string') call.name = item.name;
@@ -529,12 +519,14 @@ export class ChatGptResponsesAdapter {
       return call;
     };
     const recordStreamedText = (event: Record<string, unknown>, text: string, append: boolean): void => {
-      const outputIndex = typeof event.output_index === 'number' && Number.isInteger(event.output_index)
-        ? event.output_index
-        : Number.MAX_SAFE_INTEGER;
-      const contentIndex = typeof event.content_index === 'number' && Number.isInteger(event.content_index)
-        ? event.content_index
-        : Number.MAX_SAFE_INTEGER;
+      const outputIndex =
+        typeof event.output_index === 'number' && Number.isInteger(event.output_index)
+          ? event.output_index
+          : Number.MAX_SAFE_INTEGER;
+      const contentIndex =
+        typeof event.content_index === 'number' && Number.isInteger(event.content_index)
+          ? event.content_index
+          : Number.MAX_SAFE_INTEGER;
       const key = `${outputIndex}:${contentIndex}`;
       const existing = streamedTextParts.get(key);
       streamedTextParts.set(key, {
@@ -544,13 +536,14 @@ export class ChatGptResponsesAdapter {
         text: append ? `${existing?.text ?? ''}${text}` : text,
       });
     };
-    const streamedText = (): string => [...streamedTextParts.values()]
-      .sort((left, right) =>
-        left.outputIndex - right.outputIndex
-        || left.contentIndex - right.contentIndex
-        || left.order - right.order)
-      .map((part) => part.text)
-      .join('');
+    const streamedText = (): string =>
+      [...streamedTextParts.values()]
+        .sort(
+          (left, right) =>
+            left.outputIndex - right.outputIndex || left.contentIndex - right.contentIndex || left.order - right.order,
+        )
+        .map((part) => part.text)
+        .join('');
     const countEvent = (name: string): void => {
       if (/^[a-z0-9_.:-]{1,80}$/i.test(name)) eventCounts[name] = (eventCounts[name] ?? 0) + 1;
     };
@@ -599,12 +592,24 @@ export class ChatGptResponsesAdapter {
         const item = object(value.item);
         if (item?.type === 'function_call') {
           const call = recordStreamedCall(value, item);
-          onEvent?.({ type: 'tool_call.preview', index: call.outputIndex ?? call.order, ...(call.callId ? { id: call.callId } : {}), ...(call.name ? { name: call.name } : {}), argumentsText: call.argumentsText });
+          onEvent?.({
+            type: 'tool_call.preview',
+            index: call.outputIndex ?? call.order,
+            ...(call.callId ? { id: call.callId } : {}),
+            ...(call.name ? { name: call.name } : {}),
+            argumentsText: call.argumentsText,
+          });
         }
       } else if (value.type === 'response.function_call_arguments.delta' && typeof value.delta === 'string') {
         const call = recordStreamedCall(value);
         call.argumentsText += value.delta;
-        onEvent?.({ type: 'tool_call.preview', index: call.outputIndex ?? call.order, ...(call.callId ? { id: call.callId } : {}), ...(call.name ? { name: call.name } : {}), argumentsText: call.argumentsText });
+        onEvent?.({
+          type: 'tool_call.preview',
+          index: call.outputIndex ?? call.order,
+          ...(call.callId ? { id: call.callId } : {}),
+          ...(call.name ? { name: call.name } : {}),
+          argumentsText: call.argumentsText,
+        });
       } else if (value.type === 'response.function_call_arguments.done') {
         recordStreamedCall(value, undefined, true);
       } else if (value.type === 'response.output_item.done') {
@@ -673,7 +678,10 @@ export class ChatGptResponsesAdapter {
         ...(firstTextMs === undefined ? {} : { firstTextMs }),
         deltaTextCharacters,
       });
-      throw withProviderErrorCode(error, interrupted ? undefined : (failureCode ?? errorCodeFrom(error) ?? 'transport'));
+      throw withProviderErrorCode(
+        error,
+        interrupted ? undefined : (failureCode ?? errorCodeFrom(error) ?? 'transport'),
+      );
     }
     await reader.cancel().catch(() => undefined);
     try {
@@ -706,10 +714,12 @@ export class ChatGptResponsesAdapter {
       // finalized function-call events, so use those when the final output array omitted a call.
       const finalCalls = finalFunctionCalls(completedResponse);
       for (const streamedCall of streamedFunctionCalls.sort((left, right) => left.order - right.order)) {
-        const finalCall = finalCalls.find((call) =>
-          (streamedCall.callId !== undefined && call.callId === streamedCall.callId)
-          || (streamedCall.itemId !== undefined && call.itemId === streamedCall.itemId)
-          || (streamedCall.outputIndex !== undefined && call.outputIndex === streamedCall.outputIndex));
+        const finalCall = finalCalls.find(
+          (call) =>
+            (streamedCall.callId !== undefined && call.callId === streamedCall.callId) ||
+            (streamedCall.itemId !== undefined && call.itemId === streamedCall.itemId) ||
+            (streamedCall.outputIndex !== undefined && call.outputIndex === streamedCall.outputIndex),
+        );
         if (finalCall) {
           const finalArguments = finalCall.argumentsText;
           if ((!finalArguments || !finalArguments.trim()) && streamedCall.argumentsComplete) {
@@ -721,10 +731,10 @@ export class ChatGptResponsesAdapter {
             }
             result.toolCalls[finalCall.toolCallIndex] = {
               id:
-                finalCall.callId
-                ?? result.toolCalls[finalCall.toolCallIndex]?.id
-                ?? streamedCall.callId
-                ?? `call-${finalCall.toolCallIndex}`,
+                finalCall.callId ??
+                result.toolCalls[finalCall.toolCallIndex]?.id ??
+                streamedCall.callId ??
+                `call-${finalCall.toolCallIndex}`,
               name,
               arguments: parseArguments(streamedCall.argumentsText, name),
             };
@@ -785,7 +795,10 @@ export class ChatGptResponsesAdapter {
         ...(firstTextMs === undefined ? {} : { firstTextMs }),
         deltaTextCharacters,
       });
-      throw withProviderErrorCode(error, interrupted ? undefined : (failureCode ?? errorCodeFrom(error) ?? 'response_failed'));
+      throw withProviderErrorCode(
+        error,
+        interrupted ? undefined : (failureCode ?? errorCodeFrom(error) ?? 'response_failed'),
+      );
     }
   }
 
@@ -828,10 +841,10 @@ export class ChatGptResponsesAdapter {
       } catch (error) {
         const interrupted = signal.aborted || (error instanceof Error && error.name === 'AbortError');
         const retryableFetchFailure = isRetryableFetchFailure(error);
-        const shouldRetry =
-          !interrupted && retryState.retries < MAX_FETCH_FAILED_RETRIES && retryableFetchFailure;
-        const errorCode =
-          interrupted ? 'aborted' : errorCodeFrom(error) ?? (retryableFetchFailure ? 'fetch_failed' : undefined);
+        const shouldRetry = !interrupted && retryState.retries < MAX_FETCH_FAILED_RETRIES && retryableFetchFailure;
+        const errorCode = interrupted
+          ? 'aborted'
+          : (errorCodeFrom(error) ?? (retryableFetchFailure ? 'fetch_failed' : undefined));
         settle({
           outcome: interrupted ? 'interrupted' : shouldRetry ? 'retrying' : 'failed',
           durationMs: Date.now() - startedAt,

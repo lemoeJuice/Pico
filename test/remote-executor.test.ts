@@ -382,7 +382,12 @@ describe('Remote Host Executor', () => {
         `http://127.0.0.1:${remote.port}`,
         token,
       );
-      const thread = await env.runtime.createRemoteThread(env.project.id, connection.id, remoteWorkspace);
+      const thread = await env.runtime.createRemoteThread(
+        env.project.id,
+        connection.id,
+        remoteWorkspace,
+        'Remote execution with a missing ledger entry',
+      );
       setToolPolicy(env.store, thread.id, 'shell', 'allow');
       const modelExecution = env.store.createModelExecution('lost-remote-model', thread.id, 0);
       env.store.transitionExecution(modelExecution.id, 'running');
@@ -443,7 +448,12 @@ describe('Remote Host Executor', () => {
     const originalFetch = globalThis.fetch;
     try {
       const connection = await env.runtime.addRemoteExecutorConnection('Build host', endpoint, token);
-      const thread = await env.runtime.createRemoteThread(env.project.id, connection.id, remoteWorkspace);
+      const thread = await env.runtime.createRemoteThread(
+        env.project.id,
+        connection.id,
+        remoteWorkspace,
+        'Reconnect after transient disconnects',
+      );
       setToolPolicy(env.store, thread.id, 'shell', 'allow');
 
       let acceptedRemoteSubmission = false;
@@ -665,7 +675,12 @@ describe('Remote Host Executor', () => {
         `http://127.0.0.1:${remote.port}`,
         token,
       );
-      const thread = await env.runtime.createRemoteThread(env.project.id, connection.id, remoteWorkspace);
+      const thread = await env.runtime.createRemoteThread(
+        env.project.id,
+        connection.id,
+        remoteWorkspace,
+        'Interrupt remote execution',
+      );
       setToolPolicy(env.store, thread.id, 'shell', 'allow');
       await env.runtime.submit(thread.id, 'remote-interrupt-message', 'Start then interrupt a command.');
       await until(() =>
@@ -713,7 +728,12 @@ describe('Remote Host Executor', () => {
     const originalFetch = globalThis.fetch;
     try {
       const connection = await env.runtime.addRemoteExecutorConnection('Build host', endpoint, token);
-      const thread = await env.runtime.createRemoteThread(env.project.id, connection.id, remoteWorkspace);
+      const thread = await env.runtime.createRemoteThread(
+        env.project.id,
+        connection.id,
+        remoteWorkspace,
+        'Interrupt after lost acknowledgement',
+      );
       setToolPolicy(env.store, thread.id, 'shell', 'allow');
 
       let acceptedSubmissionResponseWasLost = false;
@@ -791,7 +811,12 @@ describe('Remote Host Executor', () => {
     let submissionRequests = 0;
     try {
       const connection = await env.runtime.addRemoteExecutorConnection('Build host', endpoint, token);
-      const thread = await env.runtime.createRemoteThread(env.project.id, connection.id, remoteWorkspace);
+      const thread = await env.runtime.createRemoteThread(
+        env.project.id,
+        connection.id,
+        remoteWorkspace,
+        'Interrupt after reordered submission',
+      );
       setToolPolicy(env.store, thread.id, 'shell', 'allow');
 
       globalThis.fetch = async (input, init) => {

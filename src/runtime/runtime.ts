@@ -48,10 +48,7 @@ import { createToolCatalog, ToolCatalog, type ToolContext } from '../executor/to
 import { builtinPlugins } from '../plugins/builtin.js';
 import { CommandRegistry, PluginHost, type CommandResult, type PluginCatalogEntry } from '../plugins/host.js';
 import type { PluginServices } from '../plugins/services.js';
-import {
-  OpenAiCompatibleAdapter,
-  type ModelAdapter,
-} from './model.js';
+import { OpenAiCompatibleAdapter, type ModelAdapter } from './model.js';
 import type {
   ModelPrompt,
   ModelRequestTrace,
@@ -121,7 +118,9 @@ function promptForDiagnostics(prompt: ModelPrompt): ModelPrompt {
           images: turn.images.map((image) => ({
             mimeType: image.mimeType,
             ...(image.name ? { name: image.name } : {}),
-            byteLength: Math.floor((image.data.length * 3) / 4) - (image.data.endsWith('==') ? 2 : image.data.endsWith('=') ? 1 : 0),
+            byteLength:
+              Math.floor((image.data.length * 3) / 4) -
+              (image.data.endsWith('==') ? 2 : image.data.endsWith('=') ? 1 : 0),
           })),
         } as unknown as PromptTurn;
       }
@@ -501,8 +500,7 @@ export class PicoRuntime {
         create: (projectId, executorKind, title, options = {}) => {
           if (options.parentThreadId) {
             const parent = this.requireUnarchivedThread(options.parentThreadId);
-            if (parent.projectId !== projectId)
-              throw new Error('Parent Thread must belong to the same Project');
+            if (parent.projectId !== projectId) throw new Error('Parent Thread must belong to the same Project');
           }
           const thread = this.store.createThread(projectId, executorKind, title, options);
           this.publish({ type: 'thread.created', thread });
@@ -608,7 +606,11 @@ export class PicoRuntime {
       this.options.executorPluginDirectory ? { pluginDirectory: this.options.executorPluginDirectory } : {},
     );
     this.executorPluginLoadErrors = executorPluginLoad.errors;
-    const modelParameterMigrationComplete = this.store.getPluginState('pico.model-parameters', 'chatgptPreferencesV1Migrated', false);
+    const modelParameterMigrationComplete = this.store.getPluginState(
+      'pico.model-parameters',
+      'chatgptPreferencesV1Migrated',
+      false,
+    );
     if (!modelParameterMigrationComplete) {
       const oldPreferences: unknown = this.store.getPluginState('pico.chatgpt-plan', 'preferences', null);
       if (oldPreferences && typeof oldPreferences === 'object' && !Array.isArray(oldPreferences)) {
@@ -740,11 +742,7 @@ export class PicoRuntime {
     return this.store.listProjects();
   }
 
-  createThread(
-    projectId: string,
-    executorKind: Thread['executorKind'],
-    title = DEFAULT_THREAD_TITLE,
-  ): Thread {
+  createThread(projectId: string, executorKind: Thread['executorKind'], title = DEFAULT_THREAD_TITLE): Thread {
     const thread = this.store.createThread(projectId, executorKind, title.trim() || DEFAULT_THREAD_TITLE);
     this.publish({ type: 'thread.created', thread });
     return thread;
@@ -2406,7 +2404,12 @@ export class PicoRuntime {
       },
     };
     const recordModelInput = (actualPrompt: ModelPrompt, provider: string): void => {
-      call = { ...call, prompt: structuredClone(promptForDiagnostics(actualPrompt)), provider, model: actualPrompt.model };
+      call = {
+        ...call,
+        prompt: structuredClone(promptForDiagnostics(actualPrompt)),
+        provider,
+        model: actualPrompt.model,
+      };
       save();
     };
     const modelInput: ModelStageInput = {

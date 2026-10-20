@@ -217,6 +217,6 @@ describe('Usage plugin', () => {
       attempts: [{ outcome: 'failed' }, { outcome: 'failed' }],
     });
     expect(result.counts.failedAuxiliaryCalls).toBe(1);
-    expect(result.counts.providerAttempts).toBe(2);
+    expect(result.rows[0]?.attempts).toHaveLength(2);
   });
 });

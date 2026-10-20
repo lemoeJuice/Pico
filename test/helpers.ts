@@ -80,6 +80,7 @@ export async function setupRuntime(model: ModelAdapter, options: RuntimeOptions 
     createThread: (executor: 'host' | 'container' = 'host', title = 'Test thread') =>
       runtime.createThread(project.id, executor, title),
     async cleanup() {
+      await runtime.shutdown();
       store.close();
       await rm(directory, { recursive: true, force: true });
     },

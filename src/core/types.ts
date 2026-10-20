@@ -83,10 +83,10 @@ export interface ToolCall {
 
 export interface AssistantPayload {
   content: string;
-  /** Provider-supplied reasoning text for display. */
-  reasoningSummary?: string;
   /** Runtime-selected provider for this committed main-model response. */
   provider?: ModelProvider;
+  /** Provider-supplied reasoning text for display. */
+  reasoningSummary?: string;
   /** Provider-supplied reasoning content retained for adapters that support replay. */
   reasoningContent?: string;
   /** Opaque adapter replay state; kept out of user-facing history and diagnostics. */

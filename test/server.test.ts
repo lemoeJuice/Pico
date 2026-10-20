@@ -328,7 +328,7 @@ describe('Pico server access boundary', () => {
         `${redirect.origin}${redirect.pathname}?state=not-the-issued-state&error=access_denied`,
       );
       expect(callback.status).toBe(200);
-      expect(await callback.text()).toContain('did not match this authorization attempt');
+      expect(await callback.text()).toContain('expired or did not match');
     } finally {
       await server?.close();
       await rm(directory, { recursive: true, force: true });

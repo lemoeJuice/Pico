@@ -4,12 +4,50 @@ import { expect, it } from 'vitest';
 
 it('uses project and Thread names in linked Usage filters and report rows', async () => {
   const source = readFileSync(new URL('../plugins/pico.usage/webui/usage.js', import.meta.url), 'utf8');
-  const fields: Record<string, { value: string }> = Object.fromEntries(
-    ['projectId', 'threadId', 'provider', 'model', 'purpose', 'from', 'to'].map((name) => [name, { value: '' }]),
+  const fields: Record<string, { value: string; innerHTML: string; disabled: boolean }> = Object.fromEntries(
+    ['projectId', 'threadId', 'provider', 'model', 'purpose', 'from', 'to'].map((name) => [
+      name,
+      { value: '', innerHTML: '', disabled: false },
+    ]),
   );
   const listeners = new Map<string, (event: any) => void>();
   let html = '';
-  const form = { addEventListener: (type: string, listener: (event: any) => void) => listeners.set(type, listener) };
+  const fieldElement = (name: string) => {
+    const field = fields[name];
+    if (!field) return null;
+    return {
+      get value() {
+        return field.value;
+      },
+      set value(value: string) {
+        field.value = value;
+      },
+      get innerHTML() {
+        return field.innerHTML;
+      },
+      set innerHTML(value: string) {
+        field.innerHTML = value;
+      },
+      get disabled() {
+        return field.disabled;
+      },
+      set disabled(value: boolean) {
+        field.disabled = value;
+      },
+      addEventListener(type: string, listener: (event: any) => void) {
+        listeners.set(`${name}:${type}`, listener);
+      },
+    };
+  };
+  const makeForm = (id: string) => ({
+    addEventListener: (type: string, listener: (event: any) => void) => listeners.set(`${id}:${type}`, listener),
+    querySelector(selector: string) {
+      const match = selector.match(/^\[name="([^"]+)"\]$/);
+      return match?.[1] ? fieldElement(match[1]) : null;
+    },
+  });
+  const form = makeForm('filters');
+  const rateForm = makeForm('rate');
   const root = {
     set innerHTML(value: string) {
       html = value;
@@ -26,23 +64,12 @@ it('uses project and Thread names in linked Usage filters and report rows', asyn
     },
     querySelector(selector: string) {
       if (selector === '#filters') return form;
-      if (selector === '#refresh' || selector === '#rate-form') return { addEventListener() {} };
+      if (selector === '#rate-form') return rateForm;
+      if (selector === '#refresh') return { addEventListener() {} };
       const match = selector.match(/^\[name="([^"]+)"\]$/);
       const name = match?.[1];
       if (!name) return null;
-      const field = fields[name];
-      if (!field) return null;
-      return {
-        get value() {
-          return field.value;
-        },
-        set value(value: string) {
-          field.value = value;
-        },
-        addEventListener(type: string, listener: (event: any) => void) {
-          listeners.set(`${name}:${type}`, listener);
-        },
-      };
+      return fieldElement(name);
     },
     querySelectorAll: () => [],
   };
@@ -87,12 +114,15 @@ it('uses project and Thread names in linked Usage filters and report rows', asyn
   });
   expect(requests.map((request) => request.path)).toEqual([
     '/api/plugins/pico.usage/catalog',
+    '/api/plugins/pico.usage/options',
     '/api/plugins/pico.usage/report',
   ]);
 
   const catalogRequest = requests[0];
-  const reportRequest = requests[1];
-  if (!catalogRequest || !reportRequest) throw new Error('Expected catalog and report requests');
+  const optionsRequest = requests[1];
+  const reportRequest = requests[2];
+  if (!catalogRequest || !optionsRequest || !reportRequest)
+    throw new Error('Expected catalog, options, and report requests');
   const respond = (request: Record<string, unknown>, value: unknown) =>
     port.onmessage?.({
       data: { type: 'pico:plugin-ui:response', id: request.id, ok: true, value },
@@ -107,6 +137,7 @@ it('uses project and Thread names in linked Usage filters and report rows', asyn
       { id: 'thread-2', projectId: 'project-2', title: 'Build notes' },
     ],
   });
+  respond(optionsRequest, { providerModels: [], purposes: [] });
   respond(reportRequest, {
     rows: [
       {
@@ -203,7 +234,7 @@ it('uses project and Thread names in linked Usage filters and report rows', asyn
 
   fields.provider!.value = 'provider-b';
   fields.from!.value = '2026-10-01';
-  listeners.get('submit')?.({ preventDefault() {}, currentTarget: form });
+  listeners.get('filters:submit')?.({ preventDefault() {}, currentTarget: form });
   expect(requests.at(-1)?.path).toBe(
     '/api/plugins/pico.usage/report?projectId=project-2&provider=provider-b&from=2026-10-01',
   );

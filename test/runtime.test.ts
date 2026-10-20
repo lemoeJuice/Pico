@@ -81,6 +81,7 @@ describe('durable Thread runtime invariants', () => {
       },
     };
     const env = await setupRuntime(model);
+    env.runtime.updateModelSettings({ model: 'test-model' });
     const thread = env.createThread();
     const events: Array<Record<string, unknown>> = [];
     const unsubscribe = env.runtime.subscribe((event) => events.push(event));
@@ -352,7 +353,7 @@ describe('durable Thread runtime invariants', () => {
           .pluginInfo()
           .ui.filter((item) => item.pluginId === 'pico.permissions')
           .map((item) => item.slot),
-      ).toEqual(['tool.result']);
+      ).toEqual(['thread.toolbar', 'tool.result']);
 
       expect(
         (await env.runtime.listThreadTools(hostThread.id)).find((tool) => tool.name === 'optional_runtime_tool')
@@ -513,6 +514,7 @@ describe('durable Thread runtime invariants', () => {
       expect(store.listRecords(thread.id).filter((record) => record.kind === 'tool_result')).toHaveLength(1);
       expect(store.listRecords(thread.id).filter((record) => record.kind === 'assistant')).toHaveLength(2);
     } finally {
+      await runtime.shutdown();
       store.close();
       await rm(directory, { recursive: true, force: true });
     }
@@ -570,6 +572,7 @@ describe('durable Thread runtime invariants', () => {
       ]);
       expect(store.listRecords(thread.id).filter((record) => record.kind === 'message')).toHaveLength(1);
     } finally {
+      await runtime.shutdown();
       store.close();
       await rm(directory, { recursive: true, force: true });
     }

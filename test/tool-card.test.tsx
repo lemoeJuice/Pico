@@ -14,7 +14,7 @@ it('keeps arguments and the pending result visible without disclosure controls',
   expect(html).not.toContain('<summary');
   expect(html).toContain('pwd');
   expect(html).toContain('Waiting for the Executor');
-  expect(html).toContain('Result');
+  expect(html).toContain('tool-shell-output-pending');
 });
 
 it('uses the durable result status when execution history is outside the loaded page and escapes output', () => {
@@ -28,7 +28,7 @@ it('uses the durable result status when execution history is outside the loaded 
         batchId: 'b',
         toolName: 'shell',
         status: 'completed',
-        result: '<script>alert(1)</script>',
+        result: { stdout: '<script>alert(1)</script>', exitCode: 0 },
       }}
     />,
   );

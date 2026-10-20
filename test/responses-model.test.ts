@@ -377,9 +377,9 @@ describe('ChatGPT Responses adapter', () => {
         ),
     );
     const emptyAdapter = new ChatGptResponsesAdapter(auth);
-    await expect(
-      emptyAdapter.complete(prompt, new AbortController().signal, () => undefined),
-    ).rejects.toThrow('without text or tool calls');
+    await expect(emptyAdapter.complete(prompt, new AbortController().signal, () => undefined)).rejects.toThrow(
+      'without text or tool calls',
+    );
 
     vi.stubGlobal(
       'fetch',
@@ -402,9 +402,9 @@ describe('ChatGPT Responses adapter', () => {
         ),
     );
     const incompleteCallAdapter = new ChatGptResponsesAdapter(auth);
-    await expect(
-      incompleteCallAdapter.complete(prompt, new AbortController().signal, () => undefined),
-    ).rejects.toThrow('without completing its arguments');
+    await expect(incompleteCallAdapter.complete(prompt, new AbortController().signal, () => undefined)).rejects.toThrow(
+      'without completing its arguments',
+    );
   });
 
   it('does not return an incomplete stream as a completed model step', async () => {
@@ -449,9 +449,10 @@ describe('ChatGPT Responses adapter', () => {
     const adapter = new ChatGptResponsesAdapter({
       accessToken: async () => 'oauth-access-token',
     } as unknown as ChatGptPlanAuth);
-    await expect(
-      adapter.complete(prompt, new AbortController().signal, () => undefined),
-    ).resolves.toMatchObject({ content: 'partial but complete stream', finishReason: 'length' });
+    await expect(adapter.complete(prompt, new AbortController().signal, () => undefined)).resolves.toMatchObject({
+      content: 'partial but complete stream',
+      finishReason: 'length',
+    });
 
     vi.stubGlobal(
       'fetch',
@@ -467,9 +468,9 @@ describe('ChatGPT Responses adapter', () => {
     const incompleteAdapter = new ChatGptResponsesAdapter({
       accessToken: async () => 'oauth-access-token',
     } as unknown as ChatGptPlanAuth);
-    await expect(
-      incompleteAdapter.complete(prompt, new AbortController().signal, () => undefined),
-    ).rejects.toThrow('response was incomplete (content_filter)');
+    await expect(incompleteAdapter.complete(prompt, new AbortController().signal, () => undefined)).rejects.toThrow(
+      'response was incomplete (content_filter)',
+    );
   });
 
   it('preserves structured provider error codes from failed stream events', async () => {
@@ -497,7 +498,7 @@ describe('ChatGPT Responses adapter', () => {
   });
 
   it('records the nested network code when the Responses request fails before an HTTP response', async () => {
-    const cause = Object.assign(new Error('connection failed'), { code: 'ECONNRESET' });
+    const cause = Object.assign(new Error('connection failed'), { code: 'EACCES' });
     vi.stubGlobal('fetch', async () => {
       throw Object.assign(new TypeError('fetch failed'), { cause });
     });
@@ -521,7 +522,7 @@ describe('ChatGPT Responses adapter', () => {
     expect(trace.response).not.toHaveBeenCalled();
     expect(trace.settled).toHaveBeenCalledWith(
       'provider-attempt-1',
-      expect.objectContaining({ outcome: 'failed', errorCategory: 'transport', errorCode: 'ECONNRESET' }),
+      expect.objectContaining({ outcome: 'failed', errorCategory: 'transport', errorCode: 'EACCES' }),
     );
   });
 });

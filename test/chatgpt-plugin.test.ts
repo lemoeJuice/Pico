@@ -69,7 +69,9 @@ describe('ChatGPT provider plugin', () => {
         'GET /models',
         'POST /models/refresh',
         'POST /sign-in',
-        'PUT /preferences',
+        'POST /sign-in/complete',
+        'POST /sign-in/retry',
+        'DELETE /account',
       ]),
     );
     expect(await commands.execute('/chatgpt-provider', { thread: null, projectId: null })).toEqual({
