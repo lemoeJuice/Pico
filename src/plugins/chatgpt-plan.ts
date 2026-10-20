@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { ModelStageInput } from '../runtime/stages.js';
@@ -30,6 +30,17 @@ function callbackForRetry(callback: URLSearchParams): URLSearchParams {
     if (values.length === 1 && values[0]) retry.set(name, values[0]);
   }
   return retry;
+}
+
+function promptCacheKeyFor(input: ModelStageInput): string {
+  const call = input.pluginModelCall;
+  if (!call) return input.thread.id;
+
+  const digest = createHash('sha256')
+    .update(JSON.stringify(['pico.chatgpt-plan.plugin-cache.v1', input.thread.id, call.pluginId, call.purpose]))
+    .digest('hex');
+  // Keep the affinity key bounded while deriving a stable namespace per Thread, plugin, and purpose.
+  return `pico-plugin:${digest.slice(0, 52)}`;
 }
 
 function escapeHtml(value: string): string {
@@ -177,6 +188,8 @@ export function createChatGptPlanPlugin(): PicoPlugin {
           input.requestTrace,
           input.onEvent,
           input.requestParameters,
+          input.thread.id,
+          promptCacheKeyFor(input),
         );
       });
 

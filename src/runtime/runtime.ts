@@ -2333,6 +2333,7 @@ export class PicoRuntime {
     const modelInput: ModelStageInput = {
       thread,
       provider: settings.provider,
+      pluginModelCall: { pluginId, purpose: request.purpose },
       prompt,
       signal: controller.signal,
       onText: () => undefined,

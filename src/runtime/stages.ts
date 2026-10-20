@@ -28,9 +28,16 @@ export interface ProjectionInput {
   provenance?: ProjectionProvenance[];
 }
 
+export interface PluginModelCallScope {
+  pluginId: string;
+  purpose: string;
+}
+
 export interface ModelStageInput {
   thread: Thread;
   provider: ModelProvider;
+  /** Present for auxiliary model calls initiated by a plugin. */
+  pluginModelCall?: PluginModelCallScope;
   /** Public routing identity only; excludes API keys and other credentials. */
   modelTarget?: { provider: string; baseUrl: string; model: string };
   prompt: ModelPrompt;

@@ -260,8 +260,11 @@ export class ChatGptResponsesAdapter {
     requestTrace?: ModelRequestTrace,
     onEvent?: (event: ModelStreamEvent) => void,
     requestParameters?: ModelRequestParameters,
+    threadId?: string,
+    promptCacheKey?: string,
   ): Promise<ModelResponse> {
     if (!prompt.model.trim()) throw new Error('Choose a ChatGPT model in Settings before sending a message.');
+    const cacheKey = promptCacheKey ?? threadId;
     const body: Record<string, unknown> = {
       model: prompt.model,
       instructions: prompt.system,
@@ -272,6 +275,7 @@ export class ChatGptResponsesAdapter {
       tools: responseTools(prompt.tools),
       reasoning: { summary: 'auto' },
       ...requestParameters?.fields,
+      ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
     };
     let accessToken: string;
     try {
@@ -280,7 +284,15 @@ export class ChatGptResponsesAdapter {
       throw withProviderErrorCode(error, 'auth');
     }
     const retryState: ProviderRequestRetryState = { attempt: 0, retries: 0 };
-    let tracedRequest = await this.requestTraced(body, accessToken, signal, requestTrace, retryState);
+    let tracedRequest = await this.requestTraced(
+      body,
+      accessToken,
+      signal,
+      requestTrace,
+      retryState,
+      threadId,
+      cacheKey,
+    );
     // A token may be revoked between the proactive refresh check and this request.
     if (tracedRequest.response.status === 401) {
       await tracedRequest.response.body?.cancel().catch(() => undefined);
@@ -303,7 +315,15 @@ export class ChatGptResponsesAdapter {
         errorCategory: 'http',
         errorCode: 'http_401',
       });
-      tracedRequest = await this.requestTraced(body, accessToken, signal, requestTrace, retryState);
+      tracedRequest = await this.requestTraced(
+        body,
+        accessToken,
+        signal,
+        requestTrace,
+        retryState,
+        threadId,
+        cacheKey,
+      );
     }
     const response = tracedRequest.response;
     if (!response.ok) {
@@ -687,6 +707,8 @@ export class ChatGptResponsesAdapter {
     signal: AbortSignal,
     trace: ModelRequestTrace | undefined,
     retryState: ProviderRequestRetryState,
+    threadId?: string,
+    promptCacheKey?: string,
   ): Promise<TracedRequest> {
     while (true) {
       const startedAt = Date.now();
@@ -705,7 +727,7 @@ export class ChatGptResponsesAdapter {
         if (providerAttemptId) trace?.settled(providerAttemptId, summary);
       };
       try {
-        const response = await this.request(body, accessToken, signal);
+        const response = await this.request(body, accessToken, signal, threadId, promptCacheKey);
         if (providerAttemptId) {
           const providerRequestId = response.headers.get('x-request-id') ?? response.headers.get('openai-request-id');
           trace?.response(providerAttemptId, {
@@ -737,13 +759,22 @@ export class ChatGptResponsesAdapter {
     }
   }
 
-  private request(body: Record<string, unknown>, accessToken: string, signal: AbortSignal): Promise<Response> {
+  private request(
+    body: Record<string, unknown>,
+    accessToken: string,
+    signal: AbortSignal,
+    threadId?: string,
+    promptCacheKey?: string,
+  ): Promise<Response> {
+    const sessionId = promptCacheKey ?? threadId;
     return this.fetcher(responsesUrl, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${accessToken}`,
         'content-type': 'application/json',
         accept: 'text/event-stream',
+        ...(sessionId ? { 'session-id': sessionId } : {}),
+        ...(threadId ? { 'thread-id': threadId } : {}),
       },
       body: JSON.stringify(body),
       signal,
