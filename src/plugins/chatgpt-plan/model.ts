@@ -24,14 +24,20 @@ const RETRYABLE_FETCH_ERROR_CODES = new Set([
 ]);
 
 function responseInput(prompt: ModelPrompt): Array<Record<string, unknown>> {
-  return prompt.turns.flatMap((turn): Array<Record<string, unknown>> => {
+  const input: Array<Record<string, unknown>> = [];
+  for (let index = 0; index < prompt.turns.length; index += 1) {
+    const turn = prompt.turns[index]!;
     if (turn.kind === 'message') {
-      if (turn.role !== 'assistant') return [{ role: turn.role, content: turn.content }];
+      if (turn.role !== 'assistant') {
+        input.push({ role: turn.role, content: turn.content });
+        continue;
+      }
       const replay = reasoningItems(turn.reasoningReplay);
-      return [...replay, { role: turn.role, content: turn.content }];
+      input.push(...replay, { role: turn.role, content: turn.content });
+      continue;
     }
     if (turn.kind === 'assistant_tools') {
-      return [
+      input.push(
         ...reasoningItems(turn.reasoningReplay),
         ...(turn.content ? [{ role: 'assistant', content: turn.content }] : []),
         ...turn.calls.map((call) => ({
@@ -40,10 +46,38 @@ function responseInput(prompt: ModelPrompt): Array<Record<string, unknown>> {
           name: call.name,
           arguments: JSON.stringify(call.arguments),
         })),
-      ];
+      );
+      continue;
     }
-    return [{ type: 'function_call_output', call_id: turn.callId, output: turn.content }];
-  });
+    const batchId = turn.batchId;
+    const group = [turn];
+    while (index + 1 < prompt.turns.length) {
+      const next = prompt.turns[index + 1]!;
+      if (next.kind !== 'tool_result') break;
+      if (batchId ? next.batchId !== batchId : Boolean(next.batchId)) break;
+      group.push(next);
+      index += 1;
+    }
+    input.push(...group.map((result) => ({
+      type: 'function_call_output',
+      call_id: result.callId,
+      output: result.content,
+    })));
+    for (const result of group) {
+      if (!result.images?.length) continue;
+      input.push({
+        role: 'user',
+        content: [
+          { type: 'input_text', text: `Images returned by tool ${result.toolName} (call id ${result.callId}).` },
+          ...result.images.map((image) => ({
+            type: 'input_image',
+            image_url: `data:${image.mimeType};base64,${image.data}`,
+          })),
+        ],
+      });
+    }
+  }
+  return input;
 }
 
 function reasoningItems(value: unknown): Array<Record<string, unknown>> {

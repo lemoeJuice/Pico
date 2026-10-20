@@ -1,8 +1,10 @@
 import { READ_FILE_LIMITS, SEARCH_FILE_LIMITS } from './tool-limits.js';
+import { MAX_IMAGE_BYTES } from '../contracts/multimodal.js';
 
 export const CONTAINER_RUNNER = String.raw`
 const readFileLimits = ${JSON.stringify(READ_FILE_LIMITS)};
 const searchFileLimits = ${JSON.stringify(SEARCH_FILE_LIMITS)};
+const maxImageBytes = ${MAX_IMAGE_BYTES};
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
@@ -224,6 +226,12 @@ async function pathInside(value, allowMissing = false) {
   }
   return current;
 }
+function imageMimeType(bytes) {
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 12 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  return null;
+}
 async function patch(patchText) {
   const text = patchText.replace(/^\*\*\* Begin Patch\n/, '').replace(/\n\*\*\* End Patch\s*$/, '\n');
   const blocks = text.split(/(?=^diff --git |^\*\*\* (?:Update|Add|Delete) File: )/m).filter(Boolean);
@@ -379,6 +387,43 @@ const defaultExecutorPlugin = {
       if (decoded.includes('\0')) throw new Error('File contains binary data; read_file supports UTF-8 text files.');
       return { path: path.relative(workspace, file), contents: decoded.slice(0, readFileLimits.maxCharacters),
         truncated: size > bytesRead || decoded.length > readFileLimits.maxCharacters };
+    });
+    tools.register({
+      name: 'read_image',
+      description: 'Read a PNG, JPEG, or WebP image file inside the selected workspace for visual inspection. Paths are relative to the workspace; files are limited to 4 MiB.',
+      parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false },
+    }, async args => {
+      if (typeof args.path !== 'string') throw new Error('Expected path to be a string');
+      const file = await pathInside(args.path);
+      const handle = await fsp.open(file, 'r');
+      let bytes;
+      try {
+        const size = (await handle.stat()).size;
+        if (size > maxImageBytes) throw new Error('Image exceeds the 4 MiB read_image limit.');
+        let buffer = Buffer.alloc(Math.min(size + 1, maxImageBytes + 1));
+        let bytesRead = 0;
+        while (true) {
+          if (bytesRead === buffer.length) {
+            if (buffer.length === maxImageBytes + 1) break;
+            const expanded = Buffer.alloc(Math.min(maxImageBytes + 1, Math.max(buffer.length + 1, buffer.length * 2)));
+            buffer.copy(expanded, 0, 0, bytesRead);
+            buffer = expanded;
+          }
+          const read = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+          if (read.bytesRead === 0) break;
+          bytesRead += read.bytesRead;
+        }
+        if (bytesRead > maxImageBytes) throw new Error('Image exceeds the 4 MiB read_image limit.');
+        bytes = buffer.subarray(0, bytesRead);
+      } finally { await handle.close(); }
+      const mimeType = imageMimeType(bytes);
+      if (!mimeType) throw new Error('File is not a supported PNG, JPEG, or WebP image.');
+      const name = args.path.split(/[\\/]/).filter(Boolean).at(-1) || path.basename(file);
+      return {
+        kind: 'pico.multimodal-tool-result', version: 1,
+        text: 'Read image ' + name + ' (' + mimeType + ', ' + bytes.length + ' bytes).',
+        images: [{ type: 'image', mimeType, data: bytes.toString('base64'), name }],
+      };
     });
     tools.register({
       name: 'search_files',

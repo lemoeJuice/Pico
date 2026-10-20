@@ -49,7 +49,8 @@ function endpointFor(baseUrl: string): string {
 
 function toWireMessages(prompt: ModelPrompt): Array<Record<string, unknown>> {
   const messages: Array<Record<string, unknown>> = [{ role: 'system', content: prompt.system }];
-  for (const turn of prompt.turns) {
+  for (let index = 0; index < prompt.turns.length; index += 1) {
+    const turn = prompt.turns[index]!;
     if (turn.kind === 'message') {
       messages.push({
         role: turn.role,
@@ -72,7 +73,31 @@ function toWireMessages(prompt: ModelPrompt): Array<Record<string, unknown>> {
         })),
       });
     } else {
-      messages.push({ role: 'tool', tool_call_id: turn.callId, name: turn.toolName, content: turn.content });
+      const batchId = turn.batchId;
+      const group = [turn];
+      while (index + 1 < prompt.turns.length) {
+        const next = prompt.turns[index + 1]!;
+        if (next.kind !== 'tool_result') break;
+        if (batchId ? next.batchId !== batchId : Boolean(next.batchId)) break;
+        group.push(next);
+        index += 1;
+      }
+      for (const result of group) {
+        messages.push({ role: 'tool', tool_call_id: result.callId, name: result.toolName, content: result.content });
+      }
+      for (const result of group) {
+        if (!result.images?.length) continue;
+        messages.push({
+          role: 'user',
+          content: [
+            { type: 'text', text: `Images returned by tool ${result.toolName} (call id ${result.callId}).` },
+            ...result.images.map((image) => ({
+              type: 'image_url',
+              image_url: { url: `data:${image.mimeType};base64,${image.data}` },
+            })),
+          ],
+        });
+      }
     }
   }
   return messages;

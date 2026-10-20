@@ -22,6 +22,12 @@ import type {
 } from '../core/types.js';
 import { PicoStore } from '../core/store.js';
 import type { PluginModelCallRecord } from '../contracts/store.js';
+import {
+  isMultimodalToolResultEnvelope,
+  multimodalToolResultText,
+  redactMultimodalToolResult,
+  sanitizeMultimodalResultValue,
+} from '../contracts/multimodal.js';
 import type {
   ModelInputAttempt,
   ModelInputResultSummary,
@@ -81,19 +87,44 @@ const DISABLED_THREAD_TOOLS_SETTING = 'disabled-thread-tools';
 
 export const THREAD_HISTORY_PAGE_SIZE = 100;
 
+function redactPublicValue(value: unknown): unknown {
+  if (isMultimodalToolResultEnvelope(value)) return redactMultimodalToolResult(value);
+  if (Array.isArray(value)) return value.map(redactPublicValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, redactPublicValue(child)]));
+  }
+  return value;
+}
+
 function redactReasoningReplay<T>(record: CanonicalRecord<T>): CanonicalRecord<T> {
-  if (record.kind !== 'assistant') return record;
-  const payload = record.payload;
-  if (!payload || typeof payload !== 'object' || !('reasoningReplay' in payload)) return record;
+  const safePayload = redactPublicValue(record.payload) as T;
+  if (record.kind !== 'assistant') return safePayload === record.payload ? record : { ...record, payload: safePayload };
+  const payload = safePayload;
+  if (!payload || typeof payload !== 'object' || !('reasoningReplay' in payload)) return { ...record, payload };
   const { reasoningReplay: _reasoningReplay, ...publicPayload } = payload as Record<string, unknown>;
   return { ...record, payload: publicPayload as T };
+}
+
+function redactExecutionImages(execution: Execution): Execution {
+  const safe = redactPublicValue(execution) as Execution;
+  return safe === execution ? execution : safe;
 }
 
 function promptForDiagnostics(prompt: ModelPrompt): ModelPrompt {
   return {
     ...prompt,
     turns: prompt.turns.map((turn): PromptTurn => {
-      if (turn.kind === 'tool_result') return turn;
+      if (turn.kind === 'tool_result') {
+        if (!turn.images?.length) return turn;
+        return {
+          ...turn,
+          images: turn.images.map((image) => ({
+            mimeType: image.mimeType,
+            ...(image.name ? { name: image.name } : {}),
+            byteLength: Math.floor((image.data.length * 3) / 4) - (image.data.endsWith('==') ? 2 : image.data.endsWith('=') ? 1 : 0),
+          })),
+        } as unknown as PromptTurn;
+      }
       const { reasoningReplay: _reasoningReplay, ...diagnosticTurn } = turn;
       return diagnosticTurn;
     }),
@@ -356,8 +387,9 @@ function stringifyToolResult(payload: ToolResultPayload): string {
         : undefined;
     return `Tool failed: ${payload.error ?? 'Unknown error'}${guidance ? `\nModel guidance: ${guidance}` : ''}`;
   }
+  if (isMultimodalToolResultEnvelope(payload.result)) return multimodalToolResultText(payload.result);
   try {
-    return JSON.stringify(payload.result ?? null);
+    return JSON.stringify(sanitizeMultimodalResultValue(payload.result ?? null));
   } catch {
     return String(payload.result);
   }
@@ -502,7 +534,10 @@ export class PicoRuntime {
           const current = this.store.getExecution(executionId);
           if (!current) throw new Error('Execution not found');
           if (terminalStatus(current.status)) return current;
-          const failed = this.store.transitionExecution(executionId, 'failed', { error: reason, result });
+          const failed = this.store.transitionExecution(executionId, 'failed', {
+            error: reason,
+            result: sanitizeMultimodalResultValue(result),
+          });
           this.executionChanged(failed);
           return failed;
         },
@@ -679,7 +714,7 @@ export class PicoRuntime {
   }
 
   private executionChanged(execution: Execution): void {
-    this.publish({ type: 'execution.updated', execution });
+    this.publish({ type: 'execution.updated', execution: redactExecutionImages(execution) });
     this.publishThreadUpdate(execution.threadId);
     for (const listener of this.executionListeners) listener(execution);
   }
@@ -939,7 +974,7 @@ export class PicoRuntime {
     return {
       thread,
       records: page.records.map(redactReasoningReplay),
-      executions,
+      executions: executions.map(redactExecutionImages),
       children: this.listThreads(thread.projectId).filter((candidate) => candidate.parentThreadId === threadId),
       hasEarlierRecords: page.hasEarlierRecords,
       historyPageSize: THREAD_HISTORY_PAGE_SIZE,
@@ -1600,7 +1635,7 @@ export class PicoRuntime {
       }
       if (terminalStatus(current.status) || result.status === 'pending' || current.status === result.status) continue;
       const updated = this.store.transitionExecution(current.id, result.status, {
-        result: result.result ?? null,
+        result: sanitizeMultimodalResultValue(result.result ?? null),
         ...(result.error ? { error: result.error } : {}),
         detail: { source: 'tool-batch-pipeline' },
       });
@@ -1847,6 +1882,15 @@ export class PicoRuntime {
       };
       let response: ModelResponse;
       try {
+        const hasImageInput = prompt.turns.some((turn) => turn.kind === 'tool_result' && Boolean(turn.images?.length));
+        const providerSupportsImages = this.plugins
+          .modelProviders()
+          .find((provider) => provider.id === modelSettings.provider)?.supportsImages;
+        if (hasImageInput && providerSupportsImages !== true) {
+          throw new Error(
+            `Model provider "${modelSettings.provider}" does not support image inputs; images were not sent.`,
+          );
+        }
         response = await this.pipelines.run<ModelStageInput, ModelResponse>('model', modelInput, async (input) => {
           input.recordModelInput(input.prompt, input.provider, input.projectionProvenance);
           return this.model.complete(
@@ -2001,6 +2045,7 @@ export class PicoRuntime {
                 kind: 'tool_result',
                 callId: call.id,
                 toolName: call.name,
+                ...(assistant.batchId ? { batchId: assistant.batchId } : {}),
                 content: stringifyToolResult(result),
               });
             }
@@ -2024,6 +2069,7 @@ export class PicoRuntime {
           kind: 'tool_result',
           callId: result.toolCallId,
           toolName: result.toolName,
+          batchId: result.batchId,
           content: stringifyToolResult(result),
         });
       }
@@ -2088,7 +2134,7 @@ export class PicoRuntime {
         if (terminalStatus(current.status)) return current;
         const failed = this.store.transitionExecution(executionId, 'failed', {
           error: reason,
-          ...(result === undefined ? {} : { result }),
+          ...(result === undefined ? {} : { result: sanitizeMultimodalResultValue(result) }),
         });
         if (!failed) throw new Error(`Tool Execution ${executionId} could not be failed.`);
         this.executionChanged(failed);
@@ -2187,7 +2233,9 @@ export class PicoRuntime {
     const promise = (async () => {
       try {
         const result = await tool.execute(call.arguments, context);
-        const completed = this.store.transitionExecution(executionId, 'completed', { result });
+        const completed = this.store.transitionExecution(executionId, 'completed', {
+          result: sanitizeMultimodalResultValue(result),
+        });
         this.executionChanged(completed);
         return completed;
       } catch (error) {

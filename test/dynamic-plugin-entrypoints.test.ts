@@ -37,6 +37,7 @@ describe('dynamic first-party plugin entries', () => {
         'pico.global-memory',
         'pico.collaboration',
         'pico.permissions',
+        'pico.vision',
       ]);
     } finally {
       await runtime.shutdown();

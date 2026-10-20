@@ -1,9 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { lstat, open, readFile, realpath, writeFile, unlink, mkdir } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import type { ToolDefinition } from '../core/types.js';
 import type { Thread } from '../core/types.js';
+import { MAX_IMAGE_BYTES } from '../contracts/multimodal.js';
 import { READ_FILE_LIMITS, SEARCH_FILE_LIMITS } from './tool-limits.js';
 
 export interface ToolContext {
@@ -114,6 +115,21 @@ async function safePath(workspacePath: string, requestedPath: string, allowMissi
 
 function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === code;
+}
+
+function imageMimeType(bytes: Buffer): 'image/png' | 'image/jpeg' | 'image/webp' | null {
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return 'image/png';
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (
+    bytes.length >= 12 &&
+    bytes.toString('ascii', 0, 4) === 'RIFF' &&
+    bytes.toString('ascii', 8, 12) === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+  return null;
 }
 
 function runProcess(
@@ -459,6 +475,55 @@ export function builtinExecutorTools(): ToolImplementation[] {
           path: relative(context.workspacePath, target),
           contents,
           truncated: size > bytesRead || decoded.length > READ_FILE_LIMITS.maxCharacters,
+        };
+      },
+    },
+    {
+      definition: {
+        name: 'read_image',
+        description:
+          'Read a PNG, JPEG, or WebP image file inside the selected workspace for visual inspection. Paths are relative to the workspace; files are limited to 4 MiB.',
+        parameters: {
+          type: 'object',
+          properties: { path: schemas.string },
+          required: ['path'],
+          additionalProperties: false,
+        },
+      },
+      async execute(args, context) {
+        const requestedPath = requiredString(args, 'path');
+        const target = await safePath(context.workspacePath, requestedPath);
+        const handle = await open(target, 'r');
+        let bytes: Buffer;
+        try {
+          const size = (await handle.stat()).size;
+          if (size > MAX_IMAGE_BYTES) throw new Error('Image exceeds the 4 MiB read_image limit.');
+          let buffer = Buffer.alloc(Math.min(size + 1, MAX_IMAGE_BYTES + 1));
+          let bytesRead = 0;
+          while (true) {
+            if (bytesRead === buffer.length) {
+              if (buffer.length === MAX_IMAGE_BYTES + 1) break;
+              const expanded = Buffer.alloc(Math.min(MAX_IMAGE_BYTES + 1, Math.max(buffer.length + 1, buffer.length * 2)));
+              buffer.copy(expanded, 0, 0, bytesRead);
+              buffer = expanded;
+            }
+            const read = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+            if (read.bytesRead === 0) break;
+            bytesRead += read.bytesRead;
+          }
+          if (bytesRead > MAX_IMAGE_BYTES) throw new Error('Image exceeds the 4 MiB read_image limit.');
+          bytes = buffer.subarray(0, bytesRead);
+        } finally {
+          await handle.close();
+        }
+        const mimeType = imageMimeType(bytes);
+        if (!mimeType) throw new Error('File is not a supported PNG, JPEG, or WebP image.');
+        const name = requestedPath.split(/[\\/]/).filter(Boolean).at(-1) ?? basename(target);
+        return {
+          kind: 'pico.multimodal-tool-result',
+          version: 1,
+          text: `Read image ${name} (${mimeType}, ${bytes.length} bytes).`,
+          images: [{ type: 'image', mimeType, data: bytes.toString('base64'), name }],
         };
       },
     },

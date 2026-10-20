@@ -1,6 +1,7 @@
 import type { PicoPlugin } from './host.js';
 import { modelParametersPlugin } from './model-parameters/index.js';
 import { autoThreadTitlePlugin } from './auto-thread-title.js';
+import { visionPlugin } from './vision.js';
 
 export const workspacePlugin: PicoPlugin = {
   id: 'pico.workspace',
@@ -80,4 +81,5 @@ export const builtinPlugins: PicoPlugin[] = [
   helpPlugin,
   modelParametersPlugin,
   autoThreadTitlePlugin,
+  visionPlugin,
 ];

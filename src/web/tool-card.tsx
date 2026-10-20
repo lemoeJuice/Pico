@@ -1,4 +1,5 @@
 import type { Execution, ToolCall, ToolResultPayload } from '../core/types.js';
+import { isMultimodalToolResultEnvelope, redactMultimodalToolResult } from '../contracts/multimodal.js';
 import type { ReactNode } from 'react';
 import { useEffect, useState } from 'react';
 import './tool-card.css';
@@ -105,6 +106,54 @@ function toJson(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function redactToolResultValue(value: unknown): unknown {
+  if (isMultimodalToolResultEnvelope(value)) return redactMultimodalToolResult(value);
+  if (Array.isArray(value)) return value.map(redactToolResultValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, redactToolResultValue(child)]));
+  }
+  return value;
+}
+
+function toSafeResultJson(value: unknown): string {
+  return toJson(redactToolResultValue(value));
+}
+
+function readableToolResult(toolName: string, value: unknown): ReactNode {
+  value = redactToolResultValue(value);
+  if (
+    isRecord(value) &&
+    value.kind === 'pico.multimodal-tool-result' &&
+    typeof value.text === 'string' &&
+    Array.isArray(value.images)
+  ) {
+    return (
+      <div className="tool-result-note">
+        {value.invalid === true ? <div className="tool-result-note">图像数据无效/超限，未发送</div> : null}
+        {value.text ? <pre className="tool-result-content">{value.text}</pre> : null}
+        {value.images.map((image, index) => {
+          if (!isRecord(image)) return null;
+          if (image.invalid === true) {
+            return (
+              <div className="tool-result-note" key={`${index}-invalid`}>
+                图像数据无效/超限，未发送
+              </div>
+            );
+          }
+          const name = typeof image.name === 'string' ? ` · ${image.name}` : '';
+          const size = typeof image.byteLength === 'number' ? ` · ${image.byteLength} bytes` : '';
+          return (
+            <div className="tool-result-note" key={`${index}-${String(image.mimeType)}`}>
+              Image: {String(image.mimeType ?? 'unknown')}{name}{size}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+  return readableResult(toolName, value);
 }
 
 const defaultShellTimeoutMs = 120_000;
@@ -508,9 +557,9 @@ export function ToolCard({
   const outcomeUnconfirmed = execution?.error?.includes('The Executor did not confirm an outcome.') ?? false;
   const args = previewArguments(call, preview);
   const structuredResult = isRecord(result?.result)
-    ? result.result
+    ? redactToolResultValue(result.result) as JsonRecord
     : isRecord(execution?.result)
-      ? execution.result
+      ? redactToolResultValue(execution.result) as JsonRecord
       : undefined;
   const modelGuidance = typeof structuredResult?.modelGuidance === 'string' ? structuredResult.modelGuidance : null;
   const resultErrors = result
@@ -523,16 +572,16 @@ export function ToolCard({
       : result?.status === 'failed'
         ? (result.error ?? 'Tool failed.')
         : result
-          ? toJson(result.result)
+          ? toSafeResultJson(result.result)
           : execution?.error
             ? `${execution.error}${execution.status === 'pending' && !outcomeUnconfirmed ? '\n\nContinue this Thread to retry the same Execution.' : ''}`
             : execution?.status === 'running'
               ? 'Running in the selected Executor…'
               : 'Waiting for the Executor…';
   const fullResult = result
-    ? toJson(result)
+    ? toSafeResultJson(result)
     : execution?.result !== null && execution?.result !== undefined
-      ? toJson(execution.result)
+      ? toSafeResultJson(execution.result)
       : resultText;
   const [clockNow, setClockNow] = useState(() => Date.now());
   useEffect(() => {
@@ -654,7 +703,7 @@ export function ToolCard({
             ) : preview || !result ? (
               <pre className={`pico-ui-preview tool-output${hasError ? ' tool-output-error' : ''}`}>{resultText}</pre>
             ) : (
-              readableResult(call.name, result.result)
+              readableToolResult(call.name, result.result)
             )}
             {view === 'readable' && resultStatusMessage ? (
               <div className="tool-result-note tool-result-status-message" role="status">

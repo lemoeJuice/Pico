@@ -1,3 +1,4 @@
+import type { ImageInput } from './multimodal.js';
 import type { TokenUsage, ToolCall, ToolDefinition } from '../core/types.js';
 
 export type ProviderRequestOutcome = 'retrying' | 'completed' | 'failed' | 'interrupted';
@@ -55,7 +56,7 @@ export type PromptTurn =
       /** Opaque provider replay state. Core and projections must pass it through without interpreting it. */
       reasoningReplay?: unknown;
     }
-  | { kind: 'tool_result'; callId: string; toolName: string; content: string };
+  | { kind: 'tool_result'; callId: string; toolName: string; content: string; batchId?: string; images?: ImageInput[] };
 
 export interface ModelPrompt {
   system: string;

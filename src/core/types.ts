@@ -166,6 +166,8 @@ export interface ModelProviderContribution {
   id: ModelProvider;
   label: string;
   description?: string;
+  /** The provider adapter maps PromptTurn image inputs to its wire format. */
+  supportsImages?: boolean;
 }
 
 export interface PublicSettings {

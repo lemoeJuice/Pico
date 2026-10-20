@@ -1,6 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { CanonicalRecord, MessagePayload, Thread, ToolCall, ToolResultPayload } from '../core/types.js';
 import type { ModelPrompt, PromptTurn } from '../contracts/model.js';
+import {
+  isMultimodalToolResultEnvelope,
+  multimodalToolResultText,
+  sanitizeMultimodalResultValue,
+} from '../contracts/multimodal.js';
 import { assistantReasoningContent } from '../runtime/reasoning.js';
 import type { ProjectionInput, ProjectionProvenance } from '../runtime/stages.js';
 import type { PicoPlugin, PluginContext, PluginHttpRequest } from './host.js';
@@ -109,8 +114,9 @@ function projectedToolResult(payload: ToolResultPayload): string {
   if (payload.status === 'interrupted')
     return `Execution interrupted. ${payload.error ?? ''} Its real-world side effects may be partial or unknown. Inspect the environment before retrying.`;
   if (payload.status === 'failed') return `Tool failed: ${payload.error ?? 'Unknown error'}`;
+  if (isMultimodalToolResultEnvelope(payload.result)) return multimodalToolResultText(payload.result);
   try {
-    return JSON.stringify(payload.result ?? null);
+    return JSON.stringify(sanitizeMultimodalResultValue(payload.result ?? null));
   } catch {
     return String(payload.result);
   }
@@ -126,7 +132,10 @@ export function segmentId(threadId: string, records: readonly CanonicalRecord[],
 }
 function describeRecords(records: readonly CanonicalRecord[]): string {
   return records
-    .map((record) => `Canonical seq ${record.seq} (${record.kind}, id ${record.id}):\n${stableJson(record.payload)}`)
+    .map((record) => {
+      const payload = sanitizeMultimodalResultValue(record.payload);
+      return `Canonical seq ${record.seq} (${record.kind}, id ${record.id}):\n${stableJson(payload)}`;
+    })
     .join('\n\n');
 }
 function parseJsonResponse(text: string): Record<string, unknown> {
@@ -279,6 +288,7 @@ function promptTurns(records: readonly CanonicalRecord[], thread: Thread): Promp
             kind: 'tool_result',
             callId: String(call.id ?? ''),
             toolName: String(call.name ?? ''),
+            ...(typeof payload.batchId === 'string' ? { batchId: payload.batchId } : {}),
             content: projectedToolResult(result as unknown as ToolResultPayload),
           });
         }
@@ -300,6 +310,7 @@ function promptTurns(records: readonly CanonicalRecord[], thread: Thread): Promp
         kind: 'tool_result',
         callId: String(result.toolCallId ?? ''),
         toolName: String(result.toolName ?? ''),
+        ...(typeof result.batchId === 'string' ? { batchId: result.batchId } : {}),
         content: projectedToolResult(result as unknown as ToolResultPayload),
       });
     }

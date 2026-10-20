@@ -188,7 +188,7 @@ export class PluginHost {
   private readonly contributions: UiContribution[] = [];
   private readonly pages: RegisteredPluginPage[] = [];
   private readonly providers: Array<{ pluginId: string } & ModelProviderContribution> = [
-    { pluginId: 'pico.core', id: 'openai-compatible', label: 'OpenAI-compatible API key' },
+    { pluginId: 'pico.core', id: 'openai-compatible', label: 'OpenAI-compatible API key', supportsImages: true },
   ];
   private readonly routes: RegisteredPluginHttpRoute[] = [];
   private readonly activePlugins: PicoPlugin[] = [];
@@ -417,7 +417,12 @@ export class PluginHost {
   }
 
   modelProviders(): ModelProviderContribution[] {
-    return this.providers.map(({ id, label, description }) => ({ id, label, ...(description ? { description } : {}) }));
+    return this.providers.map(({ id, label, description, supportsImages }) => ({
+      id,
+      label,
+      ...(description ? { description } : {}),
+      supportsImages: supportsImages === true,
+    }));
   }
 
   httpRoutes(): ReadonlyArray<RegisteredPluginHttpRoute> {

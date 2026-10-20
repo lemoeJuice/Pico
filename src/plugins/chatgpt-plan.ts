@@ -176,6 +176,7 @@ export function createChatGptPlanPlugin(): PicoPlugin {
         id: 'chatgpt-plan',
         label: 'ChatGPT account',
         description: 'Use a ChatGPT plan account through OpenAI’s Responses API.',
+        supportsImages: true,
       });
 
       context.pipelines.use<ModelStageInput, ModelResponse>('model', async (input, next) => {
