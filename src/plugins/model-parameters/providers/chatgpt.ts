@@ -51,7 +51,7 @@ export const chatGptParameterProfile: ModelParameterProfile = {
         summary: 'auto',
         ...(typeof effort === 'string' && effort !== 'auto' ? { effort } : {}),
       },
-      ...(fastMode ? { service_tier: 'fast' } : {}),
+      ...(fastMode ? { service_tier: 'priority' } : {}),
     };
   },
 };
