@@ -7,7 +7,6 @@ import {
   completedTurnBlocks,
   rollingContextPlugin,
   segmentId,
-  shouldAutoWarm,
   sourceHash,
   summarizeAndEvaluate,
   transition,
@@ -101,57 +100,18 @@ describe('Rolling Context plugin', () => {
     expect(sourceHash([...fullTurn, record(5, 'plugin', { audit: true })])).not.toBe(segment.sourceHash);
   });
 
-  it('never automatically warms when reliable cache cost data is unavailable', () => {
-    expect(
-      shouldAutoWarm({
-        recommendation: 'warm',
-        semanticRisk: 'low',
-        confidence: 1,
-        cacheCostDataKnown: false,
-        expectedSavings: null,
-      }),
-    ).toBe(false);
-    expect(
-      shouldAutoWarm({
-        recommendation: 'warm',
-        semanticRisk: 'low',
-        confidence: 1,
-        cacheCostDataKnown: true,
-        expectedSavings: 5,
-      }),
-    ).toBe(true);
-    expect(
-      shouldAutoWarm({
-        recommendation: 'warm',
-        semanticRisk: 'medium',
-        confidence: 1,
-        cacheCostDataKnown: true,
-        expectedSavings: 5,
-      }),
-    ).toBe(false);
-  });
-
-  it('directly summarizes each segment, separately evaluates it, and ignores invented cost claims', async () => {
+  it('summarizes each segment and skips review when a complete net-savings estimate is unavailable', async () => {
     const requests: Array<{ purpose: string; idempotencyKey: string; prompt: { turns: Array<{ content: string }> } }> =
       [];
     const context = {
       models: {
         complete: async (request: (typeof requests)[number]) => {
           requests.push(request);
+          if (request.purpose !== 'rolling-summary') throw new Error(`Unexpected model purpose: ${request.purpose}`);
           return {
             id: `call-${requests.length}`,
             response: {
-              content:
-                requests.length === 1
-                  ? JSON.stringify({ summary: 'Verified: the test passed after a fix (canonical seq 4).' })
-                  : JSON.stringify({
-                      recommendation: 'warm',
-                      semanticRisk: 'low',
-                      confidence: 0.99,
-                      cacheCostDataKnown: true,
-                      expectedSavings: 999,
-                      reason: 'Looks cheaper.',
-                    }),
+              content: JSON.stringify({ summary: 'Verified: the test passed after a fix (canonical seq 4).' }),
             },
           };
         },
@@ -160,14 +120,15 @@ describe('Rolling Context plugin', () => {
     const thread = { id: 'thread-1', projectId: 'project-1' } as Thread;
     const segment = sampleSegment();
     const processed = await summarizeAndEvaluate(context, thread, segment, 'the exact original source');
-    expect(requests.map((request) => request.purpose)).toEqual(['rolling-summary', 'rolling-tier-review']);
+    expect(requests.map((request) => request.purpose)).toEqual(['rolling-summary']);
     expect(requests[0]?.prompt.turns[0]?.content).toContain('the exact original source');
-    expect(requests[1]?.prompt.turns[0]?.content).toContain('Verified: the test passed');
-    expect(requests[0]?.idempotencyKey).not.toBe(requests[1]?.idempotencyKey);
     expect(processed.summaryStatus).toBe('completed');
     expect(processed.tier).toBe('hot');
+    expect(processed.evaluator.status).toBe('skipped');
+    expect(processed.evaluator.callId).toBeNull();
     expect(processed.evaluator.cacheCostDataKnown).toBe(false);
     expect(processed.evaluator.expectedSavings).toBeNull();
+    expect(processed.transitions).toEqual([]);
   });
 
   it('records manual tier transitions while preserving the original source hash', () => {
@@ -204,6 +165,7 @@ describe('Rolling Context plugin', () => {
 
   it('keeps a segment hot automatically, then uses its saved direct summary after explicit /compact', async () => {
     const values = new Map<string, unknown>();
+    const modelPurposes: string[] = [];
     const records = [
       ...fullTurn,
       record(5, 'message', { role: 'user', source: 'user', content: 'Continue with the next request.' }),
@@ -241,22 +203,14 @@ describe('Rolling Context plugin', () => {
         },
       },
       models: {
-        complete: async (request: { purpose: string }) => ({
-          id: request.purpose,
-          response: {
-            content:
-              request.purpose === 'rolling-summary'
-                ? JSON.stringify({ summary: 'Verified result: the test passed (canonical seq 4).' })
-                : JSON.stringify({
-                    recommendation: 'warm',
-                    semanticRisk: 'low',
-                    confidence: 0.99,
-                    cacheCostDataKnown: true,
-                    expectedSavings: 99,
-                    reason: 'Evaluator recommends warm.',
-                  }),
-          },
-        }),
+        complete: async (request: { purpose: string }) => {
+          modelPurposes.push(request.purpose);
+          if (request.purpose !== 'rolling-summary') throw new Error(`Unexpected model purpose: ${request.purpose}`);
+          return {
+            id: request.purpose,
+            response: { content: JSON.stringify({ summary: 'Verified result: the test passed (canonical seq 4).' }) },
+          };
+        },
       },
       pipelines: {
         use: (_stage: string, handler: typeof projection) => {
@@ -307,5 +261,6 @@ describe('Rolling Context plugin', () => {
     expect(manual.provenance).toContainEqual(
       expect.objectContaining({ disposition: 'summary', canonicalStartSeq: 1, canonicalEndSeq: 4 }),
     );
+    expect(modelPurposes).toEqual(['rolling-summary']);
   });
 });

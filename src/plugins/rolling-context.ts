@@ -19,7 +19,7 @@ export interface RollingSegment {
   summaryStatus: 'pending' | 'completed' | 'failed';
   summaryCallId: string | null;
   evaluator: {
-    status: 'pending' | 'completed' | 'failed';
+    status: 'pending' | 'completed' | 'failed' | 'skipped';
     recommendation: 'warm' | 'hot' | 'cold' | null;
     reason: string | null;
     confidence: number | null;
@@ -155,41 +155,8 @@ function summaryPrompt(segment: RollingSegment, source: string, model: string): 
     temperature: 0,
   };
 }
-function evaluatorPrompt(segment: RollingSegment, source: string, summary: string, model: string): ModelPrompt {
-  return {
-    system:
-      'You are a read-only context-tier evaluator. Do not summarize or modify content. Assess whether replacing this one segment with its supplied direct summary is semantically safe and likely to save cost across future requests, considering provider prompt-cache behavior. Return only JSON with recommendation ("warm"|"hot"|"cold"), semanticRisk ("low"|"medium"|"high"), confidence (0..1), cacheCostDataKnown (boolean), expectedSavings (number or null), and reason. If exact provider pricing/cache-cost facts are unavailable, set cacheCostDataKnown false and expectedSavings null. Never invent prices or cache behavior.',
-    turns: [
-      {
-        kind: 'message',
-        role: 'user',
-        content: `Segment metadata: ${stableJson({ id: segment.id, startSeq: segment.startSeq, endSeq: segment.endSeq, sourceHash: segment.sourceHash })}\n\nDirect summary:\n${summary}\n\nOriginal source:\n${source}\n\nProvider cache pricing and prefix invalidation data: unavailable to this plugin. Future request count estimate: unavailable.`,
-      },
-    ],
-    tools: [],
-    model,
-    temperature: 0,
-  };
-}
 export function callKey(purpose: string, segment: RollingSegment): string {
   return `${purpose}:${segment.id}:${segment.sourceHash}`;
-}
-export function shouldAutoWarm(decision: {
-  recommendation: string | null;
-  semanticRisk: unknown;
-  confidence: number | null;
-  cacheCostDataKnown: boolean;
-  expectedSavings: number | null;
-}): boolean {
-  return (
-    decision.recommendation === 'warm' &&
-    decision.semanticRisk === 'low' &&
-    decision.confidence !== null &&
-    decision.confidence >= 0.8 &&
-    decision.cacheCostDataKnown &&
-    decision.expectedSavings !== null &&
-    decision.expectedSavings > 0
-  );
 }
 export async function summarizeAndEvaluate(
   context: PluginContext,
@@ -218,46 +185,24 @@ export async function summarizeAndEvaluate(
       summaryCallId: summaryCall.id,
       updatedAt: new Date().toISOString(),
     };
-    const evaluatorCall = await context.models.complete({
-      threadId: thread.id,
-      projectId: thread.projectId,
-      purpose: 'rolling-tier-review',
-      idempotencyKey: callKey('evaluator', segment),
-      prompt: evaluatorPrompt(segment, source, summary, model),
-    });
-    const decision = parseJsonResponse(evaluatorCall.response.content);
-    const recommendation = ['warm', 'hot', 'cold'].includes(String(decision.recommendation))
-      ? (decision.recommendation as 'warm' | 'hot' | 'cold')
-      : null;
-    const confidence =
-      typeof decision.confidence === 'number' && Number.isFinite(decision.confidence)
-        ? Math.max(0, Math.min(1, decision.confidence))
-        : null;
-    // Runtime currently reports token counts but no trustworthy provider price/cache table.
-    // Do not accept an evaluator's claim as cost telemetry.
-    const costKnown = false;
-    const expectedSavings =
-      costKnown && typeof decision.expectedSavings === 'number' && Number.isFinite(decision.expectedSavings)
-        ? decision.expectedSavings
-        : null;
-    const semanticRisk = decision.semanticRisk;
-    const reason =
-      typeof decision.reason === 'string' ? decision.reason.slice(0, 1600) : 'Evaluator did not provide a reason.';
-    const evaluator = {
-      status: 'completed' as const,
-      recommendation,
-      reason,
-      confidence,
-      expectedSavings,
-      cacheCostDataKnown: costKnown,
-      callId: evaluatorCall.id,
+    // Fail closed until Runtime can provide a complete pre-review net-savings estimate.
+    // Usage rates alone do not establish per-segment token savings, cache-prefix loss,
+    // expected future reuse, or summary/reviewer call costs. Calling the reviewer here
+    // would spend money to confirm that those required inputs are still unknown.
+    updated = {
+      ...updated,
+      evaluator: {
+        status: 'skipped',
+        recommendation: null,
+        reason:
+          'Skipped: net savings cannot be estimated from current Runtime data (segment token savings, cache-prefix impact, future reuse, and summary/reviewer costs are incomplete).',
+        confidence: null,
+        expectedSavings: null,
+        cacheCostDataKnown: false,
+        callId: null,
+      },
+      updatedAt: new Date().toISOString(),
     };
-    updated = { ...updated, evaluator };
-    // No provider cache pricing or future request estimate is exposed to the plugin today.
-    // Therefore an evaluator assertion alone can never authorize automatic warm/cold.
-    if (shouldAutoWarm({ recommendation, semanticRisk, confidence, cacheCostDataKnown: costKnown, expectedSavings })) {
-      updated = transition(updated, 'warm', 'Evaluator found safe positive savings with known cache cost data.');
-    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     updated =

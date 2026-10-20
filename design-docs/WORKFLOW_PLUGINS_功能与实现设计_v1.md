@@ -162,12 +162,14 @@ Rolling Context 以 Canonical History 为唯一历史依据，并在自己的 Pl
 1. 每个安全封段后，Rolling Context Plugin 调用 Runtime 辅助模型服务，针对该段的 Canonical 原文单独生成摘要。摘要不递归概括之前摘要；每段保留自己的原文引用、source hash、摘要 prompt / model / version、输入输出 token 与调用状态。
 2. 摘要应保留目标和约束、已验证事实、关键决定及其理由、未解决问题、失败/风险、Tool 结果出处和后续动作。无关重复可以压缩；不能把推断写成已验证事实。
 3. 摘要失败时，段保持 hot，记录失败，后台可在后续安全边界重试；不以截断原文或空摘要代替。
-4. 摘要生成后由一个独立、无 Tool 权限的 Rolling Evaluator Agent 判断是否有足够收益进入 warm。Evaluator 获得该段原文、现有目标与近期上下文、预计后续调用量、输入 token 与缓存计量、已生成摘要及调用成本，返回结构化建议、预计净节省、信心和简要理由。Evaluator 不写摘要、不直接执行转换、不修改 Canonical History。
-5. 只有建议是 warm、语义风险可接受且预计累计节省覆盖摘要调用、Evaluator 调用、缓存前缀损失和预计后续请求增量成本时，插件才将段状态切到 warm。此后 Projection 用刚才生成的该段摘要替换对应原文。
+4. 摘要生成后先做费用预估。只有段级输入 token 节省、缓存前缀影响、预计未来复用次数以及摘要和 Reviewer 调用成本都可估算，且严格净节省为正时，才调用独立、无 Tool 权限的 Rolling Evaluator Agent。缺少任何一项或净节省不为正时，记录 `skipped` 原因、保持 hot，并且不产生 Reviewer 调用。Evaluator 获得费用预估和该段原文、现有目标与近期上下文，返回结构化建议、信心和简要理由；它不写摘要、不直接改变 Canonical History。
+5. 只有费用预估仍为正、语义风险可接受且 Reviewer 建议适合的目标层级时，插件才执行自动转层。成本资料未知或不完整时，始终保持 hot；用户显式手动 compact 仍可绕过自动收益门槛。
 
 **成本与 provider cache**
 
-成本节省是自动 warm 的门槛，不是假设。收益预测按 token / provider 实际计量和未来预计请求次数计算，不能用字数比例替代。缓存命中、缓存写入、缓存 TTL、不同输入 token 价格如果 provider 未公开或运行时没有可靠报告，系统必须把该数据标为 unknown；在严格自动模式下不得自动 warm。UI 的手动 compact 可在成本未知时由用户明确触发。
+成本节省是自动 warm/cold 的门槛，不是假设。收益预测按 token / provider 实际计量和未来预计请求次数计算，不能用字数比例替代。缓存命中、缓存写入、缓存 TTL、不同输入 token 价格如果 provider 未公开或运行时没有可靠报告，系统必须把该数据标为 unknown；严格自动模式下既不得调用 Reviewer，也不得自动转层。UI 的手动 compact 可在成本未知时由用户明确触发。
+
+当前实现状态：Runtime 尚未提供完整净节省估算能力。因此每个新段完成摘要后都会将 tier review 标为 `skipped`，即使已在 Usage 配置费率也不会调用 Reviewer 或自动 warm/cold；费率只是估算成本所需输入之一。上面的条件描述的是完整估算能力接入后的目标行为。
 
 Projection 顺序与摘要必须稳定，不能为了短 prompt 每轮随机重排内容。变更早期段落可能破坏其后的 prefix cache，因此 evaluator 应把预计 cache miss / 前缀失效成本计入。已 warm 摘要保持稳定，不因每轮新语境重新改写；若确需重算，先记录新版本和差异，并在安全边界原子替换。
 
@@ -323,7 +325,7 @@ Usage Plugin 汇总主 Model Step 与插件辅助模型调用，按 Thread、Pro
 - Auto-review 只替换 ask 的裁决者，一次决定只适用于确切调用，不扩大沙箱或持久扩大权限；失败默认 fail closed。
 - 用户 Goal 能在同一 Thread 上跨普通 Assistant final response 持续推进；pause、needs_input、complete、context/provider limit、Runtime restart 均能恢复或正确停止。
 - Agent 可以判断是否需要 Todo；开放 Todo 注入上下文，完成项被勾选并退出默认投影。
-- Rolling Context 每个封段独立调用辅助模型直接总结；Evaluator 独立决定层级，自动 warm 有正向且可解释的净成本收益，未知成本时不自动 warm。
+- Rolling Context 每个封段独立调用辅助模型直接总结；只有严格净成本预估完整且为正时才调用 Evaluator，未知成本时不调用 Reviewer、不自动转层。
 - Warm 使用该段已有直接摘要，cold 不进入 prompt；三层变化从不删改 Canonical History。
 - 用户能对照每次实际发送给 LLM 的原文和工具 schema，看到每个段如何投影、摘要替换和省略。
 - 自动 Project / Global Memory 写入不要求逐条用户确认，分类范围正确且有源记录；UI 可手动增删改查、pin、纠错。

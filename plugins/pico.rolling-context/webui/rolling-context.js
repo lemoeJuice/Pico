@@ -107,7 +107,7 @@
       .join('');
     root.innerHTML = `<section class="pico-ui-panel panel">
       <div class="pico-ui-heading heading"><strong>ROLLING CONTEXT</strong><span class="muted">${segments.length} segment(s)</span></div>
-      <div class="muted">Canonical History stays intact. Automatic warm is disabled when provider cache cost data is unknown.</div>
+      <div class="muted">Canonical History stays intact. After each successful summary, tier review is skipped because Runtime cannot estimate complete net savings; Usage rates alone are insufficient. Segments stay hot; use manual compact to change tier.</div>
       <div class="toolbar"><button class="pico-ui-button" data-global="refresh" ${pending ? 'disabled' : ''}>Refresh / summarize sealed turns</button><button class="pico-ui-button" data-global="compact-all" ${pending ? 'disabled' : ''}>Manual compact summaries</button></div>
       ${error ? `<div class="pico-ui-error error" role="alert">${escape(error)}</div>` : ''}
       <div>${cards || '<p class="pico-ui-empty empty">No sealed complete turn blocks yet. A turn becomes eligible after a later user turn closes it.</p>'}</div>
