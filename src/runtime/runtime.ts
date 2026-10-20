@@ -846,12 +846,17 @@ export class PicoRuntime {
     const current = this.store.getThread(threadId);
     if (!current) throw new Error('Thread not found.');
     if (current.deletedAt) throw new Error('This Thread is hidden and cannot be archived.');
-    this.assertThreadNotRunning(threadId);
-    if (current.archivedAt) return this.getThread(threadId)!;
-    const thread = this.store.archiveThread(threadId);
-    if (!thread) throw new Error('Thread not found.');
-    const updated = this.getThread(threadId)!;
-    this.publish({ type: 'thread.updated', thread: updated });
+    const tree = this.store.listThreadTree(threadId);
+    for (const candidate of tree) {
+      if (!candidate.deletedAt) this.assertThreadNotRunning(candidate.id);
+    }
+    const archived = this.store.archiveThreadTree(threadId);
+    for (const candidate of archived) {
+      const updated = this.getThread(candidate.id);
+      if (updated) this.publish({ type: 'thread.updated', thread: updated });
+    }
+    const updated = this.getThread(threadId);
+    if (!updated) throw new Error('Thread not found.');
     return updated;
   }
 

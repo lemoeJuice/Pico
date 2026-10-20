@@ -545,10 +545,47 @@ export class PicoStore {
     return this.getThread(threadId);
   }
 
+  listThreadTree(threadId: string): Thread[] {
+    const rows = this.db
+      .prepare(
+        `
+        WITH RECURSIVE thread_tree(id) AS (
+          SELECT id FROM threads WHERE id = ?
+          UNION
+          SELECT child.id FROM threads child JOIN thread_tree parent ON child.parent_thread_id = parent.id
+        )
+        SELECT t.*, e.kind AS executor_kind, e.label AS executor_label,
+               e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote
+        FROM thread_tree tree
+        JOIN threads t ON t.id = tree.id
+        JOIN executors e ON e.id = t.executor_id
+      `,
+      )
+      .all(threadId) as SqlRow[];
+    return rows.map((row) => this.threadFromRow(row));
+  }
+
+  archiveThreadTree(threadId: string, archivedAt = isoNow()): Thread[] {
+    return this.transaction(() => {
+      const tree = this.listThreadTree(threadId);
+      const update = this.db.prepare(
+        'UPDATE threads SET archived_at = ? WHERE id = ? AND archived_at IS NULL AND deleted_at IS NULL',
+      );
+      const archived: Thread[] = [];
+      for (const candidate of tree) {
+        if (candidate.archivedAt || candidate.deletedAt) continue;
+        const result = update.run(archivedAt, candidate.id);
+        if (Number(result.changes) > 0) {
+          const thread = this.getThread(candidate.id);
+          if (thread) archived.push(thread);
+        }
+      }
+      return archived;
+    });
+  }
+
   archiveThread(threadId: string, archivedAt = isoNow()): Thread | null {
-    this.db
-      .prepare('UPDATE threads SET archived_at = ? WHERE id = ? AND deleted_at IS NULL')
-      .run(archivedAt, threadId);
+    this.archiveThreadTree(threadId, archivedAt);
     return this.getThread(threadId);
   }
 
