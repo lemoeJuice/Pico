@@ -12,6 +12,16 @@
   let editing = false;
   let sequence = 0;
   const pending = new Map();
+  let resizeFrame = 0;
+  const resizeObserver = new ResizeObserver(() => {
+    if (!port || resizeFrame) return;
+    resizeFrame = requestAnimationFrame(() => {
+      resizeFrame = 0;
+      const panel = root.querySelector('.goal-panel');
+      if (panel) port?.postMessage({ type: 'pico:plugin-ui:resize', height: panel.getBoundingClientRect().height });
+    });
+  });
+  resizeObserver.observe(root);
 
   function send(action, payload = {}) {
     if (!port) return Promise.reject(new Error('Pico plugin UI is not connected.'));
@@ -132,9 +142,6 @@
         }
       });
     });
-    requestAnimationFrame(() =>
-      port?.postMessage({ type: 'pico:plugin-ui:resize', height: root.getBoundingClientRect().height }),
-    );
   }
   function accept(message) {
     if (!message || typeof message !== 'object') return;
