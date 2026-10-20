@@ -412,6 +412,20 @@ function terminalStatus(status: ExecutionStatus): status is 'completed' | 'faile
   return status === 'completed' || status === 'failed' || status === 'interrupted';
 }
 
+function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'));
+
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(new DOMException('The operation was aborted.', 'AbortError'));
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+
+  return Promise.race([promise, aborted]).finally(() => {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  });
+}
+
 function modelExecutionProjectionThrough(execution: Execution): number | null {
   const value = execution.arguments?.projectionThrough;
   return typeof value === 'number' && Number.isSafeInteger(value) ? value : null;
@@ -1323,6 +1337,7 @@ export class PicoRuntime {
 
   private resumeForPlugin(threadId: string): Thread {
     this.requireUnarchivedThread(threadId);
+    this.recoverOrphanedModelExecutions(threadId, 'plugin-resume');
     this.store.setPause(threadId, false);
     this.publishThreadUpdate(threadId);
     this.startLoop(threadId);
@@ -1331,6 +1346,7 @@ export class PicoRuntime {
 
   continue(threadId: string): Thread {
     this.requireUnarchivedThread(threadId);
+    this.recoverOrphanedModelExecutions(threadId, 'continue');
     this.store.setPause(threadId, false);
     this.publishThreadUpdate(threadId);
     this.startLoop(threadId);
@@ -1339,11 +1355,19 @@ export class PicoRuntime {
 
   retryModelExecution(threadId: string, sourceExecutionId: string): { execution: Execution; thread: Thread } {
     this.requireUnarchivedThread(threadId);
+    if (this.loops.has(threadId)) {
+      throw new Error('This Thread is already running. Wait for the active step to settle before retrying.');
+    }
+    const candidate = this.store.getExecution(sourceExecutionId);
+    if (!candidate || candidate.threadId !== threadId || candidate.kind !== 'model') {
+      throw new Error('Model Execution not found in this Thread.');
+    }
+    this.recoverOrphanedModelExecutions(threadId, 'retry');
     const source = this.store.getExecution(sourceExecutionId);
     if (!source || source.threadId !== threadId || source.kind !== 'model') {
       throw new Error('Model Execution not found in this Thread.');
     }
-    if (this.loops.has(threadId) || this.store.listActiveExecutions(threadId).length > 0) {
+    if (this.store.listActiveExecutions(threadId).length > 0) {
       throw new Error('This Thread is already running. Wait for the active step to settle before retrying.');
     }
 
@@ -1400,6 +1424,7 @@ export class PicoRuntime {
       const execution = this.store.getExecution(executionId);
       if (execution?.threadId === threadId) controller.abort();
     }
+    this.recoverOrphanedModelExecutions(threadId, 'interrupt');
     for (const [executionId, active] of this.runtimeToolRuns) {
       const execution = this.store.getExecution(executionId);
       if (execution?.threadId === threadId) active.controller.abort();
@@ -1478,11 +1503,40 @@ export class PicoRuntime {
     if (
       !thread ||
       (thread.archivedAt !== undefined && thread.archivedAt !== null) ||
-      (thread.deletedAt !== undefined && thread.deletedAt !== null) ||
-      (thread.pauseRequested && !this.latestActiveBatch(threadId))
+      (thread.deletedAt !== undefined && thread.deletedAt !== null)
     ) {
       return;
     }
+
+    const recovered = this.recoverOrphanedModelExecutions(threadId, 'loop-start');
+    const pendingRetryId = this.pendingModelRetry(threadId)?.id;
+    const activeModels = this.store.listActiveExecutions(threadId).filter((execution) => execution.kind === 'model');
+    const unownedActiveModels = activeModels.filter(
+      (execution) => execution.id !== pendingRetryId && !this.modelSignals.has(execution.id),
+    );
+    if (unownedActiveModels.length > 0) {
+      if (!this.store.getThread(threadId)?.pauseRequested) {
+        this.store.setPause(
+          threadId,
+          true,
+          'An unfinished Model Execution was recovered. Continue this Thread to start a new attempt.',
+        );
+      }
+      this.publishThreadUpdate(threadId);
+      return;
+    }
+    if (activeModels.some((execution) => this.modelSignals.has(execution.id))) return;
+    if (recovered.length > 0 && !pendingRetryId && !thread.pauseRequested) {
+      this.store.setPause(
+        threadId,
+        true,
+        'An unfinished Model Execution was recovered. Continue this Thread to start a new attempt.',
+      );
+      this.publishThreadUpdate(threadId);
+      return;
+    }
+    if (thread.pauseRequested && !this.latestActiveBatch(threadId)) return;
+
     const task = Promise.resolve()
       .then(() => this.driveThread(threadId))
       .catch((error: unknown) => {
@@ -1494,10 +1548,37 @@ export class PicoRuntime {
         this.publish({ type: 'runtime.error', threadId, message });
       })
       .finally(() => {
-        this.loops.delete(threadId);
+        try {
+          const recovered = this.recoverOrphanedModelExecutions(threadId, 'loop-exit');
+          const pendingRetryId = this.pendingModelRetry(threadId)?.id;
+          const hasUnownedActiveModel = this.store
+            .listActiveExecutions(threadId)
+            .some(
+              (execution) =>
+                execution.kind === 'model' &&
+                execution.id !== pendingRetryId &&
+                !this.modelSignals.has(execution.id),
+            );
+          const current = this.store.getThread(threadId);
+          if ((recovered.length > 0 || hasUnownedActiveModel) && current && !current.pauseRequested) {
+            this.store.setPause(
+              threadId,
+              true,
+              'Runtime stopped before the Model Step settled. Continue this Thread to start a new attempt.',
+            );
+          }
+        } catch (error) {
+          this.publish({
+            type: 'runtime.error',
+            threadId,
+            message: `Could not reconcile Model Executions after the loop stopped: ${error instanceof Error ? error.message : String(error)}`,
+          });
+        } finally {
+          this.loops.delete(threadId);
+        }
         this.publishThreadUpdate(threadId);
-        const current = this.store.getThread(threadId);
-        if (current && !current.pauseRequested && this.hasUnprocessedWork(threadId)) this.startLoop(threadId);
+        const afterLoop = this.store.getThread(threadId);
+        if (afterLoop && !afterLoop.pauseRequested && this.hasUnprocessedWork(threadId)) this.startLoop(threadId);
       });
     this.loops.set(threadId, task);
     this.publishThreadUpdate(threadId);
@@ -1751,6 +1832,42 @@ export class PicoRuntime {
     );
   }
 
+  private recoverOrphanedModelExecutions(
+    threadId: string,
+    recoveryPoint: 'continue' | 'interrupt' | 'loop-exit' | 'loop-start' | 'plugin-resume' | 'retry',
+  ): Execution[] {
+    const pendingRetryId = this.pendingModelRetry(threadId)?.id;
+    const orphaned = this.store.listActiveExecutions(threadId).filter(
+      (execution) =>
+        execution.kind === 'model' &&
+        execution.id !== pendingRetryId &&
+        !this.modelSignals.has(execution.id),
+    );
+    const recovered: Execution[] = [];
+
+    for (const execution of orphaned) {
+      try {
+        const current = this.store.getExecution(execution.id);
+        if (!current || terminalStatus(current.status)) continue;
+        const interrupted = this.store.transitionExecution(execution.id, 'interrupted', {
+          error: 'Runtime found an unfinished Model Execution without a live local model request.',
+          detail: { orphanedModelExecution: true, recoveryPoint },
+        });
+        recovered.push(interrupted);
+        this.executionChanged(interrupted);
+      } catch (error) {
+        this.publish({
+          type: 'runtime.error',
+          threadId,
+          executionId: execution.id,
+          message: `Could not recover an orphaned Model Execution: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+    }
+
+    return recovered;
+  }
+
   private async runModelStep(thread: Thread, retryExecution?: Execution): Promise<void> {
     const allRecords = this.store.listRecords(thread.id);
     const retryThrough = retryExecution ? modelExecutionProjectionThrough(retryExecution) : null;
@@ -1825,6 +1942,7 @@ export class PicoRuntime {
       };
       let requestId: string | null = null;
       const recordModelInput: ModelStageInput['recordModelInput'] = (actualPrompt, provider, provenance) => {
+        if (controller.signal.aborted) return;
         if (requestId) return;
         requestId = randomUUID();
         this.store.appendExecutionLog(modelExecutionId, 'model-input-requested', {
@@ -1836,8 +1954,9 @@ export class PicoRuntime {
       };
       const requestTrace: ModelRequestTrace = {
         started: (details) => {
-          recordModelInput(prompt, modelSettings.provider, projected.provenance);
           const providerAttemptId = randomUUID();
+          if (controller.signal.aborted) return providerAttemptId;
+          recordModelInput(prompt, modelSettings.provider, projected.provenance);
           this.appendExecutionDiagnostic(modelExecutionId, 'provider-request-started', {
             requestId,
             providerAttemptId,
@@ -1846,7 +1965,7 @@ export class PicoRuntime {
           return providerAttemptId;
         },
         response: (providerAttemptId, details) => {
-          if (!requestId || !providerAttemptId) return;
+          if (controller.signal.aborted || !requestId || !providerAttemptId) return;
           this.appendExecutionDiagnostic(modelExecutionId, 'provider-request-response', {
             requestId,
             providerAttemptId,
@@ -1854,7 +1973,7 @@ export class PicoRuntime {
           });
         },
         settled: (providerAttemptId, details) => {
-          if (!requestId || !providerAttemptId) return;
+          if (controller.signal.aborted || !requestId || !providerAttemptId) return;
           this.appendExecutionDiagnostic(modelExecutionId, 'provider-request-settled', {
             requestId,
             providerAttemptId,
@@ -1869,11 +1988,14 @@ export class PicoRuntime {
         prompt,
         signal: controller.signal,
         onText: (delta: string) => {
+          if (controller.signal.aborted) return;
           latestDraft += delta;
           this.publish({ type: 'model.delta', threadId: thread.id, executionId: modelExecutionId, delta });
         },
-        onEvent: (event) =>
-          this.publish({ ...event, type: `model.${event.type}`, threadId: thread.id, executionId: modelExecutionId }),
+        onEvent: (event) => {
+          if (controller.signal.aborted) return;
+          this.publish({ ...event, type: `model.${event.type}`, threadId: thread.id, executionId: modelExecutionId });
+        },
         recordModelInput,
         ...(projected.provenance ? { projectionProvenance: projected.provenance } : {}),
         requestTrace,
@@ -1889,18 +2011,21 @@ export class PicoRuntime {
             `Model provider "${modelSettings.provider}" does not support image inputs; images were not sent.`,
           );
         }
-        response = await this.pipelines.run<ModelStageInput, ModelResponse>('model', modelInput, async (input) => {
-          input.recordModelInput(input.prompt, input.provider, input.projectionProvenance);
-          return this.model.complete(
-            input.prompt,
-            modelSettings,
-            input.signal,
-            input.onText,
-            input.requestTrace,
-            input.onEvent,
-            input.requestParameters,
-          );
-        });
+        response = await raceWithAbort(
+          this.pipelines.run<ModelStageInput, ModelResponse>('model', modelInput, async (input) => {
+            input.recordModelInput(input.prompt, input.provider, input.projectionProvenance);
+            return this.model.complete(
+              input.prompt,
+              modelSettings,
+              input.signal,
+              input.onText,
+              input.requestTrace,
+              input.onEvent,
+              input.requestParameters,
+            );
+          }),
+          controller.signal,
+        );
         if (requestId)
           this.store.appendExecutionLog(modelExecutionId, 'model-input-settled', {
             requestId,
