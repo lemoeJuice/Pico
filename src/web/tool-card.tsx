@@ -108,8 +108,41 @@ function toJson(value: unknown): string {
   }
 }
 
+// Runtime snapshots already replace image bytes with metadata; keep that view idempotent in the UI.
+function isRedactedMultimodalToolResult(value: unknown): boolean {
+  if (!isMultimodalToolResultEnvelope(value) || !isRecord(value)) return false;
+  if (
+    Object.keys(value).some((key) => !['kind', 'version', 'text', 'images', 'invalid'].includes(key)) ||
+    value.version !== 1 ||
+    typeof value.text !== 'string' ||
+    !Array.isArray(value.images) ||
+    value.images.length > 8 ||
+    (value.images.length === 0 && value.invalid !== true) ||
+    (value.invalid !== undefined && value.invalid !== true)
+  ) {
+    return false;
+  }
+  return value.images.every((image) => {
+    if (
+      !isRecord(image) ||
+      Object.keys(image).some((key) => !['type', 'mimeType', 'name', 'byteLength', 'invalid'].includes(key)) ||
+      'data' in image ||
+      typeof image.mimeType !== 'string' ||
+      image.mimeType.length > 100 ||
+      (image.name !== undefined && (typeof image.name !== 'string' || image.name.length > 200)) ||
+      (image.invalid !== undefined && image.invalid !== true)
+    ) {
+      return false;
+    }
+    const hasByteLength = Number.isSafeInteger(image.byteLength) && (image.byteLength as number) >= 0;
+    return (image.type === 'image' && hasByteLength) || image.invalid === true;
+  });
+}
+
 function redactToolResultValue(value: unknown): unknown {
-  if (isMultimodalToolResultEnvelope(value)) return redactMultimodalToolResult(value);
+  if (isMultimodalToolResultEnvelope(value)) {
+    return isRedactedMultimodalToolResult(value) ? value : redactMultimodalToolResult(value);
+  }
   if (Array.isArray(value)) return value.map(redactToolResultValue);
   if (value && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, redactToolResultValue(child)]));
