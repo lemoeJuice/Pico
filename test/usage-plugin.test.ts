@@ -10,6 +10,9 @@ function harness() {
   const records = new Map<string, CanonicalRecord[]>();
   const thread = { id: 'thread-1', projectId: 'project-1', title: 'Current thread' } as Thread;
   const routes = new Map<string, (request: { body: unknown; query: URLSearchParams }) => unknown>();
+  let modelListener: (() => void) | undefined;
+  let invalidations = 0;
+  const contributions: Array<{ slot: string; id: string }> = [];
   const context = {
     projects: { list: () => [{ id: 'project-1', name: 'Example project' }] },
     threads: { list: () => [thread] },
@@ -21,6 +24,12 @@ function harness() {
             (!filter.threadId || call.threadId === filter.threadId) &&
             (!filter.projectId || call.projectId === filter.projectId),
         ),
+      subscribe: (listener: () => void) => {
+        modelListener = listener;
+        return () => {
+          modelListener = undefined;
+        };
+      },
     },
     http: {
       register: (
@@ -29,7 +38,13 @@ function harness() {
         handler: (request: { body: unknown; query: URLSearchParams }) => unknown,
       ) => routes.set(`${method} ${path}`, handler),
     },
-    ui: { registerPage: () => undefined },
+    ui: {
+      registerPage: () => undefined,
+      contribute: (item: { slot: string; id: string }) => contributions.push(item),
+      invalidate: () => {
+        invalidations += 1;
+      },
+    },
     state: {
       get: <T>(key: string, fallback: T): T => (values.has(key) ? (values.get(key) as T) : fallback),
       set: <T>(key: string, value: T) => values.set(key, structuredClone(value)),
@@ -38,10 +53,17 @@ function harness() {
   usagePlugin.activate?.(context);
   const report = (query = new URLSearchParams()) =>
     routes.get('GET /report')!({ body: null, query }) as Record<string, any>;
-  return { calls, records, routes, thread, report };
+  return { calls, records, routes, thread, report, contributions, modelChanged: () => modelListener?.(), get invalidations() { return invalidations; } };
 }
 
 describe('Usage plugin', () => {
+  it('owns the composer summary contribution and invalidates it on model telemetry changes', () => {
+    const env = harness();
+    expect(env.contributions).toContainEqual(expect.objectContaining({ slot: 'composer.status', id: 'usage-summary' }));
+    env.modelChanged();
+    expect(env.invalidations).toBe(1);
+  });
+
   it('uses Canonical main usage and auxiliary telemetry once each', () => {
     const env = harness();
     env.records.set(env.thread.id, [

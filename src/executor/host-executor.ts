@@ -10,7 +10,6 @@ import { currentExecutorBundle, currentExecutorVersion } from './bundle.js';
 import type { ExecutionListener, ExecutorAdapter } from './executor.js';
 import { executorPluginDirectory } from './plugin-host.js';
 import { RemoteHostExecutor } from './remote-executor.js';
-import type { ToolCatalog } from './tools.js';
 
 const HOST_EXECUTOR_SETTING = 'executor-host-connection';
 
@@ -50,7 +49,6 @@ export class HostExecutor implements ExecutorAdapter {
 
   constructor(
     private readonly store: PicoStore,
-    _tools: ToolCatalog,
     onExecution: ExecutionListener = () => undefined,
     private readonly pluginDirectory = executorPluginDirectory(),
   ) {

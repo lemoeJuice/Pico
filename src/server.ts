@@ -16,7 +16,12 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { PicoRuntime } from './runtime/runtime.js';
 import { currentExecutorVersion } from './executor/bundle.js';
 import { PicoStore } from './core/store.js';
-import { DEFAULT_THREAD_TITLE, type ExecutorKind, type ModelSettings } from './core/types.js';
+import {
+  DEFAULT_THREAD_TITLE,
+  type ExecutorKind,
+  type ModelSettings,
+  type ThreadModelSelection,
+} from './core/types.js';
 
 function bodyObject(request: Request): Record<string, unknown> {
   if (!request.body || typeof request.body !== 'object' || Array.isArray(request.body)) {
@@ -52,8 +57,7 @@ function pluginUiHeaders(request: Request, response: Response): void {
   const appOrigin = requestOrigin && requestOrigin !== 'null' ? ` ${requestOrigin}` : '';
   response.set({
     'cache-control': 'no-cache',
-    'content-security-policy':
-      `default-src 'none'; script-src 'self'${appOrigin}; style-src 'self'${appOrigin} 'unsafe-inline'; img-src 'self'${appOrigin} data: blob:; font-src 'self'${appOrigin} data:; connect-src 'none'; form-action 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'`,
+    'content-security-policy': `default-src 'none'; script-src 'self'${appOrigin}; style-src 'self'${appOrigin} 'unsafe-inline'; img-src 'self'${appOrigin} data: blob:; font-src 'self'${appOrigin} data:; connect-src 'none'; form-action 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'`,
     'referrer-policy': 'no-referrer',
     'x-content-type-options': 'nosniff',
   });
@@ -252,6 +256,17 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   app.patch('/api/threads/:threadId', (request, response) => {
     const body = bodyObject(request);
     response.json(runtime.updateThreadTitle(request.params.threadId!, requiredText(body, 'title')));
+  });
+  app.get('/api/threads/:threadId/model-selection', (request, response) => {
+    response.json(runtime.threadModelSelection(request.params.threadId!));
+  });
+  app.put('/api/threads/:threadId/model-selection', (request, response) => {
+    response.json(
+      runtime.updateThreadModelSelection(
+        request.params.threadId!,
+        bodyObject(request) as unknown as ThreadModelSelection,
+      ),
+    );
   });
   app.post('/api/threads/:threadId/archive', (request, response) => {
     response.json(runtime.archiveThread(request.params.threadId!));

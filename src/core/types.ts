@@ -61,6 +61,8 @@ export type RemoteExecutorConnectionView = Omit<RemoteExecutorConnection, 'acces
 export interface CanonicalRecord<T = Record<string, unknown>> {
   id: string;
   threadId: string | null;
+  /** Stable ordering scope; Thread history uses `thread:<id>`. */
+  scope?: string;
   seq: number;
   kind: CanonicalKind;
   payload: T;
@@ -149,7 +151,7 @@ export interface ToolDefinition {
 }
 
 export interface UiContribution {
-  slot: 'thread.toolbar' | 'composer.action' | 'composer.model' | 'sidebar.panel' | 'tool.result';
+  slot: 'thread.toolbar' | 'composer.action' | 'composer.model' | 'composer.status' | 'sidebar.panel' | 'tool.result';
   id: string;
   label: string;
   description?: string;
@@ -160,6 +162,7 @@ export interface UiContribution {
   toolNames?: string[];
   providers?: ModelProvider[];
   supportsPopover?: boolean;
+  preferredWidth?: number;
 }
 
 export interface ModelProviderContribution {
@@ -168,6 +171,15 @@ export interface ModelProviderContribution {
   description?: string;
   /** The provider adapter maps PromptTurn image inputs to its wire format. */
   supportsImages?: boolean;
+}
+
+/** Non-secret model choice fixed to a Thread. provider identifies the adapter; connectionId identifies its configuration. */
+export interface ThreadModelSelection {
+  provider: ModelProvider;
+  connectionId: string;
+  model: string;
+  /** Semantic, non-wire settings fixed to this Thread. */
+  parameters: { temperature?: number | null; options: Record<string, string | number | boolean> };
 }
 
 export interface PublicSettings {

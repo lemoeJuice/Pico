@@ -13,7 +13,6 @@ import {
 import { modelParameterTargetFromRecord, modelParameterTargetFromSettings, modelParameterTargetKey } from './target.js';
 
 const PLUGIN_ID = 'pico.model-parameters';
-const selectionsKey = 'selections';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
@@ -33,73 +32,119 @@ export const modelParametersPlugin: PicoPlugin = {
   name: 'Model parameters',
   version: '0.1.0',
   pipelinePriority: { model: -100 },
-  activate({ pipelines, state, http, ui }) {
-    const savedSelection = (target: ModelParameterTarget): ModelParameterSelection | undefined => {
-      const stored: unknown = state.get(selectionsKey, {});
-      if (!isRecord(stored)) return undefined;
-      const value = stored[modelParameterTargetKey(target)];
-      return isRecord(value) ? (value as ModelParameterSelection) : undefined;
-    };
-
-    const legacyChatGptSelection = (target: ModelParameterTarget): ModelParameterSelection | undefined => {
-      if (target.provider !== 'chatgpt-plan' || profileForTarget(target)?.id !== 'openai.chatgpt-plan.responses') {
-        return undefined;
-      }
-      const legacy: unknown = state.get('legacyChatGptPreferences', null);
-      if (!isRecord(legacy)) return undefined;
-      return {
-        ...(typeof legacy.reasoningEffort === 'string' ? { reasoningEffort: legacy.reasoningEffort } : {}),
-        ...(typeof legacy.fastMode === 'boolean' ? { fastMode: legacy.fastMode } : {}),
+  activate({ pipelines, http, ui, threads, models, state }) {
+    for (const provider of ['openai-compatible', 'chatgpt-plan']) {
+      const targetFromSelection = (selectionTarget: Parameters<typeof modelParameterTargetFromSettings>[0]) =>
+        modelParameterTargetFromSettings(selectionTarget);
+      const initialSelection = (
+        selectionTarget: Parameters<typeof modelParameterTargetFromSettings>[0],
+      ): ModelParameterSelection => {
+        const target = targetFromSelection(selectionTarget);
+        const stored: unknown = state.get('selections', {});
+        if (isRecord(stored)) {
+          const saved = stored[modelParameterTargetKey(target)];
+          if (isRecord(saved)) return sanitizeSelection(target, saved);
+        }
+        if (target.provider === 'chatgpt-plan' && profileForTarget(target)?.id === 'openai.chatgpt-plan.responses') {
+          const legacy: unknown = state.get('legacyChatGptPreferences', null);
+          if (isRecord(legacy)) {
+            return sanitizeSelection(target, {
+              ...(typeof legacy.reasoningEffort === 'string' ? { reasoningEffort: legacy.reasoningEffort } : {}),
+              ...(typeof legacy.fastMode === 'boolean' ? { fastMode: legacy.fastMode } : {}),
+            });
+          }
+        }
+        return {};
       };
-    };
+      models.registerSelectionNormalizer(
+        provider,
+        (selectionTarget, options) => {
+          const target = modelParameterTargetFromSettings(selectionTarget);
+          const validated = validateSelection(target, options);
+          if (validated) return validated;
+          if (Object.keys(options).length > 0) {
+            throw new Error(`The selected model does not support option(s): ${Object.keys(options).join(', ')}.`);
+          }
+          return {};
+        },
+        initialSelection,
+      );
+    }
 
-    const selectionFor = (target: ModelParameterTarget): ModelParameterSelection => {
-      const saved = savedSelection(target);
-      return sanitizeSelection(target, saved ?? legacyChatGptSelection(target) ?? {});
-    };
-
-    const profileView = (target: ModelParameterTarget) => ({
+    const profileView = (target: ModelParameterTarget, values: ModelParameterSelection = {}) => ({
       profileId: profileForTarget(target)?.id ?? null,
       controls: controlsForTarget(target),
       temperature: temperatureForTarget(target),
-      values: selectionFor(target),
+      values: sanitizeSelection(target, values),
     });
 
     http.register('GET', '/profile', ({ query }) => {
       const target = targetFromQuery(query);
       if (!target) throw new Error('A valid model provider, endpoint, protocol, and model are required.');
-      return profileView(target);
+      const threadId = query.get('threadId') ?? '';
+      if (!threadId) throw new Error('threadId is required.');
+      const selection = threads.modelSelection(threadId);
+      if (selection.provider !== target.provider || selection.model !== target.model)
+        throw new Error('Thread model selection changed.');
+      return {
+        ...profileView(target, selection.parameters.options),
+        temperatureValue: selection.parameters.temperature,
+      };
     });
 
     http.register('PUT', '/selection', ({ body }) => {
       if (!isRecord(body)) throw new Error('Model parameter selection must be an object.');
       const target = modelParameterTargetFromRecord(body.target);
       if (!target) throw new Error('A valid model parameter target is required.');
+      const threadId = typeof body.threadId === 'string' ? body.threadId : '';
+      if (!threadId) throw new Error('threadId is required.');
       const selection = validateSelection(target, body.selection);
       if (!selection) throw new Error('The selected values are not available for this model.');
-      const stored: unknown = state.get(selectionsKey, {});
-      const next = isRecord(stored) ? { ...stored } : {};
-      next[modelParameterTargetKey(target)] = selection;
-      state.set(selectionsKey, next);
-      return profileView(target);
+      const current = threads.modelSelection(threadId);
+      if (current.provider !== target.provider || current.model !== target.model)
+        throw new Error('Thread model selection changed.');
+      const saved = threads.validateModelSelection({
+        ...current,
+        parameters: { ...current.parameters, options: selection },
+      });
+      const updated = threads.updateModelSelection(threadId, saved);
+      return { ...profileView(target, updated.parameters.options), temperatureValue: updated.parameters.temperature };
     });
 
     pipelines.use<ModelStageInput, ModelResponse>('model', async (input, next) => {
       if (!input.modelTarget) return next();
       const target = modelParameterTargetFromSettings(input.modelTarget);
       if (!target.endpoint) return next();
+      const semantic = input.selectionParameters?.options ?? {};
+      const normalized = validateSelection(target, semantic);
+      if (
+        (Object.keys(semantic).length > 0 && !normalized) ||
+        (!profileForTarget(target) && Object.keys(semantic).length > 0)
+      ) {
+        throw new Error('Thread model options are not supported by the selected provider and model.');
+      }
       const capability = temperatureForTarget(target);
+      const selectionTemperature = input.selectionParameters?.temperature ?? input.prompt.temperature;
+      const requestedTemperature = input.requestParameters?.temperature;
       const temperature =
-        capability.mode === 'adjustable'
-          ? Math.max(capability.min, Math.min(capability.max, input.prompt.temperature))
-          : capability.mode === 'fixed'
-            ? capability.value
-            : null;
+        requestedTemperature !== undefined
+          ? requestedTemperature
+          : capability.mode === 'adjustable'
+            ? Math.max(capability.min, Math.min(capability.max, selectionTemperature))
+            : capability.mode === 'fixed'
+              ? capability.value
+              : null;
+      const serializedSelection = profileForTarget(target)
+        ? serializeSelection(target, normalized ?? {}, selectionTemperature)
+        : undefined;
       return next({
         ...input,
         requestParameters: {
-          fields: serializeSelection(target, selectionFor(target), input.prompt.temperature) ?? {},
-          temperature,
+          fields: {
+            ...input.requestParameters?.fields,
+            ...(serializedSelection ?? {}),
+          },
+          temperature: requestedTemperature ?? temperature,
         },
       });
     });

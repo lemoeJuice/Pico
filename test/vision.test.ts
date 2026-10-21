@@ -62,7 +62,8 @@ describe('Pico visual tool results', () => {
     try {
       await writeFile(join(workspacePath, image.name), bytes);
       const tool = (await import('../src/executor/tools.js')).createToolCatalog().get('read_image');
-      expect(tool).toBeDefined();
+      expect(tool?.source).toBe('executor');
+      if (!tool || tool.source !== 'executor') throw new Error('read_image Executor tool is unavailable.');
       const result = await tool!.execute(
         { path: image.name },
         { workspacePath, executionId: 'vision-test', signal: new AbortController().signal },

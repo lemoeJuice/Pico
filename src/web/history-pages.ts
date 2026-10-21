@@ -42,7 +42,7 @@ export function mergeLatestSnapshot(current: ThreadSnapshot | null, next: Thread
 export function mergeEarlierSnapshot(current: ThreadSnapshot, earlier: ThreadSnapshot): ThreadSnapshot {
   if (current.thread.id !== earlier.thread.id) return current;
   const merged = mergeSnapshotData(current, earlier, earlier.hasEarlierRecords);
-  return { ...merged, thread: current.thread, children: current.children };
+  return { ...merged, thread: current.thread, modelSelection: current.modelSelection, children: current.children };
 }
 
 export function appendSnapshotRecord(

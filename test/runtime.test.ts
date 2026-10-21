@@ -57,6 +57,101 @@ async function decidePermission(runtime: PicoRuntime, executionId: string, allow
 }
 
 describe('durable Thread runtime invariants', () => {
+  it('keeps framework compaction available without Rolling Context and rebuilds its projection after restart', async () => {
+    const model = new FakeModel((_prompt, callNumber) =>
+      response(
+        callNumber === 1
+          ? 'Earlier turns summary: objective alpha; verified result beta.'
+          : 'Continued with the recent context.',
+      ),
+    );
+    const env = await setupRuntime(model, { disabledBuiltinPlugins: ['pico.rolling-context'] });
+    let runtime = env.runtime;
+    const thread = env.runtime.createThread(env.project.id, 'runtime');
+    try {
+      expect(runtime.commands.list()).toContainEqual(expect.objectContaining({ name: 'compact' }));
+      for (let turn = 1; turn <= 4; turn += 1) {
+        const user = env.store.appendCanonical(thread.id, `compact-user-${turn}`, 'message', {
+          role: 'user',
+          source: 'user',
+          content: `request turn ${turn}`,
+        });
+        env.store.appendCanonical(thread.id, `compact-assistant-${turn}`, 'assistant', {
+          content: `response turn ${turn}`,
+          toolCalls: [],
+          batchId: null,
+          projectionThrough: user.record.seq,
+          usage: null,
+          model: 'test-model',
+        });
+      }
+
+      const compact = await runtime.submit(thread.id, 'compact-without-plugin', '/compact');
+      expect(compact.command?.text).toContain('Compacted 2 completed turn(s)');
+      expect(env.store.listRecords(thread.id).filter((record) => record.kind === 'message')).toHaveLength(4);
+      expect(
+        env.store
+          .listRecords(thread.id)
+          .filter((record) => record.kind === 'plugin' && record.payload.action === 'context-compacted'),
+      ).toHaveLength(1);
+
+      await runtime.shutdown();
+      runtime = new PicoRuntime(env.store, {
+        model,
+        disabledBuiltinPlugins: ['pico.rolling-context'],
+        pluginDirectory: join(env.directory, 'empty-plugins'),
+      });
+      await runtime.initialize();
+      expect(runtime.commands.list()).toContainEqual(expect.objectContaining({ name: 'compact' }));
+      await runtime.submit(thread.id, 'continue-after-compact-restart', 'Continue from the recent work.');
+      await runtime.drain();
+
+      const continuationPrompt = model.prompts.at(-1)!;
+      const promptTurns = JSON.stringify(continuationPrompt.turns);
+      expect(promptTurns).toContain('Earlier turns summary: objective alpha; verified result beta.');
+      expect(promptTurns).toContain('request turn 3');
+      expect(promptTurns).toContain('request turn 4');
+      expect(promptTurns).not.toContain('request turn 1');
+      expect(promptTurns).not.toContain('response turn 2');
+      expect(env.store.listRecords(thread.id).filter((record) => record.kind === 'message')).toHaveLength(5);
+    } finally {
+      await runtime.shutdown();
+      env.store.close();
+      await rm(env.directory, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects stored semantic model options when their owner is disabled but permits empty options', async () => {
+    const model = new FakeModel(() => response('completed without optional parameters'));
+    const env = await setupRuntime(model);
+    try {
+      const configured = env.createThread();
+      const selection = env.runtime.threadModelSelection(configured.id);
+      env.store.setThreadModelSelection(configured.id, {
+        ...selection,
+        parameters: { ...selection.parameters, options: { legacySetting: 'keep' } },
+      });
+      await env.runtime.plugins.setEnabled('pico.model-parameters', false);
+      await env.runtime.submit(configured.id, 'semantic-options-after-disable', 'Run with saved settings.');
+      await env.runtime.drain();
+      expect(model.calls).toBe(0);
+      expect(env.store.listExecutions(configured.id)).toContainEqual(
+        expect.objectContaining({
+          status: 'failed',
+          error: expect.stringContaining('Model parameters are not supported'),
+        }),
+      );
+
+      const plain = env.createThread();
+      await env.runtime.submit(plain.id, 'empty-options-after-disable', 'Run with default settings.');
+      await env.runtime.drain();
+      expect(model.calls).toBe(1);
+      expect(env.store.getThread(plain.id)?.state).toBe('idle');
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it('publishes provider previews and persists the returned reasoning summary', async () => {
     let adapterCalled = false;
     const model: ModelAdapter = {
@@ -89,7 +184,10 @@ describe('durable Thread runtime invariants', () => {
       await env.runtime.submit(thread.id, 'preview-and-summary', 'Read a note.');
       await env.runtime.drain();
 
-      expect(adapterCalled).toBe(true);
+      expect(
+        adapterCalled,
+        JSON.stringify(env.store.listExecutions(thread.id).map((execution) => execution.error)),
+      ).toBe(true);
       const previews = events.filter((event) => event.executionId && String(event.type).startsWith('model.'));
       expect(previews).toContainEqual({
         type: 'model.reasoning_summary.delta',
@@ -231,7 +329,7 @@ describe('durable Thread runtime invariants', () => {
       expect(info.plugins.some((plugin) => plugin.id === 'pico.chatgpt-plan')).toBe(true);
       expect(
         info.pipelines.some((pipeline) => pipeline.stage === 'model' && pipeline.pluginId === 'pico.chatgpt-plan'),
-      ).toBe(true);
+      ).toBe(false);
       expect(info.pages).toContainEqual(
         expect.objectContaining({ id: 'account', pluginId: 'pico.chatgpt-plan', entry: 'webui' }),
       );
@@ -481,6 +579,7 @@ describe('durable Thread runtime invariants', () => {
     });
     await runtime.initialize();
     const project = await runtime.createProject('Approval recovery', workspace);
+    runtime.updateModelSettings({ model: 'test-model' });
     const thread = runtime.createThread(project.id, 'host');
     try {
       await runtime.submit(thread.id, 'approval-restart-message', 'Read the input file.');
@@ -545,6 +644,7 @@ describe('durable Thread runtime invariants', () => {
     });
     await runtime.initialize();
     const project = await runtime.createProject('Model recovery', workspace);
+    runtime.updateModelSettings({ model: 'test-model' });
     const thread = runtime.createThread(project.id, 'host');
     try {
       await runtime.submit(thread.id, 'model-shutdown-message', 'Please finish this response.');
@@ -1534,7 +1634,7 @@ describe('durable Thread runtime invariants', () => {
       expect(env.runtime.getModelInputAttempts(thread.id, modelExecution!.id)).toMatchObject([
         {
           status: 'failed',
-          error: 'Model request failed (Error).',
+          error: 'Model request failed (provider_error).',
           prompt: { turns: [{ content: 'Write something' }] },
         },
       ]);

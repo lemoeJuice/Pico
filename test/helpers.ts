@@ -4,8 +4,11 @@ import { join } from 'node:path';
 import type { AssistantPayload } from '../src/core/types.js';
 import { PicoStore } from '../src/core/store.js';
 import { collaborationPlugin } from '../src/plugins/collaboration.js';
+import { autoThreadTitlePlugin } from '../src/plugins/auto-thread-title.js';
+import { modelParametersPlugin } from '../src/plugins/model-parameters/index.js';
 import { permissionPlugin } from '../src/plugins/permissions.js';
 import { projectContextPlugin } from '../src/plugins/project-context.js';
+import { visionPlugin } from '../src/plugins/vision.js';
 import type { ModelAdapter, ModelPrompt, ModelResponse } from '../src/runtime/model.js';
 import { PicoRuntime, type RuntimeOptions } from '../src/runtime/runtime.js';
 
@@ -58,7 +61,14 @@ export async function setupRuntime(model: ModelAdapter, options: RuntimeOptions 
   const providedPlugins = options.plugins ?? [];
   const fixturePlugins = options.pluginDirectory
     ? []
-    : [permissionPlugin, projectContextPlugin, collaborationPlugin].filter(
+    : [
+        permissionPlugin,
+        projectContextPlugin,
+        collaborationPlugin,
+        modelParametersPlugin,
+        autoThreadTitlePlugin,
+        visionPlugin,
+      ].filter(
         (plugin) =>
           !providedPlugins.some((provided) => provided.id === plugin.id) &&
           !options.disabledBuiltinPlugins?.includes(plugin.id),
@@ -70,6 +80,7 @@ export async function setupRuntime(model: ModelAdapter, options: RuntimeOptions 
     pluginDirectory: options.pluginDirectory ?? join(directory, 'empty-plugins'),
   });
   await runtime.initialize();
+  if (!runtime.publicModelSettings().model) runtime.updateModelSettings({ model: 'test-model' });
   const project = await runtime.createProject('Test project', workspace);
   return {
     directory,

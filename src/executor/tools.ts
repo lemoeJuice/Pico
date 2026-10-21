@@ -3,70 +3,16 @@ import { lstat, open, readFile, realpath, writeFile, unlink, mkdir } from 'node:
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import type { ToolDefinition } from '../core/types.js';
-import type { Thread } from '../core/types.js';
+import { BUILTIN_EXECUTOR_TOOL_DEFINITIONS } from '../contracts/executor-tool-definitions.js';
 import { MAX_IMAGE_BYTES } from '../contracts/multimodal.js';
 import { READ_FILE_LIMITS, SEARCH_FILE_LIMITS } from './tool-limits.js';
-
-export interface ToolContext {
-  workspacePath: string;
-  executionId: string;
-  signal: AbortSignal;
-  thread?: Thread;
-}
-
-export interface ToolImplementation {
-  definition: ToolDefinition;
-  execute(args: Record<string, unknown>, context: ToolContext): Promise<unknown>;
-}
-
-export type ToolSource = 'executor' | 'runtime';
-
-export interface RegisteredTool extends ToolImplementation {
-  owner: string;
-  source: ToolSource;
-}
-
-const schemas = {
-  string: { type: 'string' },
-};
+import { ToolCatalog, type ExecutorToolContext, type ExecutorToolImplementation } from './tool-catalog.js';
 
 const activeShellExitCleanups = new Set<() => void>();
 process.once('exit', () => {
   for (const cleanup of activeShellExitCleanups) cleanup();
 });
 
-export class ToolCatalog {
-  private readonly items = new Map<string, RegisteredTool>();
-
-  register(tool: RegisteredTool): void {
-    if (this.items.has(tool.definition.name)) {
-      throw new Error(`Tool ${tool.definition.name} is already registered`);
-    }
-    this.items.set(tool.definition.name, tool);
-  }
-
-  replace(tool: RegisteredTool): void {
-    this.items.set(tool.definition.name, tool);
-  }
-
-  get(name: string): RegisteredTool | undefined {
-    return this.items.get(name);
-  }
-
-  list(): ToolDefinition[] {
-    return [...this.items.values()].map(({ definition }) => definition);
-  }
-
-  listBySource(source: ToolSource): RegisteredTool[] {
-    return [...this.items.values()].filter((tool) => tool.source === source);
-  }
-
-  removeOwner(owner: string): void {
-    for (const [name, tool] of this.items) {
-      if (tool.owner === owner) this.items.delete(name);
-    }
-  }
-}
 
 function requiredString(args: Record<string, unknown>, key: string): string {
   const value = args[key];
@@ -437,20 +383,10 @@ async function applyPatch(patchText: string, workspacePath: string): Promise<str
   return changed;
 }
 
-export function builtinExecutorTools(): ToolImplementation[] {
+export function builtinExecutorTools(): ExecutorToolImplementation[] {
   return [
     {
-      definition: {
-        name: 'read_file',
-        description:
-          'Read a UTF-8 text file inside the selected workspace. Paths are relative to the workspace; output is capped at 60,000 characters and returns truncated when more remains.',
-        parameters: {
-          type: 'object',
-          properties: { path: schemas.string },
-          required: ['path'],
-          additionalProperties: false,
-        },
-      },
+      definition: BUILTIN_EXECUTOR_TOOL_DEFINITIONS.read_file!,
       async execute(args, context) {
         const target = await safePath(context.workspacePath, requiredString(args, 'path'));
         const handle = await open(target, 'r');
@@ -479,17 +415,7 @@ export function builtinExecutorTools(): ToolImplementation[] {
       },
     },
     {
-      definition: {
-        name: 'read_image',
-        description:
-          'Read a PNG, JPEG, or WebP image file inside the selected workspace for visual inspection. Paths are relative to the workspace; files are limited to 4 MiB.',
-        parameters: {
-          type: 'object',
-          properties: { path: schemas.string },
-          required: ['path'],
-          additionalProperties: false,
-        },
-      },
+      definition: BUILTIN_EXECUTOR_TOOL_DEFINITIONS.read_image!,
       async execute(args, context) {
         const requestedPath = requiredString(args, 'path');
         const target = await safePath(context.workspacePath, requestedPath);
@@ -528,48 +454,19 @@ export function builtinExecutorTools(): ToolImplementation[] {
       },
     },
     {
-      definition: {
-        name: 'search_files',
-        description:
-          'Search text files under the workspace using a regular expression. Skips dependency and build folders; output is capped at 200 matches and 30,000 characters, and truncated indicates incomplete coverage.',
-        parameters: {
-          type: 'object',
-          properties: { pattern: schemas.string },
-          required: ['pattern'],
-          additionalProperties: false,
-        },
-      },
+      definition: BUILTIN_EXECUTOR_TOOL_DEFINITIONS.search_files!,
       async execute(args, context) {
         return searchFiles(requiredString(args, 'pattern'), context.workspacePath, context.signal);
       },
     },
     {
-      definition: {
-        name: 'apply_patch',
-        description:
-          'Apply a unified diff patch to files in the selected workspace. Paths must be relative and may not escape the workspace.',
-        parameters: {
-          type: 'object',
-          properties: { patch: schemas.string },
-          required: ['patch'],
-          additionalProperties: false,
-        },
-      },
+      definition: BUILTIN_EXECUTOR_TOOL_DEFINITIONS.apply_patch!,
       async execute(args, context) {
         return { changed: await applyPatch(requiredString(args, 'patch'), context.workspacePath) };
       },
     },
     {
-      definition: {
-        name: 'shell',
-        description: 'Run a shell command in the selected executor workspace and return its output and exit code.',
-        parameters: {
-          type: 'object',
-          properties: { command: schemas.string, timeout_ms: { type: 'integer', minimum: 1000, maximum: 600000 } },
-          required: ['command'],
-          additionalProperties: false,
-        },
-      },
+      definition: BUILTIN_EXECUTOR_TOOL_DEFINITIONS.shell!,
       async execute(args, context) {
         const timeoutMs =
           typeof args.timeout_ms === 'number' ? Math.min(Math.max(args.timeout_ms, 1000), 600_000) : 120_000;
@@ -595,7 +492,7 @@ export const defaultExecutorPlugin = {
     tools: {
       register(
         definition: ToolDefinition,
-        execute: (args: Record<string, unknown>, context: ToolContext) => Promise<unknown> | unknown,
+        execute: (args: Record<string, unknown>, context: ExecutorToolContext) => Promise<unknown> | unknown,
       ): void;
     };
   }): void {

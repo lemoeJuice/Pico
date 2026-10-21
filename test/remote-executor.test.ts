@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { PicoStore } from '../src/core/store.js';
 import { startRemoteExecutorServer } from '../src/executor/remote-server.js';
-import { ToolCatalog } from '../src/executor/tools.js';
+import { ToolCatalog } from '../src/executor/tool-catalog.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
 import { FakeModel, response, setupRuntime, setToolPolicy } from './helpers.js';
 
@@ -46,6 +46,7 @@ describe('Remote Host Executor', () => {
     const outside = join(directory, 'outside');
     await mkdir(workspace, { recursive: true });
     await mkdir(outside);
+    await writeFile(join(workspace, 'read-me.txt'), 'Remote tool read succeeded.');
     const databasePath = join(directory, 'executor.sqlite');
     let server = await startRemoteExecutorServer({ token, workspaceRoot, databasePath, port: 0 });
     let baseUrl = `http://127.0.0.1:${server.port}`;
@@ -67,6 +68,38 @@ describe('Remote Host Executor', () => {
         body: JSON.stringify({ path: outside }),
       });
       expect(invalidWorkspace.status).toBe(400);
+
+      const readId = 'remote-read-file-execution';
+      const readAccepted = await fetch(`${baseUrl}/api/executions/${readId}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          toolName: 'read_file',
+          arguments: { path: 'read-me.txt' },
+          workspacePath: workspace,
+        }),
+      });
+      expect(readAccepted.status).toBe(202);
+      await waitForExecution(baseUrl, readId);
+      expect(await getJson<{ result: { contents: string } }>(`${baseUrl}/api/executions/${readId}`, token)).toMatchObject({
+        result: { contents: 'Remote tool read succeeded.' },
+      });
+
+      const patchId = 'remote-apply-patch-execution';
+      const patchAccepted = await fetch(`${baseUrl}/api/executions/${patchId}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          toolName: 'apply_patch',
+          arguments: {
+            patch: ['*** Begin Patch', '*** Add File: remote-patch.txt', '+Remote patch succeeded.', '*** End Patch'].join('\n'),
+          },
+          workspacePath: workspace,
+        }),
+      });
+      expect(patchAccepted.status).toBe(202);
+      await waitForExecution(baseUrl, patchId);
+      expect(await readFile(join(workspace, 'remote-patch.txt'), 'utf8')).toBe('Remote patch succeeded.\n');
 
       const executionId = 'stable-execution-id';
       const request = {
@@ -543,6 +576,7 @@ describe('Remote Host Executor', () => {
       await runtime.initialize();
       const project = await runtime.createProject('Runtime restart', projectWorkspace);
       const connection = await runtime.addRemoteExecutorConnection('Build host', endpoint, token);
+      runtime.updateModelSettings({ model: 'test-model' });
       const thread = await runtime.createRemoteThread(project.id, connection.id, remoteWorkspace);
       setToolPolicy(store, thread.id, 'shell', 'allow');
       await runtime.submit(thread.id, 'runtime-restart-message', 'Run a command that outlives this Runtime.');
@@ -608,6 +642,7 @@ describe('Remote Host Executor', () => {
       await runtime.initialize();
       const project = await runtime.createProject('Paused Runtime restart', projectWorkspace);
       const connection = await runtime.addRemoteExecutorConnection('Build host', endpoint, token);
+      runtime.updateModelSettings({ model: 'test-model' });
       const thread = await runtime.createRemoteThread(project.id, connection.id, remoteWorkspace);
       setToolPolicy(store, thread.id, 'shell', 'allow');
       await runtime.submit(thread.id, 'paused-runtime-restart-message', 'Run while the Runtime restarts.');

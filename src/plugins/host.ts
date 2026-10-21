@@ -13,7 +13,13 @@ import type {
 } from '../core/types.js';
 import type { ExecutionPipelines, Interceptor, PipelineStage } from '../core/pipeline.js';
 import type { PicoStore } from '../core/store.js';
-import type { ToolCatalog, ToolContext } from '../executor/tools.js';
+import type { RuntimeToolContext, ToolCatalog } from '../executor/tool-catalog.js';
+import type {
+  InitialModelSelection,
+  ModelProviderRegistry,
+  ModelSelectionNormalizer,
+  RegisteredModelHandler,
+} from '../runtime/provider-registry.js';
 
 export interface CommandContext {
   thread: Thread | null;
@@ -50,6 +56,7 @@ export interface PluginPageContribution {
   label: string;
   description?: string;
   entry: string;
+  group?: string;
 }
 
 export interface PluginHttpRequest {
@@ -76,7 +83,7 @@ export interface PluginContext extends Omit<PluginServices, 'models' | 'continua
   tools: {
     register(
       definition: ToolDefinition,
-      execute: (args: Record<string, unknown>, context: ToolContext) => Promise<unknown> | unknown,
+      execute: (args: Record<string, unknown>, context: RuntimeToolContext) => Promise<unknown> | unknown,
     ): void;
   };
   models: {
@@ -86,7 +93,12 @@ export interface PluginContext extends Omit<PluginServices, 'models' | 'continua
     history: PluginServices['models']['history'];
     inputs: PluginServices['models']['inputs'];
     subscribe: PluginServices['models']['subscribe'];
-    registerProvider(provider: ModelProviderContribution): void;
+    registerProvider(provider: ModelProviderContribution, handler: RegisteredModelHandler): void;
+    registerSelectionNormalizer(
+      provider: string,
+      normalize: ModelSelectionNormalizer,
+      initial?: InitialModelSelection,
+    ): void;
   };
   continuations: {
     register(hasPendingWork: (threadId: string) => boolean): () => void;
@@ -98,6 +110,7 @@ export interface PluginContext extends Omit<PluginServices, 'models' | 'continua
   ui: {
     contribute(contribution: UiContribution): void;
     registerPage(page: PluginPageContribution): void;
+    invalidate(): void;
   };
   http: {
     register(
@@ -111,6 +124,15 @@ export interface PluginContext extends Omit<PluginServices, 'models' | 'continua
     set<T>(key: string, value: T): void;
     transaction<T>(run: () => T): T;
     subscribe(listener: () => void): () => void;
+  };
+  secrets?: {
+    get<T>(key: string, fallback: T): T;
+    set<T>(key: string, value: T): void;
+    delete(key: string): void;
+  };
+  cache: {
+    get<T>(key: string, fallback: T): T;
+    set<T>(key: string, value: T): void;
   };
   canonical: {
     append(threadId: string, payload: Record<string, unknown>): CanonicalRecord;
@@ -187,9 +209,6 @@ export class PluginHost {
   private readonly loaded: LoadedPlugin[] = [];
   private readonly contributions: UiContribution[] = [];
   private readonly pages: RegisteredPluginPage[] = [];
-  private readonly providers: Array<{ pluginId: string } & ModelProviderContribution> = [
-    { pluginId: 'pico.core', id: 'openai-compatible', label: 'OpenAI-compatible API key', supportsImages: true },
-  ];
   private readonly routes: RegisteredPluginHttpRoute[] = [];
   private readonly activePlugins: PicoPlugin[] = [];
   private readonly subscriptions = new Map<string, Array<() => void>>();
@@ -199,7 +218,7 @@ export class PluginHost {
   private readonly candidateErrors = new Map<string, { source: string; error: string }>();
   private readonly enablement = new Map<string, boolean>();
   private readonly lifecycleQueues = new Map<string, Promise<void>>();
-  private readonly requiredPlugins = new Set(['pico.workspace', 'pico.commands', 'pico.model-parameters']);
+  private readonly requiredPlugins = new Set(['pico.workspace', 'pico.commands']);
   private readonly forcedDisabled = new Set<string>();
   private shutdownStarted = false;
   private importSequence = 0;
@@ -212,6 +231,7 @@ export class PluginHost {
     private readonly pluginDirectory = resolve(process.env.PICO_PLUGIN_DIR ?? join(process.cwd(), 'plugins')),
     private readonly services: PluginServices = unavailablePluginServices,
     private readonly options: PluginHostOptions = {},
+    private readonly providerRegistry?: ModelProviderRegistry,
   ) {}
 
   list(): LoadedPlugin[] {
@@ -374,11 +394,7 @@ export class PluginHost {
       ...this.contributions.filter((item) => item.pluginId !== pluginId),
     );
     this.pages.splice(0, this.pages.length, ...this.pages.filter((item) => item.pluginId !== pluginId));
-    this.providers.splice(
-      1,
-      this.providers.length - 1,
-      ...this.providers.slice(1).filter((item) => item.pluginId !== pluginId),
-    );
+    this.providerRegistry?.removeOwner(pluginId);
     this.routes.splice(0, this.routes.length, ...this.routes.filter((item) => item.pluginId !== pluginId));
     try {
       await plugin.deactivate?.();
@@ -417,12 +433,7 @@ export class PluginHost {
   }
 
   modelProviders(): ModelProviderContribution[] {
-    return this.providers.map(({ id, label, description, supportsImages }) => ({
-      id,
-      label,
-      ...(description ? { description } : {}),
-      supportsImages: supportsImages === true,
-    }));
+    return this.providerRegistry?.list() ?? [];
   }
 
   httpRoutes(): ReadonlyArray<RegisteredPluginHttpRoute> {
@@ -540,7 +551,6 @@ export class PluginHost {
     if (!plugin.activate) return;
     const contributionsStart = this.contributions.length;
     const pagesStart = this.pages.length;
-    const providersStart = this.providers.length;
     const routesStart = this.routes.length;
     const assertStaticPath = (path: string, label: string): void => {
       if (!path.startsWith('/') || path.includes('?') || path.includes('#') || path.split('/').includes('..')) {
@@ -589,13 +599,13 @@ export class PluginHost {
           subscriptions.push(unsubscribe);
           return unsubscribe;
         },
-        registerProvider: (provider) => {
-          if (!/^[a-z0-9][a-z0-9._-]*$/.test(provider.id)) throw new Error(`Invalid model provider ID: ${provider.id}`);
-          if (!provider.label.trim()) throw new Error('Model provider label is required.');
-          if (this.providers.some((item) => item.id === provider.id)) {
-            throw new Error(`Model provider ${provider.id} is already registered`);
-          }
-          this.providers.push({ ...provider, pluginId: plugin.id });
+        registerProvider: (provider, handler) => {
+          if (!this.providerRegistry) throw new Error('Model provider registry is unavailable.');
+          this.providerRegistry.register(plugin.id, provider, handler);
+        },
+        registerSelectionNormalizer: (provider, normalize, initial) => {
+          if (!this.providerRegistry) throw new Error('Model provider registry is unavailable.');
+          this.providerRegistry.registerSelectionNormalizer(plugin.id, provider, normalize, initial);
         },
       },
       continuations: {
@@ -609,7 +619,14 @@ export class PluginHost {
       ui: {
         contribute: (contribution) => {
           if (
-            !['thread.toolbar', 'composer.action', 'composer.model', 'sidebar.panel', 'tool.result'].includes(
+            ![
+              'thread.toolbar',
+              'composer.action',
+              'composer.model',
+              'composer.status',
+              'sidebar.panel',
+              'tool.result',
+            ].includes(
               contribution.slot,
             )
           ) {
@@ -647,6 +664,12 @@ export class PluginHost {
           ) {
             throw new Error('Popover controls require a Web UI component in thread.toolbar or composer.model.');
           }
+          if (
+            contribution.preferredWidth !== undefined &&
+            (!Number.isFinite(contribution.preferredWidth) || contribution.preferredWidth < 120)
+          ) {
+            throw new Error('Preferred UI width must be a finite value of at least 120 pixels.');
+          }
           this.contributions.push({ ...contribution, pluginId: plugin.id, id: `${plugin.id}:${contribution.id}` });
         },
         registerPage: (page) => {
@@ -659,6 +682,7 @@ export class PluginHost {
           }
           this.pages.push({ ...page, pluginId: plugin.id });
         },
+        invalidate: () => this.options.onChange?.(plugin.id),
       },
       http: {
         register: (method, path, handler) => {
@@ -683,6 +707,15 @@ export class PluginHost {
           return unsubscribe;
         },
       },
+      secrets: {
+        get: (key, fallback) => this.store.getPrivateSecret(plugin.id, key, fallback),
+        set: (key, value) => this.store.setPrivateSecret(plugin.id, key, value),
+        delete: (key) => this.store.deletePrivateSecret(plugin.id, key),
+      },
+      cache: {
+        get: (key, fallback) => this.store.getPluginCache(plugin.id, key, fallback),
+        set: (key, value) => this.store.setPluginCache(plugin.id, key, value),
+      },
       canonical: {
         append: (threadId, payload) => this.store.appendPluginRecord(threadId, plugin.id, payload),
         list: (threadId) => this.store.listRecords(threadId).map((record) => record),
@@ -706,9 +739,9 @@ export class PluginHost {
       this.tools.removeOwner(plugin.id);
       this.pipelines.removePlugin(plugin.id);
       this.commands.removeOwner(plugin.id);
+      this.providerRegistry?.removeOwner(plugin.id);
       this.contributions.splice(contributionsStart);
       this.pages.splice(pagesStart);
-      this.providers.splice(providersStart);
       this.routes.splice(routesStart);
       this.continuations.delete(plugin.id);
       await plugin.deactivate?.();

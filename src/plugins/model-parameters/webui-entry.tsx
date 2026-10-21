@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import './webui.css';
-import { createPluginUiClient, PLUGIN_UI_PROTOCOL_VERSION, type PluginUiInitMessage } from '../ui-protocol.js';
+import {
+  createPluginUiClient,
+  PLUGIN_UI_PROTOCOL_VERSION,
+  type PluginUiContext,
+  type PluginUiInitMessage,
+} from '../ui-protocol.js';
 import { pluginWebUi } from './webui.js';
 
 const pluginId = 'pico.model-parameters';
@@ -18,12 +23,14 @@ function PluginView({
   client: ReturnType<typeof createPluginUiClient>;
 }): ReactElement {
   const [settings, setSettings] = useState(init.settings);
+  const [context, setContext] = useState(init.context);
   const wrapper = useRef<HTMLDivElement>(null);
   const Component = pluginWebUi.components[init.viewId as keyof typeof pluginWebUi.components];
 
   useEffect(() => () => client.close(), [client]);
   useEffect(() => client.ready(init.attemptId), [client, init.attemptId]);
   useEffect(() => client.subscribeSettings(setSettings), [client]);
+  useEffect(() => client.subscribeContext(setContext), [client]);
   useEffect(() => {
     document.body.classList.toggle('pico-plugin-popover', init.popover === true);
     return () => document.body.classList.remove('pico-plugin-popover');
@@ -38,10 +45,11 @@ function PluginView({
   useEffect(() => {
     const element = wrapper.current;
     if (!element) return;
-    const reportVisibility = (): void => client.reportVisibility(
-      element.childElementCount > 0,
-      init.popover ? undefined : Math.ceil(element.getBoundingClientRect().width),
-    );
+    const reportVisibility = (): void =>
+      client.reportVisibility(
+        element.childElementCount > 0,
+        init.popover ? undefined : Math.ceil(element.getBoundingClientRect().width),
+      );
     const mutationObserver = new MutationObserver(reportVisibility);
     const resizeObserver = new ResizeObserver(reportVisibility);
     mutationObserver.observe(element, { childList: true, subtree: true });
@@ -65,7 +73,7 @@ function PluginView({
           : ({ '--pico-composer-control-height': `${init.controlHeightPx}px` } as CSSProperties)
       }
     >
-      <Component {...client.props(settings)} />
+      <Component {...client.props(settings, context as PluginUiContext)} />
     </div>
   );
 }

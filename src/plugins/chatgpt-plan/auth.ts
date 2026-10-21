@@ -141,6 +141,16 @@ export interface ChatGptPluginState {
   set<T>(key: string, value: T): void;
 }
 
+export interface ChatGptPluginSecrets {
+  get<T>(key: string, fallback: T): T;
+  set<T>(key: string, value: T): void;
+}
+
+export interface ChatGptPluginCache {
+  get<T>(key: string, fallback: T): T;
+  set<T>(key: string, value: T): void;
+}
+
 /** Implements OpenAI's public Sign in with ChatGPT flow for eligible open-source clients. */
 export class ChatGptPlanAuth {
   private readonly pending = new Map<string, PendingAuthorization>();
@@ -151,9 +161,11 @@ export class ChatGptPlanAuth {
   private modelCatalogLastRefreshAttemptAt = 0;
 
   constructor(
-    private readonly state: ChatGptPluginState,
+    state: ChatGptPluginState,
     private readonly fetcher: typeof fetch = fetch,
     private readonly now: () => number = Date.now,
+    private readonly secrets: ChatGptPluginSecrets = state,
+    private readonly cache: ChatGptPluginCache = state,
   ) {}
 
   status(): ChatGptAccountStatus {
@@ -410,7 +422,7 @@ export class ChatGptPlanAuth {
     this.modelCatalogLastRefreshAttemptAt = this.now();
     const request = this.fetchModels()
       .then((models) => {
-        this.state.set<CachedModelCatalog>(modelCatalogStateKey, { models, refreshedAt: this.now() });
+        this.cache.set<CachedModelCatalog>(modelCatalogStateKey, { models, refreshedAt: this.now() });
         return models;
       })
       .finally(() => {
@@ -421,7 +433,7 @@ export class ChatGptPlanAuth {
   }
 
   private readModelCatalog(): CachedModelCatalog | null {
-    const value: unknown = this.state.get<unknown>(modelCatalogStateKey, null);
+    const value: unknown = this.cache.get<unknown>(modelCatalogStateKey, null);
     if (!isObject(value) || !Array.isArray(value.models) || typeof value.refreshedAt !== 'number') return null;
     const models = value.models.flatMap((entry): ChatGptModelChoice[] => {
       if (!isObject(entry) || typeof entry.slug !== 'string' || typeof entry.displayName !== 'string') return [];
@@ -499,7 +511,7 @@ export class ChatGptPlanAuth {
         scopes: [],
       });
     }
-    this.state.set<CachedModelCatalog | null>(modelCatalogStateKey, null);
+    this.cache.set<CachedModelCatalog | null>(modelCatalogStateKey, null);
     return { remoteRevoked };
   }
 
@@ -728,10 +740,10 @@ export class ChatGptPlanAuth {
   }
 
   private readCredentials(): StoredCredentials | null {
-    return normalizedCredential(this.state.get<unknown>(authStateKey, null));
+    return normalizedCredential(this.secrets.get<unknown>(authStateKey, null));
   }
 
   private writeCredentials(credentials: StoredCredentials): void {
-    this.state.set(authStateKey, credentials);
+    this.secrets.set(authStateKey, credentials);
   }
 }

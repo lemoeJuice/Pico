@@ -1,6 +1,7 @@
 import { createPortal } from 'react-dom';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactElement } from 'react';
 import type { PublicSettings } from '../core/types.js';
+import { clampPluginPopoverWidth } from './plugin-ui-sizing.js';
 import {
   markPluginUiDiagnosticMounted,
   reportPluginUiDiagnostic,
@@ -38,11 +39,12 @@ type PluginWebViewProps = {
   controlLabel?: string | undefined;
   controlClassName?: string | undefined;
   supportsPopover?: boolean | undefined;
+  preferredWidth?: number | undefined;
   context: PluginUiContext;
   events?: Array<{ sequence: number; event: PluginUiEvent }>;
   settings: PublicSettings;
   api<T>(path: string, init?: PluginApiInit): Promise<T>;
-  updateModelSettings(update: PluginModelSettingsUpdate): Promise<void>;
+  updateModelSettings(update: PluginModelSettingsUpdate, threadId?: string): Promise<void>;
   openThread(threadId: string): Promise<void>;
   openMessage(seq: number): Promise<void>;
   runCommand(pluginId: string, threadId: string | null, command: string): Promise<unknown>;
@@ -247,8 +249,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
   };
 
   const toolbarPopoverWidth = (): number => {
-    if (props.pluginId !== 'pico.rolling-context') return 360;
-    return Math.min(640, Math.max(120, window.innerWidth - 24));
+    return clampPluginPopoverWidth(props.preferredWidth, window.innerWidth);
   };
 
   const updateAnchor = (): void => {
@@ -482,6 +483,8 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
           const limits =
             current.current.uiSlot === 'tool.result'
               ? { min: 0, max: 180 }
+              : current.current.uiSlot === 'composer.status'
+                ? { min: 24, max: 90 }
               : current.current.viewType === 'page'
                 ? { min: 220, max: 620 }
                 : { min: 46, max: 180 };
@@ -588,11 +591,11 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
         runtimeError.current ? 'error' : 'bridge-ready',
         runtimeError.current ?? 'The iframe diagnostic bridge responded to the host probe.',
         {
-        bridgeResponded: true,
-        frameSecureContext: readCapability('secureContext'),
-        frameRandomUUID: readCapability('randomUUID'),
-        frameResizeObserver: readCapability('resizeObserver'),
-        frameMessageChannel: readCapability('messageChannel'),
+          bridgeResponded: true,
+          frameSecureContext: readCapability('secureContext'),
+          frameRandomUUID: readCapability('randomUUID'),
+          frameResizeObserver: readCapability('resizeObserver'),
+          frameMessageChannel: readCapability('messageChannel'),
         },
       );
       sendInit(true);
@@ -621,7 +624,11 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
     }
     if (message.action === 'update-model-settings') {
       if (!isPluginModelSettingsUpdate(message.update)) throw new Error('Invalid model settings update.');
-      await latest.updateModelSettings(message.update);
+      const contextThreadId = latest.context.thread?.id;
+      if (message.threadId !== contextThreadId) {
+        throw new Error('The active Thread changed before the model setting could be saved.');
+      }
+      await latest.updateModelSettings(message.update, message.threadId);
       return null;
     }
     if (message.action === 'command') {
@@ -721,7 +728,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
           aria-label={`${props.controlLabel} panel`}
           style={(() => {
             const anchor = anchorPosition ?? { left: -1000, top: -1000, height: 0 };
-            const width = Math.min(popover?.width ?? toolbarPopoverWidth(), Math.max(120, window.innerWidth - 24));
+            const width = clampPluginPopoverWidth(popover?.width ?? props.preferredWidth, window.innerWidth);
             const height = popover ? Math.min(popover.height, Math.max(80, window.innerHeight - 24)) : 0;
             const belowTop = anchor.top + anchor.height + 9;
             const belowSpace = window.innerHeight - belowTop - 12;

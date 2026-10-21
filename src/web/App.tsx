@@ -23,6 +23,7 @@ import type {
   PublicSettings,
   RemoteExecutorConnectionView,
   Thread,
+  ThreadModelSelection,
   ToolCall,
   ToolResultPayload,
   UiContribution,
@@ -58,7 +59,6 @@ import {
 import { ToolCard } from './tool-card.js';
 import { reasoningSummaryMarkdown } from './reasoning-summary.js';
 import { Markdown } from './markdown.js';
-import { ComposerUsage } from './usage-summary.js';
 import {
   modelExecutionGroups,
   selectedAttemptIndex,
@@ -130,7 +130,7 @@ type PluginInfo = {
     error?: string;
   }>;
   ui: UiContribution[];
-  pages: Array<{ id: string; label: string; description?: string; entry: string; pluginId: string }>;
+  pages: Array<{ id: string; label: string; description?: string; entry: string; pluginId: string; group?: string }>;
   providers: ModelProviderContribution[];
   pipelines: Array<{ stage: string; pluginId: string; order: number }>;
   errors: string[];
@@ -768,6 +768,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const toolbarContributions = uiContributionsAt(uiContributions, 'thread.toolbar');
   const composerActions = uiContributionsAt(uiContributions, 'composer.action');
   const composerModelContributions = uiContributionsAt(uiContributions, 'composer.model', settings?.provider);
+  const composerStatusContributions = uiContributionsAt(uiContributions, 'composer.status');
   const sidebarPanels = uiContributionsAt(uiContributions, 'sidebar.panel');
   const toolResultContributions = uiContributionsAt(uiContributions, 'tool.result');
   const newProjectWorkspacePath = newProjectPath || defaultWorkspace;
@@ -921,10 +922,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     if (!isActive && activeThreadId.current === updated.id) {
       const next = activeThreadsRef.current.find(
         (thread) =>
-          thread.id !== updated.id &&
-          thread.projectId === updated.projectId &&
-          !thread.archivedAt &&
-          !thread.deletedAt,
+          thread.id !== updated.id && thread.projectId === updated.projectId && !thread.archivedAt && !thread.deletedAt,
       );
       setThreadId(next?.id ?? null);
     }
@@ -1247,6 +1245,17 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             );
           }
         } else if (
+          event.type === 'thread.model-selection.updated' &&
+          typeof event.threadId === 'string' &&
+          event.selection &&
+          typeof event.selection === 'object'
+        ) {
+          const targetThreadId = event.threadId;
+          const selection = event.selection as ThreadModelSelection;
+          setSnapshot((current) =>
+            current?.thread.id === targetThreadId ? { ...current, modelSelection: selection } : current,
+          );
+        } else if (
           event.type === 'model.delta' &&
           typeof event.threadId === 'string' &&
           typeof event.executionId === 'string' &&
@@ -1558,8 +1567,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     setArchivedThreadActionId(thread.id);
     try {
       const response = await api<unknown>(`/api/threads/${encodeURIComponent(thread.id)}`, { method: 'DELETE' });
-      const updated =
-        response && typeof response === 'object' && 'id' in response ? (response as Thread) : null;
+      const updated = response && typeof response === 'object' && 'id' in response ? (response as Thread) : null;
       if (updated) {
         syncThreadLists(updated);
       } else {
@@ -1758,10 +1766,40 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     }
   };
 
-  const updateModelSettingsFromPlugin: PluginUiProps['updateModelSettings'] = async (update) => {
+  const updateModelSettingsFromPlugin: PluginUiProps['updateModelSettings'] = async (update, targetThreadId) => {
+    if (targetThreadId) {
+      const current = await api<ThreadModelSelection>(
+        `/api/threads/${encodeURIComponent(targetThreadId)}/model-selection`,
+      );
+      const provider = update.provider ?? current.provider;
+      const model = update.model ?? current.model;
+      const targetChanged = provider !== current.provider || model !== current.model;
+      const saved = await api<ThreadModelSelection>(
+        `/api/threads/${encodeURIComponent(targetThreadId)}/model-selection`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            ...current,
+            provider,
+            model,
+            parameters: {
+              ...current.parameters,
+              ...(update.temperature === undefined ? {} : { temperature: update.temperature }),
+              ...(targetChanged ? { options: {} } : {}),
+            },
+          }),
+        },
+      );
+      if (activeThreadId.current === targetThreadId) {
+        setSnapshot((snapshot) =>
+          snapshot?.thread.id === targetThreadId ? { ...snapshot, modelSelection: saved } : snapshot,
+        );
+      }
+      return;
+    }
     const saved = await api<PublicSettings>('/api/settings/model', { method: 'PUT', body: JSON.stringify(update) });
     setSettings(saved);
-    setModelForm((current) => ({ ...current, ...saved, apiKey: '' }));
+    setModelForm((form) => ({ ...form, ...saved, apiKey: '' }));
   };
 
   const openCanonicalMessage: PluginUiProps['openMessage'] = async (seq) => {
@@ -1806,10 +1844,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   };
 
   const openPluginPage = (pluginId: string, pageId: string): void => {
-    if (pluginId === 'pico.global-memory') {
+    const page = pluginInfo?.pages.find((candidate) => candidate.pluginId === pluginId && candidate.id === pageId);
+    if (page?.group === 'memory') {
+      setPluginPageSelection({ pluginId, pageId });
       setMemoryManagerOpen(true);
       setPluginManagerOpen(false);
-      setPluginPageSelection(null);
       setSettingsOpen(true);
       setError('');
       return;
@@ -1845,7 +1884,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     }
   };
 
-  const viewContext: PluginUiContext = { thread: selectedThread };
+  const viewContext: PluginUiContext = {
+    thread: selectedThread,
+    ...(activeSnapshot && selectedThread && activeSnapshot.thread.id === selectedThread.id
+      ? { modelSelection: activeSnapshot.modelSelection }
+      : {}),
+  };
 
   const runPluginCommand = async (
     pluginId: string,
@@ -1885,11 +1929,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         (page) => page.pluginId === pluginPageSelection.pluginId && page.id === pluginPageSelection.pageId,
       )
     : undefined;
-  const memoryPages =
-    pluginInfo?.pages.filter(
-      (page) => page.pluginId === 'pico.project-context' || page.pluginId === 'pico.global-memory',
-    ) ?? [];
-  const selectedMemoryPage = memoryPages.find((page) => page.pluginId === 'pico.global-memory');
+  const memoryPages = pluginInfo?.pages.filter((page) => page.group === 'memory') ?? [];
+  const selectedMemoryPage =
+    memoryPages.find((page) => page.pluginId === pluginPageSelection?.pluginId && page.id === pluginPageSelection.pageId) ??
+    memoryPages[0];
   const isRegisteredPluginPage = (pluginId: string, pageId: string): boolean =>
     Boolean(pluginInfo?.pages.some((page) => page.pluginId === pluginId && page.id === pageId));
 
@@ -2059,7 +2102,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         {(childrenByParent.get(thread.id) ?? []).map((nested) => renderThreadTree(nested, true, depth + 1))}
       </div>
     );
-    const roots = visibleThreads.filter((thread) => !thread.parentThreadId || !visibleThreadIds.has(thread.parentThreadId));
+    const roots = visibleThreads.filter(
+      (thread) => !thread.parentThreadId || !visibleThreadIds.has(thread.parentThreadId),
+    );
     return roots.length ? (
       <div className="project-thread-list">{roots.map((thread) => renderThreadTree(thread))}</div>
     ) : (
@@ -2084,9 +2129,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         ])
       : null;
   const pauseNoticeKey =
-    selectedThread &&
-    (currentState === 'paused' || currentState === 'pausing') &&
-    selectedThread.pauseReason
+    selectedThread && (currentState === 'paused' || currentState === 'pausing') && selectedThread.pauseReason
       ? JSON.stringify([selectedThread.id, selectedThread.pauseReason])
       : null;
   const pluginNoticeKey = pluginInfo && pluginInfo.errors.length > 0 ? JSON.stringify(pluginInfo.errors) : null;
@@ -2325,10 +2368,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 <summary>Diagnostics</summary>
                 <pre>{executorError}</pre>
               </details>
-              <button
-                type="button"
-                onClick={() => setDismissedExecutorNoticeKey(executorNoticeKey)}
-              >
+              <button type="button" onClick={() => setDismissedExecutorNoticeKey(executorNoticeKey)}>
                 Dismiss
               </button>
             </div>
@@ -2770,6 +2810,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                               controlLabel={item.label}
                               controlClassName="composer-plugin-action"
                               supportsPopover={item.supportsPopover}
+        preferredWidth={item.preferredWidth}
                               events={pluginEvents}
                               {...pluginUiContext}
                               isRegisteredPage={isRegisteredPluginPage}
@@ -2827,12 +2868,25 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 </div>
               </div>
               <div className="composer-caption composer-meta">
-                <ComposerUsage
-                  threadId={selectedThread.id}
-                  revision={`${records.at(-1)?.id ?? ''}:${executions.filter((item) => item.status === 'completed' || item.status === 'failed').length}`}
-                  enabled={Boolean(pluginInfo?.plugins.some((plugin) => plugin.id === 'pico.usage'))}
-                />
-                {settings?.model ? (
+                {pluginUiContext && composerStatusContributions.map((item) =>
+                  item.pluginId && item.entry && item.component ? (
+                    <PluginWebView
+                      key={item.id}
+                      pluginId={item.pluginId}
+                      entry={item.entry}
+                      viewType="component"
+                      viewId={item.component}
+                      uiSlot={item.slot}
+                      events={pluginEvents}
+                      {...pluginUiContext}
+                      isRegisteredPage={isRegisteredPluginPage}
+                      runCommand={runPluginCommand}
+                    />
+                  ) : null,
+                )}
+                {activeSnapshot?.thread.id === selectedThread.id && activeSnapshot.modelSelection.model ? (
+                  <span className="composer-model-name">{activeSnapshot.modelSelection.model}</span>
+                ) : settings?.model ? (
                   <span className="composer-model-name">{settings.model}</span>
                 ) : (
                   <button className="setup-caption composer-model-name" onClick={() => setSettingsOpen(true)}>
@@ -3001,7 +3055,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   Archived Threads
                 </button>
                 {pluginInfo.pages
-                  .filter((page) => page.pluginId !== 'pico.project-context' && page.pluginId !== 'pico.global-memory')
+                  .filter((page) => page.group !== 'memory')
                   .map((page) => (
                     <button
                       type="button"

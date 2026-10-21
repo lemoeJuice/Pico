@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Thread } from '../src/core/types.js';
+import type { ThreadModelSelection } from '../src/core/types.js';
 import { ExecutionPipelines } from '../src/core/pipeline.js';
 import { collaborationPlugin } from '../src/plugins/collaboration.js';
 import type { PluginContext } from '../src/plugins/host.js';
@@ -26,6 +27,17 @@ function makeThread(id: string, projectId = 'project-1', parentThreadId: string 
 function setup() {
   const parent = makeThread('parent');
   const threadsById = new Map<string, Thread>([[parent.id, parent]]);
+  const selectionByThread = new Map<string, ThreadModelSelection>([
+    [
+      parent.id,
+      {
+        provider: 'openai-compatible',
+        connectionId: 'default',
+        model: 'parent-model',
+        parameters: { temperature: 0.4, options: { reasoningEffort: 'high' } },
+      },
+    ],
+  ]);
   const tools = new Map<
     string,
     (args: Record<string, unknown>, context: { thread?: Thread; executionId: string }) => unknown
@@ -39,6 +51,15 @@ function setup() {
   const context = {
     threads: {
       get: (id: string) => threadsById.get(id) ?? null,
+      modelSelection: (id: string) => selectionByThread.get(id)!,
+      validateModelSelection: (selection: ThreadModelSelection) => {
+        if (selection.model === 'invalid') throw new Error('unsupported parameters');
+        return structuredClone(selection);
+      },
+      updateModelSelection: (id: string, selection: ThreadModelSelection) => {
+        selectionByThread.set(id, structuredClone(selection));
+        return selection;
+      },
       list: (projectId?: string) =>
         [...threadsById.values()].filter((thread) => !projectId || thread.projectId === projectId),
       tools: async () => [],
@@ -47,12 +68,13 @@ function setup() {
         projectId: string,
         _kind: Thread['executorKind'],
         title: string,
-        options: { parentThreadId?: string | null; idempotencyKey?: string },
+        options: { parentThreadId?: string | null; idempotencyKey?: string; modelSelection?: ThreadModelSelection },
       ) => {
         const existing = options.idempotencyKey ? createByKey.get(options.idempotencyKey) : undefined;
         if (existing) return existing;
         const child = { ...makeThread(`child-${++idCount}`, projectId, options.parentThreadId ?? null), title };
         threadsById.set(child.id, child);
+        if (options.modelSelection) selectionByThread.set(child.id, structuredClone(options.modelSelection));
         if (options.idempotencyKey) createByKey.set(options.idempotencyKey, child);
         return child;
       },
@@ -119,7 +141,7 @@ function setup() {
     },
   } as unknown as PluginContext;
   void collaborationPlugin.activate?.(context);
-  return { parent, threadsById, tools, routes, sent, pipelines, stateMap };
+  return { parent, threadsById, tools, routes, sent, pipelines, stateMap, selectionByThread };
 }
 
 describe('Collaboration plugin', () => {
@@ -215,6 +237,51 @@ describe('Collaboration plugin', () => {
         query: new URLSearchParams(),
       }),
     ).toThrow('does not belong');
+  });
+
+  it('inherits the fixed parent selection, isolates explicit target overrides, and keeps retry selection stable', async () => {
+    const env = setup();
+    const spawn = env.tools.get('spawn_thread')!;
+    const first = (await spawn({ prompt: 'Inherited task' }, { thread: env.parent, executionId: 'stable-spawn' })) as {
+      threadId: string;
+    };
+    const inherited = env.selectionByThread.get(first.threadId)!;
+    expect(inherited).toEqual(env.selectionByThread.get(env.parent.id));
+
+    env.selectionByThread.set(env.parent.id, {
+      provider: 'chatgpt-plan',
+      connectionId: 'default',
+      model: 'new-parent-model',
+      parameters: { temperature: 0.1, options: { reasoningEffort: 'low' } },
+    });
+    const retry = (await spawn({ prompt: 'Inherited task' }, { thread: env.parent, executionId: 'stable-spawn' })) as {
+      threadId: string;
+    };
+    expect(retry.threadId).toBe(first.threadId);
+    expect(env.selectionByThread.get(first.threadId)).toEqual(inherited);
+
+    const override = (await spawn(
+      {
+        prompt: 'Override task',
+        model: { provider: 'chatgpt-plan', model: 'gpt-5' },
+      },
+      { thread: env.parent, executionId: 'override-spawn' },
+    )) as { threadId: string };
+    expect(env.selectionByThread.get(override.threadId)).toEqual({
+      provider: 'chatgpt-plan',
+      connectionId: 'default',
+      model: 'gpt-5',
+      parameters: { temperature: 0.1, options: {} },
+    });
+    await expect(
+      spawn(
+        { prompt: 'Bad override', model: { provider: 'chatgpt-plan', model: 'invalid' } },
+        {
+          thread: env.parent,
+          executionId: 'invalid-spawn',
+        },
+      ),
+    ).rejects.toThrow('unsupported parameters');
   });
 
   it('adds child collaboration guidance to each Model Input projection', async () => {

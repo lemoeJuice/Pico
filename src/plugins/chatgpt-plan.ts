@@ -2,7 +2,6 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { ModelStageInput } from '../runtime/stages.js';
-import type { ModelResponse } from '../contracts/model.js';
 import { ChatGptPlanAuth, RetryableChatGptAuthorizationExchange } from './chatgpt-plan/auth.js';
 import { ChatGptResponsesAdapter } from './chatgpt-plan/model.js';
 import type { PicoPlugin, PluginHttpRequest } from './host.js';
@@ -169,30 +168,30 @@ export function createChatGptPlanPlugin(): PicoPlugin {
     name: 'ChatGPT plan provider',
     version: '0.1.0',
     activate(context) {
-      auth = new ChatGptPlanAuth(context.state);
+      auth = new ChatGptPlanAuth(context.state, fetch, Date.now, context.secrets, context.cache);
       const model = new ChatGptResponsesAdapter(auth);
 
-      context.models.registerProvider({
-        id: 'chatgpt-plan',
-        label: 'ChatGPT account',
-        description: 'Use a ChatGPT plan account through OpenAI’s Responses API.',
-        supportsImages: true,
-      });
-
-      context.pipelines.use<ModelStageInput, ModelResponse>('model', async (input, next) => {
-        if (input.provider !== 'chatgpt-plan') return next();
-        input.recordModelInput(input.prompt, input.provider);
-        return model.complete(
-          input.prompt,
-          input.signal,
-          input.onText,
-          input.requestTrace,
-          input.onEvent,
-          input.requestParameters,
-          input.thread.id,
-          promptCacheKeyFor(input),
-        );
-      });
+      context.models.registerProvider(
+        {
+          id: 'chatgpt-plan',
+          label: 'ChatGPT account',
+          description: 'Use a ChatGPT plan account through OpenAI’s Responses API.',
+          supportsImages: true,
+        },
+        async (input) => {
+          input.recordModelInput(input.prompt, input.provider, input.projectionProvenance);
+          return model.complete(
+            input.prompt,
+            input.signal,
+            input.onText,
+            input.requestTrace,
+            input.onEvent,
+            input.requestParameters,
+            input.thread.id,
+            promptCacheKeyFor(input),
+          );
+        },
+      );
 
       context.commands.register({
         name: 'chatgpt-provider',

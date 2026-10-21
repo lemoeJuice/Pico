@@ -3,6 +3,7 @@ import type {
   ModelSettings,
   PublicSettings,
   Thread,
+  ThreadModelSelection,
   ToolCall,
   ToolResultPayload,
   UiContribution,
@@ -34,8 +35,12 @@ export interface PluginUiVisibilityMessage {
 export function isPluginUiVisibilityMessage(value: unknown): value is PluginUiVisibilityMessage {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const message = value as Record<string, unknown>;
-  return message.type === 'pico:plugin-ui:visibility' && typeof message.visible === 'boolean' &&
-    (message.width === undefined || (typeof message.width === 'number' && Number.isFinite(message.width) && message.width >= 0));
+  return (
+    message.type === 'pico:plugin-ui:visibility' &&
+    typeof message.visible === 'boolean' &&
+    (message.width === undefined ||
+      (typeof message.width === 'number' && Number.isFinite(message.width) && message.width >= 0))
+  );
 }
 
 export function isPluginUiPopoverMessage(value: unknown): value is PluginUiPopoverMessage {
@@ -65,6 +70,7 @@ export function isPluginUiToolbarStateMessage(value: unknown): value is PluginUi
 
 export interface PluginUiContext {
   thread: Thread | null;
+  modelSelection?: ThreadModelSelection;
   /** Narrow identity for a result-area action; does not expose the Thread object or Tool arguments. */
   threadId?: string;
   execution?: Execution;
@@ -76,6 +82,7 @@ export interface PluginUiContext {
 export function samePluginUiContext(left: PluginUiContext, right: PluginUiContext): boolean {
   return (
     left.thread === right.thread &&
+    JSON.stringify(left.modelSelection ?? null) === JSON.stringify(right.modelSelection ?? null) &&
     left.execution === right.execution &&
     left.toolCall === right.toolCall &&
     left.result === right.result &&
@@ -99,7 +106,7 @@ export interface PluginUiProps {
   executeCommand(command: string): Promise<unknown>;
   settings: PublicSettings;
   context: PluginUiContext;
-  updateModelSettings(update: PluginModelSettingsUpdate): Promise<void>;
+  updateModelSettings(update: PluginModelSettingsUpdate, threadId?: string): Promise<void>;
   openPage(pluginId: string, pageId: string): void;
   openThread(threadId: string): Promise<void>;
   openMessage(seq: number): Promise<void>;
@@ -112,7 +119,13 @@ export type PluginModelSettingsUpdate = Partial<Pick<ModelSettings, 'baseUrl' | 
 export type PluginUiRequest =
   | { type: 'pico:plugin-ui:request'; id: string; action: 'api'; path: string; init?: PluginApiInit }
   | { type: 'pico:plugin-ui:request'; id: string; action: 'command'; command: string }
-  | { type: 'pico:plugin-ui:request'; id: string; action: 'update-model-settings'; update: PluginModelSettingsUpdate }
+  | {
+      type: 'pico:plugin-ui:request';
+      id: string;
+      action: 'update-model-settings';
+      update: PluginModelSettingsUpdate;
+      threadId?: string;
+    }
   | { type: 'pico:plugin-ui:request'; id: string; action: 'open-page'; pluginId: string; pageId: string }
   | { type: 'pico:plugin-ui:request'; id: string; action: 'open-thread'; threadId: string }
   | { type: 'pico:plugin-ui:request'; id: string; action: 'open-message'; seq: number }
@@ -121,7 +134,7 @@ export type PluginUiRequest =
 export type PluginUiRequestPayload =
   | { action: 'api'; path: string; init?: PluginApiInit }
   | { action: 'command'; command: string }
-  | { action: 'update-model-settings'; update: PluginModelSettingsUpdate }
+  | { action: 'update-model-settings'; update: PluginModelSettingsUpdate; threadId?: string }
   | { action: 'open-page'; pluginId: string; pageId: string }
   | { action: 'open-thread'; threadId: string }
   | { action: 'open-message'; seq: number }
@@ -273,8 +286,8 @@ export function createPluginUiClient(
         executeCommand: (command) => request({ action: 'command', command }),
         settings: currentSettings,
         context: currentContext,
-        updateModelSettings: async (update) => {
-          await request({ action: 'update-model-settings', update });
+        updateModelSettings: async (update, threadId = context.thread?.id) => {
+          await request({ action: 'update-model-settings', update, ...(threadId ? { threadId } : {}) });
         },
         openPage: (pluginId, pageId) => {
           void request({ action: 'open-page', pluginId, pageId }).catch(() => undefined);
@@ -309,7 +322,8 @@ export function createPluginUiClient(
       if (!closed && Number.isFinite(height)) port.postMessage({ type: 'pico:plugin-ui:resize', height });
     },
     reportVisibility(visible, width) {
-      if (!closed) port.postMessage({ type: 'pico:plugin-ui:visibility', visible, ...(width === undefined ? {} : { width }) });
+      if (!closed)
+        port.postMessage({ type: 'pico:plugin-ui:visibility', visible, ...(width === undefined ? {} : { width }) });
     },
     close() {
       if (closed) return;
@@ -338,7 +352,11 @@ export function isPluginUiRequest(value: unknown): value is PluginUiRequest {
     case 'command':
       return typeof message.command === 'string' && message.command.length > 0 && message.command.length <= 200;
     case 'update-model-settings':
-      return isPluginModelSettingsUpdate(message.update);
+      return (
+        isPluginModelSettingsUpdate(message.update) &&
+        (message.threadId === undefined ||
+          (typeof message.threadId === 'string' && message.threadId.length > 0 && message.threadId.length <= 200))
+      );
     case 'open-page':
       return typeof message.pluginId === 'string' && typeof message.pageId === 'string';
     case 'open-thread':

@@ -3,7 +3,8 @@ import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { builtinExecutorTools } from '../src/executor/tools.js';
+import { builtinExecutorToolDefinitions } from '../src/contracts/executor-tool-definitions.js';
+import { builtinExecutorTools, createToolCatalog } from '../src/executor/tools.js';
 import { READ_FILE_LIMITS, SEARCH_FILE_LIMITS } from '../src/executor/tool-limits.js';
 
 const toolMap = new Map(builtinExecutorTools().map((tool) => [tool.definition.name, tool]));
@@ -24,6 +25,10 @@ async function processStopped(pid: number, timeoutMs = 2000): Promise<boolean> {
 }
 
 describe('workspace tools', () => {
+  it('uses one shared schema source for static Runtime discovery and Executor tools', () => {
+    expect(builtinExecutorToolDefinitions()).toEqual(createToolCatalog().list());
+  });
+
   it('reads, searches, and patches files within the selected workspace', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pico-tools-'));
     const workspacePath = join(directory, 'workspace');

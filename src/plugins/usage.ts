@@ -373,6 +373,7 @@ export const usagePlugin: PicoPlugin = {
   version: '0.1.0',
   activate(context) {
     const { state, ui, http } = context;
+    context.models.subscribe(() => ui.invalidate());
     const readRates = (): UsageRate[] => {
       const value = state.get<unknown>('rates', []);
       const rates = normalizeRates(value);
@@ -412,6 +413,13 @@ export const usagePlugin: PicoPlugin = {
       label: 'Usage',
       description: 'Token, cache, attempt, and estimated cost statistics.',
       entry: 'webui',
+    });
+    ui.contribute({
+      slot: 'composer.status',
+      id: 'usage-summary',
+      label: 'Thread usage',
+      entry: 'webui',
+      component: 'ComposerUsage',
     });
   },
 };

@@ -7,6 +7,77 @@ import { PicoStore } from '../src/core/store.js';
 import { assistantPayload } from './helpers.js';
 
 describe('PicoStore migrations', () => {
+  it('adds scope metadata without changing existing Canonical row content', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-canonical-scope-migration-'));
+    const databasePath = join(directory, 'canonical.sqlite');
+    let store: PicoStore | null = new PicoStore(databasePath);
+    try {
+      const project = store.createProject('Canonical migration', directory);
+      const thread = store.createThread(project.id, 'runtime');
+      store.appendMessage(thread.id, 'legacy-canonical-row', { role: 'user', content: 'unchanged', source: 'user' });
+      store.close();
+      store = null;
+      const legacy = new DatabaseSync(databasePath);
+      legacy.exec(`
+        DROP TRIGGER canonical_records_no_update;
+        DROP TRIGGER canonical_records_no_delete;
+        DROP INDEX canonical_thread_seq;
+        DROP INDEX canonical_thread_kind_seq;
+        ALTER TABLE canonical_records RENAME TO canonical_records_with_scope;
+        CREATE TABLE canonical_records (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL REFERENCES threads(id),
+          seq INTEGER NOT NULL,
+          kind TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(thread_id, seq)
+        );
+        INSERT INTO canonical_records (id, thread_id, seq, kind, payload_json, created_at)
+          SELECT id, thread_id, seq, kind, payload_json, created_at
+          FROM canonical_records_with_scope WHERE thread_id IS NOT NULL;
+        DROP TABLE canonical_records_with_scope;
+      `);
+      const before = legacy
+        .prepare(
+          'SELECT id, thread_id, seq, kind, payload_json, created_at FROM canonical_records ORDER BY thread_id, seq',
+        )
+        .all();
+      legacy.close();
+
+      store = new PicoStore(databasePath);
+      const readMigratedRows = () =>
+        store!.db
+          .prepare(
+            'SELECT id, thread_id, seq, kind, payload_json, created_at FROM canonical_records WHERE thread_id IS NOT NULL ORDER BY thread_id, seq',
+          )
+          .all();
+      expect(readMigratedRows()).toEqual(before);
+      expect(store.listRecords(thread.id)[0]).toMatchObject({
+        id: 'legacy-canonical-row',
+        threadId: thread.id,
+        seq: 1,
+      });
+
+      const afterFirstMigration = store.db
+        .prepare(
+          'SELECT id, thread_id, scope_key, seq, kind, payload_json, created_at FROM canonical_records ORDER BY scope_key, seq',
+        )
+        .all();
+      store.close();
+      store = new PicoStore(databasePath);
+      const afterSecondOpen = store.db
+        .prepare(
+          'SELECT id, thread_id, scope_key, seq, kind, payload_json, created_at FROM canonical_records ORDER BY scope_key, seq',
+        )
+        .all();
+      expect(afterSecondOpen).toEqual(afterFirstMigration);
+    } finally {
+      store?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('adds Runtime Chat bindings while preserving existing Executor bindings', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pico-runtime-executor-migration-'));
     const databasePath = join(directory, 'runtime.sqlite');
@@ -52,6 +123,165 @@ describe('PicoStore migrations', () => {
 });
 
 describe('PicoStore execution transactions', () => {
+  it('rebuilds Thread ModelSelection from its scoped workflow fact', () => {
+    const store = new PicoStore(':memory:');
+    try {
+      const project = store.createProject('Model selection replay', '/tmp');
+      const thread = store.createThread(project.id, 'runtime');
+      const selection = {
+        provider: 'openai-compatible',
+        connectionId: 'default',
+        model: 'pinned-model',
+        parameters: { temperature: 0.4, options: {} },
+      };
+      store.setThreadModelSelection(thread.id, selection);
+      store.db.exec('DELETE FROM thread_model_selections;');
+
+      store.rebuildWorkflowViews();
+
+      expect(store.getThreadModelSelection(thread.id)).toEqual(selection);
+      expect(store.listRecords(thread.id)).toHaveLength(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rolls back a Plugin State view when its workflow fact cannot commit', () => {
+    const store = new PicoStore(':memory:');
+    let notifications = 0;
+    try {
+      store.subscribePluginState(() => notifications++);
+      store.db.exec(`CREATE TRIGGER fail_workflow_state_fact BEFORE INSERT ON canonical_records
+        WHEN NEW.scope_key = 'workflow:global' AND NEW.payload_json LIKE '%plugin-state:atomic.plugin:key%'
+        BEGIN SELECT RAISE(ABORT, 'simulated workflow fact failure'); END;`);
+      expect(() => store.setPluginState('atomic.plugin', 'key', { value: 1 })).toThrow(
+        /simulated workflow fact failure/,
+      );
+      expect(store.getPluginState('atomic.plugin', 'key', null)).toBeNull();
+      expect(notifications).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rebuilds workflow views from scoped facts without changing Thread history', () => {
+    const store = new PicoStore(':memory:');
+    try {
+      const project = store.createProject('Workflow replay', '/');
+      const thread = store.createThread(project.id, 'runtime');
+      const message = store.appendMessage(thread.id, 'workflow-message', {
+        role: 'user',
+        content: 'hello',
+        source: 'user',
+      }).record;
+      store.setPluginState('example.plugin', 'state', { count: 3 });
+      store.setPause(thread.id, true, 'review');
+      let execution = store.createModelExecution('workflow-execution', thread.id, message.seq);
+      execution = store.transitionExecution(execution.id, 'running');
+      execution = store.transitionExecution(execution.id, 'failed', { error: 'offline' });
+      store.savePluginModelCall({
+        id: 'workflow-call',
+        pluginId: 'example.plugin',
+        idempotencyKey: 'stable-key',
+        requestFingerprint: 'a'.repeat(64),
+        threadId: thread.id,
+        projectId: project.id,
+        purpose: 'review',
+        provider: 'test',
+        model: 'small',
+        prompt: { secret: 'full prompt sentinel' },
+        status: 'completed',
+        response: { text: 'result' },
+        usage: null,
+        attempts: [{ request: 'diagnostic' }],
+        error: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+
+      const threadHistory = store.listRecords(thread.id);
+      const facts = store.listScopedCanonical(`workflow:thread:${thread.id}`);
+      expect(facts.length).toBeGreaterThan(0);
+      expect(facts.every((fact) => fact.threadId === null && fact.scope === `workflow:thread:${thread.id}`)).toBe(true);
+      expect(store.listRecords(thread.id)).toEqual(threadHistory);
+      expect(JSON.stringify(facts)).not.toContain('full prompt sentinel');
+
+      store.db.exec('DELETE FROM executions; DELETE FROM plugin_state; DELETE FROM plugin_model_calls;');
+      store.db.prepare('UPDATE threads SET pause_requested = 0, pause_reason = NULL WHERE id = ?').run(thread.id);
+      store.rebuildWorkflowViews();
+
+      expect(store.getExecution('workflow-execution')).toEqual(execution);
+      expect(store.getThread(thread.id)).toMatchObject({ pauseRequested: true, pauseReason: 'review' });
+      expect(store.getPluginState('example.plugin', 'state', null)).toEqual({ count: 3 });
+      expect(store.getPluginModelCall('workflow-call')).toMatchObject({
+        status: 'completed',
+        response: { text: 'result' },
+        prompt: null,
+        attempts: [],
+        requestFingerprint: 'a'.repeat(64),
+      });
+      expect(store.listRecords(thread.id)).toEqual(threadHistory);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('imports legacy OAuth state into private storage before idempotent fact import', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-workflow-legacy-'));
+    const databasePath = join(directory, 'legacy.sqlite');
+    let store: PicoStore | null = new PicoStore(databasePath);
+    try {
+      store.db
+        .prepare('INSERT INTO plugin_state (plugin_id, key, value_json, updated_at) VALUES (?, ?, ?, ?)')
+        .run(
+          'pico.chatgpt-plan',
+          'oauth',
+          JSON.stringify({ refreshToken: 'oauth-secret-sentinel' }),
+          new Date().toISOString(),
+        );
+      store.db
+        .prepare('INSERT INTO plugin_state (plugin_id, key, value_json, updated_at) VALUES (?, ?, ?, ?)')
+        .run('example.plugin', 'legacy', JSON.stringify({ value: 9 }), new Date().toISOString());
+      store.db
+        .prepare('INSERT INTO plugin_state (plugin_id, key, value_json, updated_at) VALUES (?, ?, ?, ?)')
+        .run(
+          'pico.chatgpt-plan',
+          'modelCatalog',
+          JSON.stringify({ models: [{ slug: 'cached-model' }], refreshedAt: 1 }),
+          new Date().toISOString(),
+        );
+      store.close();
+      store = new PicoStore(databasePath);
+
+      expect(store.getPrivateSecret('pico.chatgpt-plan', 'oauth', null)).toEqual({
+        refreshToken: 'oauth-secret-sentinel',
+      });
+      expect(store.getPluginCache('pico.chatgpt-plan', 'modelCatalog', null)).toEqual({
+        models: [{ slug: 'cached-model' }],
+        refreshedAt: 1,
+      });
+      expect(
+        store.db.prepare("SELECT 1 FROM plugin_state WHERE plugin_id = 'pico.chatgpt-plan' AND key = 'oauth'").get(),
+      ).toBeUndefined();
+      expect(
+        store
+          .listScopedCanonical('workflow:global')
+          .some((record) => JSON.stringify(record).includes('oauth-secret-sentinel')),
+      ).toBe(false);
+      const legacyFacts = store
+        .listScopedCanonical('workflow:global')
+        .filter((record) => record.id.startsWith('legacy-import:'));
+      store.close();
+      store = new PicoStore(databasePath);
+      expect(
+        store.listScopedCanonical('workflow:global').filter((record) => record.id.startsWith('legacy-import:')),
+      ).toHaveLength(legacyFacts.length);
+    } finally {
+      store?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('creates a child Thread once for a stable plugin idempotency key', () => {
     const store = new PicoStore(':memory:');
     try {
@@ -75,7 +305,7 @@ describe('PicoStore execution transactions', () => {
     }
   });
 
-  it('keeps execution state and its append-only log entry atomic', () => {
+  it('commits Execution facts when diagnostic log writes fail', () => {
     const store = new PicoStore(':memory:');
     try {
       const project = store.createProject('Execution transaction', '/');
@@ -88,8 +318,8 @@ describe('PicoStore execution transactions', () => {
         BEGIN SELECT RAISE(ABORT, 'simulated execution log failure'); END;
       `);
 
-      expect(() => store.transitionExecution(transition.id, 'running')).toThrow(/simulated execution log failure/);
-      expect(store.getExecution(transition.id)?.status).toBe('pending');
+      expect(store.transitionExecution(transition.id, 'running').status).toBe('running');
+      expect(store.getExecution(transition.id)?.status).toBe('running');
       expect(store.listExecutionLog(transition.id, 'created')).toHaveLength(1);
       expect(store.listExecutionLog(transition.id, 'running')).toHaveLength(0);
 
@@ -101,17 +331,39 @@ describe('PicoStore execution transactions', () => {
         BEGIN SELECT RAISE(ABORT, 'simulated execution creation log failure'); END;
       `);
 
-      expect(() => store.createModelExecution('atomic-create', thread.id, 0)).toThrow(
-        /simulated execution creation log failure/,
-      );
-      expect(store.getExecution('atomic-create')).toBeNull();
+      expect(store.createModelExecution('atomic-create', thread.id, 0).status).toBe('pending');
+      expect(store.getExecution('atomic-create')).toMatchObject({ status: 'pending' });
       expect(store.listExecutionLog('atomic-create', 'created')).toHaveLength(0);
     } finally {
       store.close();
     }
   });
 
-  it('persists retryable setup diagnostics atomically without changing the Execution state', () => {
+  it('commits the assistant result while every execution diagnostic insert fails', () => {
+    const store = new PicoStore(':memory:');
+    try {
+      const project = store.createProject('No diagnostic dependency', '/');
+      const thread = store.createThread(project.id, 'runtime');
+      store.db.exec(`CREATE TRIGGER fail_all_execution_diagnostics BEFORE INSERT ON execution_log
+        BEGIN SELECT RAISE(ABORT, 'diagnostics unavailable'); END;`);
+      store.createModelExecution('diagnostic-free-model', thread.id, 0);
+      store.transitionExecution('diagnostic-free-model', 'running');
+      store.commitModelStep({
+        assistantRecordId: 'diagnostic-free-model:assistant',
+        modelExecutionId: 'diagnostic-free-model',
+        threadId: thread.id,
+        payload: assistantPayload({ content: 'committed' }),
+        toolCalls: [],
+      });
+      expect(store.getExecution('diagnostic-free-model')).toMatchObject({ status: 'completed' });
+      expect(store.listRecords(thread.id).some((record) => record.id === 'diagnostic-free-model:assistant')).toBe(true);
+      expect(store.listExecutionLog('diagnostic-free-model', 'created')).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('persists retryable setup state when diagnostic log writes fail', () => {
     const store = new PicoStore(':memory:');
     try {
       const project = store.createProject('Retryable execution diagnostic', '/');
@@ -133,10 +385,13 @@ describe('PicoStore execution transactions', () => {
         BEGIN SELECT RAISE(ABORT, 'simulated retryable diagnostic log failure'); END;
       `);
 
-      expect(() =>
+      expect(
         store.recordRetryableExecutionFailure('retryable-tool', 'Registry connection ended with EOF'),
-      ).toThrow(/simulated retryable diagnostic log failure/);
-      expect(store.getExecution('retryable-tool')).toMatchObject({ status: 'pending', error: null });
+      ).toMatchObject({ status: 'pending', error: 'Registry connection ended with EOF' });
+      expect(store.getExecution('retryable-tool')).toMatchObject({
+        status: 'pending',
+        error: 'Registry connection ended with EOF',
+      });
       expect(store.listExecutionLog('retryable-tool', 'retryable-setup-failure')).toHaveLength(0);
 
       store.db.exec('DROP TRIGGER fail_retryable_setup_log;');
@@ -150,7 +405,7 @@ describe('PicoStore execution transactions', () => {
     }
   });
 
-  it('persists executor errors atomically while preserving the recoverable Execution state', () => {
+  it('persists executor errors when diagnostic log writes fail', () => {
     const store = new PicoStore(':memory:');
     try {
       const project = store.createProject('Executor error diagnostic', '/');
@@ -172,10 +427,14 @@ describe('PicoStore execution transactions', () => {
         BEGIN SELECT RAISE(ABORT, 'simulated executor diagnostic log failure'); END;
       `);
 
-      expect(() => store.recordExecutionError('executor-error-tool', 'Executor disconnected')).toThrow(
-        /simulated executor diagnostic log failure/,
-      );
-      expect(store.getExecution('executor-error-tool')).toMatchObject({ status: 'pending', error: null });
+      expect(store.recordExecutionError('executor-error-tool', 'Executor disconnected')).toMatchObject({
+        status: 'pending',
+        error: 'Executor disconnected',
+      });
+      expect(store.getExecution('executor-error-tool')).toMatchObject({
+        status: 'pending',
+        error: 'Executor disconnected',
+      });
 
       store.db.exec('DROP TRIGGER fail_executor_error_log;');
       expect(store.recordExecutionError('executor-error-tool', 'Executor disconnected')).toMatchObject({
@@ -188,10 +447,7 @@ describe('PicoStore execution transactions', () => {
         error: 'Executor stopped responding',
       });
       expect(store.listExecutionLog('executor-error-tool', 'execution-error')).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ detail: { error: 'Executor disconnected' } }),
-          expect.objectContaining({ detail: { error: 'Executor stopped responding' } }),
-        ]),
+        expect.arrayContaining([expect.objectContaining({ detail: { error: 'Executor stopped responding' } })]),
       );
     } finally {
       store.close();

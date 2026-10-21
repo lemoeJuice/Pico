@@ -263,6 +263,7 @@ describe('Pico server access boundary', () => {
       const latestResponse = await fetch(`${base}/api/threads/${thread.id}`);
       expect(latestResponse.status).toBe(200);
       const latest = (await latestResponse.json()) as ThreadSnapshot;
+      expect(latest.modelSelection).toMatchObject({ provider: 'openai-compatible', connectionId: 'default' });
       expect(latest.records).toHaveLength(100);
       expect(latest.records[0]?.id).toBe('api-history-135');
       expect(latest.hasEarlierRecords).toBe(true);
@@ -275,6 +276,20 @@ describe('Pico server access boundary', () => {
 
       const invalidCursor = await fetch(`${base}/api/threads/${thread.id}?beforeSeq=not-a-number`);
       expect(invalidCursor.status).toBe(400);
+
+      const selectionResponse = await fetch(`${base}/api/threads/${thread.id}/model-selection`);
+      expect(selectionResponse.status).toBe(200);
+      const selection = (await selectionResponse.json()) as ThreadSnapshot['modelSelection'];
+      const updatedSelection = { ...selection, model: 'thread-pinned-model' };
+      const savedSelectionResponse = await fetch(`${base}/api/threads/${thread.id}/model-selection`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(updatedSelection),
+      });
+      expect(savedSelectionResponse.status).toBe(200);
+      expect(await savedSelectionResponse.json()).toMatchObject({ model: 'thread-pinned-model' });
+      server.runtime.updateModelSettings({ model: 'future-thread-default' });
+      expect(server.runtime.threadModelSelection(thread.id).model).toBe('thread-pinned-model');
     } finally {
       await server?.close();
       await rm(directory, { recursive: true, force: true });

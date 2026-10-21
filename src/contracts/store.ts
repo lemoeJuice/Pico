@@ -4,6 +4,8 @@ export interface PluginModelCallRecord {
   id: string;
   pluginId: string;
   idempotencyKey: string;
+  /** Hash of the normalized request identity; null for legacy calls that cannot be safely replayed. */
+  requestFingerprint?: string | null;
   threadId: string | null;
   projectId: string | null;
   purpose: string;

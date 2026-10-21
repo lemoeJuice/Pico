@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { CanonicalRecord, Execution, Thread } from '../src/core/types.js';
+import type { CanonicalRecord, Execution, Thread, ThreadModelSelection } from '../src/core/types.js';
 import type { ThreadSnapshot } from '../src/runtime/runtime.js';
 import { appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from '../src/web/history-pages.js';
 
@@ -12,6 +12,12 @@ function snapshot(
 ): ThreadSnapshot {
   return {
     thread: { id: threadId, projectId: 'project', state } as Thread,
+    modelSelection: {
+      provider: 'openai-compatible',
+      connectionId: 'default',
+      model: 'test-model',
+      parameters: { temperature: 0.2, options: {} },
+    } satisfies ThreadModelSelection,
     records,
     executions,
     children: [],

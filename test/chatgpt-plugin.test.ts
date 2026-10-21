@@ -33,7 +33,8 @@ describe('ChatGPT provider plugin', () => {
         history: () => [],
         inputs: () => [],
         subscribe: () => () => undefined,
-        registerProvider: (provider) => providers.push(provider),
+        registerProvider: (provider, handler) => providers.push({ provider, handler: typeof handler }),
+        registerSelectionNormalizer: () => undefined,
       },
       continuations: { register: () => () => undefined },
       pipelines: { use: (stage, interceptor) => pipelines.use(stage, plugin.id, interceptor) },
@@ -41,6 +42,7 @@ describe('ChatGPT provider plugin', () => {
       ui: {
         contribute: (contribution) => contributions.push(contribution),
         registerPage: (page) => pages.push(page),
+        invalidate: () => undefined,
       },
       http: { register: (method, path) => routes.push(`${method} ${path}`) },
       state: {
@@ -49,11 +51,24 @@ describe('ChatGPT provider plugin', () => {
         transaction: (run) => run(),
         subscribe: () => () => undefined,
       },
+      cache: {
+        get: (key, fallback) => (state.has(`cache:${key}`) ? (state.get(`cache:${key}`) as typeof fallback) : fallback),
+        set: (key, value) => void state.set(`cache:${key}`, value),
+      },
+      secrets: {
+        get: (key, fallback) =>
+          state.has(`secret:${key}`) ? (state.get(`secret:${key}`) as typeof fallback) : fallback,
+        set: (key, value) => void state.set(`secret:${key}`, value),
+        delete: (key) => void state.delete(`secret:${key}`),
+      },
       canonical: { append: () => ({}) as never, list: () => [], read: () => [], subscribe: () => () => undefined },
     };
     await plugin.activate?.(context);
 
-    expect(providers).toContainEqual(expect.objectContaining({ id: 'chatgpt-plan' }));
+    expect(providers).toContainEqual({
+      provider: expect.objectContaining({ id: 'chatgpt-plan' }),
+      handler: 'function',
+    });
     expect(pages).toContainEqual(expect.objectContaining({ id: 'account', entry: 'webui' }));
     expect(contributions).toContainEqual(
       expect.objectContaining({

@@ -1,4 +1,5 @@
 import type { ModelSettings, TokenUsage } from '../core/types.js';
+import { ModelCallError } from '../contracts/model-error.js';
 import type {
   ModelPrompt,
   ModelRequestParameters,
@@ -42,7 +43,13 @@ interface OpenAiToolCall {
 
 function endpointFor(baseUrl: string): string {
   const base = baseUrl.trim().replace(/\/+$/, '');
-  if (!base) throw new Error('Model API base URL is required');
+  if (!base) throw new ModelCallError('missing-base-url');
+  try {
+    const parsed = new URL(base);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('Unsupported URL scheme.');
+  } catch {
+    throw new ModelCallError('invalid-base-url');
+  }
   if (/\/chat\/completions$/i.test(base)) return base;
   return `${base}/chat/completions`;
 }
@@ -212,9 +219,8 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
       });
     }
     if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      const excerpt = body ? `: ${body.slice(0, 1200)}` : '';
-      throw new Error(`Model provider returned HTTP ${response.status} ${response.statusText}${excerpt}`);
+      await response.body?.cancel().catch(() => undefined);
+      throw new ModelCallError('http-response', response.status);
     }
     if (!response.body) throw new Error('Model provider returned an empty response stream');
     const contentType = response.headers.get('content-type') ?? '';

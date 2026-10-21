@@ -316,13 +316,15 @@ export const projectContextPlugin: PicoPlugin = {
           ? { ...existing, status: 'conflicted' as const, updatedAt: now }
           : existing,
       );
-      save(context, { entries: [...updatedEntries, entry] });
-      audit(context, thread.id, 'memory.recorded', {
-        projectId: thread.projectId,
-        entryId: entry.id,
-        category,
-        sourceSeq: entry.sourceSeq,
-        supersedes: entry.supersedes,
+      context.state.transaction(() => {
+        save(context, { entries: [...updatedEntries, entry] });
+        audit(context, thread.id, 'memory.recorded', {
+          projectId: thread.projectId,
+          entryId: entry.id,
+          category,
+          sourceSeq: entry.sourceSeq,
+          supersedes: entry.supersedes,
+        });
       });
       return entry;
     };
@@ -420,9 +422,11 @@ export const projectContextPlugin: PicoPlugin = {
       };
       const entries = [...memory.entries];
       entries[index] = next;
-      save(context, { entries });
-      if (previous.sourceThreadId)
-        audit(context, previous.sourceThreadId, 'memory.updated', { projectId, entryId, fields: Object.keys(patch) });
+      context.state.transaction(() => {
+        save(context, { entries });
+        if (previous.sourceThreadId)
+          audit(context, previous.sourceThreadId, 'memory.updated', { projectId, entryId, fields: Object.keys(patch) });
+      });
       return next;
     };
     http.register('GET', '/memory', ({ query }) => {
@@ -450,10 +454,12 @@ export const projectContextPlugin: PicoPlugin = {
       const memory = readState(context);
       const entry = memory.entries.find((candidate) => candidate.projectId === projectId && candidate.id === entryId);
       if (!entry) throw new Error('Project Memory entry not found.');
-      save(context, {
-        entries: memory.entries.filter((candidate) => candidate.id !== entryId || candidate.projectId !== projectId),
+      context.state.transaction(() => {
+        save(context, {
+          entries: memory.entries.filter((candidate) => candidate.id !== entryId || candidate.projectId !== projectId),
+        });
+        if (entry.sourceThreadId) audit(context, entry.sourceThreadId, 'memory.deleted', { projectId, entryId });
       });
-      if (entry.sourceThreadId) audit(context, entry.sourceThreadId, 'memory.deleted', { projectId, entryId });
       return { deleted: true, id: entryId };
     });
 
@@ -462,6 +468,8 @@ export const projectContextPlugin: PicoPlugin = {
       description: 'View or update shared memory for this Project.',
       execute(_args, commandContext) {
         if (!commandContext.thread || !commandContext.projectId) return { text: 'Choose a Project Thread first.' };
+        const currentThread = commandContext.thread;
+        const currentProjectId = commandContext.projectId;
         const raw = commandContext.rawArgs.trim();
         if (!raw)
           return {
@@ -474,25 +482,27 @@ export const projectContextPlugin: PicoPlugin = {
         if (raw.toLowerCase() === 'clear') {
           const memory = readState(context);
           const removed = memory.entries.filter(
-            (entry) => entry.projectId === commandContext.projectId && entry.source !== 'agent',
+            (entry) => entry.projectId === currentProjectId && entry.source !== 'agent',
           );
-          save(context, {
-            entries: memory.entries.filter(
-              (entry) => entry.projectId !== commandContext.projectId || entry.source === 'agent',
-            ),
-          });
-          const legacyContexts = object(context.state.get<unknown>('byProject', {}));
-          const legacyValue = object(legacyContexts[commandContext.projectId]);
-          context.state.set('byProject', {
-            ...legacyContexts,
-            [commandContext.projectId]: {
-              text: '',
-              revision: (Number.isSafeInteger(legacyValue.revision) ? Number(legacyValue.revision) : 0) + 1,
-            },
-          });
-          audit(context, commandContext.thread.id, 'legacy-context.cleared', {
-            projectId: commandContext.projectId,
-            removed: removed.length,
+          context.state.transaction(() => {
+            save(context, {
+              entries: memory.entries.filter(
+                (entry) => entry.projectId !== currentProjectId || entry.source === 'agent',
+              ),
+            });
+            const legacyContexts = object(context.state.get<unknown>('byProject', {}));
+            const legacyValue = object(legacyContexts[currentProjectId]);
+            context.state.set('byProject', {
+              ...legacyContexts,
+              [currentProjectId]: {
+                text: '',
+                revision: (Number.isSafeInteger(legacyValue.revision) ? Number(legacyValue.revision) : 0) + 1,
+              },
+            });
+            audit(context, currentThread.id, 'legacy-context.cleared', {
+              projectId: currentProjectId,
+              removed: removed.length,
+            });
           });
           return {
             text: `Manual Project Context cleared (${removed.length} entries). Agent-maintained Project Memory remains.`,

@@ -3,13 +3,13 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ToolDefinition } from '../core/types.js';
 import type { PicoPlugin } from '../plugins/host.js';
-import type { ToolCatalog, ToolContext } from './tools.js';
+import type { ExecutorToolContext, ToolCatalog } from './tool-catalog.js';
 
 export interface ExecutorPluginContext {
   tools: {
     register(
       definition: ToolDefinition,
-      execute: (args: Record<string, unknown>, context: ToolContext) => Promise<unknown> | unknown,
+      execute: (args: Record<string, unknown>, context: ExecutorToolContext) => Promise<unknown> | unknown,
     ): void;
   };
 }

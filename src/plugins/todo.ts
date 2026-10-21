@@ -76,8 +76,10 @@ function persist(
 ): void {
   state.transaction(() => {
     const all = object(state.get<unknown>('byThread', {})) as TodoState;
-    state.set('byThread', { ...all, [threadId]: next });
-    canonical.append(threadId, { action: 'todo.updated', ...audit });
+    state.transaction(() => {
+      state.set('byThread', { ...all, [threadId]: next });
+      canonical.append(threadId, { action: 'todo.updated', ...audit });
+    });
   });
 }
 function titleArg(args: Record<string, unknown>): string {

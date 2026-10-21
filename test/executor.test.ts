@@ -1,18 +1,15 @@
-import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
-import { access, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { CONTAINER_RUNNER } from '../src/executor/container-runner.js';
 import { PicoStore } from '../src/core/store.js';
 import { assistantPayload, setToolPolicy } from './helpers.js';
-import { ToolCatalog } from '../src/executor/tools.js';
+import { ToolCatalog } from '../src/executor/tool-catalog.js';
 import { HostExecutor } from '../src/executor/executor.js';
 import { ContainerExecutor } from '../src/executor/container-executor.js';
 import { EXECUTOR_PROTOCOL_VERSION } from '../src/executor/remote-protocol.js';
-import { READ_FILE_LIMITS, SEARCH_FILE_LIMITS } from '../src/executor/tool-limits.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
 import { FakeModel, response, setupRuntime } from './helpers.js';
 
@@ -190,391 +187,6 @@ function createMockContainerAgent(
 }
 
 describe('Executor execution identity and recovery', () => {
-  it('applies the same bounded file and search output in the Container Runner', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'pico-container-tool-limits-'));
-    const executionDirectory = join(directory, 'executions');
-    const workspace = join(directory, 'workspace');
-    await mkdir(executionDirectory);
-    await mkdir(workspace);
-    const longLines = Array.from({ length: 30 }, () => `needle ${'x'.repeat(2_500)}`).join('\n');
-    await writeFile(join(workspace, 'long-lines.txt'), longLines, 'utf8');
-    await writeFile(join(workspace, 'oversized.txt'), `needle ${'z'.repeat(SEARCH_FILE_LIMITS.maxFileBytes)}`, 'utf8');
-    try {
-      const read = await executeRunner(
-        'run',
-        randomUUID().replaceAll('-', ''),
-        'read_file',
-        executionDirectory,
-        workspace,
-        JSON.stringify({ path: 'long-lines.txt' }),
-      );
-      expect(read.status).toBe('completed');
-      expect(read.result).toMatchObject({
-        contents: expect.stringMatching(/^needle /),
-        truncated: true,
-      });
-      expect((read.result as { contents: string }).contents).toHaveLength(READ_FILE_LIMITS.maxCharacters);
-
-      const search = await executeRunner(
-        'run',
-        randomUUID().replaceAll('-', ''),
-        'search_files',
-        executionDirectory,
-        workspace,
-        JSON.stringify({ pattern: 'needle' }),
-      );
-      expect(search.status).toBe('completed');
-      const result = search.result as { matches: string[]; truncated: boolean };
-      expect(result.matches.join('\n').length).toBeLessThanOrEqual(SEARCH_FILE_LIMITS.maxOutputCharacters);
-      expect(result.matches.length).toBeLessThan(30);
-      expect(result.matches[0]).toContain('[line truncated]');
-      expect(result.truncated).toBe(true);
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  it.skipIf(process.platform === 'win32')(
-    'keeps Container file tools inside the selected workspace through symlinks',
-    async () => {
-      const directory = await mkdtemp(join(tmpdir(), 'pico-container-path-guard-'));
-      const executionDirectory = join(directory, 'executions');
-      const workspace = join(directory, 'workspace');
-      const outside = join(directory, 'outside');
-      await mkdir(executionDirectory);
-      await mkdir(workspace);
-      await mkdir(outside);
-      await writeFile(join(outside, 'secret.txt'), 'outside secret', 'utf8');
-      await symlink(join(outside, 'secret.txt'), join(workspace, 'escape.txt'));
-      await symlink(outside, join(workspace, 'escape-dir'));
-      const missingOutside = join(outside, 'not-created');
-      await symlink(missingOutside, join(workspace, 'dangling-dir'));
-      await writeFile(join(workspace, 'inside.txt'), 'inside workspace', 'utf8');
-      await symlink(join(workspace, 'inside.txt'), join(workspace, 'inside-link.txt'));
-
-      try {
-        const blockedRead = await executeRunner(
-          'run',
-          randomUUID().replaceAll('-', ''),
-          'read_file',
-          executionDirectory,
-          workspace,
-          JSON.stringify({ path: 'escape.txt' }),
-        );
-        expect(blockedRead.status).toBe('failed');
-        expect(blockedRead.error).toMatch(/outside the workspace/);
-
-        const patch = ['*** Begin Patch', '*** Add File: escape-dir/new.txt', '+must not escape', '*** End Patch'].join(
-          '\n',
-        );
-        const blockedPatch = await executeRunner(
-          'run',
-          randomUUID().replaceAll('-', ''),
-          'apply_patch',
-          executionDirectory,
-          workspace,
-          JSON.stringify({ patch }),
-        );
-        expect(blockedPatch.status).toBe('failed');
-        expect(blockedPatch.error).toMatch(/outside the workspace/);
-        await expect(readFile(join(outside, 'new.txt'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
-
-        const danglingPatch = [
-          '*** Begin Patch',
-          '*** Add File: dangling-dir/new.txt',
-          '+must not escape',
-          '*** End Patch',
-        ].join('\n');
-        const blockedDanglingPatch = await executeRunner(
-          'run',
-          randomUUID().replaceAll('-', ''),
-          'apply_patch',
-          executionDirectory,
-          workspace,
-          JSON.stringify({ patch: danglingPatch }),
-        );
-        expect(blockedDanglingPatch.status).toBe('failed');
-        expect(blockedDanglingPatch.error).toMatch(/outside the workspace/);
-        await expect(readFile(join(missingOutside, 'new.txt'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
-
-        const allowedRead = await executeRunner(
-          'run',
-          randomUUID().replaceAll('-', ''),
-          'read_file',
-          executionDirectory,
-          workspace,
-          JSON.stringify({ path: 'inside-link.txt' }),
-        );
-        expect(allowedRead).toMatchObject({ status: 'completed', result: { contents: 'inside workspace' } });
-      } finally {
-        await rm(directory, { recursive: true, force: true });
-      }
-    },
-  );
-
-  it.skipIf(process.platform === 'win32')(
-    'deduplicates container runner submissions and returns a completed result to a racing Interrupt',
-    async () => {
-      const directory = await mkdtemp(join(tmpdir(), 'pico-container-runner-'));
-      const executionDirectory = join(directory, 'executions');
-      const workspace = join(directory, 'workspace');
-      await mkdir(executionDirectory);
-      await mkdir(workspace);
-      const key = randomUUID().replaceAll('-', '');
-      const firstPatch = ['*** Begin Patch', '*** Add File: original.txt', '+first submission', '*** End Patch'].join(
-        '\n',
-      );
-      const duplicatePatch = [
-        '*** Begin Patch',
-        '*** Add File: duplicate.txt',
-        '+duplicate side effect',
-        '*** End Patch',
-      ].join('\n');
-      const pidFile = join(executionDirectory, `${key}.pid`);
-      const command = spawn(
-        process.execPath,
-        ['-e', CONTAINER_RUNNER, 'run', key, 'apply_patch', executionDirectory, workspace],
-        { stdio: ['pipe', 'pipe', 'pipe'] },
-      );
-      const commandResult = captureRunner(command);
-      try {
-        await waitForFile(pidFile);
-        const duplicate = await executeRunner(
-          'run',
-          key,
-          'apply_patch',
-          executionDirectory,
-          workspace,
-          JSON.stringify({ patch: duplicatePatch }),
-        );
-        expect(duplicate.status).toBe('running');
-        expect((await executeRunner('status', key, undefined, executionDirectory, workspace)).status).toBe('running');
-
-        command.stdin!.end(JSON.stringify({ patch: firstPatch }));
-        const completed = await commandResult;
-        expect(completed).toMatchObject({ status: 'completed', result: { changed: ['original.txt'] } });
-        expect(await readFile(join(workspace, 'original.txt'), 'utf8')).toBe('first submission\n');
-        await expect(readFile(join(workspace, 'duplicate.txt'), 'utf8')).rejects.toThrow();
-        expect(await executeRunner('interrupt', key, undefined, executionDirectory, workspace)).toEqual(completed);
-      } finally {
-        if (command.exitCode === null) {
-          command.stdin!.end(JSON.stringify({ patch: firstPatch }));
-          await commandResult.catch(() => undefined);
-        }
-        await rm(directory, { recursive: true, force: true });
-      }
-    },
-  );
-
-  it.skipIf(process.platform !== 'linux')(
-    'does not treat a reused process ID as a live container execution',
-    async () => {
-      const directory = await mkdtemp(join(tmpdir(), 'pico-container-stale-pid-'));
-      const executionDirectory = join(directory, 'executions');
-      const workspace = join(directory, 'workspace');
-      await mkdir(executionDirectory);
-      await mkdir(workspace);
-      const key = randomUUID().replaceAll('-', '');
-      try {
-        await writeFile(join(executionDirectory, `${key}.pid`), String(process.pid));
-        expect((await executeRunner('status', key, undefined, executionDirectory, workspace)).status).toBe(
-          'interrupted',
-        );
-      } finally {
-        await rm(directory, { recursive: true, force: true });
-      }
-    },
-  );
-
-  it.skipIf(process.platform === 'win32')(
-    'interrupts a Container shell process group and records its terminal state',
-    async () => {
-      const directory = await mkdtemp(join(tmpdir(), 'pico-container-interrupt-'));
-      const executionDirectory = join(directory, 'executions');
-      const workspace = join(directory, 'workspace');
-      await mkdir(executionDirectory);
-      await mkdir(workspace);
-      const key = randomUUID().replaceAll('-', '');
-      const childPidFile = join(executionDirectory, `${key}.child.pid`);
-      const command = spawn(
-        process.execPath,
-        ['-e', CONTAINER_RUNNER, 'run', key, 'shell', executionDirectory, workspace],
-        { stdio: ['pipe', 'pipe', 'pipe'] },
-      );
-      const commandResult = captureRunner(command);
-      command.stdin!.end(JSON.stringify({ command: 'sleep 10', timeout_ms: 20_000 }));
-      try {
-        await waitForFile(childPidFile);
-        const interrupt = await executeRunner('interrupt', key, undefined, executionDirectory, workspace);
-        expect(['running', 'interrupted']).toContain(interrupt.status);
-        const completed = await withTimeout(commandResult, 3_000);
-        expect(completed.status).toBe('interrupted');
-        expect((await executeRunner('status', key, undefined, executionDirectory, workspace)).status).toBe(
-          'interrupted',
-        );
-      } finally {
-        const childPid = Number(await readFile(childPidFile, 'utf8').catch(() => ''));
-        if (Number.isSafeInteger(childPid) && childPid > 0) {
-          try {
-            process.kill(-childPid, 'SIGKILL');
-          } catch {
-            try {
-              process.kill(childPid, 'SIGKILL');
-            } catch {
-              /* The shell process group already exited. */
-            }
-          }
-        }
-        if (command.exitCode === null && !command.stdin!.writableEnded) {
-          command.stdin!.end(JSON.stringify({ command: 'sleep 10', timeout_ms: 20_000 }));
-        }
-        await commandResult.catch(() => undefined);
-        await rm(directory, { recursive: true, force: true });
-      }
-    },
-  );
-
-  it.skipIf(process.platform === 'win32')(
-    'escalates an explicit Container Interrupt when the shell ignores SIGTERM',
-    async () => {
-      const directory = await mkdtemp(join(tmpdir(), 'pico-container-force-interrupt-'));
-      const executionDirectory = join(directory, 'executions');
-      const workspace = join(directory, 'workspace');
-      await mkdir(executionDirectory);
-      await mkdir(workspace);
-      const key = randomUUID().replaceAll('-', '');
-      const childPidFile = join(executionDirectory, `${key}.child.pid`);
-      const command = spawn(
-        process.execPath,
-        ['-e', CONTAINER_RUNNER, 'run', key, 'shell', executionDirectory, workspace],
-        { stdio: ['pipe', 'pipe', 'pipe'] },
-      );
-      const commandResult = captureRunner(command);
-      command.stdin!.end(
-        JSON.stringify({ command: "trap '' TERM; while :; do sleep 0.05; done", timeout_ms: 600_000 }),
-      );
-      try {
-        await waitForFile(childPidFile);
-        const interrupt = await withTimeout(
-          executeRunner('interrupt', key, undefined, executionDirectory, workspace),
-          5_000,
-        );
-        const completed = await withTimeout(commandResult, 2_000);
-
-        expect(interrupt.status).toBe('interrupted');
-        expect(completed.status).toBe('interrupted');
-        expect((await executeRunner('status', key, undefined, executionDirectory, workspace)).status).toBe(
-          'interrupted',
-        );
-      } finally {
-        const identity = JSON.parse(await readFile(childPidFile, 'utf8').catch(() => 'null')) as {
-          pid?: number;
-        } | null;
-        if (identity?.pid) {
-          try {
-            process.kill(-identity.pid, 'SIGKILL');
-          } catch {
-            /* The shell process group already exited. */
-          }
-        }
-        if (command.exitCode === null) command.kill('SIGKILL');
-        await commandResult.catch(() => undefined);
-        await rm(directory, { recursive: true, force: true });
-      }
-    },
-  );
-
-  it.skipIf(process.platform === 'win32')(
-    'force-stops a SIGTERM-resistant Container shell when its timeout expires',
-    async () => {
-      const directory = await mkdtemp(join(tmpdir(), 'pico-container-force-timeout-'));
-      const executionDirectory = join(directory, 'executions');
-      const workspace = join(directory, 'workspace');
-      await mkdir(executionDirectory);
-      await mkdir(workspace);
-      const key = randomUUID().replaceAll('-', '');
-      const childPidFile = join(executionDirectory, `${key}.child.pid`);
-      const command = spawn(
-        process.execPath,
-        ['-e', CONTAINER_RUNNER, 'run', key, 'shell', executionDirectory, workspace],
-        { stdio: ['pipe', 'pipe', 'pipe'] },
-      );
-      const commandResult = captureRunner(command);
-      command.stdin!.end(JSON.stringify({ command: "trap '' TERM; while :; do sleep 0.05; done", timeout_ms: 1_000 }));
-      try {
-        await waitForFile(childPidFile);
-        const settled = await withTimeout(commandResult, 5_000);
-
-        expect(settled.status).toBe('failed');
-        expect(settled.error).toMatch(/timed out after 1000ms/i);
-        expect((await executeRunner('status', key, undefined, executionDirectory, workspace)).status).toBe('failed');
-      } finally {
-        const identity = JSON.parse(await readFile(childPidFile, 'utf8').catch(() => 'null')) as {
-          pid?: number;
-        } | null;
-        if (identity?.pid) {
-          try {
-            process.kill(-identity.pid, 'SIGKILL');
-          } catch {
-            /* The shell process group already exited. */
-          }
-        }
-        if (command.exitCode === null) command.kill('SIGKILL');
-        await commandResult.catch(() => undefined);
-        await rm(directory, { recursive: true, force: true });
-      }
-    },
-    10_000,
-  );
-
-  it.skipIf(process.platform !== 'linux')(
-    'keeps a detached shell running and interruptible after its Container Runner exits',
-    async () => {
-      const directory = await mkdtemp(join(tmpdir(), 'pico-container-orphan-'));
-      const executionDirectory = join(directory, 'executions');
-      const workspace = join(directory, 'workspace');
-      await mkdir(executionDirectory);
-      await mkdir(workspace);
-      const key = randomUUID().replaceAll('-', '');
-      const childPidFile = join(executionDirectory, `${key}.child.pid`);
-      const command = spawn(
-        process.execPath,
-        ['-e', CONTAINER_RUNNER, 'run', key, 'shell', executionDirectory, workspace],
-        { stdio: ['pipe', 'pipe', 'pipe'] },
-      );
-      const commandResult = captureRunner(command);
-      command.stdin!.end(JSON.stringify({ command: 'sleep 20; printf completed > completed.txt', timeout_ms: 30_000 }));
-      let childPid = 0;
-      let childStartTime: string | undefined;
-      try {
-        await waitForFile(childPidFile);
-        const identity = JSON.parse(await readFile(childPidFile, 'utf8')) as { pid: number; startTime?: string };
-        childPid = identity.pid;
-        childStartTime = identity.startTime;
-        command.kill('SIGKILL');
-        await commandResult.catch(() => undefined);
-
-        expect((await executeRunner('status', key, undefined, executionDirectory, workspace)).status).toBe('running');
-        await executeRunner('interrupt', key, undefined, executionDirectory, workspace);
-        await waitForRunnerStatus(key, executionDirectory, workspace, 'interrupted');
-        await expect(readFile(join(workspace, 'completed.txt'), 'utf8')).rejects.toThrow();
-      } finally {
-        if (command.exitCode === null) {
-          command.kill('SIGKILL');
-          await commandResult.catch(() => undefined);
-        }
-        if (childPid > 0 && processGroupMatches(childPid, childStartTime)) {
-          try {
-            process.kill(-childPid, 'SIGKILL');
-          } catch {
-            /* The detached shell process group already exited. */
-          }
-        }
-        await rm(directory, { recursive: true, force: true });
-      }
-    },
-  );
-
   it('treats concurrent and repeated Host Executor submissions with one ID as one execution', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.createThread('host');
@@ -612,7 +224,7 @@ describe('Executor execution identity and recovery', () => {
       toolCalls: [{ call: { id: 'stable-call', name: 'side_effect', arguments: {} }, executionId: randomUUID() }],
     });
     const executionId = env.store.listExecutions(thread.id).find((execution) => execution.kind === 'tool')!.id;
-    const executor = new HostExecutor(env.store, new ToolCatalog(), undefined, pluginDirectory);
+    const executor = new HostExecutor(env.store, undefined, pluginDirectory);
     const binding = env.store.executorForThread(thread.id)!;
     try {
       const one = executor.execute(executionId, binding);
@@ -677,7 +289,7 @@ describe('Executor execution identity and recovery', () => {
         { call: { id: 'shutdown-call', name: 'wait_for_abort', arguments: {} }, executionId: shutdownExecutionId },
       ],
     });
-    const executor = new HostExecutor(env.store, new ToolCatalog(), undefined, pluginDirectory);
+    const executor = new HostExecutor(env.store, undefined, pluginDirectory);
     const binding = env.store.executorForThread(thread.id)!;
     let execution: Promise<Awaited<ReturnType<typeof executor.execute>>> | undefined;
     try {
@@ -804,6 +416,7 @@ describe('Executor execution identity and recovery', () => {
       },
     });
     await runtime.initialize();
+    runtime.updateModelSettings({ model: 'test-model' });
     try {
       await runtime.drain();
       const results = store
@@ -851,7 +464,7 @@ describe('Executor execution identity and recovery', () => {
     const disconnected = async () => {
       throw new Error('Cannot connect to Executor: connection refused');
     };
-    const executor = new ContainerExecutor(env.store, new ToolCatalog(), undefined, undefined, disconnected);
+    const executor = new ContainerExecutor(env.store, undefined, undefined, disconnected);
     try {
       const binding = env.store.executorForThread(thread.id)!;
       await expect(executor.status('offline-tool', binding)).rejects.toThrow(/connection refused/);
@@ -893,15 +506,6 @@ describe('Executor execution identity and recovery', () => {
         return { stdout: 'container-id', stderr: '' };
       }
       if (args.includes('exec')) {
-        if (args.includes(CONTAINER_RUNNER) && args[args.indexOf('-e') + 2] === 'tools') {
-          return {
-            stdout: JSON.stringify({
-              status: 'completed',
-              tools: [{ name: 'shell', description: 'test shell', parameters: { type: 'object' } }],
-            }),
-            stderr: '',
-          };
-        }
         return {
           stdout: JSON.stringify({ status: 'completed', result: { exitCode: 0, stdout: '', stderr: '' } }),
           stderr: '',
@@ -917,7 +521,7 @@ describe('Executor execution identity and recovery', () => {
       execute: async () => ({ exitCode: 0 }),
     });
     const mockAgent = createMockContainerAgent(env.workspace, catalog, podman);
-    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, mockAgent.runner);
+    const executor = new ContainerExecutor(env.store, undefined, undefined, mockAgent.runner);
     try {
       const binding = env.store.executorForThread(thread.id)!;
       const firstAttempt = await executor.execute('registry-eof-tool', binding).then(
@@ -980,7 +584,7 @@ describe('Executor execution identity and recovery', () => {
         }),
     });
     const mockAgent = createMockContainerAgent(env.workspace, catalog, podman);
-    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, mockAgent.runner);
+    const executor = new ContainerExecutor(env.store, undefined, undefined, mockAgent.runner);
     mockAgent.loseNextSubmissionAck = true;
     let execution: Promise<Awaited<ReturnType<typeof executor.execute>>> | undefined;
     try {
@@ -1054,7 +658,7 @@ describe('Executor execution identity and recovery', () => {
     });
     const mockAgent = createMockContainerAgent(env.workspace, catalog, podman);
     const binding = env.store.executorForThread(thread.id)!;
-    const beforeRestart = new ContainerExecutor(env.store, catalog, undefined, undefined, mockAgent.runner);
+    const beforeRestart = new ContainerExecutor(env.store, undefined, undefined, mockAgent.runner);
     const executionPromise = beforeRestart.execute('shutdown-container-tool', binding);
     try {
       await toolStarted;
@@ -1063,7 +667,7 @@ describe('Executor execution identity and recovery', () => {
       expect(env.store.getExecution('shutdown-container-tool')?.status).toBe('running');
 
       mockAgent.completeExecution('shutdown-container-tool', { contents: 'recovered' });
-      const afterRestart = new ContainerExecutor(env.store, catalog, undefined, undefined, mockAgent.runner);
+      const afterRestart = new ContainerExecutor(env.store, undefined, undefined, mockAgent.runner);
       try {
         const resumed = await afterRestart.execute('shutdown-container-tool', binding);
         expect(resumed).toMatchObject({ status: 'completed', result: { contents: 'recovered' } });
@@ -1126,7 +730,7 @@ describe('Executor execution identity and recovery', () => {
       definition: { name: 'shell', description: 'test shell', parameters: { type: 'object' } },
       execute: async () => ({ exitCode: 0 }),
     });
-    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, runner);
+    const executor = new ContainerExecutor(env.store, undefined, undefined, runner);
     try {
       const binding = env.store.executorForThread(thread.id)!;
       const execution = executor.execute('preparing-tool', binding);
@@ -1194,7 +798,7 @@ describe('Executor execution identity and recovery', () => {
       execute: async () => ({ exitCode: 0 }),
     });
     const mockAgent = createMockContainerAgent(env.workspace, catalog, podman);
-    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, mockAgent.runner);
+    const executor = new ContainerExecutor(env.store, undefined, undefined, mockAgent.runner);
     try {
       const binding = env.store.executorForThread(thread.id)!;
       const firstExecution = executor.execute('setup-retry-first-tool', binding);
@@ -1247,7 +851,7 @@ describe('Executor execution identity and recovery', () => {
       execute: async () => ({ exitCode: 0 }),
     });
     const mockAgent = createMockContainerAgent(env.workspace, catalog, runner);
-    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, mockAgent.runner);
+    const executor = new ContainerExecutor(env.store, undefined, undefined, mockAgent.runner);
     try {
       const binding = env.store.executorForThread(thread.id)!;
       const result = await executor.execute('image-tool', binding);
@@ -1324,7 +928,7 @@ describe('Executor execution identity and recovery', () => {
       });
     }
     const mockAgent = createMockContainerAgent(env.workspace, catalog, runner);
-    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, mockAgent.runner);
+    const executor = new ContainerExecutor(env.store, undefined, undefined, mockAgent.runner);
     const binding = env.store.executorForThread(thread.id)!;
     let executions: Promise<PromiseSettledResult<Awaited<ReturnType<typeof executor.execute>>>[]> | undefined;
     try {
@@ -1368,7 +972,6 @@ describe('Executor execution identity and recovery', () => {
     const mockAgent = createMockContainerAgent(env.workspace, catalog, podman);
     const executor = new ContainerExecutor(
       env.store,
-      catalog,
       undefined,
       undefined,
       mockAgent.runner,
@@ -1403,7 +1006,7 @@ describe('Executor execution identity and recovery', () => {
     const vfsRoot = '/tmp/pico-test-vfs-root';
     const catalog = new ToolCatalog();
     const mockAgent = createMockContainerAgent(env.workspace, catalog, podman);
-    const executor = new ContainerExecutor(env.store, catalog, undefined, undefined, mockAgent.runner, '', vfsRoot);
+    const executor = new ContainerExecutor(env.store, undefined, undefined, mockAgent.runner, '', vfsRoot);
     try {
       const binding = env.store.executorForThread(thread.id)!;
       await executor.checkConnection(binding);
@@ -1429,7 +1032,6 @@ describe('Executor execution identity and recovery', () => {
     };
     const executor = new ContainerExecutor(
       env.store,
-      new ToolCatalog(),
       undefined,
       undefined,
       runner,
@@ -1500,110 +1102,5 @@ async function until(predicate: () => boolean, timeoutMs = 3_000): Promise<void>
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error('Condition did not become true before timeout');
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
-  }
-}
-
-interface RunnerResponse {
-  status: 'running' | 'completed' | 'failed' | 'interrupted';
-  result?: unknown;
-  error?: string;
-}
-
-function captureRunner(command: ChildProcess): Promise<RunnerResponse> {
-  let stdout = '';
-  let stderr = '';
-  command.stdout!.setEncoding('utf8').on('data', (chunk: string) => {
-    stdout += chunk;
-  });
-  command.stderr!.setEncoding('utf8').on('data', (chunk: string) => {
-    stderr += chunk;
-  });
-  return new Promise((resolve, reject) => {
-    command.once('error', reject);
-    command.once('close', (code) => {
-      if (code !== 0) return reject(new Error(stderr || `Container runner exited with code ${code ?? 1}`));
-      try {
-        resolve(JSON.parse(stdout) as RunnerResponse);
-      } catch (error) {
-        reject(error);
-      }
-    });
-  });
-}
-
-function executeRunner(
-  mode: 'run' | 'status' | 'interrupt',
-  key: string,
-  toolName: string | undefined,
-  executionDirectory: string,
-  workspace: string,
-  input?: string,
-): Promise<RunnerResponse> {
-  const command = spawn(
-    process.execPath,
-    ['-e', CONTAINER_RUNNER, mode, key, toolName ?? '', executionDirectory, workspace],
-    { stdio: ['pipe', 'pipe', 'pipe'] },
-  );
-  const result = captureRunner(command);
-  command.stdin!.end(input);
-  return result;
-}
-
-async function waitForFile(path: string, timeoutMs = 3_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (
-      await access(path).then(
-        () => true,
-        () => false,
-      )
-    )
-      return;
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
-  }
-  throw new Error(`File did not appear before timeout: ${path}`);
-}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`Operation did not settle within ${timeoutMs}ms`)), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-async function waitForRunnerStatus(
-  key: string,
-  executionDirectory: string,
-  workspace: string,
-  target: RunnerResponse['status'],
-  timeoutMs = 3_000,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const current = await executeRunner('status', key, undefined, executionDirectory, workspace);
-    if (current.status === target) return;
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
-  }
-  throw new Error(`Container Runner did not report ${target} before timeout`);
-}
-
-function processGroupMatches(pid: number, startTime?: string): boolean {
-  if (!startTime) return false;
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    const fields = stat
-      .slice(stat.lastIndexOf(')') + 2)
-      .trim()
-      .split(/\s+/);
-    return Number(fields[2]) === pid && fields[19] === startTime;
-  } catch {
-    return false;
   }
 }

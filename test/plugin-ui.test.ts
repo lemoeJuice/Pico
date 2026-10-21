@@ -128,8 +128,20 @@ describe('dynamic plugin UI boundary', () => {
   it('keeps context messages stable across unrelated renders and scopes plugin events by owner', () => {
     const threadA = { id: 'thread-a' } as PluginUiContext['thread'];
     const threadB = { id: 'thread-b' } as PluginUiContext['thread'];
+    const selection = {
+      provider: 'openai-compatible',
+      connectionId: 'default',
+      model: 'first',
+      parameters: { temperature: 0.2, options: {} },
+    };
     expect(samePluginUiContext({ thread: threadA }, { thread: threadA })).toBe(true);
     expect(samePluginUiContext({ thread: threadA }, { thread: threadB })).toBe(false);
+    expect(
+      samePluginUiContext(
+        { thread: threadA, modelSelection: selection },
+        { thread: threadA, modelSelection: { ...selection, model: 'second' } },
+      ),
+    ).toBe(false);
     expect(
       pluginUiEventMatchesPlugin({ type: 'plugin.updated', pluginId: 'pico.permissions' }, 'pico.permissions'),
     ).toBe(true);

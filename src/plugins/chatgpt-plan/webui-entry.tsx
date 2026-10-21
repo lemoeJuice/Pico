@@ -1,7 +1,12 @@
 import { useEffect, useState, type CSSProperties, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import './webui.css';
-import { createPluginUiClient, PLUGIN_UI_PROTOCOL_VERSION, type PluginUiInitMessage } from '../ui-protocol.js';
+import {
+  createPluginUiClient,
+  PLUGIN_UI_PROTOCOL_VERSION,
+  type PluginUiContext,
+  type PluginUiInitMessage,
+} from '../ui-protocol.js';
 import { pluginWebUi } from './webui.js';
 
 const pluginId = 'pico.chatgpt-plan';
@@ -18,6 +23,7 @@ function PluginView({
   client: ReturnType<typeof createPluginUiClient>;
 }): ReactElement {
   const [settings, setSettings] = useState(init.settings);
+  const [context, setContext] = useState(init.context);
   const Component =
     init.viewType === 'page'
       ? pluginWebUi.pages[init.viewId as keyof typeof pluginWebUi.pages]
@@ -26,6 +32,7 @@ function PluginView({
   useEffect(() => () => client.close(), [client]);
   useEffect(() => client.ready(init.attemptId), [client, init.attemptId]);
   useEffect(() => client.subscribeSettings(setSettings), [client]);
+  useEffect(() => client.subscribeContext(setContext), [client]);
   useEffect(() => {
     const reportSize = (): void => client.resize(document.documentElement.scrollHeight);
     const observer = new ResizeObserver(reportSize);
@@ -45,7 +52,7 @@ function PluginView({
           : ({ '--pico-composer-control-height': `${init.controlHeightPx}px` } as CSSProperties)
       }
     >
-      <Component {...client.props(settings)} />
+      <Component {...client.props(settings, context as PluginUiContext)} />
     </div>
   );
 }

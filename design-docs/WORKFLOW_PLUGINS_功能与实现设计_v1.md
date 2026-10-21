@@ -11,7 +11,7 @@
 | 1 | Permission | 在单个 Tool Invocation 边界授权；支持 reviewer 自动审批模式 | pico.permissions 已存在，支持 allow / deny / ask 与审批 UI |
 | 2 | Goal | 用户提供持续目标；Agent 在同一 Thread 中持续推进，直到完成、暂停或需要用户输入 | 未实现；Runtime 缺少插件驱动的持久续跑条件 |
 | 3 | Todo | 管理短期清单；由 Agent 按需创建并在完成后勾选 | 未实现 |
-| 4 | Rolling Context | 管理同一 Thread 的 hot / warm / cold 上下文；保留手动 fallback compaction | 未实现 |
+| 4 | Rolling Context | 管理同一 Thread 的 hot / warm / cold 上下文；复用 Runtime 的手动 fallback compact | 分层面板已实现；`/compact` 由 Runtime 核心提供，不依赖本插件 |
 | 5 | Project Context | 自动维护 Project 级共享记忆并注入相关内容 | pico.project-context 目前仅支持手动设置与清除 |
 | 6 | Global Memory | 跨 Project 的长期用户偏好与知识；由 Agent 判断是否记入 | 未实现 |
 | 7 | Subagent | 通过普通 Child Thread 和 Message 提供非阻塞、双向协作 | pico.collaboration 已提供基本 spawn / send 工具 |
@@ -120,7 +120,7 @@ Goal 是同一 Thread 的持续工作目标，由用户明确提供，包括结�
 
 **护栏**
 
-使用可配置的单次推进步数 / 时间预算和无进展熔断。限制触发后状态改为 paused 或 needs_input，继续时沿用原 Thread 和已持久化 Canonical History。Permission、Executor 和 provider 限制仍独立有效；Goal 活跃不等于获得审批或更宽沙箱。
+不按累计模型轮数自动暂停 Goal。Agent 可通过明确的 needs_input / paused checkpoint 报告阻塞，用户也可主动暂停；继续时沿用原 Thread 和已持久化 Canonical History。Permission、Executor 和 provider 限制仍独立有效；Goal 活跃不等于获得审批或更宽沙箱。
 
 **Harness 参考与取舍**
 
@@ -183,17 +183,17 @@ Projection 顺序与摘要必须稳定，不能为了短 prompt 每轮随机重�
 
 **fallback compaction**
 
-保留 Thread 工具栏和 /compact 用户命令作为可见的手动 fallback：
+`/compact` 是 Runtime 核心命令，Rolling Context 未安装或停用时仍可使用。它只对已完成的完整 turn block 总结，保留最近两个完整 turn 原文；单次输入超过 60,000 字符时按安全边界缩小范围，若最老的候选 block 单独超限则不修改状态。摘要最多 12,000 字符。
 
-- 可选整段或多个已封段；不允许越过 Tool Batch / Execution 安全边界。
-- 用户触发后允许跳过自动收益门槛，显式将有可用直接摘要的范围转为 warm，并展示影响预览；必要时在同一界面发起缺失的摘要调用。
-- 用户显式压缩不能修改 Canonical History。默认在压缩完成后保持 Thread Paused，用户检查 Projection 后 Continue。
-- 若辅助模型调用失败，不做无提示截断；展示原因、保持原文 hot，允许更换模型后重试。
-- Provider context limit 可使 Thread 暂停；用户可调整模型、手动 compact、查看预览，再 Continue。
+- Runtime 使用当前 Thread 选择的 Provider 和既有 model stage，生成无 Tool 的辅助摘要；不新建 agent loop、Execution、普通 Assistant Message 或 Tool Batch。
+- 成功后向该 Thread 的 Canonical History 追加带版本、throughSeq、source IDs/hash 和摘要的 Runtime compaction fact。原始 Message、Assistant 与 Tool Result 永不修改或删除；模型请求失败或摘要无效时不追加 compact fact。
+- 后续唯一主执行路径从 Canonical History 重建 Projection：验证 compact fact 覆盖的 source IDs，使用摘要替换此前缀，再接入后续原始 turn。重启不依赖 Plugin State 或 Rolling Context 状态。
+- Rolling Context Panel 仍可操作自己的 warm/cold 分层与 segment summary；这些可选功能不会拥有 `/compact` 命令，也不会覆盖 Runtime compaction 已替换的前缀。
+- Provider context limit 可使 Thread 暂停；用户可调整 Thread 模型、调用 `/compact`、查看实际 Model Input，再 Continue。
 
 **观测 UI**
 
-单独提供 Rolling Context Panel，按时间列出每段 tier、Canonical seq / Message 引用、源文本、摘要、摘要版本、Evaluator 判断与理由、预计成本、实际摘要/evaluator 开销及历史转层。用户可以 pin hot、手动 warm / cold、重试摘要、召回 cold 段和执行 fallback compact。
+单独提供 Rolling Context Panel，按时间列出每段 tier、Canonical seq / Message 引用、源文本、摘要、摘要版本、Evaluator 判断与理由、预计成本、实际摘要/evaluator 开销及历史转层。用户可以 pin hot、手动 warm / cold、重试摘要和召回 cold 段；跨插件关闭仍可用的长会话压缩由 Runtime `/compact` 提供。
 
 每次主模型调用提供“实际 Model Input”视图：逐字展示最终传给 Model Adapter 的 system prompt、turns、tools 与 projection boundary；对每段标明原文、摘要替换、cold omission、Goal/Todo/Memory 注入来源以及 provider attempt。它应读取执行日志中记录的真实 prompt，精确保留换行和调用参数；凭证不进入记录。UI 同时解释每个 Canonical 区间为什么出现在或没出现在本次请求中。
 
@@ -232,6 +232,8 @@ Global Memory 记录跨 Project 仍适用的用户偏好、长期事实和通用
 **手动管理**
 
 提供统一 Memory UI 的 Global 与 Project 两个 scope。用户可以直接添加、编辑、删除、Pin、搜索、检查来源和调整自动记忆开关；编辑/删除形成可追溯的状态变化。UI 是治理与纠错入口，不是记忆写入的必经审批点。
+
+> 实施边界更新（2026-10-21）：本段保留为原始设计记录。当前界面按作用域分开：Settings 的 Memory 页面只管理 Global Memory；Project Memory 仅从当前 Thread toolbar 打开，不提供统一的 Global/Project scope 页面。
 
 ### 3.7 Subagent：Child Thread 协作
 

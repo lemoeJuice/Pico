@@ -7,6 +7,7 @@ import {
   type GlobalMemoryItem,
 } from '../src/plugins/global-memory.js';
 import type { ProjectionInput } from '../src/runtime/stages.js';
+import { setupRuntime, response } from './helpers.js';
 
 function harness() {
   const values = new Map<string, unknown>();
@@ -16,6 +17,7 @@ function harness() {
     (args: Record<string, unknown>, context: { executionId: string; thread?: Thread }) => unknown
   >();
   const routes = new Map<string, (request: { body: unknown; query: URLSearchParams }) => unknown>();
+  let failCanonicalAppend = false;
   let project:
     | ((input: ProjectionInput, next: (input: ProjectionInput) => Promise<ProjectionInput>) => Promise<ProjectionInput>)
     | null = null;
@@ -54,11 +56,22 @@ function harness() {
         values.set(key, structuredClone(value));
       },
       transaction<T>(run: () => T): T {
-        return run();
+        const previous = new Map(values);
+        const previousRecords = new Map([...records].map(([key, list]) => [key, [...list]]));
+        try {
+          return run();
+        } catch (error) {
+          values.clear();
+          for (const [key, value] of previous) values.set(key, value);
+          records.clear();
+          for (const [key, list] of previousRecords) records.set(key, list);
+          throw error;
+        }
       },
     },
     canonical: {
       append(threadId: string, payload: Record<string, unknown>) {
+        if (failCanonicalAppend) throw new Error('simulated audit failure');
         const list = records.get(threadId) ?? [];
         const record = {
           id: `record-${list.length + 1}`,
@@ -93,10 +106,68 @@ function harness() {
     if (!implementation) throw new Error(`Tool not found: ${name}`);
     return implementation(args, { executionId: `exec-${name}`, thread: toolThread });
   };
-  return { context, thread, records, tools, routes, runTool, userMessage, getProjection: () => project };
+  return {
+    context,
+    thread,
+    records,
+    tools,
+    routes,
+    runTool,
+    userMessage,
+    setFailCanonicalAppend(value: boolean) {
+      failCanonicalAppend = value;
+    },
+    getProjection: () => project,
+  };
 }
 
 describe('Global Memory plugin', () => {
+  it('stores no-Thread Settings edits as replayable Global Canonical state', async () => {
+    const env = await setupRuntime(
+      {
+        async complete() {
+          return response();
+        },
+      },
+      { plugins: [globalMemoryPlugin] },
+    );
+    try {
+      const route = env.runtime.pluginHttpRoute('pico.global-memory', 'POST', '/items');
+      expect(route).toBeDefined();
+      const saved = (await route!.handler({
+        body: { text: 'Prefers concise written responses.', category: 'preference' },
+        query: new URLSearchParams(),
+        origin: null,
+      })) as { item: GlobalMemoryItem };
+      const globalFacts = env.store.listScopedCanonical('workflow:global');
+      expect(JSON.stringify(globalFacts)).toContain(saved.item.text);
+      expect(
+        globalFacts.every((record) => record.threadId === null && Number.isSafeInteger(record.seq) && record.seq > 0),
+      ).toBe(true);
+      env.store.db.exec("DELETE FROM plugin_state WHERE plugin_id = 'pico.global-memory';");
+      env.store.rebuildWorkflowViews();
+      const restored = (await env.runtime.pluginHttpRoute('pico.global-memory', 'GET', '/items')!.handler({
+        body: null,
+        query: new URLSearchParams(),
+        origin: null,
+      })) as { items: GlobalMemoryItem[] };
+      expect(restored.items).toMatchObject([{ id: saved.item.id, text: saved.item.text }]);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('rolls back Global Memory state when its Thread audit append fails', () => {
+    const env = harness();
+    env.userMessage('Please remember I prefer concise replies.');
+    env.setFailCanonicalAppend(true);
+    expect(() => env.runTool('memory_save', { text: 'Prefers concise replies.', category: 'preference' })).toThrow(
+      'simulated audit failure',
+    );
+    expect(env.context.state.get('memory', {})).toEqual({});
+    expect(env.records.get(env.thread.id)).toHaveLength(1);
+  });
+
   it('lets the agent search, save, and replace cross-project memories with verifiable sources', () => {
     const env = harness();
     env.userMessage('Please remember that I prefer concise Chinese replies.');

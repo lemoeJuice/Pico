@@ -1,8 +1,1610 @@
-import{createHash as qe,randomUUID as ze}from"node:crypto";import{createServer as He}from"node:http";import{createHash as be,createPublicKey as Pe,randomBytes as ne,randomUUID as ue,verify as pe}from"node:crypto";var H="https://auth.openai.com",Re=`${H}/api/accounts/authorize`,he=`${H}/api/accounts/oauth/token`,re="https://api.openai.com/v1",fe="oauth",Q="chatgpt.tokens.use.direct",Ie="openid profile email offline_access resource.invoke chatgpt.tokens.use.direct",Ae=12e4,Ee=10*6e4,Se=6e4,oe="modelCatalog",B=class extends Error{},$=class extends Error{};function v(n){return!!(n&&typeof n=="object"&&!Array.isArray(n))}function U(n,e){if(typeof n!="string"||!n)throw new Error(`ChatGPT sign-in response is missing ${e}.`);return n}function ge(n){try{let e=JSON.parse(Buffer.from(n,"base64url").toString("utf8"));if(!v(e))throw new Error;return e}catch{throw new Error("ChatGPT returned a malformed identity token.")}}function me(n){return typeof n=="string"?[...new Set(n.split(/\s+/).filter(Boolean))]:[]}function ye(n,e){if(typeof n!="number"||!Number.isFinite(n)||n<=0)throw new Error("ChatGPT sign-in response did not include a valid token lifetime.");return e+n*1e3}function xe(n){let e=n,r=new Set;for(let t=0;t<5&&e&&typeof e=="object"&&!r.has(e);t+=1){r.add(e);let s=e.code;if(typeof s=="string"&&/^[a-z0-9_.:-]{1,80}$/i.test(s))return s;if(e.name==="TimeoutError")return"timeout";e=e.cause}}function ve(n){return!v(n)||typeof n.hostId!="string"?null:{hostId:n.hostId,clientId:typeof n.clientId=="string"?n.clientId:null,subject:typeof n.subject=="string"?n.subject:null,email:typeof n.email=="string"?n.email:null,idToken:typeof n.idToken=="string"?n.idToken:null,accessToken:typeof n.accessToken=="string"?n.accessToken:null,refreshToken:typeof n.refreshToken=="string"?n.refreshToken:null,expiresAt:typeof n.expiresAt=="number"?n.expiresAt:null,scopes:Array.isArray(n.scopes)?n.scopes.filter(e=>typeof e=="string"):[]}}var Z=class{constructor(e,r=fetch,t=Date.now){this.state=e;this.fetcher=r;this.now=t}state;fetcher;now;pending=new Map;refreshInFlight=null;metadata=null;jwks=null;modelCatalogRefreshInFlight=null;modelCatalogLastRefreshAttemptAt=0;status(){let e=this.readCredentials(),r=!!(e?.clientId&&e.refreshToken&&e.scopes.includes(Q));return{connected:r,accountLabel:r?e?.email??"ChatGPT account":null}}async beginSignIn(e){let r=new URL(e);if(r.protocol!=="http:"||r.hostname!=="127.0.0.1"||r.username||r.password||!r.pathname.endsWith("/auth/callback"))throw new Error("ChatGPT sign-in requires the registered 127.0.0.1 loopback callback.");let t=this.readCredentials(),s=t?.hostId??`urn:uuid:${ue()}`,a=t?.clientId??"dynamic_agent_client",o=ne(32).toString("base64url"),h=ne(32).toString("base64url"),l=ne(32).toString("base64url"),m=be("sha256").update(l).digest("base64url"),p={state:o,nonce:h,verifier:l,redirectUri:r.toString(),clientId:a,createdAt:this.now()};for(let[g,y]of this.pending)y.createdAt+10*6e4<=this.now()&&this.pending.delete(g);this.pending.set(o,p);let f=new URL(Re);return f.search=new URLSearchParams({client_id:a,...a==="dynamic_agent_client"?{agent_name_hint:"Pico"}:{},ext_agent_host_id:s,...a!=="dynamic_agent_client"&&t?.idToken?{id_token_hint:t.idToken}:{},...a!=="dynamic_agent_client"&&t?.email?{login_hint:t.email}:{},response_type:"code",redirect_uri:r.toString(),scope:Ie,resource:re,state:o,nonce:h,code_challenge_method:"S256",code_challenge:m}).toString(),this.writeCredentials({hostId:s,clientId:t?.clientId??null,subject:t?.subject??null,email:t?.email??null,idToken:t?.idToken??null,accessToken:t?.accessToken??null,refreshToken:t?.refreshToken??null,expiresAt:t?.expiresAt??null,scopes:t?.scopes??[]}),{authorizationUrl:f.toString()}}parseCallbackUrl(e,r){if(e.length>8192)throw new Error("ChatGPT callback URL is too long.");let t,s;try{t=new URL(e.trim()),s=new URL(r)}catch{throw new Error("Paste the full ChatGPT callback URL from the browser address bar.")}if(t.protocol!=="http:"||t.username||t.password||t.hash||t.origin!==s.origin||t.pathname!==s.pathname)throw new Error("This callback URL does not match the active ChatGPT sign-in attempt.");let a=t.searchParams.getAll("state"),o=t.searchParams.getAll("code"),h=t.searchParams.getAll("error"),l=t.searchParams.getAll("client_id");if(a.length!==1||o.length>1||h.length>1||l.length>1||l.length===1&&!l[0]||!!o.length==!!h.length)throw new Error("The ChatGPT callback URL is incomplete or malformed.");if(!this.hasPendingAuthorization(a[0]??null,r))throw new Error("This ChatGPT sign-in attempt expired or did not match. Start again.");return t.searchParams}hasPendingAuthorization(e,r){if(!e)return!1;let t=this.pending.get(e);return!!(t&&t.redirectUri===r&&t.createdAt+10*6e4>this.now())}async completeSignIn(e,r,t={}){let s=e.get("state"),a=s?this.pending.get(s):void 0;if(!a||a.redirectUri!==r||a.createdAt+10*6e4<=this.now())throw new Error("ChatGPT sign-in expired or did not match this authorization attempt. Start again.");let o=e.getAll("code"),h=e.getAll("error"),l=e.getAll("client_id");if(e.getAll("state").length!==1||o.length>1||h.length>1||l.length>1||l.length===1&&!l[0]||!!o.length==!!h.length||o.length===1&&!o[0]||h.length===1&&!h[0])throw new Error("The ChatGPT callback is incomplete or malformed.");if(e.get("error"))throw this.pending.delete(a.state),e.get("error")==="access_denied"?new Error("ChatGPT sign-in was cancelled."):new Error("ChatGPT sign-in was not completed.");let m=U(e.get("code"),"authorization code"),p=e.get("client_id"),f=a.clientId;try{if(a.clientId==="dynamic_agent_client"){if(f=U(p,"registered client ID"),f==="dynamic_agent_client")throw new Error("ChatGPT did not finish registering Pico. Start again.")}else if(p&&p!==a.clientId)throw new Error("ChatGPT returned a different client registration. Start sign-in again.")}catch(T){throw this.pending.delete(a.state),T}let g;try{g=await this.exchangeToken({grant_type:"authorization_code",client_id:f,code:m,code_verifier:a.verifier,redirect_uri:a.redirectUri,resource:re})}catch(T){throw T instanceof $&&t.allowTransportRetry!==!1||this.pending.delete(a.state),T}this.pending.delete(a.state);let y=U(g.access_token,"access token"),C=U(g.refresh_token,"refresh token"),_=U(g.id_token,"identity token");if(U(g.token_type,"token type").toLowerCase()!=="bearer")throw new Error("ChatGPT returned an unsupported token type.");let b=me(g.scope);if(!b.includes(Q))throw new Error("This ChatGPT account did not authorize plan usage for Pico.");let P=await this.verifyIdentityToken(_,f,a.nonce),R=this.readCredentials();if(a.clientId!=="dynamic_agent_client"&&R?.subject&&R.subject!==P.sub)throw new Error("The ChatGPT account changed during reauthorization. The saved account was not replaced.");let j={hostId:R?.hostId??`urn:uuid:${ue()}`,clientId:f,subject:P.sub,email:typeof P.email=="string"?P.email:R?.email??null,idToken:_,accessToken:y,refreshToken:C,expiresAt:ye(g.expires_in,this.now()),scopes:b};return this.writeCredentials(j),this.status()}async accessToken(e=!1,r){let t=this.readCredentials();if(!t?.clientId||!t.refreshToken||!t.accessToken||!t.expiresAt)throw new Error("Connect a ChatGPT account in Settings before using this model provider.");if(!t.scopes.includes(Q))throw new Error("The connected ChatGPT account has not granted plan usage to Pico. Reconnect it in Settings.");return!e&&t.expiresAt>this.now()+Ae?t.accessToken:this.refreshInFlight?this.refreshInFlight:(this.refreshInFlight=this.refresh(t,r).finally(()=>{this.refreshInFlight=null}),this.refreshInFlight)}async listModels(e=!1){let r=this.readModelCatalog();if(r&&!e)return r.refreshedAt+Ee<=this.now()&&this.modelCatalogLastRefreshAttemptAt+Se<=this.now()&&this.refreshModels().catch(()=>{}),r.models;try{return await this.refreshModels()}catch(t){if(r)return r.models;throw t}}refreshModels(){if(this.modelCatalogRefreshInFlight)return this.modelCatalogRefreshInFlight;this.modelCatalogLastRefreshAttemptAt=this.now();let e=this.fetchModels().then(r=>(this.state.set(oe,{models:r,refreshedAt:this.now()}),r)).finally(()=>{this.modelCatalogRefreshInFlight=null});return this.modelCatalogRefreshInFlight=e,e}readModelCatalog(){let e=this.state.get(oe,null);return!v(e)||!Array.isArray(e.models)||typeof e.refreshedAt!="number"?null:{models:e.models.flatMap(t=>!v(t)||typeof t.slug!="string"||typeof t.displayName!="string"?[]:[{slug:t.slug,displayName:t.displayName}]),refreshedAt:e.refreshedAt}}async fetchModels(){let e=await this.accessToken(),r=await this.fetcher("https://api.openai.com/v1/models",{headers:{authorization:`Bearer ${e}`,accept:"application/json"},signal:AbortSignal.timeout(15e3)}),t=r;if(r.status===401&&(await r.body?.cancel().catch(()=>{}),e=await this.accessToken(!0),t=await this.fetcher("https://api.openai.com/v1/models",{headers:{authorization:`Bearer ${e}`,accept:"application/json"},signal:AbortSignal.timeout(15e3)})),!t.ok)throw new Error(`Could not load ChatGPT models (HTTP ${t.status}).`);let s=await t.json();if(!v(s)||!Array.isArray(s.models))throw new Error("ChatGPT returned an invalid model catalog.");return s.models.flatMap(a=>!v(a)||a.visibility!=="list"||typeof a.slug!="string"?[]:[{slug:a.slug,displayName:typeof a.display_name=="string"?a.display_name:a.slug}])}async signOut(){let e=this.readCredentials(),r=!e?.refreshToken||!e.clientId;if(e?.refreshToken&&e.clientId)try{let t=await this.oidcMetadata(),s=typeof t.revocation_endpoint=="string"?t.revocation_endpoint:null;if(s&&new URL(s).protocol==="https:"&&new URL(s).hostname==="auth.openai.com")for(let a=0;a<3&&!r;a+=1){let o=await this.fetcher(s,{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({token:e.refreshToken,token_type_hint:"refresh_token",client_id:e.clientId}),signal:AbortSignal.timeout(1e4)});if(r=o.status===200,r||o.status<500&&o.status!==429)break;await new Promise(h=>setTimeout(h,a===0?200:700))}}catch{r=!1}return e&&this.writeCredentials({...e,idToken:null,accessToken:null,refreshToken:null,expiresAt:null,scopes:[]}),this.state.set(oe,null),{remoteRevoked:r}}async refresh(e,r){let t;try{t=await this.exchangeToken({grant_type:"refresh_token",client_id:e.clientId,refresh_token:e.refreshToken,resource:re},r)}catch(h){throw h instanceof B&&this.writeCredentials({...e,accessToken:null,refreshToken:null,expiresAt:null,scopes:[]}),h}let s=U(t.access_token,"refreshed access token"),a=U(t.refresh_token,"rotated refresh token"),o=me(t.scope);if(o.length>0&&!o.includes(Q))throw this.writeCredentials({...e,accessToken:null,refreshToken:null,expiresAt:null,scopes:[]}),new B("The refreshed ChatGPT session no longer permits plan usage. Reconnect it in Settings.");return this.writeCredentials({...e,accessToken:s,refreshToken:a,expiresAt:ye(t.expires_in,this.now()),scopes:o.length?o:e.scopes,idToken:e.idToken}),s}async exchangeToken(e,r){let t=Date.now(),s=r?.started({provider:"chatgpt-plan",protocol:"https+oauth-token",endpoint:he,attempt:1}),a=!1,o=m=>{!s||a||(a=!0,r?.settled(s,m))},h;try{h=await this.fetcher(he,{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded",accept:"application/json"},body:new URLSearchParams(e),signal:AbortSignal.timeout(15e3)})}catch(m){let p=m instanceof Error&&m.name==="AbortError",f=p?"aborted":xe(m);throw o({outcome:p?"interrupted":"failed",durationMs:Date.now()-t,errorCategory:p?"aborted":"transport",...f?{errorCode:f}:{}}),e.grant_type==="authorization_code"?new $("The ChatGPT token request did not return a response. You can retry it once; if the authorization code was already used, start a new sign-in."):m}s&&r?.response(s,{status:h.status,contentType:h.headers.get("content-type")});let l=await h.json().catch(()=>null);if(!h.ok){o({outcome:"failed",durationMs:Date.now()-t,terminalEvent:"http_response",errorCategory:"http",errorCode:`http_${h.status}`});let m=v(l)&&typeof l.error=="string"?l.error:"";throw new Set(["invalid_grant","invalid_refresh_token","token_expired","refresh_token_expired","refresh_token_invalidated","refresh_token_reused"]).has(m)?new B("ChatGPT authorization expired. Reconnect your account in Settings."):new Error(`ChatGPT token exchange failed (HTTP ${h.status}).`)}if(!v(l))throw o({outcome:"failed",durationMs:Date.now()-t,terminalEvent:"http_response",errorCategory:"protocol",errorCode:"invalid_token_response"}),new Error("ChatGPT returned an invalid token response.");return o({outcome:"completed",durationMs:Date.now()-t,terminalEvent:"http_response"}),l}async oidcMetadata(){if(this.metadata)return this.metadata;let e=await this.fetcher(`${H}/.well-known/openid-configuration`,{headers:{accept:"application/json"},signal:AbortSignal.timeout(1e4)});if(!e.ok)throw new Error("Could not load ChatGPT identity verification metadata.");let r=await e.json();if(!v(r)||r.issuer!==H||typeof r.jwks_uri!="string")throw new Error("ChatGPT identity metadata is invalid.");let t=new URL(r.jwks_uri);if(t.protocol!=="https:"||t.hostname!=="auth.openai.com")throw new Error("ChatGPT identity metadata contains an untrusted signing key location.");return this.metadata=r,this.metadata}async verifyIdentityToken(e,r,t){let s=e.split(".");if(s.length!==3)throw new Error("ChatGPT returned a malformed identity token.");let a=ge(s[0]),o=ge(s[1]),h=a.alg,l=a.kid;if(h!=="RS256"&&h!=="ES256"||typeof l!="string")throw new Error("ChatGPT identity token uses an unsupported signing key.");let m=await this.oidcMetadata(),p=async(T=!1)=>{if(this.jwks&&!T)return this.jwks;let L=await this.fetcher(m.jwks_uri,{headers:{accept:"application/json"},signal:AbortSignal.timeout(1e4)});if(!L.ok)throw new Error("Could not load ChatGPT identity signing keys.");let F=await L.json();if(!v(F)||!Array.isArray(F.keys))throw new Error("ChatGPT signing key set is invalid.");return this.jwks=F,this.jwks},f=await p(),g=f.keys?.find(T=>T.kid===l&&T.use!=="enc"&&(!T.alg||T.alg===h)&&(!T.key_ops||T.key_ops.includes("verify")));if(g||(f=await p(!0),g=f.keys?.find(T=>T.kid===l&&T.use!=="enc"&&(!T.alg||T.alg===h)&&(!T.key_ops||T.key_ops.includes("verify")))),!g)throw new Error("ChatGPT identity token signing key was not found.");let y=Pe({key:g,format:"jwk"}),C=Buffer.from(`${s[0]}.${s[1]}`,"ascii"),_=Buffer.from(s[2],"base64url"),b=h==="RS256"?pe("RSA-SHA256",C,y,_):pe("sha256",C,{key:y,dsaEncoding:"ieee-p1363"},_),P=Math.floor(this.now()/1e3),R=o.aud,j=Array.isArray(R)?R.includes(r):R===r;if(!b||o.iss!==H||!j||o.azp!==void 0&&o.azp!==r||typeof o.sub!="string"||typeof o.exp!="number"||o.exp<=P||o.nonce!==t)throw new Error("ChatGPT identity token validation failed. The account was not connected.");return o}readCredentials(){return ve(this.state.get(fe,null))}writeCredentials(e){this.state.set(fe,e)}};var we="https://api.openai.com/v1/responses";var Me=new Set(["ECONNREFUSED","ECONNRESET","EAI_AGAIN","EHOSTUNREACH","ENETUNREACH","ETIMEDOUT","UND_ERR_CONNECT_TIMEOUT","UND_ERR_SOCKET"]);function Ge(n){let e=[];for(let r=0;r<n.turns.length;r+=1){let t=n.turns[r];if(t.kind==="message"){if(t.role!=="assistant"){e.push({role:t.role,content:t.content});continue}let o=ke(t.reasoningReplay);e.push(...o,{role:t.role,content:t.content});continue}if(t.kind==="assistant_tools"){e.push(...ke(t.reasoningReplay),...t.content?[{role:"assistant",content:t.content}]:[],...t.calls.map(o=>({type:"function_call",call_id:o.id,name:o.name,arguments:JSON.stringify(o.arguments)})));continue}let s=t.batchId,a=[t];for(;r+1<n.turns.length;){let o=n.turns[r+1];if(o.kind!=="tool_result"||(s?o.batchId!==s:o.batchId))break;a.push(o),r+=1}e.push(...a.map(o=>({type:"function_call_output",call_id:o.callId,output:o.content})));for(let o of a)o.images?.length&&e.push({role:"user",content:[{type:"input_text",text:`Images returned by tool ${o.toolName} (call id ${o.callId}).`},...o.images.map(h=>({type:"input_image",image_url:`data:${h.mimeType};base64,${h.data}`}))]})}return e}function ke(n){return Array.isArray(n)?n.flatMap(e=>{let r=I(e);return r?.type==="reasoning"?[r]:[]}):[]}function Ue(n){return n.map(e=>({type:"function",name:e.name,description:e.description,parameters:e.parameters}))}function I(n){return n&&typeof n=="object"&&!Array.isArray(n)?n:null}function je(n){let e=I(n);if(!e)return null;let r=typeof e.input_tokens=="number"?e.input_tokens:void 0,t=typeof e.output_tokens=="number"?e.output_tokens:void 0,s=typeof e.total_tokens=="number"?e.total_tokens:void 0,a=I(e.input_tokens_details),o=typeof a?.cached_tokens=="number"?a.cached_tokens:void 0,h=typeof a?.cache_write_tokens=="number"?a.cache_write_tokens:void 0;return r===void 0&&t===void 0&&s===void 0&&o===void 0&&h===void 0?null:{...r===void 0?{}:{inputTokens:r},...t===void 0?{}:{outputTokens:t},...s===void 0?{}:{totalTokens:s},...o===void 0?{}:{cachedInputTokens:o},...h===void 0?{}:{cacheWriteTokens:h}}}function se(n,e){if(typeof n!="string"||!n.trim())return{};let r;try{r=JSON.parse(n)}catch{throw new Error(`Model returned invalid arguments for tool ${e}.`)}if(!r||typeof r!="object"||Array.isArray(r))throw new Error(`Tool arguments for ${e} must be a JSON object.`);return r}function Fe(n,e){let r=Array.isArray(n.output)?n.output:[],t="",s=[],a=[],o=[];for(let m of r){let p=I(m);if(p)if(p.type==="reasoning"){if(a.push(p),Array.isArray(p.summary))for(let f of p.summary){let g=I(f)?.text;typeof g=="string"&&g.length>0&&s.push(g)}}else if(p.type==="message"&&Array.isArray(p.content))for(let f of p.content){let g=I(f);g?.type==="output_text"&&typeof g.text=="string"&&(t+=g.text),g?.type==="refusal"&&typeof g.refusal=="string"&&(t+=g.refusal)}else p.type==="function_call"&&typeof p.name=="string"&&o.push({id:typeof p.call_id=="string"?p.call_id:`call-${o.length}`,name:p.name,arguments:se(p.arguments,p.name)})}let h=I(n.incomplete_details),l=s.join(`
+// src/plugins/chatgpt-plan.ts
+import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
+import { createServer } from "node:http";
 
-`);return{content:t,...l?{reasoningSummary:l}:{},...a.length>0?{reasoningReplay:a}:{},toolCalls:o,usage:je(n.usage),model:typeof n.model=="string"?n.model:e.model,finishReason:n.status==="incomplete"?h?.reason==="max_output_tokens"?"length":"incomplete":o.length>0?"tool_calls":"stop"}}function Oe(n,e){let t=(Array.isArray(n.output)?n.output:[]).flatMap((a,o)=>{let h=I(a);if(h?.type!=="reasoning")return[];let l=e.get(o);if(!l)return[h];let m={...l,...h};return typeof h.encrypted_content!="string"&&typeof l.encrypted_content=="string"&&(m.encrypted_content=l.encrypted_content),[m]}),s=t.length>0?t:[...e.entries()].sort(([a],[o])=>a-o).map(([,a])=>a);return s.length>0?s:void 0}function $e(n){if(!Array.isArray(n.output))return[];let e=[];for(let[r,t]of n.output.entries()){let s=I(t);s?.type!=="function_call"||typeof s.name!="string"||e.push({...typeof s.id=="string"?{itemId:s.id}:{},outputIndex:r,...typeof s.call_id=="string"?{callId:s.call_id}:{},...typeof s.arguments=="string"?{argumentsText:s.arguments}:{},toolCallIndex:e.length})}return e}function M(n){let e=n,r=new Set;for(let t=0;t<5&&e&&typeof e=="object"&&!r.has(e);t+=1){r.add(e);let s=e.code;if(typeof s=="string"&&/^[a-z0-9_.:-]{1,80}$/i.test(s))return s;e=e.cause}}function Le(n){let e=M(n)?.toUpperCase();return e?Me.has(e):n instanceof TypeError&&n.message.toLowerCase()==="fetch failed"}function Ne(n){return n.aborted?Promise.reject(new DOMException("The operation was aborted.","AbortError")):new Promise((e,r)=>{let t,s=()=>{clearTimeout(t),r(new DOMException("The operation was aborted.","AbortError"))};t=setTimeout(()=>{n.removeEventListener("abort",s),e()},2e3),n.addEventListener("abort",s,{once:!0})})}function N(n,e){if(n instanceof Error&&n.name==="AbortError")return n;let r=M(n)??(e&&/^[a-z0-9_.:-]{1,80}$/i.test(e)?e:void 0);if(!r||I(n)?.code===r)return n;let t=n instanceof Error?n.message:"ChatGPT model request failed.",s=Object.assign(new Error(t),{cause:n,code:r});return n instanceof Error&&(s.name=n.name),s}function Ce(n,e){return Object.assign(new Error(n),{code:e})}function De(n){let e={};if(!Array.isArray(n.output))return e;for(let r of n.output){let t=I(r),s=typeof t?.type=="string"?t.type:"unknown";/^[a-z0-9_.:-]{1,80}$/i.test(s)&&(e[s]=(e[s]??0)+1)}return e}var ee=class{constructor(e,r=fetch){this.auth=e;this.fetcher=r}auth;fetcher;async complete(e,r,t,s,a,o,h,l){if(!e.model.trim())throw new Error("Choose a ChatGPT model in Settings before sending a message.");let m=l??h,p={model:e.model,instructions:e.system,input:Ge(e),store:!1,stream:!0,parallel_tool_calls:!0,tools:Ue(e.tools),reasoning:{summary:"auto"},...o?.fields,include:["reasoning.encrypted_content"],...m?{prompt_cache_key:m}:{}},f;try{f=await this.auth.accessToken(!1,s)}catch(i){throw N(i,"auth")}let g={attempt:0,retries:0},y=await this.requestTraced(p,f,r,s,g,h,m);if(y.response.status===401){await y.response.body?.cancel().catch(()=>{});try{f=await this.auth.accessToken(!0,s)}catch(i){throw y.settle({outcome:"failed",durationMs:Date.now()-y.startedAt,terminalEvent:"http_response",errorCategory:"http",errorCode:"http_401"}),N(i,"http_401")}y.settle({outcome:"retrying",durationMs:Date.now()-y.startedAt,terminalEvent:"http_response",errorCategory:"http",errorCode:"http_401"}),y=await this.requestTraced(p,f,r,s,g,h,m)}let C=y.response;if(!C.ok)throw await C.body?.cancel().catch(()=>{}),y.settle({outcome:"failed",durationMs:Date.now()-y.startedAt,terminalEvent:"http_response",errorCategory:"http",errorCode:`http_${C.status}`}),Ce(`ChatGPT model request returned HTTP ${C.status}.`,`http_${C.status}`);if(!C.body)throw y.settle({outcome:"failed",durationMs:Date.now()-y.startedAt,terminalEvent:"http_response",errorCategory:"protocol",errorCode:"empty_stream"}),Ce("ChatGPT returned an empty Responses stream.","empty_stream");let _;try{_=C.body.getReader()}catch(i){let u=r.aborted||i instanceof Error&&i.name==="AbortError";throw y.settle({outcome:u?"interrupted":"failed",durationMs:Date.now()-y.startedAt,errorCategory:u?"aborted":"protocol",errorCode:u?"aborted":"invalid_stream"}),N(i,u?void 0:"invalid_stream")}let b=new TextDecoder,P="",R=[],j=null,T="",L=null,F=null,J,S,A,x,D={},G,K=0,q=!1,W=new Map,z=[],ae=new Map,Y=new Map,X=new Map,Te=(i,u)=>{let c=i?Y.get(i):void 0,k=u===void 0?void 0:X.get(u),d=c??k;if(c&&k&&c!==k){d=c.order<=k.order?c:k;let w=d===c?k:c;d.itemId===void 0&&w.itemId!==void 0&&(d.itemId=w.itemId),d.outputIndex===void 0&&w.outputIndex!==void 0&&(d.outputIndex=w.outputIndex),d.callId===void 0&&w.callId!==void 0&&(d.callId=w.callId),d.name===void 0&&w.name!==void 0&&(d.name=w.name),w.argumentsComplete&&!d.argumentsComplete?d.argumentsText=w.argumentsText:d.argumentsText||(d.argumentsText=w.argumentsText),d.argumentsComplete||=w.argumentsComplete,d.order=Math.min(d.order,w.order);for(let[O,te]of Y)te===w&&Y.set(O,d);for(let[O,te]of X)te===w&&X.set(O,d);let E=z.indexOf(w);E>=0&&z.splice(E,1)}return d||(d={argumentsText:"",argumentsComplete:!1,order:z.length},z.push(d)),i&&(d.itemId=i,Y.set(i,d)),u!==void 0&&(d.outputIndex=u,X.set(u,d)),d},V=(i,u,c=!1)=>{let k=typeof i.item_id=="string"?i.item_id:typeof u?.id=="string"?u.id:void 0,d=typeof i.output_index=="number"&&Number.isInteger(i.output_index)?i.output_index:void 0,w=Te(k,d);return typeof u?.call_id=="string"&&(w.callId=u.call_id),typeof u?.name=="string"&&(w.name=u.name),c&&typeof i.arguments=="string"?(w.argumentsText=i.arguments,w.argumentsComplete=!0):c&&typeof u?.arguments=="string"&&(w.argumentsText=u.arguments,w.argumentsComplete=!0),w},ie=(i,u,c)=>{let k=typeof i.output_index=="number"&&Number.isInteger(i.output_index)?i.output_index:Number.MAX_SAFE_INTEGER,d=typeof i.content_index=="number"&&Number.isInteger(i.content_index)?i.content_index:Number.MAX_SAFE_INTEGER,w=`${k}:${d}`,E=W.get(w);W.set(w,{outputIndex:k,contentIndex:d,order:E?.order??W.size,text:c?`${E?.text??""}${u}`:u})},_e=()=>[...W.values()].sort((i,u)=>i.outputIndex-u.outputIndex||i.contentIndex-u.contentIndex||i.order-u.order).map(i=>i.text).join(""),le=i=>{/^[a-z0-9_.:-]{1,80}$/i.test(i)&&(D[i]=(D[i]??0)+1)},ce=()=>{if(R.length===0)return;let i=R.join(`
-`);if(R=[],i==="[DONE]"){le("done"),x="done",q=!0;return}let u;try{u=JSON.parse(i)}catch{throw S="protocol",A="invalid_json",new Error("ChatGPT returned invalid streaming JSON.")}let c=I(u);if(!(!c||typeof c.type!="string"))if(le(c.type),c.type==="response.output_text.delta"&&typeof c.delta=="string")c.delta.length>0&&G===void 0&&(G=Date.now()-y.startedAt),K+=c.delta.length,ie(c,c.delta,!0),t(c.delta);else if(c.type==="response.reasoning_summary_text.delta"&&typeof c.delta=="string"){let k=typeof c.output_index=="number"?c.output_index:0,d=typeof c.summary_index=="number"?c.summary_index:0,w=`${k}:${d}`;c.delta&&L!==null&&L!==w&&(T+=`
+// src/plugins/chatgpt-plan/auth.ts
+import { createHash, createPublicKey, randomBytes, randomUUID, verify } from "node:crypto";
+var authIssuer = "https://auth.openai.com";
+var authorizeEndpoint = `${authIssuer}/api/accounts/authorize`;
+var tokenEndpoint = `${authIssuer}/api/accounts/oauth/token`;
+var resource = "https://api.openai.com/v1";
+var authStateKey = "oauth";
+var planScope = "chatgpt.tokens.use.direct";
+var requestedScopes = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
+var refreshAheadMs = 12e4;
+var modelCatalogRefreshMs = 10 * 6e4;
+var modelCatalogRetryMs = 6e4;
+var modelCatalogStateKey = "modelCatalog";
+var UnusableChatGptRefreshToken = class extends Error {
+};
+var RetryableChatGptAuthorizationExchange = class extends Error {
+};
+function isObject(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+function stringField(value, name) {
+  if (typeof value !== "string" || !value) throw new Error(`ChatGPT sign-in response is missing ${name}.`);
+  return value;
+}
+function decodeJwtPart(value) {
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    if (!isObject(parsed)) throw new Error();
+    return parsed;
+  } catch {
+    throw new Error("ChatGPT returned a malformed identity token.");
+  }
+}
+function scopesFrom(value) {
+  return typeof value === "string" ? [...new Set(value.split(/\s+/).filter(Boolean))] : [];
+}
+function expiryFrom(value, now) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error("ChatGPT sign-in response did not include a valid token lifetime.");
+  }
+  return now + value * 1e3;
+}
+function networkErrorCode(error) {
+  let current = error;
+  const visited = /* @__PURE__ */ new Set();
+  for (let depth = 0; depth < 5 && current && typeof current === "object" && !visited.has(current); depth += 1) {
+    visited.add(current);
+    const code = current.code;
+    if (typeof code === "string" && /^[a-z0-9_.:-]{1,80}$/i.test(code)) return code;
+    if (current.name === "TimeoutError") return "timeout";
+    current = current.cause;
+  }
+  return void 0;
+}
+function normalizedCredential(value) {
+  if (!isObject(value) || typeof value.hostId !== "string") return null;
+  return {
+    hostId: value.hostId,
+    clientId: typeof value.clientId === "string" ? value.clientId : null,
+    subject: typeof value.subject === "string" ? value.subject : null,
+    email: typeof value.email === "string" ? value.email : null,
+    idToken: typeof value.idToken === "string" ? value.idToken : null,
+    accessToken: typeof value.accessToken === "string" ? value.accessToken : null,
+    refreshToken: typeof value.refreshToken === "string" ? value.refreshToken : null,
+    expiresAt: typeof value.expiresAt === "number" ? value.expiresAt : null,
+    scopes: Array.isArray(value.scopes) ? value.scopes.filter((item) => typeof item === "string") : []
+  };
+}
+var ChatGptPlanAuth = class {
+  constructor(state, fetcher = fetch, now = Date.now, secrets = state, cache = state) {
+    this.fetcher = fetcher;
+    this.now = now;
+    this.secrets = secrets;
+    this.cache = cache;
+  }
+  fetcher;
+  now;
+  secrets;
+  cache;
+  pending = /* @__PURE__ */ new Map();
+  refreshInFlight = null;
+  metadata = null;
+  jwks = null;
+  modelCatalogRefreshInFlight = null;
+  modelCatalogLastRefreshAttemptAt = 0;
+  status() {
+    const credentials = this.readCredentials();
+    const connected = Boolean(
+      credentials?.clientId && credentials.refreshToken && credentials.scopes.includes(planScope)
+    );
+    return { connected, accountLabel: connected ? credentials?.email ?? "ChatGPT account" : null };
+  }
+  async beginSignIn(redirectUri) {
+    const redirect = new URL(redirectUri);
+    if (redirect.protocol !== "http:" || redirect.hostname !== "127.0.0.1" || redirect.username || redirect.password || !redirect.pathname.endsWith("/auth/callback")) {
+      throw new Error("ChatGPT sign-in requires the registered 127.0.0.1 loopback callback.");
+    }
+    const stored = this.readCredentials();
+    const hostId = stored?.hostId ?? `urn:uuid:${randomUUID()}`;
+    const clientId = stored?.clientId ?? "dynamic_agent_client";
+    const state = randomBytes(32).toString("base64url");
+    const nonce = randomBytes(32).toString("base64url");
+    const verifier = randomBytes(32).toString("base64url");
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const attempt = {
+      state,
+      nonce,
+      verifier,
+      redirectUri: redirect.toString(),
+      clientId,
+      createdAt: this.now()
+    };
+    for (const [key, existing] of this.pending) {
+      if (existing.createdAt + 10 * 6e4 <= this.now()) this.pending.delete(key);
+    }
+    this.pending.set(state, attempt);
+    const url = new URL(authorizeEndpoint);
+    url.search = new URLSearchParams({
+      client_id: clientId,
+      ...clientId === "dynamic_agent_client" ? { agent_name_hint: "Pico" } : {},
+      ext_agent_host_id: hostId,
+      ...clientId !== "dynamic_agent_client" && stored?.idToken ? { id_token_hint: stored.idToken } : {},
+      ...clientId !== "dynamic_agent_client" && stored?.email ? { login_hint: stored.email } : {},
+      response_type: "code",
+      redirect_uri: redirect.toString(),
+      scope: requestedScopes,
+      resource,
+      state,
+      nonce,
+      code_challenge_method: "S256",
+      code_challenge: challenge
+    }).toString();
+    this.writeCredentials({
+      hostId,
+      clientId: stored?.clientId ?? null,
+      subject: stored?.subject ?? null,
+      email: stored?.email ?? null,
+      idToken: stored?.idToken ?? null,
+      accessToken: stored?.accessToken ?? null,
+      refreshToken: stored?.refreshToken ?? null,
+      expiresAt: stored?.expiresAt ?? null,
+      scopes: stored?.scopes ?? []
+    });
+    return { authorizationUrl: url.toString() };
+  }
+  parseCallbackUrl(callbackUrl, redirectUri) {
+    if (callbackUrl.length > 8192) throw new Error("ChatGPT callback URL is too long.");
+    let callback;
+    let redirect;
+    try {
+      callback = new URL(callbackUrl.trim());
+      redirect = new URL(redirectUri);
+    } catch {
+      throw new Error("Paste the full ChatGPT callback URL from the browser address bar.");
+    }
+    if (callback.protocol !== "http:" || callback.username || callback.password || callback.hash || callback.origin !== redirect.origin || callback.pathname !== redirect.pathname) {
+      throw new Error("This callback URL does not match the active ChatGPT sign-in attempt.");
+    }
+    const states = callback.searchParams.getAll("state");
+    const codes = callback.searchParams.getAll("code");
+    const errors = callback.searchParams.getAll("error");
+    const clientIds = callback.searchParams.getAll("client_id");
+    if (states.length !== 1 || codes.length > 1 || errors.length > 1 || clientIds.length > 1 || clientIds.length === 1 && !clientIds[0] || Boolean(codes.length) === Boolean(errors.length)) {
+      throw new Error("The ChatGPT callback URL is incomplete or malformed.");
+    }
+    if (!this.hasPendingAuthorization(states[0] ?? null, redirectUri)) {
+      throw new Error("This ChatGPT sign-in attempt expired or did not match. Start again.");
+    }
+    return callback.searchParams;
+  }
+  hasPendingAuthorization(state, redirectUri) {
+    if (!state) return false;
+    const attempt = this.pending.get(state);
+    return Boolean(attempt && attempt.redirectUri === redirectUri && attempt.createdAt + 10 * 6e4 > this.now());
+  }
+  async completeSignIn(callback, redirectUri, options = {}) {
+    const state = callback.get("state");
+    const attempt = state ? this.pending.get(state) : void 0;
+    if (!attempt || attempt.redirectUri !== redirectUri || attempt.createdAt + 10 * 6e4 <= this.now()) {
+      throw new Error("ChatGPT sign-in expired or did not match this authorization attempt. Start again.");
+    }
+    const codes = callback.getAll("code");
+    const errors = callback.getAll("error");
+    const clientIds = callback.getAll("client_id");
+    if (callback.getAll("state").length !== 1 || codes.length > 1 || errors.length > 1 || clientIds.length > 1 || clientIds.length === 1 && !clientIds[0] || Boolean(codes.length) === Boolean(errors.length) || codes.length === 1 && !codes[0] || errors.length === 1 && !errors[0]) {
+      throw new Error("The ChatGPT callback is incomplete or malformed.");
+    }
+    if (callback.get("error")) {
+      this.pending.delete(attempt.state);
+      if (callback.get("error") === "access_denied") throw new Error("ChatGPT sign-in was cancelled.");
+      throw new Error("ChatGPT sign-in was not completed.");
+    }
+    const code = stringField(callback.get("code"), "authorization code");
+    const callbackClientId = callback.get("client_id");
+    let clientId = attempt.clientId;
+    try {
+      if (attempt.clientId === "dynamic_agent_client") {
+        clientId = stringField(callbackClientId, "registered client ID");
+        if (clientId === "dynamic_agent_client") {
+          throw new Error("ChatGPT did not finish registering Pico. Start again.");
+        }
+      } else if (callbackClientId && callbackClientId !== attempt.clientId) {
+        throw new Error("ChatGPT returned a different client registration. Start sign-in again.");
+      }
+    } catch (error) {
+      this.pending.delete(attempt.state);
+      throw error;
+    }
+    let tokenResponse;
+    try {
+      tokenResponse = await this.exchangeToken({
+        grant_type: "authorization_code",
+        client_id: clientId,
+        code,
+        code_verifier: attempt.verifier,
+        redirect_uri: attempt.redirectUri,
+        resource
+      });
+    } catch (error) {
+      if (!(error instanceof RetryableChatGptAuthorizationExchange && options.allowTransportRetry !== false)) {
+        this.pending.delete(attempt.state);
+      }
+      throw error;
+    }
+    this.pending.delete(attempt.state);
+    const accessToken = stringField(tokenResponse.access_token, "access token");
+    const refreshToken = stringField(tokenResponse.refresh_token, "refresh token");
+    const idToken = stringField(tokenResponse.id_token, "identity token");
+    if (stringField(tokenResponse.token_type, "token type").toLowerCase() !== "bearer") {
+      throw new Error("ChatGPT returned an unsupported token type.");
+    }
+    const scopes = scopesFrom(tokenResponse.scope);
+    if (!scopes.includes(planScope)) throw new Error("This ChatGPT account did not authorize plan usage for Pico.");
+    const claims = await this.verifyIdentityToken(idToken, clientId, attempt.nonce);
+    const existing = this.readCredentials();
+    if (attempt.clientId !== "dynamic_agent_client" && existing?.subject && existing.subject !== claims.sub) {
+      throw new Error("The ChatGPT account changed during reauthorization. The saved account was not replaced.");
+    }
+    const saved = {
+      hostId: existing?.hostId ?? `urn:uuid:${randomUUID()}`,
+      clientId,
+      subject: claims.sub,
+      email: typeof claims.email === "string" ? claims.email : existing?.email ?? null,
+      idToken,
+      accessToken,
+      refreshToken,
+      expiresAt: expiryFrom(tokenResponse.expires_in, this.now()),
+      scopes
+    };
+    this.writeCredentials(saved);
+    return this.status();
+  }
+  async accessToken(forceRefresh = false, requestTrace) {
+    const credentials = this.readCredentials();
+    if (!credentials?.clientId || !credentials.refreshToken || !credentials.accessToken || !credentials.expiresAt) {
+      throw new Error("Connect a ChatGPT account in Settings before using this model provider.");
+    }
+    if (!credentials.scopes.includes(planScope)) {
+      throw new Error("The connected ChatGPT account has not granted plan usage to Pico. Reconnect it in Settings.");
+    }
+    if (!forceRefresh && credentials.expiresAt > this.now() + refreshAheadMs) return credentials.accessToken;
+    if (this.refreshInFlight) return this.refreshInFlight;
+    this.refreshInFlight = this.refresh(credentials, requestTrace).finally(() => {
+      this.refreshInFlight = null;
+    });
+    return this.refreshInFlight;
+  }
+  async listModels(forceRefresh = false) {
+    const cached = this.readModelCatalog();
+    if (cached && !forceRefresh) {
+      if (cached.refreshedAt + modelCatalogRefreshMs <= this.now() && this.modelCatalogLastRefreshAttemptAt + modelCatalogRetryMs <= this.now()) {
+        void this.refreshModels().catch(() => void 0);
+      }
+      return cached.models;
+    }
+    try {
+      return await this.refreshModels();
+    } catch (error) {
+      if (cached) return cached.models;
+      throw error;
+    }
+  }
+  refreshModels() {
+    if (this.modelCatalogRefreshInFlight) return this.modelCatalogRefreshInFlight;
+    this.modelCatalogLastRefreshAttemptAt = this.now();
+    const request = this.fetchModels().then((models) => {
+      this.cache.set(modelCatalogStateKey, { models, refreshedAt: this.now() });
+      return models;
+    }).finally(() => {
+      this.modelCatalogRefreshInFlight = null;
+    });
+    this.modelCatalogRefreshInFlight = request;
+    return request;
+  }
+  readModelCatalog() {
+    const value = this.cache.get(modelCatalogStateKey, null);
+    if (!isObject(value) || !Array.isArray(value.models) || typeof value.refreshedAt !== "number") return null;
+    const models = value.models.flatMap((entry) => {
+      if (!isObject(entry) || typeof entry.slug !== "string" || typeof entry.displayName !== "string") return [];
+      return [{ slug: entry.slug, displayName: entry.displayName }];
+    });
+    return { models, refreshedAt: value.refreshedAt };
+  }
+  async fetchModels() {
+    let accessToken = await this.accessToken();
+    const response = await this.fetcher("https://api.openai.com/v1/models", {
+      headers: { authorization: `Bearer ${accessToken}`, accept: "application/json" },
+      signal: AbortSignal.timeout(15e3)
+    });
+    let modelsResponse = response;
+    if (response.status === 401) {
+      await response.body?.cancel().catch(() => void 0);
+      accessToken = await this.accessToken(true);
+      modelsResponse = await this.fetcher("https://api.openai.com/v1/models", {
+        headers: { authorization: `Bearer ${accessToken}`, accept: "application/json" },
+        signal: AbortSignal.timeout(15e3)
+      });
+    }
+    if (!modelsResponse.ok) throw new Error(`Could not load ChatGPT models (HTTP ${modelsResponse.status}).`);
+    const payload = await modelsResponse.json();
+    if (!isObject(payload) || !Array.isArray(payload.models)) {
+      throw new Error("ChatGPT returned an invalid model catalog.");
+    }
+    return payload.models.flatMap((entry) => {
+      if (!isObject(entry) || entry.visibility !== "list" || typeof entry.slug !== "string") return [];
+      return [
+        {
+          slug: entry.slug,
+          displayName: typeof entry.display_name === "string" ? entry.display_name : entry.slug
+        }
+      ];
+    });
+  }
+  async signOut() {
+    const credentials = this.readCredentials();
+    let remoteRevoked = !credentials?.refreshToken || !credentials.clientId;
+    if (credentials?.refreshToken && credentials.clientId) {
+      try {
+        const metadata = await this.oidcMetadata();
+        const endpoint = typeof metadata.revocation_endpoint === "string" ? metadata.revocation_endpoint : null;
+        if (endpoint && new URL(endpoint).protocol === "https:" && new URL(endpoint).hostname === "auth.openai.com") {
+          for (let attempt = 0; attempt < 3 && !remoteRevoked; attempt += 1) {
+            const response = await this.fetcher(endpoint, {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                token: credentials.refreshToken,
+                token_type_hint: "refresh_token",
+                client_id: credentials.clientId
+              }),
+              signal: AbortSignal.timeout(1e4)
+            });
+            remoteRevoked = response.status === 200;
+            if (remoteRevoked || response.status < 500 && response.status !== 429) break;
+            await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 200 : 700));
+          }
+        }
+      } catch {
+        remoteRevoked = false;
+      }
+    }
+    if (credentials) {
+      this.writeCredentials({
+        ...credentials,
+        idToken: null,
+        accessToken: null,
+        refreshToken: null,
+        expiresAt: null,
+        scopes: []
+      });
+    }
+    this.cache.set(modelCatalogStateKey, null);
+    return { remoteRevoked };
+  }
+  async refresh(credentials, requestTrace) {
+    let tokenResponse;
+    try {
+      tokenResponse = await this.exchangeToken(
+        {
+          grant_type: "refresh_token",
+          client_id: credentials.clientId,
+          refresh_token: credentials.refreshToken,
+          resource
+        },
+        requestTrace
+      );
+    } catch (error) {
+      if (error instanceof UnusableChatGptRefreshToken) {
+        this.writeCredentials({
+          ...credentials,
+          accessToken: null,
+          refreshToken: null,
+          expiresAt: null,
+          scopes: []
+        });
+      }
+      throw error;
+    }
+    const accessToken = stringField(tokenResponse.access_token, "refreshed access token");
+    const refreshToken = stringField(tokenResponse.refresh_token, "rotated refresh token");
+    const scopes = scopesFrom(tokenResponse.scope);
+    if (scopes.length > 0 && !scopes.includes(planScope)) {
+      this.writeCredentials({
+        ...credentials,
+        accessToken: null,
+        refreshToken: null,
+        expiresAt: null,
+        scopes: []
+      });
+      throw new UnusableChatGptRefreshToken(
+        "The refreshed ChatGPT session no longer permits plan usage. Reconnect it in Settings."
+      );
+    }
+    this.writeCredentials({
+      ...credentials,
+      accessToken,
+      refreshToken,
+      expiresAt: expiryFrom(tokenResponse.expires_in, this.now()),
+      scopes: scopes.length ? scopes : credentials.scopes,
+      idToken: credentials.idToken
+    });
+    return accessToken;
+  }
+  async exchangeToken(fields, requestTrace) {
+    const startedAt = Date.now();
+    const providerAttemptId = requestTrace?.started({
+      provider: "chatgpt-plan",
+      protocol: "https+oauth-token",
+      endpoint: tokenEndpoint,
+      attempt: 1
+    });
+    let settled = false;
+    const settle = (details) => {
+      if (!providerAttemptId || settled) return;
+      settled = true;
+      requestTrace?.settled(providerAttemptId, details);
+    };
+    let response;
+    try {
+      response = await this.fetcher(tokenEndpoint, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+        body: new URLSearchParams(fields),
+        signal: AbortSignal.timeout(15e3)
+      });
+    } catch (error) {
+      const aborted = error instanceof Error && error.name === "AbortError";
+      const errorCode = aborted ? "aborted" : networkErrorCode(error);
+      settle({
+        outcome: aborted ? "interrupted" : "failed",
+        durationMs: Date.now() - startedAt,
+        errorCategory: aborted ? "aborted" : "transport",
+        ...errorCode ? { errorCode } : {}
+      });
+      if (fields.grant_type === "authorization_code") {
+        throw new RetryableChatGptAuthorizationExchange(
+          "The ChatGPT token request did not return a response. You can retry it once; if the authorization code was already used, start a new sign-in."
+        );
+      }
+      throw error;
+    }
+    if (providerAttemptId) {
+      requestTrace?.response(providerAttemptId, {
+        status: response.status,
+        contentType: response.headers.get("content-type")
+      });
+    }
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      settle({
+        outcome: "failed",
+        durationMs: Date.now() - startedAt,
+        terminalEvent: "http_response",
+        errorCategory: "http",
+        errorCode: `http_${response.status}`
+      });
+      const error = isObject(payload) && typeof payload.error === "string" ? payload.error : "";
+      const unusableRefreshCodes = /* @__PURE__ */ new Set([
+        "invalid_grant",
+        "invalid_refresh_token",
+        "token_expired",
+        "refresh_token_expired",
+        "refresh_token_invalidated",
+        "refresh_token_reused"
+      ]);
+      if (unusableRefreshCodes.has(error)) {
+        throw new UnusableChatGptRefreshToken("ChatGPT authorization expired. Reconnect your account in Settings.");
+      }
+      throw new Error(`ChatGPT token exchange failed (HTTP ${response.status}).`);
+    }
+    if (!isObject(payload)) {
+      settle({
+        outcome: "failed",
+        durationMs: Date.now() - startedAt,
+        terminalEvent: "http_response",
+        errorCategory: "protocol",
+        errorCode: "invalid_token_response"
+      });
+      throw new Error("ChatGPT returned an invalid token response.");
+    }
+    settle({
+      outcome: "completed",
+      durationMs: Date.now() - startedAt,
+      terminalEvent: "http_response"
+    });
+    return payload;
+  }
+  async oidcMetadata() {
+    if (this.metadata) return this.metadata;
+    const response = await this.fetcher(`${authIssuer}/.well-known/openid-configuration`, {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(1e4)
+    });
+    if (!response.ok) throw new Error("Could not load ChatGPT identity verification metadata.");
+    const value = await response.json();
+    if (!isObject(value) || value.issuer !== authIssuer || typeof value.jwks_uri !== "string") {
+      throw new Error("ChatGPT identity metadata is invalid.");
+    }
+    const jwksUrl = new URL(value.jwks_uri);
+    if (jwksUrl.protocol !== "https:" || jwksUrl.hostname !== "auth.openai.com") {
+      throw new Error("ChatGPT identity metadata contains an untrusted signing key location.");
+    }
+    this.metadata = value;
+    return this.metadata;
+  }
+  async verifyIdentityToken(token, clientId, expectedNonce) {
+    const parts = token.split(".");
+    if (parts.length !== 3) throw new Error("ChatGPT returned a malformed identity token.");
+    const header = decodeJwtPart(parts[0]);
+    const claims = decodeJwtPart(parts[1]);
+    const alg = header.alg;
+    const kid = header.kid;
+    if (alg !== "RS256" && alg !== "ES256" || typeof kid !== "string") {
+      throw new Error("ChatGPT identity token uses an unsupported signing key.");
+    }
+    const metadata = await this.oidcMetadata();
+    const loadJwks = async (force = false) => {
+      if (this.jwks && !force) return this.jwks;
+      const response = await this.fetcher(metadata.jwks_uri, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(1e4)
+      });
+      if (!response.ok) throw new Error("Could not load ChatGPT identity signing keys.");
+      const value = await response.json();
+      if (!isObject(value) || !Array.isArray(value.keys)) throw new Error("ChatGPT signing key set is invalid.");
+      this.jwks = value;
+      return this.jwks;
+    };
+    let keySet = await loadJwks();
+    let jwk = keySet.keys?.find(
+      (key2) => key2.kid === kid && key2.use !== "enc" && (!key2.alg || key2.alg === alg) && (!key2.key_ops || key2.key_ops.includes("verify"))
+    );
+    if (!jwk) {
+      keySet = await loadJwks(true);
+      jwk = keySet.keys?.find(
+        (key2) => key2.kid === kid && key2.use !== "enc" && (!key2.alg || key2.alg === alg) && (!key2.key_ops || key2.key_ops.includes("verify"))
+      );
+    }
+    if (!jwk) throw new Error("ChatGPT identity token signing key was not found.");
+    const key = createPublicKey({ key: jwk, format: "jwk" });
+    const data = Buffer.from(`${parts[0]}.${parts[1]}`, "ascii");
+    const signature = Buffer.from(parts[2], "base64url");
+    const validSignature = alg === "RS256" ? verify("RSA-SHA256", data, key, signature) : verify("sha256", data, { key, dsaEncoding: "ieee-p1363" }, signature);
+    const nowSeconds = Math.floor(this.now() / 1e3);
+    const audience = claims.aud;
+    const audienceMatches = Array.isArray(audience) ? audience.includes(clientId) : audience === clientId;
+    if (!validSignature || claims.iss !== authIssuer || !audienceMatches || claims.azp !== void 0 && claims.azp !== clientId || typeof claims.sub !== "string" || typeof claims.exp !== "number" || claims.exp <= nowSeconds || claims.nonce !== expectedNonce) {
+      throw new Error("ChatGPT identity token validation failed. The account was not connected.");
+    }
+    return claims;
+  }
+  readCredentials() {
+    return normalizedCredential(this.secrets.get(authStateKey, null));
+  }
+  writeCredentials(credentials) {
+    this.secrets.set(authStateKey, credentials);
+  }
+};
 
-`,a?.({type:"reasoning_summary.delta",delta:`
+// src/plugins/chatgpt-plan/model.ts
+var responsesUrl = "https://api.openai.com/v1/responses";
+var FETCH_FAILED_RETRY_INTERVAL_MS = 2e3;
+var MAX_FETCH_FAILED_RETRIES = 5;
+var RETRYABLE_FETCH_ERROR_CODES = /* @__PURE__ */ new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET"
+]);
+function responseInput(prompt) {
+  const input = [];
+  for (let index = 0; index < prompt.turns.length; index += 1) {
+    const turn = prompt.turns[index];
+    if (turn.kind === "message") {
+      if (turn.role !== "assistant") {
+        input.push({ role: turn.role, content: turn.content });
+        continue;
+      }
+      const replay = reasoningItems(turn.reasoningReplay);
+      input.push(...replay, { role: turn.role, content: turn.content });
+      continue;
+    }
+    if (turn.kind === "assistant_tools") {
+      input.push(
+        ...reasoningItems(turn.reasoningReplay),
+        ...turn.content ? [{ role: "assistant", content: turn.content }] : [],
+        ...turn.calls.map((call) => ({
+          type: "function_call",
+          call_id: call.id,
+          name: call.name,
+          arguments: JSON.stringify(call.arguments)
+        }))
+      );
+      continue;
+    }
+    const batchId = turn.batchId;
+    const group = [turn];
+    while (index + 1 < prompt.turns.length) {
+      const next = prompt.turns[index + 1];
+      if (next.kind !== "tool_result") break;
+      if (batchId ? next.batchId !== batchId : Boolean(next.batchId)) break;
+      group.push(next);
+      index += 1;
+    }
+    input.push(
+      ...group.map((result) => ({
+        type: "function_call_output",
+        call_id: result.callId,
+        output: result.content
+      }))
+    );
+    for (const result of group) {
+      if (!result.images?.length) continue;
+      input.push({
+        role: "user",
+        content: [
+          { type: "input_text", text: `Images returned by tool ${result.toolName} (call id ${result.callId}).` },
+          ...result.images.map((image) => ({
+            type: "input_image",
+            image_url: `data:${image.mimeType};base64,${image.data}`
+          }))
+        ]
+      });
+    }
+  }
+  return input;
+}
+function reasoningItems(value) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const candidate = object(item);
+    return candidate?.type === "reasoning" ? [candidate] : [];
+  });
+}
+function responseTools(tools) {
+  return tools.map((tool) => ({
+    type: "function",
+    name: tool.name,
+    description: tool.description,
+    parameters: tool.parameters
+  }));
+}
+function object(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function readUsage(value) {
+  const usage = object(value);
+  if (!usage) return null;
+  const input = typeof usage.input_tokens === "number" ? usage.input_tokens : void 0;
+  const output = typeof usage.output_tokens === "number" ? usage.output_tokens : void 0;
+  const total = typeof usage.total_tokens === "number" ? usage.total_tokens : void 0;
+  const inputDetails = object(usage.input_tokens_details);
+  const cached = typeof inputDetails?.cached_tokens === "number" ? inputDetails.cached_tokens : void 0;
+  const cacheWrite = typeof inputDetails?.cache_write_tokens === "number" ? inputDetails.cache_write_tokens : void 0;
+  if (input === void 0 && output === void 0 && total === void 0 && cached === void 0 && cacheWrite === void 0)
+    return null;
+  return {
+    ...input === void 0 ? {} : { inputTokens: input },
+    ...output === void 0 ? {} : { outputTokens: output },
+    ...total === void 0 ? {} : { totalTokens: total },
+    ...cached === void 0 ? {} : { cachedInputTokens: cached },
+    ...cacheWrite === void 0 ? {} : { cacheWriteTokens: cacheWrite }
+  };
+}
+function parseArguments(value, name) {
+  if (typeof value !== "string" || !value.trim()) return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error(`Model returned invalid arguments for tool ${name}.`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Tool arguments for ${name} must be a JSON object.`);
+  }
+  return parsed;
+}
+function outputFrom(response, prompt) {
+  const output = Array.isArray(response.output) ? response.output : [];
+  let content = "";
+  const reasoningSummaryParts = [];
+  const reasoningReplay = [];
+  const toolCalls = [];
+  for (const rawItem of output) {
+    const item = object(rawItem);
+    if (!item) continue;
+    if (item.type === "reasoning") {
+      reasoningReplay.push(item);
+      if (Array.isArray(item.summary)) {
+        for (const rawPart of item.summary) {
+          const text = object(rawPart)?.text;
+          if (typeof text === "string" && text.length > 0) reasoningSummaryParts.push(text);
+        }
+      }
+    } else if (item.type === "message" && Array.isArray(item.content)) {
+      for (const rawContent of item.content) {
+        const part = object(rawContent);
+        if (part?.type === "output_text" && typeof part.text === "string") content += part.text;
+        if (part?.type === "refusal" && typeof part.refusal === "string") content += part.refusal;
+      }
+    } else if (item.type === "function_call" && typeof item.name === "string") {
+      toolCalls.push({
+        id: typeof item.call_id === "string" ? item.call_id : `call-${toolCalls.length}`,
+        name: item.name,
+        arguments: parseArguments(item.arguments, item.name)
+      });
+    }
+  }
+  const incomplete = object(response.incomplete_details);
+  const reasoningSummary = reasoningSummaryParts.join("\n\n");
+  return {
+    content,
+    ...reasoningSummary ? { reasoningSummary } : {},
+    ...reasoningReplay.length > 0 ? { reasoningReplay } : {},
+    toolCalls,
+    usage: readUsage(response.usage),
+    model: typeof response.model === "string" ? response.model : prompt.model,
+    finishReason: response.status === "incomplete" ? incomplete?.reason === "max_output_tokens" ? "length" : "incomplete" : toolCalls.length > 0 ? "tool_calls" : "stop"
+  };
+}
+function replayableReasoningItems(response, streamed) {
+  const output = Array.isArray(response.output) ? response.output : [];
+  const completedItems = output.flatMap((rawItem, outputIndex) => {
+    const item = object(rawItem);
+    if (item?.type !== "reasoning") return [];
+    const streamedItem = streamed.get(outputIndex);
+    if (!streamedItem) return [item];
+    const merged = { ...streamedItem, ...item };
+    if (typeof item.encrypted_content !== "string" && typeof streamedItem.encrypted_content === "string") {
+      merged.encrypted_content = streamedItem.encrypted_content;
+    }
+    return [merged];
+  });
+  const items = completedItems.length > 0 ? completedItems : [...streamed.entries()].sort(([left], [right]) => left - right).map(([, item]) => item);
+  return items.length > 0 ? items : void 0;
+}
+function finalFunctionCalls(response) {
+  if (!Array.isArray(response.output)) return [];
+  const calls = [];
+  for (const [outputIndex, rawItem] of response.output.entries()) {
+    const item = object(rawItem);
+    if (item?.type !== "function_call" || typeof item.name !== "string") continue;
+    calls.push({
+      ...typeof item.id === "string" ? { itemId: item.id } : {},
+      outputIndex,
+      ...typeof item.call_id === "string" ? { callId: item.call_id } : {},
+      ...typeof item.arguments === "string" ? { argumentsText: item.arguments } : {},
+      toolCallIndex: calls.length
+    });
+  }
+  return calls;
+}
+function errorCodeFrom(error) {
+  let current = error;
+  const visited = /* @__PURE__ */ new Set();
+  for (let depth = 0; depth < 5 && current && typeof current === "object" && !visited.has(current); depth += 1) {
+    visited.add(current);
+    const code = current.code;
+    if (typeof code === "string" && /^[a-z0-9_.:-]{1,80}$/i.test(code)) return code;
+    current = current.cause;
+  }
+  return void 0;
+}
+function isRetryableFetchFailure(error) {
+  const code = errorCodeFrom(error)?.toUpperCase();
+  if (code) return RETRYABLE_FETCH_ERROR_CODES.has(code);
+  return error instanceof TypeError && error.message.toLowerCase() === "fetch failed";
+}
+function waitForFetchRetry(signal) {
+  if (signal.aborted) return Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
+  return new Promise((resolve, reject) => {
+    let timeout;
+    const onAbort = () => {
+      clearTimeout(timeout);
+      reject(new DOMException("The operation was aborted.", "AbortError"));
+    };
+    timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, FETCH_FAILED_RETRY_INTERVAL_MS);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+function withProviderErrorCode(error, code) {
+  if (error instanceof Error && error.name === "AbortError") return error;
+  const resolvedCode = errorCodeFrom(error) ?? (code && /^[a-z0-9_.:-]{1,80}$/i.test(code) ? code : void 0);
+  if (!resolvedCode) return error;
+  if (object(error)?.code === resolvedCode) return error;
+  const message = error instanceof Error ? error.message : "ChatGPT model request failed.";
+  const tagged = Object.assign(new Error(message), { cause: error, code: resolvedCode });
+  if (error instanceof Error) tagged.name = error.name;
+  return tagged;
+}
+function providerError(message, code) {
+  return Object.assign(new Error(message), { code });
+}
+function outputItemCounts(response) {
+  const counts = {};
+  if (!Array.isArray(response.output)) return counts;
+  for (const rawItem of response.output) {
+    const item = object(rawItem);
+    const type = typeof item?.type === "string" ? item.type : "unknown";
+    if (/^[a-z0-9_.:-]{1,80}$/i.test(type)) counts[type] = (counts[type] ?? 0) + 1;
+  }
+  return counts;
+}
+var ChatGptResponsesAdapter = class {
+  constructor(auth, fetcher = fetch) {
+    this.auth = auth;
+    this.fetcher = fetcher;
+  }
+  auth;
+  fetcher;
+  async complete(prompt, signal, onText, requestTrace, onEvent, requestParameters, threadId, promptCacheKey) {
+    if (!prompt.model.trim()) throw new Error("Choose a ChatGPT model in Settings before sending a message.");
+    const cacheKey = promptCacheKey ?? threadId;
+    const body = {
+      model: prompt.model,
+      instructions: prompt.system,
+      input: responseInput(prompt),
+      store: false,
+      stream: true,
+      parallel_tool_calls: true,
+      tools: responseTools(prompt.tools),
+      reasoning: { summary: "auto" },
+      ...requestParameters?.fields,
+      include: ["reasoning.encrypted_content"],
+      ...cacheKey ? { prompt_cache_key: cacheKey } : {}
+    };
+    let accessToken;
+    try {
+      accessToken = await this.auth.accessToken(false, requestTrace);
+    } catch (error) {
+      throw withProviderErrorCode(error, "auth");
+    }
+    const retryState = { attempt: 0, retries: 0 };
+    let tracedRequest = await this.requestTraced(
+      body,
+      accessToken,
+      signal,
+      requestTrace,
+      retryState,
+      threadId,
+      cacheKey
+    );
+    if (tracedRequest.response.status === 401) {
+      await tracedRequest.response.body?.cancel().catch(() => void 0);
+      try {
+        accessToken = await this.auth.accessToken(true, requestTrace);
+      } catch (error) {
+        tracedRequest.settle({
+          outcome: "failed",
+          durationMs: Date.now() - tracedRequest.startedAt,
+          terminalEvent: "http_response",
+          errorCategory: "http",
+          errorCode: "http_401"
+        });
+        throw withProviderErrorCode(error, "http_401");
+      }
+      tracedRequest.settle({
+        outcome: "retrying",
+        durationMs: Date.now() - tracedRequest.startedAt,
+        terminalEvent: "http_response",
+        errorCategory: "http",
+        errorCode: "http_401"
+      });
+      tracedRequest = await this.requestTraced(body, accessToken, signal, requestTrace, retryState, threadId, cacheKey);
+    }
+    const response = tracedRequest.response;
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => void 0);
+      tracedRequest.settle({
+        outcome: "failed",
+        durationMs: Date.now() - tracedRequest.startedAt,
+        terminalEvent: "http_response",
+        errorCategory: "http",
+        errorCode: `http_${response.status}`
+      });
+      throw providerError(`ChatGPT model request returned HTTP ${response.status}.`, `http_${response.status}`);
+    }
+    if (!response.body) {
+      tracedRequest.settle({
+        outcome: "failed",
+        durationMs: Date.now() - tracedRequest.startedAt,
+        terminalEvent: "http_response",
+        errorCategory: "protocol",
+        errorCode: "empty_stream"
+      });
+      throw providerError("ChatGPT returned an empty Responses stream.", "empty_stream");
+    }
+    let reader;
+    try {
+      reader = response.body.getReader();
+    } catch (error) {
+      const interrupted = signal.aborted || error instanceof Error && error.name === "AbortError";
+      tracedRequest.settle({
+        outcome: interrupted ? "interrupted" : "failed",
+        durationMs: Date.now() - tracedRequest.startedAt,
+        errorCategory: interrupted ? "aborted" : "protocol",
+        errorCode: interrupted ? "aborted" : "invalid_stream"
+      });
+      throw withProviderErrorCode(error, interrupted ? void 0 : "invalid_stream");
+    }
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let eventData = [];
+    let finalResponse = null;
+    let streamedReasoningSummary = "";
+    let previousReasoningSummaryKey = null;
+    let streamFailure = null;
+    let streamFailureCode;
+    let failureCategory;
+    let failureCode;
+    let terminalEvent;
+    const eventCounts = {};
+    let firstTextMs;
+    let deltaTextCharacters = 0;
+    let ended = false;
+    const streamedTextParts = /* @__PURE__ */ new Map();
+    const streamedFunctionCalls = [];
+    const streamedReasoningItems = /* @__PURE__ */ new Map();
+    const callsByItemId = /* @__PURE__ */ new Map();
+    const callsByOutputIndex = /* @__PURE__ */ new Map();
+    const getStreamedCall = (itemId, outputIndex) => {
+      const byItemId = itemId ? callsByItemId.get(itemId) : void 0;
+      const byOutputIndex = outputIndex === void 0 ? void 0 : callsByOutputIndex.get(outputIndex);
+      let call = byItemId ?? byOutputIndex;
+      if (byItemId && byOutputIndex && byItemId !== byOutputIndex) {
+        call = byItemId.order <= byOutputIndex.order ? byItemId : byOutputIndex;
+        const duplicate = call === byItemId ? byOutputIndex : byItemId;
+        if (call.itemId === void 0 && duplicate.itemId !== void 0) call.itemId = duplicate.itemId;
+        if (call.outputIndex === void 0 && duplicate.outputIndex !== void 0)
+          call.outputIndex = duplicate.outputIndex;
+        if (call.callId === void 0 && duplicate.callId !== void 0) call.callId = duplicate.callId;
+        if (call.name === void 0 && duplicate.name !== void 0) call.name = duplicate.name;
+        if (duplicate.argumentsComplete && !call.argumentsComplete) {
+          call.argumentsText = duplicate.argumentsText;
+        } else if (!call.argumentsText) {
+          call.argumentsText = duplicate.argumentsText;
+        }
+        call.argumentsComplete ||= duplicate.argumentsComplete;
+        call.order = Math.min(call.order, duplicate.order);
+        for (const [id, candidate] of callsByItemId) {
+          if (candidate === duplicate) callsByItemId.set(id, call);
+        }
+        for (const [index, candidate] of callsByOutputIndex) {
+          if (candidate === duplicate) callsByOutputIndex.set(index, call);
+        }
+        const duplicateIndex = streamedFunctionCalls.indexOf(duplicate);
+        if (duplicateIndex >= 0) streamedFunctionCalls.splice(duplicateIndex, 1);
+      }
+      if (!call) {
+        call = { argumentsText: "", argumentsComplete: false, order: streamedFunctionCalls.length };
+        streamedFunctionCalls.push(call);
+      }
+      if (itemId) {
+        call.itemId = itemId;
+        callsByItemId.set(itemId, call);
+      }
+      if (outputIndex !== void 0) {
+        call.outputIndex = outputIndex;
+        callsByOutputIndex.set(outputIndex, call);
+      }
+      return call;
+    };
+    const recordStreamedCall = (event, item, completeArguments = false) => {
+      const itemId = typeof event.item_id === "string" ? event.item_id : typeof item?.id === "string" ? item.id : void 0;
+      const outputIndex = typeof event.output_index === "number" && Number.isInteger(event.output_index) ? event.output_index : void 0;
+      const call = getStreamedCall(itemId, outputIndex);
+      if (typeof item?.call_id === "string") call.callId = item.call_id;
+      if (typeof item?.name === "string") call.name = item.name;
+      if (completeArguments && typeof event.arguments === "string") {
+        call.argumentsText = event.arguments;
+        call.argumentsComplete = true;
+      } else if (completeArguments && typeof item?.arguments === "string") {
+        call.argumentsText = item.arguments;
+        call.argumentsComplete = true;
+      }
+      return call;
+    };
+    const recordStreamedText = (event, text, append) => {
+      const outputIndex = typeof event.output_index === "number" && Number.isInteger(event.output_index) ? event.output_index : Number.MAX_SAFE_INTEGER;
+      const contentIndex = typeof event.content_index === "number" && Number.isInteger(event.content_index) ? event.content_index : Number.MAX_SAFE_INTEGER;
+      const key = `${outputIndex}:${contentIndex}`;
+      const existing = streamedTextParts.get(key);
+      streamedTextParts.set(key, {
+        outputIndex,
+        contentIndex,
+        order: existing?.order ?? streamedTextParts.size,
+        text: append ? `${existing?.text ?? ""}${text}` : text
+      });
+    };
+    const streamedText = () => [...streamedTextParts.values()].sort(
+      (left, right) => left.outputIndex - right.outputIndex || left.contentIndex - right.contentIndex || left.order - right.order
+    ).map((part) => part.text).join("");
+    const countEvent = (name) => {
+      if (/^[a-z0-9_.:-]{1,80}$/i.test(name)) eventCounts[name] = (eventCounts[name] ?? 0) + 1;
+    };
+    const consumeEvent = () => {
+      if (eventData.length === 0) return;
+      const data = eventData.join("\n");
+      eventData = [];
+      if (data === "[DONE]") {
+        countEvent("done");
+        terminalEvent = "done";
+        ended = true;
+        return;
+      }
+      let event;
+      try {
+        event = JSON.parse(data);
+      } catch {
+        failureCategory = "protocol";
+        failureCode = "invalid_json";
+        throw new Error("ChatGPT returned invalid streaming JSON.");
+      }
+      const value = object(event);
+      if (!value || typeof value.type !== "string") return;
+      countEvent(value.type);
+      if (value.type === "response.output_text.delta" && typeof value.delta === "string") {
+        if (value.delta.length > 0 && firstTextMs === void 0) firstTextMs = Date.now() - tracedRequest.startedAt;
+        deltaTextCharacters += value.delta.length;
+        recordStreamedText(value, value.delta, true);
+        onText(value.delta);
+      } else if (value.type === "response.reasoning_summary_text.delta" && typeof value.delta === "string") {
+        const outputIndex = typeof value.output_index === "number" ? value.output_index : 0;
+        const summaryIndex = typeof value.summary_index === "number" ? value.summary_index : 0;
+        const summaryKey = `${outputIndex}:${summaryIndex}`;
+        if (value.delta && previousReasoningSummaryKey !== null && previousReasoningSummaryKey !== summaryKey) {
+          streamedReasoningSummary += "\n\n";
+          onEvent?.({ type: "reasoning_summary.delta", delta: "\n\n" });
+        }
+        if (value.delta) previousReasoningSummaryKey = summaryKey;
+        streamedReasoningSummary += value.delta;
+        onEvent?.({ type: "reasoning_summary.delta", delta: value.delta });
+      } else if (value.type === "response.output_text.done" && typeof value.text === "string") {
+        recordStreamedText(value, value.text, false);
+      } else if (value.type === "response.output_item.added") {
+        const item = object(value.item);
+        if (item?.type === "function_call") {
+          const call = recordStreamedCall(value, item);
+          onEvent?.({
+            type: "tool_call.preview",
+            index: call.outputIndex ?? call.order,
+            ...call.callId ? { id: call.callId } : {},
+            ...call.name ? { name: call.name } : {},
+            argumentsText: call.argumentsText
+          });
+        }
+      } else if (value.type === "response.function_call_arguments.delta" && typeof value.delta === "string") {
+        const call = recordStreamedCall(value);
+        call.argumentsText += value.delta;
+        onEvent?.({
+          type: "tool_call.preview",
+          index: call.outputIndex ?? call.order,
+          ...call.callId ? { id: call.callId } : {},
+          ...call.name ? { name: call.name } : {},
+          argumentsText: call.argumentsText
+        });
+      } else if (value.type === "response.function_call_arguments.done") {
+        recordStreamedCall(value, void 0, true);
+      } else if (value.type === "response.output_item.done") {
+        const item = object(value.item);
+        if (item?.type === "function_call") recordStreamedCall(value, item, true);
+        if (item?.type === "reasoning" && typeof value.output_index === "number" && Number.isInteger(value.output_index)) {
+          streamedReasoningItems.set(value.output_index, item);
+        }
+      } else if (value.type === "response.completed") {
+        terminalEvent = value.type;
+        finalResponse = object(value.response);
+        ended = true;
+      } else if (value.type === "response.failed" || value.type === "error") {
+        const responseError = object(object(value.response)?.error);
+        const error = object(value.error) ?? responseError;
+        const code = typeof error?.code === "string" ? error.code : null;
+        streamFailureCode = code && /^[a-z0-9_.:-]{1,80}$/i.test(code) ? code : void 0;
+        streamFailure = streamFailureCode ? `ChatGPT model request failed (${streamFailureCode}).` : "ChatGPT model request failed.";
+        terminalEvent = value.type;
+        ended = true;
+      } else if (value.type === "response.incomplete") {
+        terminalEvent = value.type;
+        finalResponse = object(value.response);
+        ended = true;
+      }
+    };
+    const processLines = (final = false) => {
+      const lines = buffer.split(/\r?\n/);
+      buffer = final ? "" : lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line) consumeEvent();
+        else if (line.startsWith("data:")) eventData.push(line.slice(5).trimStart());
+      }
+      if (final) consumeEvent();
+    };
+    try {
+      while (!ended) {
+        const { value, done } = await reader.read();
+        if (done) {
+          buffer += decoder.decode();
+          processLines(true);
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        processLines();
+      }
+    } catch (error) {
+      await reader.cancel().catch(() => void 0);
+      const interrupted = signal.aborted || error instanceof Error && error.name === "AbortError";
+      tracedRequest.settle({
+        outcome: interrupted ? "interrupted" : "failed",
+        durationMs: Date.now() - tracedRequest.startedAt,
+        ...terminalEvent ? { terminalEvent } : {},
+        errorCategory: interrupted ? "aborted" : failureCategory ?? "transport",
+        ...(interrupted ? "aborted" : failureCode ?? errorCodeFrom(error)) ? { errorCode: interrupted ? "aborted" : failureCode ?? errorCodeFrom(error) } : {},
+        eventCounts,
+        ...firstTextMs === void 0 ? {} : { firstTextMs },
+        deltaTextCharacters
+      });
+      throw withProviderErrorCode(
+        error,
+        interrupted ? void 0 : failureCode ?? errorCodeFrom(error) ?? "transport"
+      );
+    }
+    await reader.cancel().catch(() => void 0);
+    try {
+      if (streamFailure) {
+        failureCategory = "protocol";
+        failureCode = streamFailureCode ?? "response_failed";
+        throw new Error(streamFailure);
+      }
+      const completedResponse = finalResponse;
+      if (!completedResponse) {
+        failureCategory = "protocol";
+        failureCode = "missing_completion";
+        throw new Error("ChatGPT stream ended before the model step completed.");
+      }
+      if (completedResponse.status === "incomplete") {
+        const incomplete = object(completedResponse.incomplete_details);
+        if (incomplete?.reason !== "max_output_tokens") {
+          failureCategory = "protocol";
+          failureCode = typeof incomplete?.reason === "string" ? incomplete.reason : "incomplete";
+          throw new Error(`ChatGPT response was incomplete (${failureCode}).`);
+        }
+      }
+      const result = outputFrom(completedResponse, prompt);
+      const reasoningReplay = replayableReasoningItems(completedResponse, streamedReasoningItems);
+      if (reasoningReplay) result.reasoningReplay = reasoningReplay;
+      if (!result.reasoningSummary && streamedReasoningSummary) result.reasoningSummary = streamedReasoningSummary;
+      if (!result.content) result.content = streamedText();
+      const finalCalls = finalFunctionCalls(completedResponse);
+      for (const streamedCall of streamedFunctionCalls.sort((left, right) => left.order - right.order)) {
+        const finalCall = finalCalls.find(
+          (call) => streamedCall.callId !== void 0 && call.callId === streamedCall.callId || streamedCall.itemId !== void 0 && call.itemId === streamedCall.itemId || streamedCall.outputIndex !== void 0 && call.outputIndex === streamedCall.outputIndex
+        );
+        if (finalCall) {
+          const finalArguments = finalCall.argumentsText;
+          if ((!finalArguments || !finalArguments.trim()) && streamedCall.argumentsComplete) {
+            const name = streamedCall.name;
+            if (!name) {
+              failureCategory = "protocol";
+              failureCode = "missing_function_name";
+              throw new Error("ChatGPT completed a function call without a tool name.");
+            }
+            result.toolCalls[finalCall.toolCallIndex] = {
+              id: finalCall.callId ?? result.toolCalls[finalCall.toolCallIndex]?.id ?? streamedCall.callId ?? `call-${finalCall.toolCallIndex}`,
+              name,
+              arguments: parseArguments(streamedCall.argumentsText, name)
+            };
+          }
+          continue;
+        }
+        if (!streamedCall.argumentsComplete) {
+          failureCategory = "protocol";
+          failureCode = "incomplete_function_call";
+          throw new Error("ChatGPT streamed a function call without completing its arguments.");
+        }
+        if (!streamedCall.name) {
+          failureCategory = "protocol";
+          failureCode = "missing_function_name";
+          throw new Error("ChatGPT completed a function call without a tool name.");
+        }
+        result.toolCalls.push({
+          id: streamedCall.callId ?? `call-${result.toolCalls.length}`,
+          name: streamedCall.name,
+          arguments: parseArguments(streamedCall.argumentsText, streamedCall.name)
+        });
+      }
+      if (completedResponse.status !== "incomplete" && result.toolCalls.length > 0) {
+        result.finishReason = "tool_calls";
+      }
+      if (!result.content.trim() && result.toolCalls.length === 0) {
+        failureCategory = "protocol";
+        failureCode = "empty_output";
+        throw new Error("ChatGPT completed a response without text or tool calls.");
+      }
+      tracedRequest.settle({
+        outcome: "completed",
+        durationMs: Date.now() - tracedRequest.startedAt,
+        ...terminalEvent ? { terminalEvent } : {},
+        eventCounts,
+        ...firstTextMs === void 0 ? {} : { firstTextMs },
+        deltaTextCharacters,
+        outputTextCharacters: result.content.length,
+        outputItemCounts: outputItemCounts(completedResponse),
+        toolCallCount: result.toolCalls.length,
+        finishReason: result.finishReason,
+        ...typeof completedResponse.id === "string" ? { responseId: completedResponse.id } : {},
+        usage: result.usage
+      });
+      return result;
+    } catch (error) {
+      const interrupted = signal.aborted || error instanceof Error && error.name === "AbortError";
+      tracedRequest.settle({
+        outcome: interrupted ? "interrupted" : "failed",
+        durationMs: Date.now() - tracedRequest.startedAt,
+        ...terminalEvent ? { terminalEvent } : {},
+        errorCategory: interrupted ? "aborted" : failureCategory ?? "protocol",
+        ...(interrupted ? "aborted" : failureCode ?? errorCodeFrom(error)) ? { errorCode: interrupted ? "aborted" : failureCode ?? errorCodeFrom(error) } : {},
+        eventCounts,
+        ...firstTextMs === void 0 ? {} : { firstTextMs },
+        deltaTextCharacters
+      });
+      throw withProviderErrorCode(
+        error,
+        interrupted ? void 0 : failureCode ?? errorCodeFrom(error) ?? "response_failed"
+      );
+    }
+  }
+  async requestTraced(body, accessToken, signal, trace, retryState, threadId, promptCacheKey) {
+    while (true) {
+      const startedAt = Date.now();
+      const attempt = ++retryState.attempt;
+      const providerAttemptId = trace?.started({
+        provider: "chatgpt-plan",
+        protocol: "https+sse",
+        endpoint: responsesUrl,
+        attempt
+      }) ?? "";
+      let settled = false;
+      const settle = (summary) => {
+        if (settled) return;
+        settled = true;
+        if (providerAttemptId) trace?.settled(providerAttemptId, summary);
+      };
+      try {
+        const response = await this.request(body, accessToken, signal, threadId, promptCacheKey);
+        if (providerAttemptId) {
+          const providerRequestId = response.headers.get("x-request-id") ?? response.headers.get("openai-request-id");
+          trace?.response(providerAttemptId, {
+            status: response.status,
+            contentType: response.headers.get("content-type"),
+            ...providerRequestId ? { providerRequestId } : {}
+          });
+        }
+        return { response, startedAt, settle };
+      } catch (error) {
+        const interrupted = signal.aborted || error instanceof Error && error.name === "AbortError";
+        const retryableFetchFailure = isRetryableFetchFailure(error);
+        const shouldRetry = !interrupted && retryState.retries < MAX_FETCH_FAILED_RETRIES && retryableFetchFailure;
+        const errorCode = interrupted ? "aborted" : errorCodeFrom(error) ?? (retryableFetchFailure ? "fetch_failed" : void 0);
+        settle({
+          outcome: interrupted ? "interrupted" : shouldRetry ? "retrying" : "failed",
+          durationMs: Date.now() - startedAt,
+          errorCategory: interrupted ? "aborted" : "transport",
+          ...errorCode ? { errorCode } : {}
+        });
+        if (interrupted || !shouldRetry) {
+          throw withProviderErrorCode(error, interrupted ? void 0 : errorCode ?? "transport");
+        }
+        retryState.retries += 1;
+        await waitForFetchRetry(signal);
+      }
+    }
+  }
+  request(body, accessToken, signal, threadId, promptCacheKey) {
+    const sessionId = promptCacheKey ?? threadId;
+    return this.fetcher(responsesUrl, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        ...sessionId ? { "session-id": sessionId } : {},
+        ...threadId ? { "thread-id": threadId } : {}
+      },
+      body: JSON.stringify(body),
+      signal
+    });
+  }
+};
 
-`})),c.delta&&(L=w),T+=c.delta,a?.({type:"reasoning_summary.delta",delta:c.delta})}else if(c.type==="response.output_text.done"&&typeof c.text=="string")ie(c,c.text,!1);else if(c.type==="response.output_item.added"){let k=I(c.item);if(k?.type==="function_call"){let d=V(c,k);a?.({type:"tool_call.preview",index:d.outputIndex??d.order,...d.callId?{id:d.callId}:{},...d.name?{name:d.name}:{},argumentsText:d.argumentsText})}}else if(c.type==="response.function_call_arguments.delta"&&typeof c.delta=="string"){let k=V(c);k.argumentsText+=c.delta,a?.({type:"tool_call.preview",index:k.outputIndex??k.order,...k.callId?{id:k.callId}:{},...k.name?{name:k.name}:{},argumentsText:k.argumentsText})}else if(c.type==="response.function_call_arguments.done")V(c,void 0,!0);else if(c.type==="response.output_item.done"){let k=I(c.item);k?.type==="function_call"&&V(c,k,!0),k?.type==="reasoning"&&typeof c.output_index=="number"&&Number.isInteger(c.output_index)&&ae.set(c.output_index,k)}else if(c.type==="response.completed")x=c.type,j=I(c.response),q=!0;else if(c.type==="response.failed"||c.type==="error"){let k=I(I(c.response)?.error),d=I(c.error)??k,w=typeof d?.code=="string"?d.code:null;J=w&&/^[a-z0-9_.:-]{1,80}$/i.test(w)?w:void 0,F=J?`ChatGPT model request failed (${J}).`:"ChatGPT model request failed.",x=c.type,q=!0}else c.type==="response.incomplete"&&(x=c.type,j=I(c.response),q=!0)},de=(i=!1)=>{let u=P.split(/\r?\n/);P=i?"":u.pop()??"";for(let c of u)c?c.startsWith("data:")&&R.push(c.slice(5).trimStart()):ce();i&&ce()};try{for(;!q;){let{value:i,done:u}=await _.read();if(u){P+=b.decode(),de(!0);break}P+=b.decode(i,{stream:!0}),de()}}catch(i){await _.cancel().catch(()=>{});let u=r.aborted||i instanceof Error&&i.name==="AbortError";throw y.settle({outcome:u?"interrupted":"failed",durationMs:Date.now()-y.startedAt,...x?{terminalEvent:x}:{},errorCategory:u?"aborted":S??"transport",...u||(A??M(i))?{errorCode:u?"aborted":A??M(i)}:{},eventCounts:D,...G===void 0?{}:{firstTextMs:G},deltaTextCharacters:K}),N(i,u?void 0:A??M(i)??"transport")}await _.cancel().catch(()=>{});try{if(F)throw S="protocol",A=J??"response_failed",new Error(F);let i=j;if(!i)throw S="protocol",A="missing_completion",new Error("ChatGPT stream ended before the model step completed.");if(i.status==="incomplete"){let d=I(i.incomplete_details);if(d?.reason!=="max_output_tokens")throw S="protocol",A=typeof d?.reason=="string"?d.reason:"incomplete",new Error(`ChatGPT response was incomplete (${A}).`)}let u=Fe(i,e),c=Oe(i,ae);c&&(u.reasoningReplay=c),!u.reasoningSummary&&T&&(u.reasoningSummary=T),u.content||(u.content=_e());let k=$e(i);for(let d of z.sort((w,E)=>w.order-E.order)){let w=k.find(E=>d.callId!==void 0&&E.callId===d.callId||d.itemId!==void 0&&E.itemId===d.itemId||d.outputIndex!==void 0&&E.outputIndex===d.outputIndex);if(w){let E=w.argumentsText;if((!E||!E.trim())&&d.argumentsComplete){let O=d.name;if(!O)throw S="protocol",A="missing_function_name",new Error("ChatGPT completed a function call without a tool name.");u.toolCalls[w.toolCallIndex]={id:w.callId??u.toolCalls[w.toolCallIndex]?.id??d.callId??`call-${w.toolCallIndex}`,name:O,arguments:se(d.argumentsText,O)}}continue}if(!d.argumentsComplete)throw S="protocol",A="incomplete_function_call",new Error("ChatGPT streamed a function call without completing its arguments.");if(!d.name)throw S="protocol",A="missing_function_name",new Error("ChatGPT completed a function call without a tool name.");u.toolCalls.push({id:d.callId??`call-${u.toolCalls.length}`,name:d.name,arguments:se(d.argumentsText,d.name)})}if(i.status!=="incomplete"&&u.toolCalls.length>0&&(u.finishReason="tool_calls"),!u.content.trim()&&u.toolCalls.length===0)throw S="protocol",A="empty_output",new Error("ChatGPT completed a response without text or tool calls.");return y.settle({outcome:"completed",durationMs:Date.now()-y.startedAt,...x?{terminalEvent:x}:{},eventCounts:D,...G===void 0?{}:{firstTextMs:G},deltaTextCharacters:K,outputTextCharacters:u.content.length,outputItemCounts:De(i),toolCallCount:u.toolCalls.length,finishReason:u.finishReason,...typeof i.id=="string"?{responseId:i.id}:{},usage:u.usage}),u}catch(i){let u=r.aborted||i instanceof Error&&i.name==="AbortError";throw y.settle({outcome:u?"interrupted":"failed",durationMs:Date.now()-y.startedAt,...x?{terminalEvent:x}:{},errorCategory:u?"aborted":S??"protocol",...u||(A??M(i))?{errorCode:u?"aborted":A??M(i)}:{},eventCounts:D,...G===void 0?{}:{firstTextMs:G},deltaTextCharacters:K}),N(i,u?void 0:A??M(i)??"response_failed")}}async requestTraced(e,r,t,s,a,o,h){for(;;){let l=Date.now(),m=++a.attempt,p=s?.started({provider:"chatgpt-plan",protocol:"https+sse",endpoint:we,attempt:m})??"",f=!1,g=y=>{f||(f=!0,p&&s?.settled(p,y))};try{let y=await this.request(e,r,t,o,h);if(p){let C=y.headers.get("x-request-id")??y.headers.get("openai-request-id");s?.response(p,{status:y.status,contentType:y.headers.get("content-type"),...C?{providerRequestId:C}:{}})}return{response:y,startedAt:l,settle:g}}catch(y){let C=t.aborted||y instanceof Error&&y.name==="AbortError",_=Le(y),b=!C&&a.retries<5&&_,P=C?"aborted":M(y)??(_?"fetch_failed":void 0);if(g({outcome:C?"interrupted":b?"retrying":"failed",durationMs:Date.now()-l,errorCategory:C?"aborted":"transport",...P?{errorCode:P}:{}}),C||!b)throw N(y,C?void 0:P??"transport");a.retries+=1,await Ne(t)}}}request(e,r,t,s,a){let o=a??s;return this.fetcher(we,{method:"POST",headers:{authorization:`Bearer ${r}`,"content-type":"application/json",accept:"text/event-stream",...o?{"session-id":o}:{},...s?{"thread-id":s}:{}},body:JSON.stringify(e),signal:t})}};function Be(n){let e=new URLSearchParams;for(let r of["state","code","client_id"]){let t=n.getAll(r);t.length===1&&t[0]&&e.set(r,t[0])}return e}function Je(n){let e=n.pluginModelCall;return e?`pico-plugin:${qe("sha256").update(JSON.stringify(["pico.chatgpt-plan.plugin-cache.v1",n.thread.id,e.pluginId,e.purpose])).digest("hex").slice(0,52)}`:n.thread.id}function Ke(n){return n.replace(/[&<>"']/g,e=>{switch(e){case"&":return"&amp;";case"<":return"&lt;";case">":return"&gt;";case'"':return"&quot;";default:return"&#39;"}})}function We(n,e,r,t,s){let a=JSON.stringify({type:"pico:plugin-auth",pluginId:"pico.chatgpt-plan",operationId:n,status:e,message:r,retryable:t,retryExchange:s}).replace(/</g,"\\u003c").replace(/>/g,"\\u003e").replace(/&/g,"\\u0026"),o=e==="connected"||s;return`<!doctype html><meta charset="utf-8"><title>ChatGPT sign-in</title><p>${Ke(r)}</p><p>You can close this tab and return to Pico.</p><script>if(window.opener){window.opener.postMessage(${a},'*');if(${o})window.close();}</script>`}function nt(){let n=new Set,e=new Map,r=new Map,t=null,s=o=>{let h=e.get(o);h&&clearTimeout(h),e.delete(o),n.delete(o);for(let[l,m]of r)m.server===o&&r.delete(l);return o.listening?new Promise(l=>o.close(()=>l())):Promise.resolve()},a=async(o,h,l=!1)=>{if(o.handlingCallback)return{status:"failed",message:"Authorization is already being completed.",retryable:!0,retryExchange:!!o.retryCallback};if(!t.hasPendingAuthorization(h.get("state"),o.redirectUri))return{status:"failed",message:"This ChatGPT sign-in attempt expired or did not match. Start again.",retryable:!1,retryExchange:!1};o.handlingCallback=!0;let m;try{await t.completeSignIn(h,o.redirectUri,{allowTransportRetry:!l}),o.retryCallback=null,t.refreshModels().catch(()=>{}),m={status:"connected",message:"ChatGPT is connected. Return to Pico.",retryable:!1,retryExchange:!1}}catch(p){let f=t.hasPendingAuthorization(h.get("state"),o.redirectUri),g=!l&&f&&p instanceof $&&!o.retryAttempted;o.retryCallback=g?Be(h):null,m={status:"failed",message:l&&p instanceof $?"The retry did not return a response. Start a new ChatGPT sign-in.":p instanceof Error?p.message:"ChatGPT sign-in failed.",retryable:f,retryExchange:g}}return m.retryable&&(o.handlingCallback=!1),m};return{id:"pico.chatgpt-plan",name:"ChatGPT plan provider",version:"0.1.0",activate(o){t=new Z(o.state);let h=new ee(t);o.models.registerProvider({id:"chatgpt-plan",label:"ChatGPT account",description:"Use a ChatGPT plan account through OpenAI\u2019s Responses API.",supportsImages:!0}),o.pipelines.use("model",async(l,m)=>l.provider!=="chatgpt-plan"?m():(l.recordModelInput(l.prompt,l.provider),h.complete(l.prompt,l.signal,l.onText,l.requestTrace,l.onEvent,l.requestParameters,l.thread.id,Je(l)))),o.commands.register({name:"chatgpt-provider",description:"Show whether the ChatGPT account provider is connected.",execute(){let l=t?.status();return{text:l?.connected?`ChatGPT account connected${l.accountLabel?` as ${l.accountLabel}`:""}.`:"No ChatGPT account is connected. Open the ChatGPT plugin settings to connect one."}}}),o.ui.registerPage({id:"account",label:"ChatGPT",description:"Connect and configure a ChatGPT plan account.",entry:"webui"}),o.ui.contribute({slot:"composer.model",id:"model-controls",label:"ChatGPT model controls",description:"Choose the ChatGPT model, reasoning effort, and Fast mode for this provider.",entry:"webui",component:"ChatGptPlanComposerModel",providers:["chatgpt-plan"]}),o.http.register("GET","/status",()=>t.status()),o.http.register("GET","/models",async()=>await t.listModels()),o.http.register("POST","/models/refresh",async()=>await t.listModels(!0)),o.http.register("POST","/sign-in",async l=>{if(!l.origin)throw new Error("ChatGPT sign-in must be started from the Pico Web UI.");let p=ze(),f,g=null,y="";f=He((_,b)=>{let P=new URL(_.url??"/","http://127.0.0.1");if(_.method!=="GET"||P.pathname!=="/auth/callback"){b.writeHead(404).end("Not found");return}if(!g){b.writeHead(503).end("Sign-in is not ready. Start again from Pico.");return}if(g.handlingCallback){b.writeHead(409).end("Authorization is already being completed.");return}if(g.retryCallback){b.writeHead(409).end("Return to Pico and retry the ChatGPT token exchange there.");return}a(g,P.searchParams).then(async R=>{b.writeHead(200,{"cache-control":"no-store","content-type":"text/html; charset=utf-8","content-security-policy":"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'","referrer-policy":"no-referrer","x-content-type-options":"nosniff"}),b.end(We(p,R.status,R.message,R.retryable,R.retryExchange),()=>{R.retryable||s(f)})})}),n.add(f),await new Promise((_,b)=>{let P=R=>b(R);f.once("error",P),f.listen(0,"127.0.0.1",()=>{f.removeListener("error",P),_()})});let C=f.address();if(!C||typeof C=="string")throw await s(f),new Error("Could not start the local ChatGPT sign-in callback.");y=`http://127.0.0.1:${C.port}/auth/callback`,g={operationId:p,redirectUri:y,server:f,handlingCallback:!1,retryCallback:null,retryAttempted:!1},r.set(p,g);try{let{authorizationUrl:_}=await t.beginSignIn(y),b=setTimeout(()=>{s(f)},10*6e4);return b.unref(),e.set(f,b),{authorizationUrl:_,callbackOrigin:`http://127.0.0.1:${C.port}`,operationId:p}}catch(_){throw await s(f),_}}),o.http.register("POST","/sign-in/complete",async({body:l})=>{if(!l||typeof l!="object"||Array.isArray(l))throw new Error("Paste the full ChatGPT callback URL from the browser address bar.");let m=l;if(typeof m.operationId!="string"||typeof m.callbackUrl!="string"||m.callbackUrl.length>8192)throw new Error("Paste the full ChatGPT callback URL from the browser address bar.");let p=r.get(m.operationId);if(!p)throw new Error("This ChatGPT sign-in attempt is no longer active. Start again.");if(p.retryCallback)return{status:"failed",message:"The previous token request was not confirmed. Retry the token exchange below.",retryable:!0,retryExchange:!0};let f=t.parseCallbackUrl(m.callbackUrl,p.redirectUri),g=await a(p,f);return g.retryable||await s(p.server),g}),o.http.register("POST","/sign-in/retry",async({body:l})=>{if(!l||typeof l!="object"||Array.isArray(l))throw new Error("This ChatGPT sign-in cannot be retried. Start again.");let m=l;if(Object.keys(m).length!==1||typeof m.operationId!="string")throw new Error("This ChatGPT sign-in cannot be retried. Start again.");let p=r.get(m.operationId);if(!p||!p.retryCallback||p.retryAttempted)throw new Error("The ChatGPT token retry is no longer available. Start a new sign-in.");p.retryAttempted=!0;let f=p.retryCallback,g=await a(p,f,!0);return g.retryable||await s(p.server),g}),o.http.register("DELETE","/account",async()=>await t.signOut())},async deactivate(){await Promise.all([...n].map(o=>s(o))),t=null}}}export{nt as createChatGptPlanPlugin};
+// src/plugins/chatgpt-plan.ts
+function callbackForRetry(callback) {
+  const retry = new URLSearchParams();
+  for (const name of ["state", "code", "client_id"]) {
+    const values = callback.getAll(name);
+    if (values.length === 1 && values[0]) retry.set(name, values[0]);
+  }
+  return retry;
+}
+function promptCacheKeyFor(input) {
+  const call = input.pluginModelCall;
+  if (!call) return input.thread.id;
+  const digest = createHash2("sha256").update(JSON.stringify(["pico.chatgpt-plan.plugin-cache.v1", input.thread.id, call.pluginId, call.purpose])).digest("hex");
+  return `pico-plugin:${digest.slice(0, 52)}`;
+}
+function escapeHtml(value) {
+  return value.replace(/[&<>"']/g, (character) => {
+    switch (character) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      default:
+        return "&#39;";
+    }
+  });
+}
+function pluginAuthResultHtml(operationId, status, message, retryable, retryExchange) {
+  const payload = JSON.stringify({
+    type: "pico:plugin-auth",
+    pluginId: "pico.chatgpt-plan",
+    operationId,
+    status,
+    message,
+    retryable,
+    retryExchange
+  }).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
+  const closePopup = status === "connected" || retryExchange;
+  return `<!doctype html><meta charset="utf-8"><title>ChatGPT sign-in</title><p>${escapeHtml(message)}</p><p>You can close this tab and return to Pico.</p><script>if(window.opener){window.opener.postMessage(${payload},'*');if(${closePopup})window.close();}</script>`;
+}
+function createChatGptPlanPlugin() {
+  const callbackServers = /* @__PURE__ */ new Set();
+  const callbackTimeouts = /* @__PURE__ */ new Map();
+  const callbackOperations = /* @__PURE__ */ new Map();
+  let auth = null;
+  const closeCallbackServer = (server) => {
+    const timeout = callbackTimeouts.get(server);
+    if (timeout) clearTimeout(timeout);
+    callbackTimeouts.delete(server);
+    callbackServers.delete(server);
+    for (const [operationId, operation] of callbackOperations) {
+      if (operation.server === server) callbackOperations.delete(operationId);
+    }
+    if (!server.listening) return Promise.resolve();
+    return new Promise((resolve) => server.close(() => resolve()));
+  };
+  const completeCallback = async (operation, callback, retryExchange = false) => {
+    if (operation.handlingCallback) {
+      return {
+        status: "failed",
+        message: "Authorization is already being completed.",
+        retryable: true,
+        retryExchange: Boolean(operation.retryCallback)
+      };
+    }
+    if (!auth.hasPendingAuthorization(callback.get("state"), operation.redirectUri)) {
+      return {
+        status: "failed",
+        message: "This ChatGPT sign-in attempt expired or did not match. Start again.",
+        retryable: false,
+        retryExchange: false
+      };
+    }
+    operation.handlingCallback = true;
+    let result;
+    try {
+      await auth.completeSignIn(callback, operation.redirectUri, { allowTransportRetry: !retryExchange });
+      operation.retryCallback = null;
+      void auth.refreshModels().catch(() => void 0);
+      result = {
+        status: "connected",
+        message: "ChatGPT is connected. Return to Pico.",
+        retryable: false,
+        retryExchange: false
+      };
+    } catch (error) {
+      const pending = auth.hasPendingAuthorization(callback.get("state"), operation.redirectUri);
+      const canRetryExchange = !retryExchange && pending && error instanceof RetryableChatGptAuthorizationExchange && !operation.retryAttempted;
+      operation.retryCallback = canRetryExchange ? callbackForRetry(callback) : null;
+      result = {
+        status: "failed",
+        message: retryExchange && error instanceof RetryableChatGptAuthorizationExchange ? "The retry did not return a response. Start a new ChatGPT sign-in." : error instanceof Error ? error.message : "ChatGPT sign-in failed.",
+        retryable: pending,
+        retryExchange: canRetryExchange
+      };
+    }
+    if (result.retryable) operation.handlingCallback = false;
+    return result;
+  };
+  return {
+    id: "pico.chatgpt-plan",
+    name: "ChatGPT plan provider",
+    version: "0.1.0",
+    activate(context) {
+      auth = new ChatGptPlanAuth(context.state, fetch, Date.now, context.secrets, context.cache);
+      const model = new ChatGptResponsesAdapter(auth);
+      context.models.registerProvider(
+        {
+          id: "chatgpt-plan",
+          label: "ChatGPT account",
+          description: "Use a ChatGPT plan account through OpenAI\u2019s Responses API.",
+          supportsImages: true
+        },
+        async (input) => {
+          input.recordModelInput(input.prompt, input.provider, input.projectionProvenance);
+          return model.complete(
+            input.prompt,
+            input.signal,
+            input.onText,
+            input.requestTrace,
+            input.onEvent,
+            input.requestParameters,
+            input.thread.id,
+            promptCacheKeyFor(input)
+          );
+        }
+      );
+      context.commands.register({
+        name: "chatgpt-provider",
+        description: "Show whether the ChatGPT account provider is connected.",
+        execute() {
+          const status = auth?.status();
+          return {
+            text: status?.connected ? `ChatGPT account connected${status.accountLabel ? ` as ${status.accountLabel}` : ""}.` : "No ChatGPT account is connected. Open the ChatGPT plugin settings to connect one."
+          };
+        }
+      });
+      context.ui.registerPage({
+        id: "account",
+        label: "ChatGPT",
+        description: "Connect and configure a ChatGPT plan account.",
+        entry: "webui"
+      });
+      context.ui.contribute({
+        slot: "composer.model",
+        id: "model-controls",
+        label: "ChatGPT model controls",
+        description: "Choose the ChatGPT model, reasoning effort, and Fast mode for this provider.",
+        entry: "webui",
+        component: "ChatGptPlanComposerModel",
+        providers: ["chatgpt-plan"]
+      });
+      context.http.register("GET", "/status", () => auth.status());
+      context.http.register("GET", "/models", async () => await auth.listModels());
+      context.http.register("POST", "/models/refresh", async () => await auth.listModels(true));
+      context.http.register("POST", "/sign-in", async (request) => {
+        const uiOrigin = request.origin;
+        if (!uiOrigin) throw new Error("ChatGPT sign-in must be started from the Pico Web UI.");
+        const operationId = randomUUID2();
+        let server;
+        let operation = null;
+        let redirectUri = "";
+        server = createServer((callbackRequest, callbackResponse) => {
+          const callbackUrl = new URL(callbackRequest.url ?? "/", "http://127.0.0.1");
+          if (callbackRequest.method !== "GET" || callbackUrl.pathname !== "/auth/callback") {
+            callbackResponse.writeHead(404).end("Not found");
+            return;
+          }
+          if (!operation) {
+            callbackResponse.writeHead(503).end("Sign-in is not ready. Start again from Pico.");
+            return;
+          }
+          if (operation.handlingCallback) {
+            callbackResponse.writeHead(409).end("Authorization is already being completed.");
+            return;
+          }
+          if (operation.retryCallback) {
+            callbackResponse.writeHead(409).end("Return to Pico and retry the ChatGPT token exchange there.");
+            return;
+          }
+          void completeCallback(operation, callbackUrl.searchParams).then(async (result) => {
+            callbackResponse.writeHead(200, {
+              "cache-control": "no-store",
+              "content-type": "text/html; charset=utf-8",
+              "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'",
+              "referrer-policy": "no-referrer",
+              "x-content-type-options": "nosniff"
+            });
+            callbackResponse.end(
+              pluginAuthResultHtml(operationId, result.status, result.message, result.retryable, result.retryExchange),
+              () => {
+                if (!result.retryable) void closeCallbackServer(server);
+              }
+            );
+          });
+        });
+        callbackServers.add(server);
+        await new Promise((resolve, reject) => {
+          const onError = (error) => reject(error);
+          server.once("error", onError);
+          server.listen(0, "127.0.0.1", () => {
+            server.removeListener("error", onError);
+            resolve();
+          });
+        });
+        const address = server.address();
+        if (!address || typeof address === "string") {
+          await closeCallbackServer(server);
+          throw new Error("Could not start the local ChatGPT sign-in callback.");
+        }
+        redirectUri = `http://127.0.0.1:${address.port}/auth/callback`;
+        operation = {
+          operationId,
+          redirectUri,
+          server,
+          handlingCallback: false,
+          retryCallback: null,
+          retryAttempted: false
+        };
+        callbackOperations.set(operationId, operation);
+        try {
+          const { authorizationUrl } = await auth.beginSignIn(redirectUri);
+          const timeout = setTimeout(() => void closeCallbackServer(server), 10 * 6e4);
+          timeout.unref();
+          callbackTimeouts.set(server, timeout);
+          return {
+            authorizationUrl,
+            callbackOrigin: `http://127.0.0.1:${address.port}`,
+            operationId
+          };
+        } catch (error) {
+          await closeCallbackServer(server);
+          throw error;
+        }
+      });
+      context.http.register("POST", "/sign-in/complete", async ({ body }) => {
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          throw new Error("Paste the full ChatGPT callback URL from the browser address bar.");
+        }
+        const input = body;
+        if (typeof input.operationId !== "string" || typeof input.callbackUrl !== "string" || input.callbackUrl.length > 8192) {
+          throw new Error("Paste the full ChatGPT callback URL from the browser address bar.");
+        }
+        const operation = callbackOperations.get(input.operationId);
+        if (!operation) throw new Error("This ChatGPT sign-in attempt is no longer active. Start again.");
+        if (operation.retryCallback) {
+          return {
+            status: "failed",
+            message: "The previous token request was not confirmed. Retry the token exchange below.",
+            retryable: true,
+            retryExchange: true
+          };
+        }
+        const callback = auth.parseCallbackUrl(input.callbackUrl, operation.redirectUri);
+        const result = await completeCallback(operation, callback);
+        if (!result.retryable) await closeCallbackServer(operation.server);
+        return result;
+      });
+      context.http.register("POST", "/sign-in/retry", async ({ body }) => {
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          throw new Error("This ChatGPT sign-in cannot be retried. Start again.");
+        }
+        const input = body;
+        if (Object.keys(input).length !== 1 || typeof input.operationId !== "string") {
+          throw new Error("This ChatGPT sign-in cannot be retried. Start again.");
+        }
+        const operation = callbackOperations.get(input.operationId);
+        if (!operation || !operation.retryCallback || operation.retryAttempted) {
+          throw new Error("The ChatGPT token retry is no longer available. Start a new sign-in.");
+        }
+        operation.retryAttempted = true;
+        const callback = operation.retryCallback;
+        const result = await completeCallback(operation, callback, true);
+        if (!result.retryable) await closeCallbackServer(operation.server);
+        return result;
+      });
+      context.http.register("DELETE", "/account", async () => await auth.signOut());
+    },
+    async deactivate() {
+      await Promise.all([...callbackServers].map((server) => closeCallbackServer(server)));
+      auth = null;
+    }
+  };
+}
+export {
+  createChatGptPlanPlugin
+};

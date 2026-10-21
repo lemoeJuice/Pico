@@ -1,12 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { CanonicalRecord, MessagePayload, Thread, ToolCall, ToolResultPayload } from '../core/types.js';
+import type { CanonicalRecord, Thread } from '../core/types.js';
 import type { ModelPrompt, PromptTurn } from '../contracts/model.js';
 import {
-  isMultimodalToolResultEnvelope,
-  multimodalToolResultText,
-  sanitizeMultimodalResultValue,
-} from '../contracts/multimodal.js';
-import { assistantReasoningContent } from '../runtime/reasoning.js';
+  canonicalBlockToPromptTurns,
+  canonicalConversationRecords,
+  canonicalTurnBlocks,
+  completedCanonicalTurnBlocks,
+  runtimeCompactionTurn,
+  runtimeContextCompaction,
+} from '../contracts/canonical-projection.js';
+import { sanitizeMultimodalResultValue } from '../contracts/multimodal.js';
 import type { ProjectionInput, ProjectionProvenance } from '../runtime/stages.js';
 import type { PicoPlugin, PluginContext, PluginHttpRequest } from './host.js';
 
@@ -66,60 +69,8 @@ function saveSegments(
     if (audit) context.canonical.append(threadId, { type: 'rolling-context.transition', ...audit });
   });
 }
-function canonicalBlockRecords(records: readonly CanonicalRecord[]): CanonicalRecord[] {
-  return records.filter((record) => record.kind !== 'plugin');
-}
-function userMessage(record: CanonicalRecord): boolean {
-  return record.kind === 'message' && object(record.payload).role === 'user';
-}
-function allTurnBlocks(records: readonly CanonicalRecord[]): CanonicalRecord[][] {
-  const relevant = canonicalBlockRecords(records);
-  const blocks: CanonicalRecord[][] = [];
-  let current: CanonicalRecord[] = [];
-  for (const record of relevant) {
-    if (userMessage(record) && current.length) {
-      blocks.push(current);
-      current = [];
-    }
-    current.push(record);
-  }
-  if (current.length) blocks.push(current);
-  return blocks;
-}
-export function completedTurnBlocks(records: readonly CanonicalRecord[]): CanonicalRecord[][] {
-  return allTurnBlocks(records).filter((block) => {
-    const last = block.at(-1);
-    if (!last || last.kind !== 'assistant') return false;
-    const payload = object(last.payload);
-    return Array.isArray(payload.toolCalls) && payload.toolCalls.length === 0;
-  });
-}
 function stableJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
-}
-function projectedMessageContent(payload: MessagePayload, thread: Thread): string {
-  if (payload.source === 'user') return payload.content;
-  const source =
-    payload.senderThreadId && payload.senderThreadId === thread.parentThreadId
-      ? 'Parent Thread'
-      : payload.source === 'child'
-        ? 'Child Thread'
-        : 'Agent Thread';
-  const label = payload.senderLabel?.trim();
-  const senderLabel = label ? ` ${JSON.stringify(label)}` : '';
-  const senderId = payload.senderThreadId ? ` (Thread ID: ${JSON.stringify(payload.senderThreadId)})` : '';
-  return `[Message from ${source}${senderLabel}${senderId}]\n${payload.content}`;
-}
-function projectedToolResult(payload: ToolResultPayload): string {
-  if (payload.status === 'interrupted')
-    return `Execution interrupted. ${payload.error ?? ''} Its real-world side effects may be partial or unknown. Inspect the environment before retrying.`;
-  if (payload.status === 'failed') return `Tool failed: ${payload.error ?? 'Unknown error'}`;
-  if (isMultimodalToolResultEnvelope(payload.result)) return multimodalToolResultText(payload.result);
-  try {
-    return JSON.stringify(sanitizeMultimodalResultValue(payload.result ?? null));
-  } catch {
-    return String(payload.result);
-  }
 }
 export function sourceHash(records: readonly CanonicalRecord[]): string {
   return createHash('sha256').update(stableJson(records)).digest('hex');
@@ -247,77 +198,6 @@ function isRecordPresent(records: readonly CanonicalRecord[], segment: RollingSe
   const ids = new Set(records.map((record) => record.id));
   return segment.sourceRecordIds.every((id) => ids.has(id));
 }
-function promptTurns(records: readonly CanonicalRecord[], thread: Thread): PromptTurn[] {
-  const allIds = new Set(records.map((record) => record.id));
-  const results = new Map<string, Record<string, unknown>>();
-  for (const record of records)
-    if (record.kind === 'tool_result') {
-      const result = object(record.payload);
-      results.set(`${result.batchId}:${result.toolCallId}`, result);
-    }
-  const consumed = new Set<string>();
-  const turns: PromptTurn[] = [];
-  for (const record of records) {
-    if (record.kind === 'message') {
-      const payload = object(record.payload);
-      if (payload.role === 'user' && typeof payload.content === 'string')
-        turns.push({
-          kind: 'message',
-          role: 'user',
-          content: projectedMessageContent(payload as unknown as MessagePayload, thread),
-        });
-    } else if (record.kind === 'assistant') {
-      const payload = object(record.payload);
-      const calls = Array.isArray(payload.toolCalls) ? payload.toolCalls : [];
-      const reasoningContent = assistantReasoningContent(payload);
-      if (calls.length) {
-        turns.push({
-          kind: 'assistant_tools',
-          content: typeof payload.content === 'string' ? payload.content : '',
-          calls: calls as ToolCall[],
-          ...(typeof reasoningContent === 'string' ? { reasoningContent } : {}),
-          ...(payload.reasoningReplay === undefined ? {} : { reasoningReplay: payload.reasoningReplay }),
-        });
-        for (const raw of calls) {
-          const call = object(raw);
-          const result = typeof payload.batchId === 'string' ? results.get(`${payload.batchId}:${call.id}`) : undefined;
-          if (!result) continue;
-          const resultId = `${result.executionId}:result`;
-          if (allIds.has(resultId)) consumed.add(resultId);
-          turns.push({
-            kind: 'tool_result',
-            callId: String(call.id ?? ''),
-            toolName: String(call.name ?? ''),
-            ...(typeof payload.batchId === 'string' ? { batchId: payload.batchId } : {}),
-            content: projectedToolResult(result as unknown as ToolResultPayload),
-          });
-        }
-      } else if (
-        (typeof payload.content === 'string' && payload.content) ||
-        typeof reasoningContent === 'string' ||
-        payload.reasoningReplay !== undefined
-      )
-        turns.push({
-          kind: 'message',
-          role: 'assistant',
-          content: typeof payload.content === 'string' ? payload.content : '',
-          ...(typeof reasoningContent === 'string' ? { reasoningContent } : {}),
-          ...(payload.reasoningReplay === undefined ? {} : { reasoningReplay: payload.reasoningReplay }),
-        });
-    } else if (record.kind === 'tool_result' && !consumed.has(record.id)) {
-      const result = object(record.payload);
-      turns.push({
-        kind: 'tool_result',
-        callId: String(result.toolCallId ?? ''),
-        toolName: String(result.toolName ?? ''),
-        ...(typeof result.batchId === 'string' ? { batchId: result.batchId } : {}),
-        content: projectedToolResult(result as unknown as ToolResultPayload),
-      });
-    }
-  }
-  void thread;
-  return turns;
-}
 function allTurns(
   context: PluginContext,
   input: ProjectionInput,
@@ -325,14 +205,37 @@ function allTurns(
 ): { turns: PromptTurn[]; provenance: ProjectionProvenance[] } {
   const consumed = new Set<string>();
   const replacementByStart = new Map<number, RollingSegment>();
+  const runtimeCompaction = runtimeContextCompaction(input.records);
   for (const segment of state)
-    if (segment.tier !== 'hot' && segment.summary) replacementByStart.set(segment.startSeq, segment);
+    if (
+      segment.tier !== 'hot' &&
+      segment.summary &&
+      (!runtimeCompaction || segment.startSeq > runtimeCompaction.throughSeq)
+    ) {
+      replacementByStart.set(segment.startSeq, segment);
+    }
   const turns: PromptTurn[] = [];
   const provenance: ProjectionProvenance[] = [];
-  const relevant = canonicalBlockRecords(input.records);
-  const blocks = allTurnBlocks(input.records);
+  if (runtimeCompaction) {
+    turns.push(runtimeCompactionTurn(runtimeCompaction));
+    const sourceStartSeq = input.records.find((record) => record.id === runtimeCompaction.sourceRecordIds[0])?.seq ?? 1;
+    provenance.push({
+      id: `runtime-compaction:${runtimeCompaction.sourceHash}`,
+      sourcePluginId: 'pico.runtime',
+      label: `Runtime compaction ${sourceStartSeq}-${runtimeCompaction.throughSeq}`,
+      kind: 'canonical',
+      disposition: 'summary',
+      canonicalStartSeq: sourceStartSeq,
+      canonicalEndSeq: runtimeCompaction.throughSeq,
+      reason: 'A Runtime-owned summary replaces this preserved Canonical prefix.',
+      turnIndex: 0,
+    });
+  }
+  const relevant = canonicalConversationRecords(input.records);
+  const blocks = canonicalTurnBlocks(input.records);
   const blockByStart = new Map(blocks.map((block) => [block[0]!.seq, block]));
   for (const record of relevant) {
+    if (runtimeCompaction && record.seq <= runtimeCompaction.throughSeq) continue;
     if (consumed.has(record.id)) continue;
     const segment = replacementByStart.get(record.seq);
     const block = blockByStart.get(record.seq);
@@ -371,7 +274,7 @@ function allTurns(
       continue;
     }
     if (block) {
-      const blockTurns = promptTurns(block, input.thread);
+      const blockTurns = canonicalBlockToPromptTurns(block, input.thread);
       turns.push(...blockTurns);
       block.forEach((item) => consumed.add(item.id));
       provenance.push({
@@ -385,7 +288,7 @@ function allTurns(
         reason: 'Segment remains hot or has not reached a safe full-turn boundary.',
       });
     } else {
-      turns.push(...promptTurns([record], input.thread));
+      turns.push(...canonicalBlockToPromptTurns([record], input.thread));
     }
   }
   // Preserve any core projection additions (for example, initial system turns) only when its
@@ -400,7 +303,7 @@ function requireThread(value: unknown): string {
   return threadId;
 }
 function canManualCompact(records: readonly CanonicalRecord[], segment: RollingSegment): boolean {
-  const block = completedTurnBlocks(records).find(
+  const block = completedCanonicalTurnBlocks(records).find(
     (items) => items[0]?.seq === segment.startSeq && items.at(-1)?.seq === segment.endSeq,
   );
   return Boolean(block && isRecordPresent(records, segment));
@@ -412,7 +315,7 @@ export const rollingContextPlugin: PicoPlugin = {
   version: '0.1.0',
   pipelinePriority: { projection: 0 },
   activate(context) {
-    const { canonical, pipelines, tools, http, commands, ui } = context;
+    const { canonical, pipelines, tools, http, ui } = context;
     const list = (threadId: string): RollingSegment[] => getSegments(context, threadId);
     const sourceFor = (threadId: string, segment: RollingSegment): string => {
       const records = canonical.list(threadId).filter((record) => segment.sourceRecordIds.includes(record.id));
@@ -434,10 +337,12 @@ export const rollingContextPlugin: PicoPlugin = {
     ): Promise<RollingSegment[]> => {
       const previous = list(thread.id);
       const known = new Set(previous.map((segment) => segment.id));
-      const currentBlock = allTurnBlocks(records).at(-1);
+      const runtimeCompaction = runtimeContextCompaction(records);
+      const currentBlock = canonicalTurnBlocks(records).at(-1);
       const currentStart = currentBlock?.[0]?.seq ?? Number.POSITIVE_INFINITY;
-      const sealable = completedTurnBlocks(records).filter((block) => {
+      const sealable = completedCanonicalTurnBlocks(records).filter((block) => {
         const endSeq = block.at(-1)?.seq ?? Number.POSITIVE_INFINITY;
+        if (runtimeCompaction && endSeq <= runtimeCompaction.throughSeq) return false;
         return (
           endSeq < currentStart ||
           (includeLatestComplete && thread.state === 'idle' && endSeq === currentBlock?.at(-1)?.seq)
@@ -761,45 +666,6 @@ export const rollingContextPlugin: PicoPlugin = {
       }
       throw new Error('Unknown Rolling Context action.');
     });
-    commands.register({
-      name: 'compact',
-      description: 'Summarize safe sealed turns and move available summaries into warm context.',
-      async execute(_args, commandContext) {
-        if (!commandContext.thread) return { text: 'Choose a Thread first.' };
-        const thread = context.threads.get(commandContext.thread.id);
-        if (!thread) return { text: 'Thread not found.' };
-        if (thread.state !== 'idle')
-          return { text: 'Wait for the Thread to reach a safe idle boundary before compacting.' };
-        const segments = await reconcile(thread, canonical.list(thread.id), true);
-        let warmed = 0;
-        for (const segment of segments) {
-          if (!segment.summary || !canManualCompact(canonical.list(thread.id), segment)) continue;
-          const updated = transition(segment, 'warm', 'Explicit /compact fallback.');
-          saveSegments(
-            context,
-            thread.id,
-            list(thread.id).map((item) => (item.id === segment.id ? updated : item)),
-            {
-              threadId: thread.id,
-              segmentId: segment.id,
-              from: segment.tier,
-              to: 'warm',
-              reason: 'Explicit /compact fallback.',
-              summaryVersion: segment.summaryVersion,
-            },
-          );
-          if (segment.tier !== 'warm') warmed += 1;
-        }
-        if (warmed > 0)
-          context.threads.pause(
-            thread.id,
-            'Rolling Context was manually compacted. Review the projected context before continuing.',
-          );
-        return {
-          text: `Rolling Context compacted ${warmed} summarized safe segment(s). Canonical History remains unchanged.${warmed > 0 ? ' The Thread is paused for review.' : ''}`,
-        };
-      },
-    });
     ui.contribute({
       slot: 'thread.toolbar',
       id: 'rolling-context',
@@ -808,6 +674,7 @@ export const rollingContextPlugin: PicoPlugin = {
       entry: 'webui',
       component: 'RollingContextPanel',
       supportsPopover: true,
+      preferredWidth: 640,
     });
   },
 };

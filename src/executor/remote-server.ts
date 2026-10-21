@@ -8,7 +8,7 @@ import { EXECUTOR_PROTOCOL_VERSION } from './remote-protocol.js';
 import { compareExecutorVersions, PICO_EXECUTOR_VERSION } from './version.js';
 import { createToolCatalog } from './tools.js';
 import { loadExecutorPlugins } from './plugin-host.js';
-import type { ToolCatalog } from './tools.js';
+import type { ToolCatalog } from './tool-catalog.js';
 import { RemoteExecutionLedger } from './remote-ledger.js';
 import type { RemoteExecutionRequest, RemoteExecutionState } from './remote-protocol.js';
 

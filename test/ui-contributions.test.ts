@@ -1,8 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import type { UiContribution } from '../src/core/types.js';
 import { toolResultForCall, uiContributionsAt } from '../src/web/ui-contributions.js';
+import { clampPluginPopoverWidth } from '../src/web/plugin-ui-sizing.js';
 
 describe('semantic plugin UI slots', () => {
+  it('clamps declared preferred widths to the available viewport', () => {
+    expect(clampPluginPopoverWidth(640, 500)).toBe(476);
+    expect(clampPluginPopoverWidth(undefined, 400)).toBe(360);
+    expect(clampPluginPopoverWidth(640, 100)).toBe(76);
+  });
+
   it('mounts provider model controls only for the selected provider and preserves unscoped controls', () => {
     const chatgpt: UiContribution = {
       slot: 'composer.model',

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { PicoStore } from '../src/core/store.js';
 import { ExecutionPipelines } from '../src/core/pipeline.js';
-import { ToolCatalog } from '../src/executor/tools.js';
+import { ToolCatalog } from '../src/executor/tool-catalog.js';
 import { CommandRegistry, PluginHost, type PicoPlugin } from '../src/plugins/host.js';
 import { unavailablePluginServices } from '../src/plugins/services.js';
 

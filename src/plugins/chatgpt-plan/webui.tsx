@@ -396,6 +396,7 @@ function AccountPage({ api, onError, onNotice }: PluginUiProps): ReactElement {
 function ChatGptPlanComposerModel({
   api,
   settings,
+  context,
   updateModelSettings,
   openPage,
   onError,
@@ -425,19 +426,21 @@ function ChatGptPlanComposerModel({
     }
   }, [api, onError]);
 
+  const selectedProvider = context.modelSelection?.provider ?? settings.provider;
+  const selectedModel = context.modelSelection?.model ?? settings.model;
   useEffect(() => {
-    if (settings.provider === 'chatgpt-plan') void loadProviderData();
-  }, [settings.provider, loadProviderData]);
+    if (selectedProvider === 'chatgpt-plan') void loadProviderData();
+  }, [selectedProvider, loadProviderData]);
 
   const selectModel = async (model: string): Promise<void> => {
     try {
-      await updateModelSettings({ provider: 'chatgpt-plan', model });
+      await updateModelSettings({ provider: 'chatgpt-plan', model }, context.thread?.id);
     } catch (caught) {
       onError(errorMessage(caught));
     }
   };
 
-  if (settings.provider !== 'chatgpt-plan') {
+  if (selectedProvider !== 'chatgpt-plan') {
     return null;
   }
 
@@ -463,11 +466,11 @@ function ChatGptPlanComposerModel({
       <select
         className="chatgpt-model-select pico-ui-control"
         aria-label="Model"
-        value={models.some((choice) => choice.slug === settings.model) ? settings.model : ''}
+        value={models.some((choice) => choice.slug === selectedModel) ? selectedModel : ''}
         onChange={(event) => void selectModel(event.target.value)}
         disabled={loading}
       >
-        {!models.some((choice) => choice.slug === settings.model) ? (
+        {!models.some((choice) => choice.slug === selectedModel) ? (
           <option value="" disabled>
             {loading ? 'Loading models…' : 'Choose model'}
           </option>

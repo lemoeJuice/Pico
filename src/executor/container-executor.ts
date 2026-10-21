@@ -10,7 +10,6 @@ import { currentExecutorBundle, currentExecutorVersion } from './bundle.js';
 import type { ExecutionListener, ExecutorAdapter, ExecutorServiceAddress } from './executor.js';
 import { executorPluginDirectory } from './plugin-host.js';
 import { RemoteHostExecutor } from './remote-executor.js';
-import type { ToolCatalog } from './tools.js';
 
 const CONTAINER_SETTING_PREFIX = 'executor-container-connection:';
 const CONTAINER_NAME_SETTING_PREFIX = 'executor-container-name:';
@@ -173,7 +172,6 @@ export class ContainerExecutor implements ExecutorAdapter {
 
   constructor(
     private readonly store: PicoStore,
-    _tools: ToolCatalog,
     onExecution: ExecutionListener = () => undefined,
     image = configuredContainerImage(),
     private readonly runPodmanCommand: PodmanRunner = podman,

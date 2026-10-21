@@ -1,4 +1,5 @@
 import { migrateLegacyPermissions } from './migrations/legacy-permissions.js';
+import { migrateLegacyChatGptPreferences } from './migrations/legacy-chatgpt-preferences.js';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -18,6 +19,7 @@ import type {
   RemoteExecutorConnection,
   RemoteExecutorConnectionView,
   Thread,
+  ThreadModelSelection,
   TokenUsage,
   ToolCall,
   ToolResultPayload,
@@ -164,12 +166,13 @@ export class PicoStore {
       );
       CREATE TABLE IF NOT EXISTS canonical_records (
         id TEXT PRIMARY KEY,
-        thread_id TEXT NOT NULL REFERENCES threads(id),
+        thread_id TEXT REFERENCES threads(id),
+        scope_key TEXT NOT NULL,
         seq INTEGER NOT NULL,
         kind TEXT NOT NULL,
         payload_json TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        UNIQUE(thread_id, seq)
+        UNIQUE(scope_key, seq)
       );
       CREATE INDEX IF NOT EXISTS canonical_thread_seq ON canonical_records(thread_id, seq);
       CREATE INDEX IF NOT EXISTS canonical_thread_kind_seq ON canonical_records(thread_id, kind, seq);
@@ -215,6 +218,7 @@ export class PicoStore {
         id TEXT PRIMARY KEY,
         plugin_id TEXT NOT NULL,
         idempotency_key TEXT NOT NULL,
+        request_fingerprint TEXT,
         thread_id TEXT,
         project_id TEXT,
         purpose TEXT NOT NULL,
@@ -234,6 +238,11 @@ export class PicoStore {
         ON plugin_model_calls(thread_id, created_at);
       CREATE INDEX IF NOT EXISTS plugin_model_calls_project_created
         ON plugin_model_calls(project_id, created_at);
+      CREATE TABLE IF NOT EXISTS thread_model_selections (
+        thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+        selection_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value_json TEXT NOT NULL,
@@ -255,11 +264,177 @@ export class PicoStore {
         updated_at TEXT NOT NULL,
         PRIMARY KEY(plugin_id, key)
       );
+      CREATE TABLE IF NOT EXISTS private_secrets (
+        owner TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(owner, key)
+      );
+      CREATE TABLE IF NOT EXISTS plugin_cache (
+        plugin_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(plugin_id, key)
+      );
     `);
+    this.migrateCanonicalScopes();
+    this.migrateExecutionLogIndependence();
     this.migrateRemoteExecutorBindings();
     this.migrateRuntimeExecutorKind();
     this.migrateThreadVisibility();
+    this.migratePluginModelCallFingerprint();
     migrateLegacyPermissions(this.db);
+    migrateLegacyChatGptPreferences(this.db);
+    this.importLegacyWorkflowViews();
+  }
+
+  private migrateCanonicalScopes(): void {
+    const columns = this.db.prepare('PRAGMA table_info(canonical_records)').all() as Array<{ name: string }>;
+    if (columns.some((column) => column.name === 'scope_key')) return;
+    this.db.exec(`
+      DROP TRIGGER IF EXISTS canonical_records_no_update;
+      DROP TRIGGER IF EXISTS canonical_records_no_delete;
+      DROP INDEX IF EXISTS canonical_thread_seq;
+      DROP INDEX IF EXISTS canonical_thread_kind_seq;
+      ALTER TABLE canonical_records RENAME TO canonical_records_legacy_scope;
+      CREATE TABLE canonical_records (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT REFERENCES threads(id),
+        scope_key TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(scope_key, seq)
+      );
+      INSERT INTO canonical_records (id, thread_id, scope_key, seq, kind, payload_json, created_at)
+        SELECT id, thread_id, 'thread:' || thread_id, seq, kind, payload_json, created_at
+        FROM canonical_records_legacy_scope;
+      DROP TABLE canonical_records_legacy_scope;
+      CREATE INDEX canonical_thread_seq ON canonical_records(thread_id, seq);
+      CREATE INDEX canonical_thread_kind_seq ON canonical_records(thread_id, kind, seq);
+      CREATE TRIGGER canonical_records_no_update BEFORE UPDATE ON canonical_records BEGIN
+        SELECT RAISE(ABORT, 'canonical records are append-only');
+      END;
+      CREATE TRIGGER canonical_records_no_delete BEFORE DELETE ON canonical_records BEGIN
+        SELECT RAISE(ABORT, 'canonical records are append-only');
+      END;
+    `);
+  }
+
+  private migrateExecutionLogIndependence(): void {
+    const schema = this.db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'execution_log'")
+      .get() as SqlRow | undefined;
+    if (typeof schema?.sql !== 'string' || !schema.sql.includes('REFERENCES executions')) return;
+    this.db.exec(`
+      DROP TRIGGER IF EXISTS execution_log_no_update;
+      DROP TRIGGER IF EXISTS execution_log_no_delete;
+      ALTER TABLE execution_log RENAME TO execution_log_legacy_fk;
+      CREATE TABLE execution_log (
+        id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        detail_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO execution_log SELECT * FROM execution_log_legacy_fk;
+      DROP TABLE execution_log_legacy_fk;
+      CREATE TRIGGER execution_log_no_update BEFORE UPDATE ON execution_log BEGIN
+        SELECT RAISE(ABORT, 'execution log is append-only');
+      END;
+      CREATE TRIGGER execution_log_no_delete BEFORE DELETE ON execution_log BEGIN
+        SELECT RAISE(ABORT, 'execution log is append-only');
+      END;
+    `);
+  }
+
+  private workflowFact(
+    scope: string,
+    key: string,
+    value: unknown,
+    id: string = randomUUID(),
+    createdAt = isoNow(),
+  ): void {
+    this.appendCanonicalInternal(
+      null,
+      id,
+      'plugin',
+      {
+        __picoWorkflow: { version: 1, scope, key, value },
+      },
+      createdAt,
+      `workflow:${scope}`,
+    );
+  }
+
+  private importLegacyWorkflowViews(): void {
+    this.transaction(() => {
+      const legacyId = (scope: string, key: string): string =>
+        `legacy-import:${createHash('sha256').update(`${scope}\0${key}`).digest('hex')}`;
+      const threads = this.db.prepare('SELECT id, pause_requested, pause_reason FROM threads').all() as SqlRow[];
+      for (const row of threads) {
+        const id = String(row.id);
+        const value = { pauseRequested: row.pause_requested === 1, pauseReason: row.pause_reason ?? null };
+        const key = `pause:${id}`;
+        if (!this.getCanonicalRecordById(legacyId(`thread:${id}`, key))) {
+          this.workflowFact(`thread:${id}`, key, value, legacyId(`thread:${id}`, key));
+        }
+      }
+      const executions = this.db.prepare('SELECT * FROM executions ORDER BY created_at, id').all() as SqlRow[];
+      for (const row of executions) {
+        const execution = this.executionFromRow(row);
+        const key = `execution:${execution.id}`;
+        const scope = `thread:${execution.threadId}`;
+        if (!this.getCanonicalRecordById(legacyId(scope, key))) {
+          this.workflowFact(scope, key, execution, legacyId(scope, key), execution.createdAt);
+        }
+      }
+      const states = this.db.prepare('SELECT * FROM plugin_state ORDER BY plugin_id, key').all() as SqlRow[];
+      for (const row of states) {
+        const pluginId = String(row.plugin_id);
+        const keyName = String(row.key);
+        // ChatGPT OAuth material is migrated to private_secrets before being exposed as a fact.
+        if (pluginId === 'pico.chatgpt-plan' && keyName === 'oauth') {
+          this.setPrivateSecret(pluginId, keyName, json(row.value_json, null));
+          this.db.prepare('DELETE FROM plugin_state WHERE plugin_id = ? AND key = ?').run(pluginId, keyName);
+          continue;
+        }
+        if (
+          (pluginId === 'pico.chatgpt-plan' && keyName === 'modelCatalog') ||
+          (pluginId === 'pico.permissions' && keyName === 'availableTools')
+        ) {
+          this.setPluginCache(pluginId, keyName, json(row.value_json, null));
+          this.db.prepare('DELETE FROM plugin_state WHERE plugin_id = ? AND key = ?').run(pluginId, keyName);
+          continue;
+        }
+        const scope = 'global';
+        const key = `plugin-state:${pluginId}:${keyName}`;
+        if (!this.getCanonicalRecordById(legacyId(scope, key))) {
+          this.workflowFact(
+            scope,
+            key,
+            { pluginId, key: keyName, value: json(row.value_json, null) },
+            legacyId(scope, key),
+          );
+        }
+      }
+      const calls = this.db.prepare('SELECT * FROM plugin_model_calls ORDER BY created_at, id').all() as SqlRow[];
+      for (const row of calls) {
+        const call = this.pluginModelCallFromRow(row);
+        const scope = call.threadId
+          ? `thread:${call.threadId}`
+          : call.projectId
+            ? `project:${call.projectId}`
+            : 'global';
+        const key = `plugin-model-call:${call.pluginId}:${call.idempotencyKey}`;
+        if (!this.getCanonicalRecordById(legacyId(scope, key))) {
+          this.workflowFact(scope, key, { ...call, prompt: null, attempts: [] }, legacyId(scope, key), call.createdAt);
+        }
+      }
+    });
   }
 
   ensureAuthTokenFingerprint(fingerprint: string): void {
@@ -352,6 +527,13 @@ export class PicoStore {
     }
   }
 
+  private migratePluginModelCallFingerprint(): void {
+    const columns = this.db.prepare('PRAGMA table_info(plugin_model_calls)').all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'request_fingerprint')) {
+      this.db.exec('ALTER TABLE plugin_model_calls ADD COLUMN request_fingerprint TEXT;');
+    }
+  }
+
   close(): void {
     this.db.close();
   }
@@ -422,6 +604,7 @@ export class PicoStore {
       remoteConnectionId?: string | null;
       workspacePath?: string;
       idempotencyKey?: string;
+      modelSelection?: ThreadModelSelection;
     } = {},
   ): Thread {
     const project = this.getProject(projectId);
@@ -446,6 +629,7 @@ export class PicoStore {
               createdByAgent: options.createdByAgent ?? false,
               remoteConnectionId: remoteConnection?.id ?? null,
               workspacePath,
+              modelSelection: options.modelSelection ?? null,
             }),
           )
           .digest('hex')
@@ -504,6 +688,18 @@ export class PicoStore {
             'INSERT INTO thread_create_requests (idempotency_key, request_hash, thread_id, created_at) VALUES (?, ?, ?, ?)',
           )
           .run(idempotencyKey, requestHash, id, createdAt);
+      }
+      if (options.modelSelection) {
+        this.db
+          .prepare('INSERT INTO thread_model_selections (thread_id, selection_json, updated_at) VALUES (?, ?, ?)')
+          .run(id, JSON.stringify(options.modelSelection), createdAt);
+        this.workflowFact(
+          `thread:${id}`,
+          `thread-model-selection:${id}`,
+          options.modelSelection,
+          randomUUID(),
+          createdAt,
+        );
       }
       return {
         id,
@@ -590,9 +786,7 @@ export class PicoStore {
   }
 
   unarchiveThread(threadId: string): Thread | null {
-    this.db
-      .prepare('UPDATE threads SET archived_at = NULL WHERE id = ? AND deleted_at IS NULL')
-      .run(threadId);
+    this.db.prepare('UPDATE threads SET archived_at = NULL WHERE id = ? AND deleted_at IS NULL').run(threadId);
     return this.getThread(threadId);
   }
 
@@ -604,29 +798,31 @@ export class PicoStore {
   }
 
   listThreads(projectId?: string): Thread[] {
-    const rows = (projectId
-      ? this.db
-          .prepare(
-            `
+    const rows = (
+      projectId
+        ? this.db
+            .prepare(
+              `
           SELECT t.*, e.kind AS executor_kind, e.label AS executor_label,
                  e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote
           FROM threads t JOIN executors e ON e.id = t.executor_id
           WHERE t.project_id = ? AND t.archived_at IS NULL AND t.deleted_at IS NULL
           ORDER BY t.created_at DESC
         `,
-          )
-          .all(projectId)
-      : this.db
-          .prepare(
-            `
+            )
+            .all(projectId)
+        : this.db
+            .prepare(
+              `
           SELECT t.*, e.kind AS executor_kind, e.label AS executor_label,
                  e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote
           FROM threads t JOIN executors e ON e.id = t.executor_id
           WHERE t.archived_at IS NULL AND t.deleted_at IS NULL
           ORDER BY t.created_at DESC
         `,
-          )
-          .all()) as SqlRow[];
+            )
+            .all()
+    ) as SqlRow[];
     return rows.map((row) => this.threadFromRow(row));
   }
 
@@ -667,10 +863,16 @@ export class PicoStore {
   }
 
   setPause(threadId: string, paused: boolean, reason: string | null = null): void {
-    const result = this.db
-      .prepare('UPDATE threads SET pause_requested = ?, pause_reason = ? WHERE id = ?')
-      .run(paused ? 1 : 0, paused ? reason : null, threadId);
-    if (result.changes === 0) throw new Error('Thread not found');
+    this.transaction(() => {
+      const result = this.db
+        .prepare('UPDATE threads SET pause_requested = ?, pause_reason = ? WHERE id = ?')
+        .run(paused ? 1 : 0, paused ? reason : null, threadId);
+      if (result.changes === 0) throw new Error('Thread not found');
+      this.workflowFact(`thread:${threadId}`, `pause:${threadId}`, {
+        pauseRequested: paused,
+        pauseReason: paused ? reason : null,
+      });
+    });
   }
 
   appendMessage(threadId: string, id: string, payload: MessagePayload): AppendResult<MessagePayload> {
@@ -686,6 +888,152 @@ export class PicoStore {
     return this.appendCanonical(threadId, id, 'plugin', { ...payload, pluginId }).record;
   }
 
+  listScopedCanonical(scope: string): CanonicalRecord[] {
+    return (
+      this.db.prepare('SELECT * FROM canonical_records WHERE scope_key = ? ORDER BY seq').all(scope) as SqlRow[]
+    ).map((row) => this.recordFromRow(row));
+  }
+
+  getPrivateSecret<T>(owner: string, key: string, fallback: T): T {
+    const row = this.db
+      .prepare('SELECT value_json FROM private_secrets WHERE owner = ? AND key = ?')
+      .get(owner, key) as SqlRow | undefined;
+    return row ? json(row.value_json, fallback) : fallback;
+  }
+
+  setPrivateSecret<T>(owner: string, key: string, value: T): void {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) throw new Error('Private secret must be JSON serializable');
+    this.db
+      .prepare(
+        `INSERT INTO private_secrets (owner, key, value_json, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(owner, key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
+      )
+      .run(owner, key, serialized, isoNow());
+  }
+
+  deletePrivateSecret(owner: string, key: string): void {
+    this.db.prepare('DELETE FROM private_secrets WHERE owner = ? AND key = ?').run(owner, key);
+  }
+
+  getPluginCache<T>(pluginId: string, key: string, fallback: T): T {
+    const row = this.db
+      .prepare('SELECT value_json FROM plugin_cache WHERE plugin_id = ? AND key = ?')
+      .get(pluginId, key) as SqlRow | undefined;
+    return row ? json(row.value_json, fallback) : fallback;
+  }
+
+  setPluginCache<T>(pluginId: string, key: string, value: T): void {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) throw new Error('Plugin cache must be JSON serializable');
+    this.db
+      .prepare(
+        `INSERT INTO plugin_cache (plugin_id, key, value_json, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(plugin_id, key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
+      )
+      .run(pluginId, key, serialized, isoNow());
+  }
+
+  rebuildWorkflowViews(): void {
+    this.transaction(() => {
+      this.db.exec(
+        'DELETE FROM executions; DELETE FROM plugin_state; DELETE FROM plugin_model_calls; DELETE FROM thread_model_selections;',
+      );
+      this.db.prepare('UPDATE threads SET pause_requested = 0, pause_reason = NULL').run();
+      const facts = this.db
+        .prepare(
+          `SELECT * FROM canonical_records
+        WHERE scope_key LIKE 'workflow:%' AND kind = 'plugin' ORDER BY scope_key, seq`,
+        )
+        .all() as SqlRow[];
+      for (const row of facts) {
+        const envelope = json<Record<string, unknown>>(row.payload_json, {}).__picoWorkflow as
+          Record<string, unknown> | undefined;
+        if (
+          !envelope ||
+          envelope.version !== 1 ||
+          typeof envelope.scope !== 'string' ||
+          typeof envelope.key !== 'string'
+        )
+          continue;
+        const value = envelope.value as Record<string, unknown> | null;
+        if (!value) continue;
+        if (envelope.key.startsWith('pause:')) {
+          const threadId = envelope.key.slice('pause:'.length);
+          this.db
+            .prepare('UPDATE threads SET pause_requested = ?, pause_reason = ? WHERE id = ?')
+            .run(
+              value.pauseRequested ? 1 : 0,
+              value.pauseRequested ? String(value.pauseReason ?? '') || null : null,
+              threadId,
+            );
+        } else if (envelope.key.startsWith('execution:')) {
+          const e = value as unknown as Execution;
+          this.db
+            .prepare(
+              `INSERT OR REPLACE INTO executions
+            (id, thread_id, batch_id, kind, tool_name, arguments_json, status, result_json, error, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              e.id,
+              e.threadId,
+              e.batchId,
+              e.kind,
+              e.toolName,
+              JSON.stringify(e.arguments),
+              e.status,
+              e.result === null ? null : JSON.stringify(e.result),
+              e.error,
+              e.createdAt,
+              e.updatedAt,
+            );
+        } else if (envelope.key.startsWith('plugin-state:')) {
+          const s = value as { pluginId?: unknown; key?: unknown; value?: unknown };
+          if (typeof s.pluginId !== 'string' || typeof s.key !== 'string') continue;
+          this.db
+            .prepare('INSERT OR REPLACE INTO plugin_state (plugin_id, key, value_json, updated_at) VALUES (?, ?, ?, ?)')
+            .run(s.pluginId, s.key, JSON.stringify(s.value), String(row.created_at));
+        } else if (envelope.key.startsWith('thread-model-selection:')) {
+          const threadId = envelope.key.slice('thread-model-selection:'.length);
+          this.db
+            .prepare(
+              'INSERT OR REPLACE INTO thread_model_selections (thread_id, selection_json, updated_at) VALUES (?, ?, ?)',
+            )
+            .run(threadId, JSON.stringify(value), String(row.created_at));
+        } else if (envelope.key.startsWith('plugin-model-call:')) {
+          const c = value as unknown as PluginModelCallRecord;
+          this.db
+            .prepare(
+              `INSERT OR REPLACE INTO plugin_model_calls
+            (id, plugin_id, idempotency_key, request_fingerprint, thread_id, project_id, purpose, provider, model, prompt_json, status,
+             response_json, usage_json, attempts_json, error, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              c.id,
+              c.pluginId,
+              c.idempotencyKey,
+              c.requestFingerprint ?? null,
+              c.threadId,
+              c.projectId,
+              c.purpose,
+              c.provider,
+              c.model,
+              'null',
+              c.status,
+              c.response === null ? null : JSON.stringify(c.response),
+              c.usage === null ? null : JSON.stringify(c.usage),
+              '[]',
+              c.error,
+              c.createdAt,
+              c.updatedAt,
+            );
+        }
+      }
+    });
+  }
+
   appendCanonical<T extends object>(
     threadId: string,
     id: string,
@@ -696,18 +1044,35 @@ export class PicoStore {
     return this.transaction(() => this.appendCanonicalInternal(threadId, id, kind, payload, createdAt));
   }
 
-  private appendCanonicalInternal<T extends object>(
-    threadId: string,
+  appendScopedCanonical<T extends object>(
+    scope: string,
     id: string,
     kind: CanonicalKind,
     payload: T,
     createdAt = isoNow(),
   ): AppendResult<T> {
+    const cleanedScope = scope.trim();
+    if (!cleanedScope || cleanedScope.length > 240 || cleanedScope.startsWith('thread:')) {
+      throw new Error('A non-Thread canonical scope is required.');
+    }
+    return this.transaction(() => this.appendCanonicalInternal(null, id, kind, payload, createdAt, cleanedScope));
+  }
+
+  private appendCanonicalInternal<T extends object>(
+    threadId: string | null,
+    id: string,
+    kind: CanonicalKind,
+    payload: T,
+    createdAt = isoNow(),
+    explicitScope?: string,
+  ): AppendResult<T> {
+    const scope = explicitScope ?? `thread:${threadId}`;
     const existing = this.db.prepare('SELECT * FROM canonical_records WHERE id = ?').get(id) as SqlRow | undefined;
     if (existing) {
       const oldPayload = String(existing.payload_json);
       if (
-        existing.thread_id !== threadId ||
+        (existing.thread_id ?? null) !== threadId ||
+        existing.scope_key !== scope ||
         existing.kind !== kind ||
         JSON.stringify(JSON.parse(oldPayload)) !== JSON.stringify(payload)
       ) {
@@ -716,18 +1081,18 @@ export class PicoStore {
       return { record: this.recordFromRow(existing) as CanonicalRecord<T>, inserted: false };
     }
     const sequenceRow = this.db
-      .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM canonical_records WHERE thread_id = ?')
-      .get(threadId) as SqlRow;
+      .prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM canonical_records WHERE scope_key = ?')
+      .get(scope) as SqlRow;
     const seq = Number(sequenceRow.next_seq);
     this.db
       .prepare(
         `
-      INSERT INTO canonical_records (id, thread_id, seq, kind, payload_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO canonical_records (id, thread_id, scope_key, seq, kind, payload_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `,
       )
-      .run(id, threadId, seq, kind, JSON.stringify(payload), createdAt);
-    const record = { id, threadId, seq, kind, payload, createdAt };
+      .run(id, threadId, scope, seq, kind, JSON.stringify(payload), createdAt);
+    const record = { id, threadId, scope, seq, kind, payload, createdAt };
     const snapshot = structuredClone(record) as CanonicalRecord;
     this.notifyAfterCommit(() => {
       for (const listener of this.canonicalListeners) {
@@ -740,7 +1105,8 @@ export class PicoStore {
   private recordFromRow(row: SqlRow): CanonicalRecord {
     return {
       id: String(row.id),
-      threadId: String(row.thread_id),
+      threadId: typeof row.thread_id === 'string' ? row.thread_id : null,
+      scope: typeof row.scope_key === 'string' ? row.scope_key : `thread:${String(row.thread_id)}`,
       seq: Number(row.seq),
       kind: row.kind as CanonicalKind,
       payload: json(row.payload_json, {}),
@@ -909,6 +1275,8 @@ export class PicoStore {
             createdAt,
           );
         this.logExecution(executionId, 'created', { status: 'pending' }, createdAt);
+        const createdExecution = this.getExecution(executionId);
+        if (createdExecution) this.snapshotExecution(createdExecution);
       }
       const modelExecution = this.getExecution(input.modelExecutionId);
       if (modelExecution && (modelExecution.status === 'pending' || modelExecution.status === 'running')) {
@@ -937,6 +1305,8 @@ export class PicoStore {
           },
           createdAt,
         );
+        const completedExecution = this.getExecution(input.modelExecutionId);
+        if (completedExecution) this.snapshotExecution(completedExecution);
       }
       return assistant;
     });
@@ -984,7 +1354,9 @@ export class PicoStore {
         },
         now,
       );
-      return this.getExecution(id)!;
+      const execution = this.getExecution(id)!;
+      this.snapshotExecution(execution);
+      return execution;
     });
   }
 
@@ -1001,7 +1373,9 @@ export class PicoStore {
         .prepare('UPDATE executions SET arguments_json = ?, updated_at = ? WHERE id = ?')
         .run(JSON.stringify({ ...args, model: cleanedModel }), now, id);
       this.logExecution(id, 'model-selected', { model: cleanedModel }, now);
-      return this.getExecution(id)!;
+      const updated = this.getExecution(id)!;
+      this.snapshotExecution(updated);
+      return updated;
     });
   }
 
@@ -1023,7 +1397,9 @@ export class PicoStore {
       const now = isoNow();
       this.db.prepare('UPDATE executions SET error = ?, updated_at = ? WHERE id = ?').run(error, now, id);
       this.logExecution(id, 'retryable-setup-failure', { error }, now);
-      return this.getExecution(id)!;
+      const updated = this.getExecution(id)!;
+      this.snapshotExecution(updated);
+      return updated;
     });
   }
 
@@ -1035,7 +1411,9 @@ export class PicoStore {
       const now = isoNow();
       this.db.prepare('UPDATE executions SET error = ?, updated_at = ? WHERE id = ?').run(error, now, id);
       this.logExecution(id, 'execution-error', { error }, now);
-      return this.getExecution(id)!;
+      const updated = this.getExecution(id)!;
+      this.snapshotExecution(updated);
+      return updated;
     });
   }
 
@@ -1068,23 +1446,43 @@ export class PicoStore {
       )
       .run(status, resultJson, data.error ?? null, now, id);
     this.logExecution(id, status, data.detail ?? { error: data.error ?? null }, now);
-    return this.getExecution(id)!;
+    const updated = this.getExecution(id)!;
+    this.snapshotExecution(updated);
+    return updated;
+  }
+
+  private snapshotExecution(execution: Execution): void {
+    this.workflowFact(
+      `thread:${execution.threadId}`,
+      `execution:${execution.id}`,
+      execution,
+      randomUUID(),
+      execution.updatedAt,
+    );
   }
 
   private logExecution(id: string, kind: string, detail: Record<string, unknown>, createdAt = isoNow()): void {
-    this.db
-      .prepare(
-        `
+    try {
+      this.db
+        .prepare(
+          `
       INSERT INTO execution_log (id, execution_id, kind, detail_json, created_at)
       VALUES (?, ?, ?, ?, ?)
     `,
-      )
-      .run(randomUUID(), id, kind, JSON.stringify(detail), createdAt);
+        )
+        .run(randomUUID(), id, kind, JSON.stringify(detail), createdAt);
+    } catch {
+      // Diagnostics are best effort; workflow facts and views remain authoritative.
+    }
   }
 
   appendExecutionLog(executionId: string, kind: string, detail: Record<string, unknown>): void {
     if (!this.getExecution(executionId)) throw new Error(`Execution ${executionId} not found`);
-    this.logExecution(executionId, kind, detail);
+    try {
+      this.logExecution(executionId, kind, detail);
+    } catch {
+      // Keep the explicit public diagnostic API best effort too.
+    }
   }
 
   listExecutionLog(executionId: string, kind: string): ExecutionLogEntry[] {
@@ -1114,43 +1512,63 @@ export class PicoStore {
   }
 
   savePluginModelCall(call: PluginModelCallRecord): PluginModelCallRecord {
-    const current = this.findPluginModelCall(call.pluginId, call.idempotencyKey);
-    const createdAt = current?.createdAt ?? call.createdAt;
-    this.db
-      .prepare(
-        `INSERT INTO plugin_model_calls (
-          id, plugin_id, idempotency_key, thread_id, project_id, purpose, provider, model,
+    return this.transaction(() => {
+      const current = this.findPluginModelCall(call.pluginId, call.idempotencyKey);
+      const createdAt = current?.createdAt ?? call.createdAt;
+      this.db
+        .prepare(
+          `INSERT INTO plugin_model_calls (
+          id, plugin_id, idempotency_key, request_fingerprint, thread_id, project_id, purpose, provider, model,
           prompt_json, status, response_json, usage_json, attempts_json, error, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(plugin_id, idempotency_key) DO UPDATE SET
+          request_fingerprint = excluded.request_fingerprint,
           thread_id = excluded.thread_id, project_id = excluded.project_id, purpose = excluded.purpose,
           provider = excluded.provider, model = excluded.model, prompt_json = excluded.prompt_json,
           status = excluded.status, response_json = excluded.response_json, usage_json = excluded.usage_json,
           attempts_json = excluded.attempts_json, error = excluded.error, updated_at = excluded.updated_at`,
-      )
-      .run(
-        current?.id ?? call.id,
-        call.pluginId,
-        call.idempotencyKey,
-        call.threadId,
-        call.projectId,
-        call.purpose,
-        call.provider,
-        call.model,
-        JSON.stringify(call.prompt),
-        call.status,
-        call.response === null ? null : JSON.stringify(call.response),
-        call.usage === null ? null : JSON.stringify(call.usage),
-        JSON.stringify(call.attempts),
-        call.error,
-        createdAt,
-        call.updatedAt,
+        )
+        .run(
+          current?.id ?? call.id,
+          call.pluginId,
+          call.idempotencyKey,
+          call.requestFingerprint ?? null,
+          call.threadId,
+          call.projectId,
+          call.purpose,
+          call.provider,
+          call.model,
+          JSON.stringify(call.prompt),
+          call.status,
+          call.response === null ? null : JSON.stringify(call.response),
+          call.usage === null ? null : JSON.stringify(call.usage),
+          JSON.stringify(call.attempts),
+          call.error,
+          createdAt,
+          call.updatedAt,
+        );
+      const saved = this.findPluginModelCall(call.pluginId, call.idempotencyKey)!;
+      const scope = saved.threadId
+        ? `thread:${saved.threadId}`
+        : saved.projectId
+          ? `project:${saved.projectId}`
+          : 'global';
+      this.workflowFact(
+        scope,
+        `plugin-model-call:${saved.pluginId}:${saved.idempotencyKey}`,
+        {
+          ...saved,
+          prompt: null,
+          attempts: [],
+        },
+        randomUUID(),
+        saved.updatedAt,
       );
-    const saved = this.findPluginModelCall(call.pluginId, call.idempotencyKey)!;
-    this.notifyAfterCommit(() => {
-      for (const listener of this.pluginModelCallListeners) listener(saved);
+      this.notifyAfterCommit(() => {
+        for (const listener of this.pluginModelCallListeners) this.dispatchNotification(() => listener(saved));
+      });
+      return saved;
     });
-    return saved;
   }
 
   listPluginModelCalls(
@@ -1181,6 +1599,7 @@ export class PicoStore {
       id: String(row.id),
       pluginId: String(row.plugin_id),
       idempotencyKey: String(row.idempotency_key),
+      requestFingerprint: typeof row.request_fingerprint === 'string' ? row.request_fingerprint : null,
       threadId: typeof row.thread_id === 'string' ? row.thread_id : null,
       projectId: typeof row.project_id === 'string' ? row.project_id : null,
       purpose: String(row.purpose),
@@ -1268,30 +1687,86 @@ export class PicoStore {
   }
 
   getPluginState<T>(pluginId: string, key: string, fallback: T): T {
+    if (pluginId === 'pico.chatgpt-plan' && key === 'oauth') return this.getPrivateSecret(pluginId, key, fallback);
+    if (
+      (pluginId === 'pico.chatgpt-plan' && key === 'modelCatalog') ||
+      (pluginId === 'pico.permissions' && key === 'availableTools')
+    ) {
+      return this.getPluginCache(pluginId, key, fallback);
+    }
     const row = this.db
       .prepare('SELECT value_json FROM plugin_state WHERE plugin_id = ? AND key = ?')
       .get(pluginId, key) as SqlRow | undefined;
     return row ? json(row.value_json, fallback) : fallback;
   }
 
+  getThreadModelSelection(threadId: string): ThreadModelSelection | null {
+    const row = this.db
+      .prepare('SELECT selection_json FROM thread_model_selections WHERE thread_id = ?')
+      .get(threadId) as SqlRow | undefined;
+    return row ? json<ThreadModelSelection | null>(row.selection_json, null) : null;
+  }
+
+  setThreadModelSelection(threadId: string, selection: ThreadModelSelection): ThreadModelSelection {
+    if (!this.getThread(threadId)) throw new Error('Thread not found');
+    const serialized = JSON.stringify(selection);
+    if (serialized === undefined) throw new Error('Thread ModelSelection must be JSON serializable');
+    const updatedAt = isoNow();
+    this.transaction(() => {
+      this.db
+        .prepare(
+          'INSERT OR REPLACE INTO thread_model_selections (thread_id, selection_json, updated_at) VALUES (?, ?, ?)',
+        )
+        .run(threadId, serialized, updatedAt);
+      this.workflowFact(`thread:${threadId}`, `thread-model-selection:${threadId}`, selection, randomUUID(), updatedAt);
+    });
+    return structuredClone(selection);
+  }
+
+  recordModelInvocation(threadId: string, invocationId: string, identity: Record<string, unknown>): void {
+    if (!this.getThread(threadId)) throw new Error('Thread not found');
+    this.transaction(() => {
+      this.workflowFact(
+        `thread:${threadId}`,
+        `model-invocation:${invocationId}`,
+        identity,
+        `model-invocation:${createHash('sha256').update(`${threadId}\0${invocationId}`).digest('hex')}`,
+      );
+    });
+  }
+
   setPluginState<T>(pluginId: string, key: string, value: T): void {
+    if (pluginId === 'pico.chatgpt-plan' && key === 'oauth') {
+      this.setPrivateSecret(pluginId, key, value);
+      return;
+    }
+    if (
+      (pluginId === 'pico.chatgpt-plan' && key === 'modelCatalog') ||
+      (pluginId === 'pico.permissions' && key === 'availableTools')
+    ) {
+      this.setPluginCache(pluginId, key, value);
+      return;
+    }
     const serialized = JSON.stringify(value);
     if (serialized === undefined) throw new Error('Plugin State must be JSON serializable');
-    const previous = this.db
-      .prepare('SELECT value_json FROM plugin_state WHERE plugin_id = ? AND key = ?')
-      .get(pluginId, key) as SqlRow | undefined;
-    if (previous?.value_json === serialized) return;
-    this.db
-      .prepare(
-        `
+    this.transaction(() => {
+      const previous = this.db
+        .prepare('SELECT value_json FROM plugin_state WHERE plugin_id = ? AND key = ?')
+        .get(pluginId, key) as SqlRow | undefined;
+      if (previous?.value_json === serialized) return;
+      this.db
+        .prepare(
+          `
       INSERT INTO plugin_state (plugin_id, key, value_json, updated_at) VALUES (?, ?, ?, ?)
       ON CONFLICT(plugin_id, key) DO UPDATE
         SET value_json = excluded.value_json, updated_at = excluded.updated_at
     `,
-      )
-      .run(pluginId, key, serialized, isoNow());
-    this.notifyAfterCommit(() => {
-      for (const listener of this.stateListeners) this.dispatchNotification(() => listener(pluginId));
+        )
+        .run(pluginId, key, serialized, isoNow());
+      this.workflowFact('global', `plugin-state:${pluginId}:${key}`, { pluginId, key, value }, randomUUID());
+      this.notifyAfterCommit(() => {
+        for (const listener of this.stateListeners) this.dispatchNotification(() => listener(pluginId));
+      });
     });
   }
 

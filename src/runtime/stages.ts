@@ -31,6 +31,7 @@ export interface ProjectionInput {
 export interface PluginModelCallScope {
   pluginId: string;
   purpose: string;
+  idempotencyKey?: string;
 }
 
 export interface ModelStageInput {
@@ -38,8 +39,12 @@ export interface ModelStageInput {
   provider: ModelProvider;
   /** Present for auxiliary model calls initiated by a plugin. */
   pluginModelCall?: PluginModelCallScope;
+  /** Stable primary Execution or namespaced plugin-call identity, used for invocation facts. */
+  invocationId?: string;
   /** Public routing identity only; excludes API keys and other credentials. */
-  modelTarget?: { provider: string; baseUrl: string; model: string };
+  modelTarget?: { provider: string; connectionId?: string; baseUrl: string; model: string };
+  /** Semantic Thread settings; provider adapters/plugins turn these into wire fields. */
+  selectionParameters?: { temperature?: number | null; options: Record<string, string | number | boolean> };
   prompt: ModelPrompt;
   requestParameters?: ModelRequestParameters;
   signal: AbortSignal;

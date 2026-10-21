@@ -1,8 +1,9 @@
-import type { CanonicalRecord, Execution, Thread, TokenUsage } from '../core/types.js';
+import type { CanonicalRecord, Execution, Thread, ThreadModelSelection, TokenUsage } from '../core/types.js';
 import type { ModelPrompt, ProviderRequestOutcome, ProviderRequestStart, ProviderRequestSummary } from './model.js';
 
 export interface ThreadSnapshot {
   thread: Thread;
+  modelSelection: ThreadModelSelection;
   records: CanonicalRecord[];
   executions: Execution[];
   children: Thread[];

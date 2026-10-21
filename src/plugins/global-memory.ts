@@ -379,8 +379,9 @@ export const globalMemoryPlugin: PicoPlugin = {
     ui.registerPage({
       id: 'memory',
       label: 'Memory',
-      description: 'Manage global and project memory.',
+      description: 'Manage cross-project Global Memory.',
       entry: 'webui',
+      group: 'memory',
     });
     http.register('GET', '/items', ({ query }) => ({
       scope: 'global',

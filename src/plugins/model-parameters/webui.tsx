@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import type { PublicSettings } from '../../core/types.js';
 import type { PluginUiProps } from '../ui-protocol.js';
 import type {
@@ -16,12 +16,13 @@ function targetFromSettings(settings: PublicSettings): ModelParameterTarget {
   return modelParameterTargetFromSettings(settings);
 }
 
-function profilePath(target: ModelParameterTarget): string {
+function profilePath(target: ModelParameterTarget, threadId: string): string {
   const query = new URLSearchParams();
   query.set('provider', target.provider);
   query.set('endpoint', target.endpoint);
   query.set('protocol', target.protocol);
   query.set('model', target.model);
+  query.set('threadId', threadId);
   return `${apiRoot}/profile?${query.toString()}`;
 }
 
@@ -69,7 +70,8 @@ function Control({
   }
 
   if (control.kind === 'range') {
-    const numericValue = typeof value === 'number' ? value : (control.defaultValue as number | undefined) ?? control.min ?? 0;
+    const numericValue =
+      typeof value === 'number' ? value : ((control.defaultValue as number | undefined) ?? control.min ?? 0);
     return (
       <label className="model-parameter-range">
         <span>{control.label}</span>
@@ -107,49 +109,62 @@ function Control({
   );
 }
 
-function useProfile({ api, onError, settings }: PluginUiProps): {
+function useProfile(props: PluginUiProps): {
   target: ModelParameterTarget;
   profile: ModelParameterProfileView | null;
   loading: boolean;
   saving: boolean;
   saveSelection(control: ModelParameterControl, value: ModelParameterValue): Promise<void>;
 } {
+  const { api, onError, settings } = props;
   const [profile, setProfile] = useState<ModelParameterProfileView | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const target = targetFromSettings(settings);
+  const threadId = props.context.thread?.id ?? '';
+  const selection = props.context.modelSelection;
+  const target = {
+    ...targetFromSettings(settings),
+    ...(selection ? { provider: selection.provider, model: selection.model } : {}),
+  };
+  const requestSequence = useRef(0);
 
   const reload = useCallback(async (): Promise<void> => {
-    if (!target.endpoint || !target.model) {
+    const sequence = ++requestSequence.current;
+    if (!threadId || !target.endpoint || !target.model) {
       setProfile(null);
       return;
     }
     setLoading(true);
     try {
-      setProfile(await api<ModelParameterProfileView>(profilePath(target)));
+      const loaded = await api<ModelParameterProfileView>(profilePath(target, threadId));
+      if (sequence === requestSequence.current) setProfile(loaded);
     } catch (error) {
-      setProfile(null);
-      onError(errorText(error));
+      if (sequence === requestSequence.current) {
+        setProfile(null);
+        onError(errorText(error));
+      }
     } finally {
-      setLoading(false);
+      if (sequence === requestSequence.current) setLoading(false);
     }
-  }, [api, onError, target.provider, target.endpoint, target.protocol, target.model]);
+  }, [api, onError, threadId, target.provider, target.endpoint, target.protocol, target.model]);
 
   useEffect(() => {
     void reload();
   }, [reload]);
 
   const saveSelection = async (control: ModelParameterControl, value: ModelParameterValue): Promise<void> => {
-    if (!profile) return;
+    if (!profile || !threadId) return;
+    const savedThreadId = threadId;
+    const sequence = requestSequence.current;
     const selection: ModelParameterSelection = { ...profile.values, [control.id]: value };
     setSaving(true);
     try {
-      setProfile(
-        await api<ModelParameterProfileView>(`${apiRoot}/selection`, {
-          method: 'PUT',
-          body: JSON.stringify({ target, selection }),
-        }),
-      );
+      const updated = await api<ModelParameterProfileView>(`${apiRoot}/selection`, {
+        method: 'PUT',
+        body: JSON.stringify({ target, selection, threadId: savedThreadId }),
+      });
+      if (props.context.thread?.id !== savedThreadId || requestSequence.current !== sequence) return;
+      setProfile(updated);
     } catch (error) {
       onError(errorText(error));
       await reload();
@@ -170,23 +185,25 @@ function ParameterControls({
 }): ReactElement | null {
   const { target, profile, loading, saving, saveSelection } = useProfile(props);
   const { settings, updateModelSettings, onError } = props;
-  const [temperatureDraft, setTemperatureDraft] = useState(props.settings.temperature);
+  const selectedTemperature = props.context.modelSelection?.parameters.temperature ?? settings.temperature;
+  const [temperatureDraft, setTemperatureDraft] = useState(selectedTemperature);
 
-  useEffect(() => setTemperatureDraft(settings.temperature), [settings.temperature]);
+  useEffect(() => setTemperatureDraft(selectedTemperature), [selectedTemperature, props.context.thread?.id]);
   useEffect(() => {
     const temperature = profile?.temperature;
     if (!temperature || group !== 'others' || temperature.mode !== 'adjustable') return;
-    if (temperatureDraft === settings.temperature) return;
+    if (temperatureDraft === selectedTemperature) return;
     const timer = window.setTimeout(() => {
-      void updateModelSettings({ temperature: temperatureDraft }).catch((error: unknown) => {
+      void updateModelSettings({ temperature: temperatureDraft }, props.context.thread?.id).catch((error: unknown) => {
         onError(errorText(error));
-        setTemperatureDraft(settings.temperature);
+        setTemperatureDraft(selectedTemperature);
       });
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [group, onError, profile?.temperature, settings.temperature, temperatureDraft, updateModelSettings]);
+  }, [group, onError, profile?.temperature, selectedTemperature, temperatureDraft, updateModelSettings]);
 
-  if (!profile) return group === 'others' ? <p className="model-parameter-empty">Choose a model to view its settings.</p> : null;
+  if (!profile)
+    return group === 'others' ? <p className="model-parameter-empty">Choose a model to view its settings.</p> : null;
   const controls = profile.controls.filter((control) => control.group === group);
   if (group === 'primary' && controls.length === 0) return null;
 

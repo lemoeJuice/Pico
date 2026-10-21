@@ -1,6 +1,7 @@
 import type { Execution, ExecutorBinding, ExecutorKind, Project, Thread, ToolDefinition } from '../core/types.js';
-import type { ModelPrompt, ModelResponse } from '../contracts/model.js';
+import type { ModelPrompt, ModelResponse, ModelStreamEvent } from '../contracts/model.js';
 import type { PluginModelCallRecord } from '../contracts/store.js';
+import type { ThreadModelSelection } from '../core/types.js';
 import type { ModelInputAttempt } from '../contracts/runtime.js';
 
 /** Domain operations available to workflow plugins, independent of Runtime implementation. */
@@ -10,6 +11,9 @@ export interface PluginServices {
   };
   threads: {
     get(threadId: string): Thread | null;
+    modelSelection(threadId: string): ThreadModelSelection;
+    validateModelSelection(selection: ThreadModelSelection): ThreadModelSelection;
+    updateModelSelection(threadId: string, selection: ThreadModelSelection): ThreadModelSelection;
     list(projectId?: string): Thread[];
     updateTitle(pluginId: string, threadId: string, title: string): Thread;
     tools(threadId: string): Promise<Array<ToolDefinition & { source: 'runtime' | 'executor' }>>;
@@ -24,6 +28,7 @@ export interface PluginServices {
         remoteConnectionId?: string;
         workspacePath?: string;
         idempotencyKey?: string;
+        modelSelection?: ThreadModelSelection;
       },
     ): Thread;
     send(
@@ -41,7 +46,6 @@ export interface PluginServices {
   };
   executions: {
     get(executionId: string): Execution | null;
-    fail(executionId: string, reason: string, result?: unknown): Execution;
     subscribe(listener: (execution: Execution) => void): () => void;
   };
   models: {
@@ -54,6 +58,9 @@ export interface PluginServices {
         idempotencyKey: string;
         prompt: ModelPrompt;
         signal?: AbortSignal;
+        modelTarget?: { provider: string; connectionId?: string; model?: string };
+        requestParameters?: { temperature?: number | null; fields: Record<string, unknown> };
+        onEvent?: (event: ModelStreamEvent) => void;
       },
     ): Promise<PluginModelCallRecord & { response: ModelResponse }>;
     history(filter?: { pluginId?: string; threadId?: string; projectId?: string }): PluginModelCallRecord[];
@@ -73,6 +80,9 @@ export const unavailablePluginServices: PluginServices = {
   projects: { list: unavailable },
   threads: {
     get: unavailable,
+    modelSelection: unavailable,
+    validateModelSelection: unavailable,
+    updateModelSelection: unavailable,
     list: unavailable,
     updateTitle: unavailable,
     tools: unavailable,
@@ -82,7 +92,7 @@ export const unavailablePluginServices: PluginServices = {
     pause: unavailable,
     resume: unavailable,
   },
-  executions: { get: unavailable, fail: unavailable, subscribe: unavailable },
+  executions: { get: unavailable, subscribe: unavailable },
   models: { complete: unavailable, history: unavailable, inputs: unavailable, subscribe: unavailable },
   continuations: { register: unavailable, hasPendingWork: unavailable },
 };

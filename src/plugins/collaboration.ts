@@ -1,9 +1,12 @@
 import type { PicoPlugin, PluginContext } from './host.js';
-import type { Thread } from '../core/types.js';
+import type { Thread, ThreadModelSelection } from '../core/types.js';
 import type { ProjectionInput } from '../runtime/stages.js';
 
 type CollaborationServices = Pick<PluginContext, 'threads'>;
-type SpawnIndex = Record<string, { threadId: string; prompt: string; createdAt: string }>;
+type SpawnIndex = Record<
+  string,
+  { threadId: string; prompt: string; createdAt: string; modelSelection?: ThreadModelSelection }
+>;
 
 function readSpawnIndex(get: PluginContext['state']['get']): SpawnIndex {
   const value = get<unknown>('spawn-index', {});
@@ -51,6 +54,21 @@ export const collaborationPlugin: PicoPlugin = {
           properties: {
             prompt: { type: 'string', minLength: 1 },
             title: { type: 'string' },
+            model: {
+              type: 'object',
+              properties: {
+                provider: { type: 'string' },
+                connectionId: { type: 'string' },
+                model: { type: 'string' },
+                parameters: {
+                  type: 'object',
+                  properties: { temperature: { type: ['number', 'null'] }, options: { type: 'object' } },
+                  additionalProperties: false,
+                },
+              },
+              required: ['provider', 'model'],
+              additionalProperties: false,
+            },
           },
           required: ['prompt'],
           additionalProperties: false,
@@ -72,26 +90,58 @@ export const collaborationPlugin: PicoPlugin = {
         const index = readSpawnIndex(state.get);
         const previous = index[stableKey];
         let child = previous ? threads.get(previous.threadId) : null;
+        if (previous && previous.prompt !== prompt) {
+          throw new Error('This tool execution ID was already used to spawn a different task');
+        }
         if (!child) {
+          let modelSelection = previous?.modelSelection;
+          if (!modelSelection) {
+            const requested =
+              args.model && typeof args.model === 'object' && !Array.isArray(args.model)
+                ? (args.model as Record<string, unknown>)
+                : null;
+            const inherited = threads.modelSelection(parent.id);
+            modelSelection = requested
+              ? threads.validateModelSelection({
+                  provider: typeof requested.provider === 'string' ? requested.provider : inherited.provider,
+                  connectionId:
+                    typeof requested.connectionId === 'string' ? requested.connectionId : inherited.connectionId,
+                  model: typeof requested.model === 'string' ? requested.model : inherited.model,
+                  // A provider/model override is a new target. Options belong to the
+                  // old target and must be explicitly supplied again to cross it.
+                  parameters:
+                    requested.parameters === undefined
+                      ? requested.provider !== inherited.provider || requested.model !== inherited.model
+                        ? {
+                            ...(inherited.parameters.temperature === undefined
+                              ? {}
+                              : { temperature: inherited.parameters.temperature }),
+                            options: {},
+                          }
+                        : inherited.parameters
+                      : (requested.parameters as ThreadModelSelection['parameters']),
+                })
+              : inherited;
+          }
           const binding = threads.binding(parent.id);
           const taskKey = `spawn:${parent.id}:${stableKey}`;
-          child = threads.create(parent.projectId, parent.executorKind, title, {
-            parentThreadId: parent.id,
-            createdByAgent: true,
-            idempotencyKey: taskKey,
-            ...(binding?.remoteConnectionId ? { remoteConnectionId: binding.remoteConnectionId } : {}),
-            ...(parent.executorRemote ? { workspacePath: parent.workspacePath } : {}),
-          });
           state.transaction(() => {
+            child = threads.create(parent.projectId, parent.executorKind, title, {
+              parentThreadId: parent.id,
+              createdByAgent: true,
+              idempotencyKey: taskKey,
+              ...(binding?.remoteConnectionId ? { remoteConnectionId: binding.remoteConnectionId } : {}),
+              ...(parent.executorRemote ? { workspacePath: parent.workspacePath } : {}),
+              modelSelection,
+            });
             const current = readSpawnIndex(state.get);
             state.set('spawn-index', {
               ...current,
-              [stableKey]: { threadId: child!.id, prompt, createdAt: new Date().toISOString() },
+              [stableKey]: { threadId: child!.id, prompt, createdAt: new Date().toISOString(), modelSelection },
             });
           });
-        } else if (previous?.prompt !== prompt) {
-          throw new Error('This tool execution ID was already used to spawn a different task');
         }
+        if (!child) throw new Error('Child Thread creation failed.');
 
         // Re-delivery with this stable message ID is safe if the process stops after
         // creating the child but before Runtime accepts the initial message.

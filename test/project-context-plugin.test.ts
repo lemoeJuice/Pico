@@ -22,6 +22,7 @@ function harness() {
       ) => unknown;
     }
   >();
+  let failAuditAppend = false;
   let project:
     | ((input: ProjectionInput, next: (input: ProjectionInput) => Promise<ProjectionInput>) => Promise<ProjectionInput>)
     | null = null;
@@ -80,11 +81,22 @@ function harness() {
         values.set(key, structuredClone(value));
       },
       transaction<T>(run: () => T): T {
-        return run();
+        const previousValues = new Map(values);
+        const previousRecords = new Map([...records].map(([key, list]) => [key, [...list]]));
+        try {
+          return run();
+        } catch (error) {
+          values.clear();
+          for (const [key, value] of previousValues) values.set(key, value);
+          records.clear();
+          for (const [key, list] of previousRecords) records.set(key, list);
+          throw error;
+        }
       },
     },
     canonical: {
       append(threadId: string, payload: Record<string, unknown>) {
+        if (failAuditAppend) throw new Error('simulated audit failure');
         const list = records.get(threadId) ?? [];
         const record = {
           id: `record-${list.length + 1}`,
@@ -128,12 +140,29 @@ function harness() {
     commands,
     contributions,
     values,
+    setFailAuditAppend(value: boolean) {
+      failAuditAppend = value;
+    },
     getProjection: () => project,
     runTool,
   };
 }
 
 describe('Project Context plugin', () => {
+  it('rolls back Project Memory state when its Canonical audit append fails', () => {
+    const env = harness();
+    env.setFailAuditAppend(true);
+    expect(() =>
+      env.runTool('project_memory_record', {
+        category: 'decision',
+        text: 'Atomic project note.',
+        operation_id: 'atomic-memory',
+      }),
+    ).toThrow('simulated audit failure');
+    expect(env.values.has('memory')).toBe(false);
+    expect(env.records.get('thread-a') ?? []).toEqual([]);
+  });
+
   it('labels its Thread toolbar contribution Project Memory', () => {
     const env = harness();
     expect(env.contributions).toEqual([
