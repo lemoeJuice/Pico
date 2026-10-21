@@ -8,7 +8,7 @@ import type { ProjectionInput } from '../src/runtime/stages.js';
 function setup() {
   const state = new Map<string, unknown>();
   const records: CanonicalRecord[] = [];
-  const thread: Thread = {
+  let thread: Thread = {
     id: 'thread-1',
     projectId: 'project-1',
     executorId: 'executor-1',
@@ -34,6 +34,7 @@ function setup() {
   const pauseCalls: string[] = [];
   const resumeCalls: string[] = [];
   let continuation: ((threadId: string) => boolean) | undefined;
+  let failCanonicalAppend = false;
   const context = {
     threads: {
       get: (id: string) => (id === thread.id ? thread : null),
@@ -44,10 +45,12 @@ function setup() {
       send: () => ({ delivered: true, threadId: thread.id, messageId: 'message' }),
       pause: (id: string) => {
         pauseCalls.push(id);
+        thread = { ...thread, state: 'paused', pauseRequested: true };
         return thread;
       },
       resume: (id: string) => {
         resumeCalls.push(id);
+        thread = { ...thread, state: 'idle', pauseRequested: false };
         return thread;
       },
     },
@@ -99,11 +102,23 @@ function setup() {
       set: <T>(key: string, value: T) => {
         state.set(key, value);
       },
-      transaction: <T>(run: () => T): T => run(),
+      transaction: <T>(run: () => T): T => {
+        const previous = new Map(state);
+        const recordCount = records.length;
+        try {
+          return run();
+        } catch (error) {
+          state.clear();
+          for (const [key, value] of previous) state.set(key, value);
+          records.splice(recordCount);
+          throw error;
+        }
+      },
       subscribe: () => () => undefined,
     },
     canonical: {
       append: (threadId: string, payload: Record<string, unknown>) => {
+        if (failCanonicalAppend) throw new Error('simulated audit failure');
         const record = {
           id: `record-${records.length + 1}`,
           threadId,
@@ -144,10 +159,53 @@ function setup() {
     resumeCalls,
     route,
     continuation: () => continuation!,
+    setFailCanonicalAppend(value: boolean) {
+      failCanonicalAppend = value;
+    },
   };
 }
 
 describe('Goal plugin', () => {
+  it('keeps the continuation check read-only and does not pause for pending model steps', () => {
+    const env = setup();
+    env.route('/goal', {
+      threadId: env.thread.id,
+      text: 'Keep the ledger consistent',
+      completionCriteria: 'Audit commits',
+    });
+    const existingState = structuredClone(env.state.get('goals'));
+    const auditCount = env.records.length;
+    for (let seq = 2; seq < 14; seq += 1) {
+      env.records.push({
+        id: `assistant-pending-${seq}`,
+        threadId: env.thread.id,
+        seq,
+        kind: 'assistant',
+        payload: { content: 'step', toolCalls: [] },
+        createdAt: '',
+      });
+    }
+    expect(env.continuation()(env.thread.id)).toBe(true);
+    expect(env.continuation()(env.thread.id)).toBe(true);
+    expect(env.state.get('goals')).toEqual(existingState);
+    expect(env.records).toHaveLength(auditCount + 12);
+    expect(env.pauseCalls).toEqual([]);
+  });
+
+  it('rolls back initial Goal creation when its Canonical audit write fails', () => {
+    const env = setup();
+    env.setFailCanonicalAppend(true);
+    expect(() =>
+      env.route('/goal', {
+        threadId: env.thread.id,
+        text: 'Atomic create',
+        completionCriteria: 'No partial state',
+      }),
+    ).toThrow('simulated audit failure');
+    expect(env.state.has('goals')).toBe(false);
+    expect(env.records).toHaveLength(0);
+  });
+
   it('lets the user define and manage a Goal, projects it with provenance, and keeps edits out of agent tools', async () => {
     const env = setup();
     const created = env.route('/goal', {
@@ -192,7 +250,7 @@ describe('Goal plugin', () => {
     expect(cleared.goal.status).toBe('cleared');
   });
 
-  it('requires verifiable same-Thread evidence before completion and pauses at the no-progress fuse', async () => {
+  it('requires verifiable same-Thread evidence before completion and does not pause by model-step count', async () => {
     const env = setup();
     env.route('/goal', {
       threadId: env.thread.id,
@@ -244,7 +302,7 @@ describe('Goal plugin', () => {
     ).toMatchObject({ status: 'completed', evidence: { id: 'exec-1' } });
 
     env.route('/goal', { threadId: env.thread.id, text: 'Another task', completionCriteria: 'Verified' });
-    for (let index = 1; index <= 5; index += 1) {
+    for (let index = 1; index <= 13; index += 1) {
       env.records.push({
         id: `assistant-${index}`,
         threadId: env.thread.id,
@@ -253,16 +311,16 @@ describe('Goal plugin', () => {
         payload: { content: `step ${index}`, toolCalls: [] },
         createdAt: '',
       });
-      if (index < 5) expect(env.continuation()(env.thread.id)).toBe(true);
+      expect(env.continuation()(env.thread.id)).toBe(true);
     }
-    expect(env.continuation()(env.thread.id)).toBe(false);
-    expect(env.pauseCalls).toContain(env.thread.id);
+    expect(env.continuation()(env.thread.id)).toBe(true);
+    expect(env.pauseCalls).toEqual([]);
     expect(
       (
         env.route('/goal', {}, new URLSearchParams({ threadId: env.thread.id })) as {
           goal: { status: string; blocker: string };
         }
       ).goal,
-    ).toMatchObject({ status: 'paused', blocker: expect.stringContaining('without a progress checkpoint') });
+    ).toMatchObject({ status: 'active', blocker: '' });
   });
 });

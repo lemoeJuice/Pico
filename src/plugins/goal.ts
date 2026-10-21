@@ -18,16 +18,15 @@ interface ThreadGoal {
   recentProgress: string;
   blocker: string;
   evidence: GoalEvidence | null;
-  lastObservedSeq: number;
-  stepsInSession: number;
-  stepsWithoutProgress: number;
+  // Legacy persisted fields from the removed automatic step limits.
+  lastObservedSeq?: number;
+  stepsInSession?: number;
+  stepsWithoutProgress?: number;
   createdAt: string;
   updatedAt: string;
 }
 type GoalMap = Record<string, ThreadGoal>;
 
-const MAX_SESSION_STEPS = 12;
-const MAX_STEPS_WITHOUT_PROGRESS = 5;
 const EMPTY_MAP: GoalMap = {};
 
 type GoalServices = Pick<PluginContext, 'threads' | 'executions' | 'continuations'>;
@@ -71,7 +70,6 @@ function goalView(
 function defaultGoal(
   threadId: string,
   value: { text: string; constraints: string; completionCriteria: string },
-  seq: number,
 ): ThreadGoal {
   const now = new Date().toISOString();
   return {
@@ -84,9 +82,6 @@ function defaultGoal(
     recentProgress: '',
     blocker: '',
     evidence: null,
-    lastObservedSeq: seq,
-    stepsInSession: 0,
-    stepsWithoutProgress: 0,
     createdAt: now,
     updatedAt: now,
   };
@@ -117,52 +112,20 @@ export const goalPlugin: PicoPlugin = {
       return thread;
     };
 
-    const withSessionReset = (goal: ThreadGoal, status: GoalStatus, patch: Partial<ThreadGoal> = {}): ThreadGoal => ({
+    const withStatus = (goal: ThreadGoal, status: GoalStatus, patch: Partial<ThreadGoal> = {}): ThreadGoal => ({
       ...goal,
       ...patch,
       status,
       blocker: status === 'active' ? '' : (patch.blocker ?? goal.blocker),
-      stepsInSession: 0,
-      stepsWithoutProgress: 0,
-      lastObservedSeq: maxSeq(goal.threadId),
       updatedAt: new Date().toISOString(),
     });
 
     continuations.register((threadId) => {
       const goal = getGoal(threadId);
-      if (!goal || goal.status !== 'active') return false;
       const thread = threads.get(threadId);
-      // The core Thread Pause/Interrupt state takes precedence over plugin continuation.
-      if (!thread || thread.state === 'paused' || thread.state === 'pausing') return false;
-
-      const newAssistantRecords = canonical
-        .read(threadId, { afterSeq: goal.lastObservedSeq })
-        .filter((record) => record.kind === 'assistant');
-      if (newAssistantRecords.length === 0) return true;
-
-      let nextGoal = { ...goal, lastObservedSeq: newAssistantRecords[newAssistantRecords.length - 1]!.seq };
-      nextGoal.stepsInSession += newAssistantRecords.length;
-      nextGoal.stepsWithoutProgress += newAssistantRecords.length;
-      if (nextGoal.stepsInSession >= MAX_SESSION_STEPS) {
-        nextGoal = withSessionReset(nextGoal, 'paused', {
-          blocker: `Automatic Goal continuation paused after ${MAX_SESSION_STEPS} model steps. Review progress, then resume or edit the Goal.`,
-        });
-        save(nextGoal);
-        audit(threadId, 'auto_paused', { reason: 'step_budget', limit: MAX_SESSION_STEPS });
-        threads.pause(threadId, nextGoal.blocker);
-        return false;
-      }
-      if (nextGoal.stepsWithoutProgress >= MAX_STEPS_WITHOUT_PROGRESS) {
-        nextGoal = withSessionReset(nextGoal, 'paused', {
-          blocker: `Automatic Goal continuation paused after ${MAX_STEPS_WITHOUT_PROGRESS} model steps without a progress checkpoint. Review progress, then resume or edit the Goal.`,
-        });
-        save(nextGoal);
-        audit(threadId, 'auto_paused', { reason: 'no_progress', limit: MAX_STEPS_WITHOUT_PROGRESS });
-        threads.pause(threadId, nextGoal.blocker);
-        return false;
-      }
-      save(nextGoal);
-      return true;
+      // This is a read-only scheduling predicate. The durable Goal status owns
+      // continuation; model-step counts do not pause an active Goal.
+      return Boolean(goal?.status === 'active' && thread && thread.state !== 'paused' && thread.state !== 'pausing');
     });
 
     pipelines.use<ProjectionInput, ProjectionInput>('projection', async (input, next) => {
@@ -273,15 +236,14 @@ export const goalPlugin: PicoPlugin = {
           recentProgress: progress,
           blocker: status === 'needs_input' || status === 'paused' ? String(args.blocker ?? '').trim() : '',
           evidence,
-          stepsWithoutProgress: progress === goal.recentProgress ? goal.stepsWithoutProgress : 0,
           updatedAt: new Date().toISOString(),
         };
-        save(goal);
-        audit(thread.id, 'checkpoint', { status, progress, blocker: goal.blocker, evidence });
-        if (status === 'needs_input' || status === 'paused' || status === 'completed') {
+        state.transaction(() => {
+          save(goal!);
+          audit(thread.id, 'checkpoint', { status, progress, blocker: goal!.blocker, evidence });
           if (status === 'paused' || status === 'needs_input')
-            threads.pause(thread.id, goal.blocker || `Goal ${status}`);
-        }
+            threads.pause(thread.id, goal!.blocker || `Goal ${status}`);
+        });
         return { status, progress, blocker: goal.blocker, evidence };
       },
     );
@@ -318,18 +280,19 @@ export const goalPlugin: PicoPlugin = {
           recentProgress: previous.text === text ? previous.recentProgress : '',
           blocker: '',
           evidence: null,
-          lastObservedSeq: maxSeq(threadId),
-          stepsInSession: 0,
-          stepsWithoutProgress: 0,
           updatedAt: new Date().toISOString(),
         };
-        save(updated);
-        audit(threadId, 'edited', { text, constraints, completionCriteria });
+        state.transaction(() => {
+          save(updated);
+          audit(threadId, 'edited', { text, constraints, completionCriteria });
+        });
         return { threadId, goal: goalView(updated) };
       }
-      const goal = defaultGoal(threadId, { text, constraints, completionCriteria }, maxSeq(threadId));
-      save(goal);
-      audit(threadId, 'created', { text, constraints, completionCriteria });
+      const goal = defaultGoal(threadId, { text, constraints, completionCriteria });
+      state.transaction(() => {
+        save(goal);
+        audit(threadId, 'created', { text, constraints, completionCriteria });
+      });
       return { threadId, goal: goalView(goal) };
     });
     http.register('POST', '/goal/action', ({ body }) => {
@@ -339,26 +302,32 @@ export const goalPlugin: PicoPlugin = {
       const goal = getGoal(threadId);
       if (!goal || goal.status === 'cleared') throw new Error('There is no Goal to update');
       if (value.action === 'clear') {
-        const cleared = withSessionReset(goal, 'cleared', { blocker: '', evidence: null });
-        save(cleared);
-        audit(threadId, 'cleared', { previousGoalId: goal.id });
+        const cleared = withStatus(goal, 'cleared', { blocker: '', evidence: null });
+        state.transaction(() => {
+          save(cleared);
+          audit(threadId, 'cleared', { previousGoalId: goal.id });
+        });
         return { threadId, goal: goalView(cleared) };
       }
       if (value.action === 'pause') {
-        const paused = withSessionReset(goal, 'paused', {
+        const paused = withStatus(goal, 'paused', {
           blocker:
             typeof value.reason === 'string' && value.reason.trim() ? value.reason.trim() : 'Paused by the user.',
         });
-        save(paused);
-        audit(threadId, 'paused', { source: 'user', reason: paused.blocker });
-        threads.pause(threadId, paused.blocker);
+        state.transaction(() => {
+          save(paused);
+          audit(threadId, 'paused', { source: 'user', reason: paused.blocker });
+          threads.pause(threadId, paused.blocker);
+        });
         return { threadId, goal: goalView(paused) };
       }
       if (value.action === 'resume') {
-        const active = withSessionReset(goal, 'active');
-        save(active);
-        audit(threadId, 'resumed', { source: 'user' });
-        threads.resume(threadId);
+        const active = withStatus(goal, 'active');
+        state.transaction(() => {
+          save(active);
+          audit(threadId, 'resumed', { source: 'user' });
+          threads.resume(threadId);
+        });
         return { threadId, goal: goalView(active) };
       }
       throw new Error('action must be pause, resume, or clear');
