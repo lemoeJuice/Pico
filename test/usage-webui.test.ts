@@ -2,7 +2,142 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { expect, it } from 'vitest';
 
+function createComposerHarness() {
+  const summarySource = readFileSync(new URL('../plugins/pico.usage/webui/usage-summary.js', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../plugins/pico.usage/webui/usage.js', import.meta.url), 'utf8');
+  let html = '';
+  const root = {
+    set innerHTML(value: string) {
+      html = value;
+    },
+    get innerHTML() {
+      return html;
+    },
+    scrollHeight: 24,
+  };
+  let onWindowMessage: ((event: any) => void) | undefined;
+  const parent = {};
+  const requests: Array<Record<string, any>> = [];
+  const port = {
+    onmessage: undefined as ((event: { data: unknown }) => void) | undefined,
+    postMessage: (message: Record<string, any>) => {
+      if (message.type === 'pico:plugin-ui:request') requests.push(message);
+    },
+    start() {},
+  };
+  const window = {
+    parent,
+    addEventListener(_type: string, listener: (event: any) => void) {
+      onWindowMessage = listener;
+    },
+  };
+  const globals = {
+    document: { getElementById: () => root, body: { classList: { add() {} } } },
+    window,
+    location: { search: '' },
+    URLSearchParams,
+  };
+  runInNewContext(summarySource, globals);
+  runInNewContext(source, globals);
+  onWindowMessage?.({
+    source: parent,
+    data: {
+      type: 'pico:plugin-ui:init',
+      protocolVersion: 1,
+      pluginId: 'pico.usage',
+      entry: 'webui',
+      viewType: 'component',
+      viewId: 'ComposerUsage',
+      context: { thread: { id: 'thread-a' } },
+    },
+    ports: [port],
+  });
+  const sendContext = (threadId?: string) =>
+    port.onmessage?.({
+      data: {
+        type: 'pico:plugin-ui:context',
+        context: threadId ? { thread: { id: threadId } } : { thread: null },
+      },
+    });
+  const respond = (request: Record<string, any>, inputTokens: number) =>
+    port.onmessage?.({
+      data: {
+        type: 'pico:plugin-ui:response',
+        id: request.id,
+        ok: true,
+        value: {
+          totals: { inputTokens, outputTokens: 1, cachedInputTokens: 0 },
+          coverage: {},
+          rows: [],
+        },
+      },
+    });
+  const reject = (request: Record<string, any>) =>
+    port.onmessage?.({
+      data: { type: 'pico:plugin-ui:response', id: request.id, ok: false, error: 'stale failure' },
+    });
+  const flush = async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+  return { get html() { return html; }, requests, sendContext, respond, reject, flush };
+}
+
+it('keeps Composer Usage on the current Thread when reports finish out of order', async () => {
+  const harness = createComposerHarness();
+  const firstA = harness.requests[0];
+  if (!firstA) throw new Error('Expected initial Thread A report');
+
+  harness.sendContext('thread-b');
+  const reportB = harness.requests[1];
+  if (!reportB) throw new Error('Expected Thread B report');
+  harness.respond(reportB, 222);
+  await harness.flush();
+  expect(harness.html).toContain('In 222');
+
+  harness.respond(firstA, 111);
+  await harness.flush();
+  expect(harness.html).toContain('In 222');
+  expect(harness.html).not.toContain('In 111');
+});
+
+it('ignores stale Composer Usage failures, same-Thread refreshes, and responses after clearing Thread context', async () => {
+  const harness = createComposerHarness();
+  const firstA = harness.requests[0];
+  if (!firstA) throw new Error('Expected initial Thread A report');
+  harness.sendContext('thread-b');
+  const reportB = harness.requests[1];
+  if (!reportB) throw new Error('Expected Thread B report');
+  harness.respond(reportB, 222);
+  await harness.flush();
+  harness.reject(firstA);
+  await harness.flush();
+  expect(harness.html).toContain('In 222');
+
+  harness.sendContext('thread-b');
+  const olderRefresh = harness.requests[2];
+  harness.sendContext('thread-b');
+  const newerRefresh = harness.requests[3];
+  if (!olderRefresh || !newerRefresh) throw new Error('Expected same-Thread refresh requests');
+  harness.respond(newerRefresh, 333);
+  await harness.flush();
+  harness.respond(olderRefresh, 444);
+  await harness.flush();
+  expect(harness.html).toContain('In 333');
+  expect(harness.html).not.toContain('In 444');
+
+  harness.sendContext('thread-b');
+  const pendingBeforeClear = harness.requests[4];
+  if (!pendingBeforeClear) throw new Error('Expected report before clearing Thread context');
+  harness.sendContext();
+  expect(harness.html).toBe('');
+  harness.respond(pendingBeforeClear, 555);
+  await harness.flush();
+  expect(harness.html).toBe('');
+});
+
 it('uses project and Thread names in linked Usage filters and report rows', async () => {
+  const summarySource = readFileSync(new URL('../plugins/pico.usage/webui/usage-summary.js', import.meta.url), 'utf8');
   const source = readFileSync(new URL('../plugins/pico.usage/webui/usage.js', import.meta.url), 'utf8');
   const fields: Record<string, { value: string; innerHTML: string; disabled: boolean }> = Object.fromEntries(
     ['projectId', 'threadId', 'provider', 'model', 'purpose', 'from', 'to'].map((name) => [
@@ -48,6 +183,8 @@ it('uses project and Thread names in linked Usage filters and report rows', asyn
   });
   const form = makeForm('filters');
   const rateForm = makeForm('rate');
+  let onWindowMessage: ((event: unknown) => void) | undefined;
+  const parent = {};
   const root = {
     set innerHTML(value: string) {
       html = value;
@@ -73,8 +210,6 @@ it('uses project and Thread names in linked Usage filters and report rows', asyn
     },
     querySelectorAll: () => [],
   };
-  let onWindowMessage: ((event: unknown) => void) | undefined;
-  const parent = {};
   const requests: Array<Record<string, unknown>> = [];
   const port = {
     onmessage: undefined as ((event: { data: unknown }) => void) | undefined,
@@ -87,18 +222,21 @@ it('uses project and Thread names in linked Usage filters and report rows', asyn
     }
   }
 
-  runInNewContext(source, {
-    document: { getElementById: () => root },
-    window: {
-      parent,
-      addEventListener(_type: string, listener: (event: unknown) => void) {
-        onWindowMessage = listener;
-      },
+  const window = {
+    parent,
+    addEventListener(_type: string, listener: (event: unknown) => void) {
+      onWindowMessage = listener;
     },
+  };
+  const globals = {
+    document: { getElementById: () => root },
+    window,
     location: { search: '' },
     FormData: FakeFormData,
     URLSearchParams,
-  });
+  };
+  runInNewContext(summarySource, globals);
+  runInNewContext(source, globals);
 
   onWindowMessage?.({
     source: parent,

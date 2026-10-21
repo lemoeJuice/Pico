@@ -1,5 +1,14 @@
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
-import { formatUsageSummary } from '../src/web/usage-summary.js';
+
+const windowContext: {
+  PicoUsageSummary?: { formatUsageSummary: (report: unknown) => Record<string, string> };
+} = {};
+runInNewContext(readFileSync(new URL('../plugins/pico.usage/webui/usage-summary.js', import.meta.url), 'utf8'), {
+  window: windowContext,
+});
+const formatUsageSummary = windowContext.PicoUsageSummary!.formatUsageSummary;
 
 describe('formatUsageSummary', () => {
   it('shows full totals and computes cache rate from calls with reported values', () => {

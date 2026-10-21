@@ -1,9 +1,11 @@
 (() => {
   'use strict';
   const pluginId = 'pico.usage';
+  const formatUsageSummary = window.PicoUsageSummary.formatUsageSummary;
   const root = document.getElementById('root');
   let port;
   let requestId = 0;
+  let composerRefreshId = 0;
   let pending = new Map();
   let context = { thread: null };
   let report = null;
@@ -39,6 +41,26 @@
           : { init: { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) } }),
       });
     });
+  async function refreshComposer() {
+    const refreshId = ++composerRefreshId;
+    const threadId = context.thread?.id;
+    if (!threadId) {
+      root.innerHTML = '';
+      if (port) port.postMessage({ type: 'pico:plugin-ui:resize', height: 0 });
+      return;
+    }
+    try {
+      const report = await api(`/report?threadId=${encodeURIComponent(threadId)}`);
+      if (refreshId !== composerRefreshId || context.thread?.id !== threadId) return;
+      const summary = formatUsageSummary(report);
+      root.innerHTML = `<div class="composer-usage" aria-label="Thread token usage"><span>In ${summary.input}</span><span>Out ${summary.output}</span><span>Cache ${summary.cached}</span><span title="Calls reporting both input and cache read">Hit ${summary.cacheRate} · ${summary.cacheCoverage}</span></div>`;
+      port?.postMessage({ type: 'pico:plugin-ui:resize', height: root.scrollHeight });
+    } catch {
+      if (refreshId !== composerRefreshId || context.thread?.id !== threadId) return;
+      root.innerHTML = '';
+      port?.postMessage({ type: 'pico:plugin-ui:resize', height: 0 });
+    }
+  }
   const fmt = (value) => (value == null ? 'unknown' : new Intl.NumberFormat().format(value));
   const money = (value, currency) => (value == null ? 'unknown' : `${currency || ''} ${value.toFixed(6)}`.trim());
   function filterQuery() {
@@ -301,12 +323,14 @@
       init.protocolVersion !== 1 ||
       init.pluginId !== pluginId ||
       init.entry !== 'webui' ||
-      init.viewType !== 'page' ||
+      !['page', 'component'].includes(init.viewType) ||
       event.ports.length !== 1
     )
       return;
     context = init.context || context;
     port = event.ports[0];
+    const composer = init.viewType === 'component' && init.viewId === 'ComposerUsage';
+    if (composer) document.body.classList.add('composer-status');
     port.onmessage = ({ data }) => {
       if (data?.type === 'pico:plugin-ui:response' && pending.has(data.id)) {
         const request = pending.get(data.id);
@@ -315,14 +339,22 @@
       }
       if (data?.type === 'pico:plugin-ui:context') {
         context = data.context || context;
-        void refresh();
+        void (composer ? refreshComposer() : refresh());
       }
+      if (data?.type === 'pico:plugin-ui:event' && composer) void refreshComposer();
     };
     port.start();
-    render();
+    if (composer) {
+      root.innerHTML = '';
+      void refreshComposer();
+    } else {
+      render();
+    }
     if (typeof init.attemptId === 'string')
       port.postMessage({ type: 'pico:plugin-ui:ready', attemptId: init.attemptId });
-    void loadCatalog();
-    void refresh();
+    if (!composer) {
+      void loadCatalog();
+      void refresh();
+    }
   });
 })();
