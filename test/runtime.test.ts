@@ -256,10 +256,11 @@ describe('durable Thread runtime invariants', () => {
       );
       const secondAssistant = env.store.modelOutputForThread(thread.id)!;
       const secondExecutionId = secondAssistant.id.replace(/:assistant$/, '');
-      const diagnosticPrompt = env.runtime.getModelInputAttempts(thread.id, secondExecutionId)?.[0]?.prompt;
-      expect(
-        diagnosticPrompt?.turns.find((turn) => turn.kind === 'message' && turn.role === 'assistant'),
-      ).not.toHaveProperty('reasoningReplay');
+      const diagnosticPrompt = env.runtime.getModelInputAttempts(thread.id, secondExecutionId)?.[0]?.promptSummary;
+      expect(diagnosticPrompt?.turns.some((turn) => turn.kind === 'message' && turn.role === 'assistant')).toBe(true);
+      const diagnosticLog = env.store.listExecutionLog(secondExecutionId, 'model-input-requested');
+      expect(JSON.stringify(diagnosticLog)).not.toContain('opaque-payload');
+      expect(diagnosticLog[0]?.detail).not.toHaveProperty('prompt');
     } finally {
       unsubscribe();
       await env.cleanup();
@@ -863,11 +864,20 @@ describe('durable Thread runtime invariants', () => {
       const attempts = env.runtime.getModelInputAttempts(thread.id, modelExecutionId);
       expect(attempts).toHaveLength(1);
       expect(attempts?.[0]).toMatchObject({
-        prompt: model.prompts[0],
+        promptSummary: {
+          version: 1,
+          model: model.prompts[0]?.model,
+          turns: [{ kind: 'message', role: 'user', characters: 'Hello'.length }],
+        },
         status: 'completed',
       });
-      expect(attempts?.[0]?.prompt.system).toContain('Project context: stable architecture.');
-      expect(attempts?.[0]?.prompt.system).toContain('Use concise answers.');
+      expect(attempts?.[0]?.promptSummary.systemCharacters).toBeGreaterThan(0);
+      expect(attempts?.[0]?.promptSummary.systemFingerprint).toMatch(/^[a-f0-9]{64}$/);
+      expect(attempts?.[0]?.promptSummary.toolsFingerprint).toMatch(/^[a-f0-9]{64}$/);
+      const diagnosticLog = env.store.listExecutionLog(modelExecutionId, 'model-input-requested');
+      expect(diagnosticLog[0]?.detail).not.toHaveProperty('prompt');
+      expect(JSON.stringify(diagnosticLog)).not.toContain('Hello');
+      expect(JSON.stringify(attempts)).not.toContain('stable architecture');
       expect(env.runtime.getModelInputAttempts(env.createThread().id, modelExecutionId)).toBeNull();
       expect(env.store.listRecords(thread.id)).toEqual(records);
     } finally {
@@ -1610,7 +1620,10 @@ describe('durable Thread runtime invariants', () => {
       const modelExecution = env.store.listExecutions(thread.id).find((execution) => execution.kind === 'model');
       expect(modelExecution?.status).toBe('interrupted');
       expect(env.runtime.getModelInputAttempts(thread.id, modelExecution!.id)).toMatchObject([
-        { status: 'interrupted', prompt: { turns: [{ content: 'Begin' }] } },
+        {
+          status: 'interrupted',
+          promptSummary: { turns: [{ kind: 'message', role: 'user', characters: 'Begin'.length }] },
+        },
       ]);
       expect(env.runtime.getThread(thread.id)?.state).toBe('paused');
     } finally {
@@ -1635,7 +1648,7 @@ describe('durable Thread runtime invariants', () => {
         {
           status: 'failed',
           error: 'Model request failed (provider_error).',
-          prompt: { turns: [{ content: 'Write something' }] },
+          promptSummary: { turns: [{ kind: 'message', role: 'user', characters: 'Write something'.length }] },
         },
       ]);
       expect(env.store.listRecords(thread.id).map((record) => record.kind)).toEqual(['message']);

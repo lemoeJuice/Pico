@@ -3917,8 +3917,8 @@ function ModelInputDisclosure({
         <ChevronRight className="detail-chevron projection-chevron" size={13} aria-hidden="true" /> Model input
       </summary>
       <p className="projection-note">
-        The exact prompt passed to the model adapter, plus provider request metadata. Transport logs omit credentials,
-        request bodies, and generated text.
+        Prompt structure, lengths, and instruction/tool fingerprints are shown without message, tool, or image content.
+        Provider request metadata is included for troubleshooting.
       </p>
       {modelInputsLoading ? <p className="projection-state">Loading model input…</p> : null}
       {modelInputsError ? <p className="projection-error">{modelInputsError}</p> : null}
@@ -3982,7 +3982,7 @@ function ModelInputDisclosure({
               </pre>
             </details>
           ))}
-          <pre className="projection-view">{toJson(attempt.prompt)}</pre>
+          <pre className="projection-view">{toJson(attempt.promptSummary)}</pre>
         </details>
       ))}
     </details>

@@ -179,8 +179,17 @@ describe('Pico server access boundary', () => {
       const modelInputUrl = `${base}/api/threads/${thread.id}/executions/${encodeURIComponent(modelExecution.id)}/model-input`;
       const modelInputResponse = await fetch(modelInputUrl, { headers: cookieHeaders });
       expect(modelInputResponse.status).toBe(200);
-      expect(await modelInputResponse.json()).toMatchObject({
-        attempts: [{ id: 'approval-step-request', status: 'completed', prompt: { model: 'test-model' } }],
+      const modelInputPayload = await modelInputResponse.json();
+      expect(JSON.stringify(modelInputPayload)).not.toContain('Pico test system prompt');
+      expect(JSON.stringify(modelInputPayload)).not.toContain('Hello');
+      expect(modelInputPayload).toMatchObject({
+        attempts: [
+          {
+            id: 'approval-step-request',
+            status: 'completed',
+            promptSummary: { model: 'test-model', turns: [{ kind: 'message', role: 'user', characters: 5 }] },
+          },
+        ],
       });
       const otherThread = server.runtime.createThread(project.id, 'host');
       expect(

@@ -39,7 +39,7 @@ export interface SubmitResult {
 
 export interface ModelInputAttempt {
   id: string;
-  prompt: ModelPrompt;
+  promptSummary: ModelPromptDiagnostics;
   projectionProvenance?: ProjectionProvenance[];
   status: 'running' | 'completed' | 'failed' | 'interrupted';
   error?: string;
@@ -47,6 +47,26 @@ export interface ModelInputAttempt {
   partialOutputCharacters?: number;
   providerRequests?: ProviderRequestAttempt[];
   createdAt: string;
+}
+
+export interface ModelPromptDiagnostics {
+  version: 1;
+  model: string;
+  temperature: number;
+  systemCharacters: number;
+  systemFingerprint: string;
+  turns: Array<{
+    kind: ModelPrompt['turns'][number]['kind'];
+    role?: 'user' | 'assistant';
+    characters: number;
+    toolCallCount?: number;
+    imageCount?: number;
+    imageBytes?: number;
+  }>;
+  toolCount: number;
+  toolNames: string[];
+  toolDefinitionCharacters: number;
+  toolsFingerprint: string;
 }
 
 export interface ModelInputResultSummary {

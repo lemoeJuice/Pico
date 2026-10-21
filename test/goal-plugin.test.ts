@@ -219,7 +219,7 @@ describe('Goal plugin', () => {
       thread: env.thread,
       records: [],
       through: 0,
-      systemPrompt: '',
+      systemPrompt: 'Base instructions.',
       turns: [],
       tools: [],
     };
@@ -228,12 +228,22 @@ describe('Goal plugin', () => {
       input,
       async (next) => next,
     );
-    expect(projected.turns).toHaveLength(1);
-    expect(projected.turns[0]?.kind).toBe('message');
-    expect(projected.turns[0]?.kind === 'message' ? projected.turns[0].content : '').toContain('Ship the migration');
+    expect(projected.turns).toHaveLength(0);
+    expect(projected.systemPrompt).toContain('Base instructions.');
+    expect(projected.systemPrompt).toContain('Ship the migration');
+    expect(projected.systemPrompt).toContain('Tests pass and migration verified');
     expect(projected.provenance).toEqual([
-      expect.objectContaining({ sourcePluginId: 'pico.goal', kind: 'plugin', disposition: 'raw', turnIndex: 0 }),
+      expect.objectContaining({ sourcePluginId: 'pico.goal', kind: 'plugin', disposition: 'raw' }),
     ]);
+    const checkpoint = env.tools.get('goal_checkpoint')!;
+    await checkpoint({ progress: 'One implementation step completed.' }, { thread: env.thread });
+    const afterProgressUpdate = await env.pipelines.run<ProjectionInput, ProjectionInput>(
+      'projection',
+      input,
+      async (next) => next,
+    );
+    expect(afterProgressUpdate.systemPrompt).toBe(projected.systemPrompt);
+    expect(afterProgressUpdate.turns).toHaveLength(0);
     expect(env.tools.has('goal_checkpoint')).toBe(true);
     expect([...env.tools.keys()]).not.toContain('goal_edit');
 

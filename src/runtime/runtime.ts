@@ -31,6 +31,7 @@ import {
 import type {
   ModelInputAttempt,
   ModelInputResultSummary,
+  ModelPromptDiagnostics,
   ProviderRequestAttempt,
   SubmitResult,
   ThreadSnapshot,
@@ -259,6 +260,110 @@ function promptForDiagnostics(prompt: ModelPrompt): ModelPrompt {
       const { reasoningReplay: _reasoningReplay, ...diagnosticTurn } = turn;
       return diagnosticTurn;
     }),
+  };
+}
+
+function promptSummaryForDiagnostics(prompt: ModelPrompt): ModelPromptDiagnostics {
+  const toolsJson = stableJson(prompt.tools);
+  return {
+    version: 1,
+    model: prompt.model,
+    temperature: prompt.temperature,
+    systemCharacters: prompt.system.length,
+    systemFingerprint: createHash('sha256').update(prompt.system).digest('hex'),
+    turns: prompt.turns.map((turn) => {
+      const summary: ModelPromptDiagnostics['turns'][number] = {
+        kind: turn.kind,
+        characters: turn.content.length,
+      };
+      if (turn.kind === 'message') summary.role = turn.role;
+      if (turn.kind === 'assistant_tools') summary.toolCallCount = turn.calls.length;
+      if (turn.kind === 'tool_result' && turn.images?.length) {
+        summary.imageCount = turn.images.length;
+        summary.imageBytes = turn.images.reduce(
+          (total, image) =>
+            total +
+            Math.floor((image.data.length * 3) / 4) -
+            (image.data.endsWith('==') ? 2 : image.data.endsWith('=') ? 1 : 0),
+          0,
+        );
+      }
+      return summary;
+    }),
+    toolCount: prompt.tools.length,
+    toolNames: prompt.tools.map((tool) => tool.name),
+    toolDefinitionCharacters: toolsJson.length,
+    toolsFingerprint: createHash('sha256').update(toolsJson).digest('hex'),
+  };
+}
+
+function modelPromptDiagnosticsFrom(value: unknown): ModelPromptDiagnostics | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const candidate = value as Partial<ModelPromptDiagnostics> & Partial<ModelPrompt>;
+  if (
+    typeof candidate.system === 'string' &&
+    Array.isArray(candidate.turns) &&
+    Array.isArray(candidate.tools) &&
+    typeof candidate.model === 'string' &&
+    typeof candidate.temperature === 'number'
+  ) {
+    try {
+      return promptSummaryForDiagnostics(candidate as ModelPrompt);
+    } catch {
+      return null;
+    }
+  }
+  if (
+    candidate.version !== 1 ||
+    typeof candidate.model !== 'string' ||
+    typeof candidate.temperature !== 'number' ||
+    typeof candidate.systemCharacters !== 'number' ||
+    typeof candidate.systemFingerprint !== 'string' ||
+    !Array.isArray(candidate.turns) ||
+    typeof candidate.toolCount !== 'number' ||
+    !Array.isArray(candidate.toolNames) ||
+    typeof candidate.toolDefinitionCharacters !== 'number' ||
+    typeof candidate.toolsFingerprint !== 'string'
+  ) {
+    return null;
+  }
+  const safeCount = (number: number): number =>
+    Number.isFinite(number) ? Math.max(0, Math.min(Math.floor(number), 1_000_000_000)) : 0;
+  const safeFingerprint = (fingerprint: string): string =>
+    /^[a-f0-9]{64}$/i.test(fingerprint) ? fingerprint.toLowerCase() : 'unknown';
+  const turns: ModelPromptDiagnostics['turns'] = [];
+  for (const rawTurn of candidate.turns.slice(0, 10_000)) {
+    if (!rawTurn || typeof rawTurn !== 'object' || Array.isArray(rawTurn)) continue;
+    const turn = rawTurn as Record<string, unknown>;
+    if (turn.kind !== 'message' && turn.kind !== 'assistant_tools' && turn.kind !== 'tool_result') continue;
+    const summary: ModelPromptDiagnostics['turns'][number] = {
+      kind: turn.kind,
+      characters: safeCount(typeof turn.characters === 'number' ? turn.characters : 0),
+    };
+    if (turn.kind === 'message' && (turn.role === 'user' || turn.role === 'assistant')) summary.role = turn.role;
+    if (turn.kind === 'assistant_tools') {
+      summary.toolCallCount = safeCount(typeof turn.toolCallCount === 'number' ? turn.toolCallCount : 0);
+    }
+    if (turn.kind === 'tool_result') {
+      if (typeof turn.imageCount === 'number') summary.imageCount = safeCount(turn.imageCount);
+      if (typeof turn.imageBytes === 'number') summary.imageBytes = safeCount(turn.imageBytes);
+    }
+    turns.push(summary);
+  }
+  return {
+    version: 1,
+    model: diagnosticText(candidate.model, 160) ?? 'unknown',
+    temperature: Number.isFinite(candidate.temperature) ? candidate.temperature : 0,
+    systemCharacters: safeCount(candidate.systemCharacters),
+    systemFingerprint: safeFingerprint(candidate.systemFingerprint),
+    turns,
+    toolCount: safeCount(candidate.toolCount),
+    toolNames: candidate.toolNames
+      .filter((name): name is string => typeof name === 'string')
+      .slice(0, 2_000)
+      .map((name) => diagnosticText(name, 120) ?? 'unknown'),
+    toolDefinitionCharacters: safeCount(candidate.toolDefinitionCharacters),
+    toolsFingerprint: safeFingerprint(candidate.toolsFingerprint),
   };
 }
 
@@ -1104,7 +1209,7 @@ export class PicoRuntime {
     const executions = this.store.listSnapshotExecutions(threadId, page.records).map((execution) => {
       if (execution.kind !== 'model' || typeof execution.arguments?.model === 'string') return execution;
       const attempts = this.getModelInputAttempts(threadId, execution.id);
-      const model = attempts?.at(-1)?.prompt.model;
+      const model = attempts?.at(-1)?.promptSummary.model;
       return typeof model === 'string' && model.trim()
         ? { ...execution, arguments: { ...(execution.arguments ?? {}), model } }
         : execution;
@@ -1340,15 +1445,8 @@ export class PicoRuntime {
 
     return this.store.listExecutionLog(executionId, 'model-input-requested').flatMap((entry): ModelInputAttempt[] => {
       const requestId = entry.detail.requestId;
-      const prompt = entry.detail.prompt;
-      if (
-        typeof requestId !== 'string' ||
-        !prompt ||
-        typeof prompt !== 'object' ||
-        typeof (prompt as ModelPrompt).system !== 'string' ||
-        !Array.isArray((prompt as ModelPrompt).turns) ||
-        !Array.isArray((prompt as ModelPrompt).tools)
-      ) {
+      const promptSummary = modelPromptDiagnosticsFrom(entry.detail.promptSummary ?? entry.detail.prompt);
+      if (typeof requestId !== 'string' || !promptSummary) {
         return [];
       }
       const outcome = outcomes.get(requestId);
@@ -1360,7 +1458,7 @@ export class PicoRuntime {
       return [
         {
           id: requestId,
-          prompt: prompt as ModelPrompt,
+          promptSummary,
           ...(Array.isArray(entry.detail.projectionProvenance)
             ? { projectionProvenance: entry.detail.projectionProvenance as ProjectionProvenance[] }
             : {}),
@@ -2202,7 +2300,7 @@ export class PicoRuntime {
         requestId = randomUUID();
         this.appendExecutionDiagnostic(modelExecutionId, 'model-input-requested', {
           requestId,
-          prompt: structuredClone(promptForDiagnostics(actualPrompt)),
+          promptSummary: promptSummaryForDiagnostics(actualPrompt),
           projectionProvenance: structuredClone(provenance ?? projected.provenance ?? []),
           provider,
         });

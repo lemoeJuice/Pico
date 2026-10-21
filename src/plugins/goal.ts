@@ -131,36 +131,38 @@ export const goalPlugin: PicoPlugin = {
     pipelines.use<ProjectionInput, ProjectionInput>('projection', async (input, next) => {
       const goal = getGoal(input.thread.id);
       if (!goal || goal.status === 'cleared') return next(input);
-      const turns = [...input.turns];
-      const turnIndex = turns.length;
-      turns.push({
-        kind: 'message',
-        role: 'user',
-        content: [
-          '<active_goal>',
-          `Status: ${goal.status}`,
-          `Goal: ${goal.text}`,
-          ...(goal.constraints ? [`Constraints: ${goal.constraints}`] : []),
-          ...(goal.completionCriteria ? [`Completion criteria: ${goal.completionCriteria}`] : []),
-          ...(goal.recentProgress ? [`Recent progress: ${goal.recentProgress}`] : []),
-          ...(goal.blocker ? [`Current blocker: ${goal.blocker}`] : []),
-          'Continue with the next useful action while this Goal is active. Do not claim completion without calling goal_checkpoint with verifiable evidence from this Thread.',
-          '</active_goal>',
-        ].join('\n'),
-      });
+      const goalInstructions = [
+        '<thread_goal>',
+        `Goal: ${goal.text}`,
+        ...(goal.constraints ? [`Constraints: ${goal.constraints}`] : []),
+        ...(goal.completionCriteria ? [`Completion criteria: ${goal.completionCriteria}`] : []),
+        ...(goal.status === 'active'
+          ? [
+              'Work toward this Goal. Do not claim completion without calling goal_checkpoint with verifiable evidence from this Thread.',
+            ]
+          : [
+              `Status: ${goal.status}`,
+              ...(goal.blocker ? [`Current blocker: ${goal.blocker}`] : []),
+              ...(goal.status === 'needs_input'
+                ? ['Pause work that depends on missing input and clearly ask the user for it.']
+                : goal.status === 'paused'
+                  ? ['Do not continue this Goal until the user resumes it.']
+                  : ['This Goal is completed. Do not restart it unless the user asks.']),
+            ]),
+        '</thread_goal>',
+      ].join('\n');
       const extended = input as GoalProjectionInput;
       return next({
         ...input,
-        turns,
+        systemPrompt: `${input.systemPrompt}${input.systemPrompt ? '\n\n' : ''}${goalInstructions}`,
         provenance: [
           ...(extended.provenance ?? []),
           {
             id: goal.id,
             sourcePluginId: 'pico.goal',
-            label: 'Active Goal',
+            label: 'Thread Goal instructions',
             kind: 'plugin',
             disposition: 'raw',
-            turnIndex,
           },
         ],
       });
