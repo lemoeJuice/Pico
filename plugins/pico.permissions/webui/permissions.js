@@ -149,8 +149,9 @@
     const execution = context.toolResult ?? context.execution;
     const approval = currentApproval();
     if (approval?.status === 'failed') {
+      const failureReason = approval.reviewer?.reason || 'No approval decision was made. This is not a denial.';
       return `<section class="permission-result-actions pico-ui-section" aria-label="Permission review failed">
-        <div class="permission-review-failure"><strong>Approval temporarily failed</strong><span>Reviewer timed out. No decision was made; this is not a denial.</span></div>
+        <div class="permission-review-failure"><strong>Approval temporarily failed</strong><span>${escape(failureReason)}</span></div>
       </section>`;
     }
     const awaiting = execution?.status === 'pending' && approval?.status === 'pending';

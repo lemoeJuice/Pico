@@ -186,7 +186,10 @@ describe('Permission Auto-review', () => {
       );
       expect(view.approvals[0]).toMatchObject({
         status: 'pending',
-        reviewer: { outcome: 'unavailable', reason: 'Reviewer unavailable; human approval is required.' },
+        reviewer: {
+          outcome: 'unavailable',
+          reason: 'Reviewer unavailable. Approval temporarily failed; no decision was made. This is not a denial.',
+        },
       });
       expect(env.store.listExecutions(thread.id).find((execution) => execution.kind === 'tool')?.status).toBe(
         'pending',

@@ -1,4 +1,4 @@
-import type { PicoPlugin, PluginContext } from './host.js';
+import type { PicoPlugin } from './host.js';
 import type { Execution, Thread, ToolDefinition, UiContribution } from '../core/types.js';
 import type { ProjectionInput, ToolInvocationInput } from '../runtime/stages.js';
 import type { ModelPrompt } from '../contracts/model.js';
@@ -27,19 +27,6 @@ type PermissionTools = Record<
   string,
   Array<Pick<ToolDefinition, 'name' | 'description'> & { policy: PermissionPolicy }>
 >;
-
-interface PermissionContext extends PluginContext {
-  executions: {
-    get(executionId: string): Execution | null;
-    fail(executionId: string, reason: string, result?: unknown): Execution;
-    subscribe(listener: (execution: Execution) => void): () => void;
-  };
-  models: PluginContext['models'];
-  state: PluginContext['state'] & {
-    transaction<T>(operation: () => T): T;
-    subscribe(listener: () => void): () => void;
-  };
-}
 
 function objectValue<T extends object>(value: unknown): T {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as T) : ({} as T);
@@ -78,13 +65,14 @@ function deniedResult(reason: string, extra: Record<string, unknown> = {}): Reco
 }
 
 function reviewFailureResult(reason: string, reviewer: PermissionApproval['reviewer']): Record<string, unknown> {
+  const failureCause = reviewer?.failure === 'timeout' ? 'timed out' : 'was unavailable';
   return {
     approvalFailed: true,
     denied: false,
     reason,
     ...(reviewer ? { reviewer } : {}),
     modelGuidance:
-      'Permission approval temporarily failed because the reviewer timed out. This is not a denial: no approval decision was made and the tool was not executed. Do not repeat this call automatically or describe it as denied. Explain the temporary failure to the user.',
+      `Permission approval temporarily failed because the reviewer ${failureCause}. No approval decision was made; this is not a denial, and the tool was not executed. Do not repeat this call automatically or describe it as denied. Explain the temporary failure to the user.`,
   };
 }
 
@@ -94,8 +82,8 @@ export const permissionPlugin: PicoPlugin = {
   version: '0.1.0',
   pipelinePriority: { projection: 80 },
   activate(pluginContext) {
-    const context = pluginContext as PermissionContext;
-    const { pipelines, state, canonical, ui, http, executions, threads, models } = context;
+    const context = pluginContext;
+    const { pipelines, state, cache, canonical, ui, http, executions, threads, models } = context;
     const decisionWaiters = new Map<string, Set<(allow: boolean) => void>>();
     const readAutoReview = (): Record<string, boolean> =>
       objectValue<Record<string, boolean>>(state.get('autoReview', {}));
@@ -134,9 +122,7 @@ export const permissionPlugin: PicoPlugin = {
           action: status === 'cancelled' ? 'cancel' : status === 'failed' ? 'reviewer.failed' : 'decision',
           executionId: current.executionId,
           toolName: current.toolName,
-          ...(status === 'allowed' || status === 'denied'
-            ? { decision: status === 'allowed' ? 'allow' : 'deny' }
-            : {}),
+          ...(status === 'allowed' || status === 'denied' ? { decision: status === 'allowed' ? 'allow' : 'deny' } : {}),
           ...(status === 'allowed' || status === 'denied'
             ? { scope: options.rememberForThread ? 'thread' : 'once' }
             : {}),
@@ -215,7 +201,7 @@ export const permissionPlugin: PicoPlugin = {
       }, 20_000);
       try {
         const binding = threads.binding(input.thread.id);
-        const toolDefinition = objectValue<PermissionTools>(state.get('availableTools', {}))[input.thread.id]?.find(
+        const toolDefinition = objectValue<PermissionTools>(cache.get('availableTools', {}))[input.thread.id]?.find(
           (tool) => tool.name === input.call.name,
         );
         const records = canonical.list(input.thread.id);
@@ -350,13 +336,13 @@ export const permissionPlugin: PicoPlugin = {
             outcome: 'unavailable',
             reason: timedOut
               ? 'Permission review timed out. Approval temporarily failed; no decision was made. This is not a denial.'
-              : 'Reviewer unavailable; human approval is required.',
+              : 'Reviewer unavailable. Approval temporarily failed; no decision was made. This is not a denial.',
             reviewedAt: new Date().toISOString(),
             failure: timedOut ? 'timeout' : 'unavailable',
           },
         };
         state.set('approvals', { ...readApprovals(), [input.executionId]: unavailable });
-        if (timedOut) {
+        if (timedOut || readAutoReviewDenials()[input.thread.id]) {
           return writeDecision(unavailable, 'failed', {
             source: 'reviewer',
             reason: unavailable.reviewer!.reason,
@@ -433,7 +419,7 @@ export const permissionPlugin: PicoPlugin = {
     ): Promise<Array<{ name: string; description: string; policy: PermissionPolicy }>> => {
       const thread = threads.get(threadId);
       if (!thread) throw new Error('Thread not found');
-      const known = objectValue<PermissionTools>(state.get('availableTools', {}))[threadId];
+      const known = objectValue<PermissionTools>(cache.get('availableTools', {}))[threadId];
       const binding = threads.binding(threadId);
       const available =
         known ??
@@ -463,13 +449,13 @@ export const permissionPlugin: PicoPlugin = {
               : 'allow'),
       }));
       const nextAvailable = {
-        ...objectValue<PermissionTools>(state.get('availableTools', {})),
+        ...objectValue<PermissionTools>(cache.get('availableTools', {})),
         [input.thread.id]: available,
       };
       if (
-        JSON.stringify(nextAvailable) !== JSON.stringify(objectValue<PermissionTools>(state.get('availableTools', {})))
+        JSON.stringify(nextAvailable) !== JSON.stringify(objectValue<PermissionTools>(cache.get('availableTools', {})))
       ) {
-        state.set('availableTools', nextAvailable);
+        cache.set('availableTools', nextAvailable);
       }
       return next({ ...input, tools: input.tools.filter((tool) => rules[tool.name] !== 'deny') });
     });
@@ -493,7 +479,7 @@ export const permissionPlugin: PicoPlugin = {
         if (readAutoReview()[input.thread.id]) {
           approval = (await reviewAsk(input)) ?? approval;
           if (approval.status === 'allowed') return next(input);
-          if (approval.status === 'failed' && approval.reviewer?.failure === 'timeout') {
+          if (approval.status === 'failed' && approval.reviewer?.failure) {
             const reason = approval.reviewer.reason;
             return input.fail(reason, reviewFailureResult(reason, approval.reviewer));
           }
@@ -503,10 +489,7 @@ export const permissionPlugin: PicoPlugin = {
               source: 'reviewer',
               reason: `Auto-review: ${approval.reviewer.reason}`,
             });
-            return input.fail(
-              reason,
-              deniedResult(reason, denied.reviewer ? { reviewer: denied.reviewer } : {}),
-            );
+            return input.fail(reason, deniedResult(reason, denied.reviewer ? { reviewer: denied.reviewer } : {}));
           }
         }
         const approved = await awaitDecision(approval, input.signal);
