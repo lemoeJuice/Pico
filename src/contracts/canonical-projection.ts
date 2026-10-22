@@ -78,6 +78,69 @@ export function completedCanonicalTurnBlocks(records: readonly CanonicalRecord[]
   });
 }
 
+/**
+ * Splits history into complete model-invocation units for Runtime compaction.
+ * Messages before a response attach to that invocation; tool calls and every
+ * matching result remain together. An incomplete or malformed suffix is not
+ * exposed as a safe compaction boundary.
+ */
+export function completedCanonicalModelInvocationBlocks(records: readonly CanonicalRecord[]): CanonicalRecord[][] {
+  const blocks: CanonicalRecord[][] = [];
+  let current: CanonicalRecord[] = [];
+  let pendingResults: Set<string> | null = null;
+
+  for (const record of records) {
+    if (record.kind === 'plugin') continue;
+
+    if (record.kind === 'assistant') {
+      if (pendingResults) break;
+      const payload = recordObject(record.payload);
+      const rawCalls = payload.toolCalls;
+      if (!Array.isArray(rawCalls)) break;
+      current.push(record);
+
+      if (rawCalls.length === 0) {
+        blocks.push(current);
+        current = [];
+        continue;
+      }
+
+      const batchId = typeof payload.batchId === 'string' && payload.batchId ? payload.batchId : null;
+      if (!batchId) break;
+      const expected = new Set<string>();
+      for (const rawCall of rawCalls) {
+        const call = recordObject(rawCall);
+        if (typeof call.id !== 'string' || !call.id) return blocks;
+        const key = `${batchId}:${call.id}`;
+        if (expected.has(key)) return blocks;
+        expected.add(key);
+      }
+      pendingResults = expected;
+      continue;
+    }
+
+    current.push(record);
+    if (record.kind !== 'tool_result') continue;
+
+    const result = recordObject(record.payload);
+    if (
+      !pendingResults ||
+      typeof result.batchId !== 'string' ||
+      typeof result.toolCallId !== 'string' ||
+      !pendingResults.delete(`${result.batchId}:${result.toolCallId}`)
+    ) {
+      break;
+    }
+    if (pendingResults.size === 0) {
+      blocks.push(current);
+      current = [];
+      pendingResults = null;
+    }
+  }
+
+  return blocks;
+}
+
 export function canonicalConversationRecords(records: readonly CanonicalRecord[]): CanonicalRecord[] {
   return records.filter((record) => record.kind !== 'plugin');
 }

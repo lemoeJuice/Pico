@@ -148,17 +148,33 @@ describe('Pico server access boundary', () => {
       const defaultContextManagement = await fetch(`${base}/api/settings/context-management`, {
         headers: cookieHeaders,
       }).then((response) => response.json());
-      expect(defaultContextManagement).toEqual({ contextWindowTokens: 272_000, compactionThresholdTokens: 256_000 });
+      expect(defaultContextManagement).toEqual({
+        contextWindowTokens: 272_000,
+        compactionThresholdTokens: 256_000,
+        keepRecentTokens: 16_000,
+      });
       const contextManagementUpdate = await fetch(`${base}/api/settings/context-management`, {
         method: 'PUT',
         headers: { ...cookieHeaders, 'content-type': 'application/json' },
-        body: JSON.stringify({ contextWindowTokens: 4_000, compactionThresholdTokens: 3_000 }),
+        body: JSON.stringify({ contextWindowTokens: 4_000, compactionThresholdTokens: 3_000, keepRecentTokens: 2_500 }),
       });
       expect(contextManagementUpdate.status).toBe(200);
       expect(await contextManagementUpdate.json()).toEqual({
         contextWindowTokens: 4_000,
         compactionThresholdTokens: 3_000,
+        keepRecentTokens: 2_500,
       });
+      const defaultMiscellaneousSettings = await fetch(`${base}/api/settings/miscellaneous`, {
+        headers: cookieHeaders,
+      }).then((response) => response.json());
+      expect(defaultMiscellaneousSettings).toEqual({ toolCardsExpandedByDefault: false });
+      const miscellaneousSettingsUpdate = await fetch(`${base}/api/settings/miscellaneous`, {
+        method: 'PUT',
+        headers: { ...cookieHeaders, 'content-type': 'application/json' },
+        body: JSON.stringify({ toolCardsExpandedByDefault: true }),
+      });
+      expect(miscellaneousSettingsUpdate.status).toBe(200);
+      expect(await miscellaneousSettingsUpdate.json()).toEqual({ toolCardsExpandedByDefault: true });
       expect(await upgradeStatus(wsUrl, { cookie })).toBe(101);
       expect(await upgradeStatus(wsUrl, { cookie, origin: 'https://attacker.example' })).toBe(403);
       await waitForConnected(wsUrl, cookieHeaders);

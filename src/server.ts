@@ -20,6 +20,7 @@ import {
   DEFAULT_THREAD_TITLE,
   type ContextManagementSettings,
   type ExecutorKind,
+  type MiscellaneousSettings,
   type ModelSettings,
   type ThreadModelSelection,
 } from './core/types.js';
@@ -340,8 +341,9 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     const update: Partial<ContextManagementSettings> = {};
     const hasContextWindowTokens = Object.hasOwn(body, 'contextWindowTokens');
     const hasCompactionThresholdTokens = Object.hasOwn(body, 'compactionThresholdTokens');
-    if (!hasContextWindowTokens && !hasCompactionThresholdTokens) {
-      throw new Error('Provide a context window or compaction threshold to update.');
+    const hasKeepRecentTokens = Object.hasOwn(body, 'keepRecentTokens');
+    if (!hasContextWindowTokens && !hasCompactionThresholdTokens && !hasKeepRecentTokens) {
+      throw new Error('Provide a context window, compaction threshold, or recent history budget to update.');
     }
     if (hasContextWindowTokens) {
       if (typeof body.contextWindowTokens !== 'number') {
@@ -355,7 +357,24 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
       }
       update.compactionThresholdTokens = body.compactionThresholdTokens;
     }
+    if (hasKeepRecentTokens) {
+      if (typeof body.keepRecentTokens !== 'number') {
+        throw new Error('Recent history budget must be a number of tokens.');
+      }
+      update.keepRecentTokens = body.keepRecentTokens;
+    }
     response.json(runtime.updateContextManagementSettings(update));
+  });
+  app.get('/api/settings/miscellaneous', (_request, response) => {
+    response.json(runtime.getMiscellaneousSettings());
+  });
+  app.put('/api/settings/miscellaneous', (request, response) => {
+    const body = bodyObject(request);
+    if (typeof body.toolCardsExpandedByDefault !== 'boolean') {
+      throw new Error('Default tool card expansion must be a boolean.');
+    }
+    const update: Partial<MiscellaneousSettings> = { toolCardsExpandedByDefault: body.toolCardsExpandedByDefault };
+    response.json(runtime.updateMiscellaneousSettings(update));
   });
   app.get('/api/commands', (_request, response) => response.json(runtime.availableCommands()));
   app.post('/api/commands/execute', async (request, response) => {

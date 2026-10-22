@@ -10,6 +10,7 @@ import type {
   ExecutionStatus,
   ExecutorBinding,
   MessagePayload,
+  MiscellaneousSettings,
   ModelSettings,
   Project,
   PublicSettings,
@@ -79,7 +80,7 @@ import {
   canonicalBlockToPromptTurns,
   canonicalConversationRecords,
   canonicalRecordsToPromptTurns,
-  completedCanonicalTurnBlocks,
+  completedCanonicalModelInvocationBlocks,
   runtimeCompactionTurn,
   runtimeContextCompaction,
 } from '../contracts/canonical-projection.js';
@@ -115,13 +116,57 @@ interface PreparedPluginModelCall {
 
 const THREAD_TOOL_SURFACES_SETTING = 'thread-tool-surfaces';
 const DISABLED_THREAD_TOOLS_SETTING = 'disabled-thread-tools';
-const RUNTIME_COMPACTION_RECENT_TURNS = 2;
+const RUNTIME_COMPACTION_MIN_RECENT_TURNS = 2;
 const RUNTIME_COMPACTION_MAX_SOURCE_CHARS = 60_000;
 const RUNTIME_COMPACTION_MAX_SUMMARY_CHARS = 12_000;
 const DEFAULT_CONTEXT_MANAGEMENT_SETTINGS: ContextManagementSettings = {
   contextWindowTokens: 272_000,
   compactionThresholdTokens: 256_000,
+  keepRecentTokens: 16_000,
 };
+const DEFAULT_MISCELLANEOUS_SETTINGS: MiscellaneousSettings = {
+  toolCardsExpandedByDefault: false,
+};
+
+function compactionBlockTokenEstimate(
+  block: readonly CanonicalRecord[],
+  previousBlock: readonly CanonicalRecord[] | undefined,
+  thread: Thread,
+  limit: number,
+): number {
+  const assistant = [...block].reverse().find((record) => record.kind === 'assistant');
+  const previousAssistant = previousBlock
+    ? [...previousBlock].reverse().find((record) => record.kind === 'assistant')
+    : undefined;
+  const payload = assistant ? objectValue(assistant.payload) : null;
+  const previousPayload = previousAssistant ? objectValue(previousAssistant.payload) : null;
+  const usage = diagnosticUsage(payload?.usage);
+  const previousUsage = diagnosticUsage(previousPayload?.usage);
+  // The invocation's provider usage is recorded before its tool results are
+  // appended, so also account for the complete unit's retained content.
+  const contentEstimate = estimatePromptCharacters(canonicalBlockToPromptTurns(block, thread), limit);
+  const sameModel =
+    typeof payload?.model === 'string' &&
+    typeof previousPayload?.model === 'string' &&
+    payload.model === previousPayload.model;
+  const providersCompatible =
+    typeof payload?.provider !== 'string' ||
+    typeof previousPayload?.provider !== 'string' ||
+    payload.provider === previousPayload.provider;
+  if (
+    sameModel &&
+    providersCompatible &&
+    usage?.inputTokens !== undefined &&
+    previousUsage?.inputTokens !== undefined
+  ) {
+    const delta = usage.inputTokens - previousUsage.inputTokens;
+    if (delta > 0) return Math.min(limit, Math.max(delta, contentEstimate));
+  }
+
+  // Pico has no universal tokenizer. Character count deliberately errs on the
+  // side of retaining more history when comparable provider usage is absent.
+  return Math.max(1, contentEstimate);
+}
 
 function canonicalSourceHash(records: readonly CanonicalRecord[]): string {
   return createHash('sha256')
@@ -458,6 +503,7 @@ function commandResultFromRecord(
   const command: CommandResult = {};
   if (typeof value.text === 'string') command.text = value.text;
   if (typeof value.openThreadId === 'string') command.openThreadId = value.openThreadId;
+  if (value.severity === 'notice' || value.severity === 'error') command.severity = value.severity;
   return command;
 }
 
@@ -1839,12 +1885,12 @@ export class PicoRuntime {
           this.executionChanged(interrupted);
           this.ensureToolResult(threadId, interrupted);
         }
-      } catch (error) {
+      } catch {
         // A disconnected Executor leaves its last durable state untouched.
         this.publish({
-          type: 'runtime.notice',
+          type: 'runtime.error',
           threadId,
-          message: `Interrupt could not reach ${binding.label}: ${error instanceof Error ? error.message : String(error)}`,
+          message: `Interrupt could not reach ${binding.label}. The Executor may still be running; inspect its status before continuing.`,
         });
       }
     }
@@ -2003,8 +2049,7 @@ export class PicoRuntime {
       const payload = objectValue(record.payload);
       return payload?.pluginId === 'pico.runtime' && payload.action === 'context-compacted';
     });
-    const estimatedInputTokens = contextUsage.inputTokens;
-
+    const previousThroughSeq = runtimeContextCompaction(records)?.throughSeq ?? 0;
     try {
       const result = await this.compactThread(thread, true);
       const recordsAfterCompaction = this.store.listRecords(thread.id);
@@ -2015,47 +2060,46 @@ export class PicoRuntime {
       });
       if (latestCompactionAfter && latestCompactionAfter.seq > (latestCompaction?.seq ?? 0)) {
         const compactedContext = runtimeContextCompaction(recordsAfterCompaction);
-        if (compactedContext) {
-          const remainingConversation = canonicalConversationRecords(recordsAfterCompaction).filter(
-            (record) => record.seq > compactedContext.throughSeq,
+        if (!compactedContext || compactedContext.throughSeq <= previousThroughSeq) {
+          this.store.setPause(
+            thread.id,
+            true,
+            'Automatic context compaction produced an invalid history marker. The next model request was blocked; review the Thread history before continuing.',
           );
-          const postCompactionEstimate = estimatePromptCharacters(
-            [runtimeCompactionTurn(compactedContext), ...canonicalRecordsToPromptTurns(remainingConversation, thread)],
-            settings.contextWindowTokens,
+          this.publishThreadUpdate(thread.id);
+          return;
+        }
+
+        const remainingConversation = canonicalConversationRecords(recordsAfterCompaction).filter(
+          (record) => record.seq > compactedContext.throughSeq,
+        );
+        const postCompactionEstimate = estimatePromptCharacters(
+          [runtimeCompactionTurn(compactedContext), ...canonicalRecordsToPromptTurns(remainingConversation, thread)],
+          settings.contextWindowTokens,
+        );
+        if (postCompactionEstimate >= settings.contextWindowTokens) {
+          this.store.setPause(
+            thread.id,
+            true,
+            'The compacted conversation still exceeds the configured context window. The next model request was blocked; review or shorten recent history, then Continue.',
           );
-          if (postCompactionEstimate >= settings.contextWindowTokens) {
-            this.store.setPause(
-              thread.id,
-              true,
-              'The compacted conversation still exceeds the configured context window. Review or shorten recent turns, then Continue.',
-            );
-            this.publishThreadUpdate(thread.id);
-            return;
-          }
+          this.publishThreadUpdate(thread.id);
+          return;
         }
         return;
       }
 
-      if (result.text?.startsWith('The model did not return a usable compaction summary.')) {
-        this.store.setPause(
-          thread.id,
-          true,
-          'Automatic context compaction could not produce a usable summary. Review the selected model, then Continue.',
-        );
-        this.publishThreadUpdate(thread.id);
-      } else if (estimatedInputTokens >= settings.contextWindowTokens) {
-        this.store.setPause(
-          thread.id,
-          true,
-          'The context window is full and there is no eligible history to compact. Review the conversation, then Continue.',
-        );
-        this.publishThreadUpdate(thread.id);
-      }
+      const failureDetail = result.text?.trim();
+      const reason = failureDetail
+        ? `Automatic context compaction did not complete, so the next model request was blocked. ${failureDetail} Review the compaction settings or recent history, then Continue.`
+        : 'Automatic context compaction did not complete, so the next model request was blocked. Review the compaction settings or recent history, then Continue.';
+      this.store.setPause(thread.id, true, reason);
+      this.publishThreadUpdate(thread.id);
     } catch {
       this.store.setPause(
         thread.id,
         true,
-        'Automatic context compaction failed. Review the selected model and connection, then Continue.',
+        'Automatic context compaction failed, so the next model request was blocked. Review the selected model and connection, then Continue.',
       );
       this.publishThreadUpdate(thread.id);
     }
@@ -2749,7 +2793,7 @@ export class PicoRuntime {
   }
 
   private async compactThread(thread: Thread | null, allowActiveLoop = false): Promise<CommandResult> {
-    if (!thread) return { text: 'Choose a Thread first.' };
+    if (!thread) return { text: 'Choose a Thread first.', severity: 'error' };
     const inFlightOperations = this.inFlightThreadOperations.get(thread.id) ?? 0;
     const hasRunningModelCall = this.store
       .listPluginModelCalls({ threadId: thread.id })
@@ -2762,20 +2806,37 @@ export class PicoRuntime {
       inFlightOperations > 1 ||
       hasRunningModelCall
     ) {
-      return { text: 'Wait for the Thread to reach a safe idle boundary before compacting.' };
+      return { text: 'Wait for the Thread to reach a safe idle boundary before compacting.', severity: 'error' };
     }
 
     const records = this.store.listRecords(thread.id);
     const conversation = canonicalConversationRecords(records);
     const previous = runtimeContextCompaction(records);
     const previousThroughSeq = previous?.throughSeq ?? 0;
-    const completed = completedCanonicalTurnBlocks(conversation).filter(
+    const keepRecentTokens = this.getContextManagementSettings().keepRecentTokens;
+    const completed = completedCanonicalModelInvocationBlocks(conversation).filter(
       (block) => (block.at(-1)?.seq ?? 0) > previousThroughSeq,
     );
-    const eligible = completed.slice(0, -RUNTIME_COMPACTION_RECENT_TURNS);
+    const recent: CanonicalRecord[][] = [];
+    let recentTokenEstimate = 0;
+    for (let index = completed.length - 1; index >= 0; index -= 1) {
+      const block = completed[index]!;
+      recent.unshift(block);
+      recentTokenEstimate = Math.min(
+        keepRecentTokens,
+        recentTokenEstimate +
+          compactionBlockTokenEstimate(block, index > 0 ? completed[index - 1] : undefined, thread, keepRecentTokens),
+      );
+      if (recent.length >= RUNTIME_COMPACTION_MIN_RECENT_TURNS && recentTokenEstimate >= keepRecentTokens) break;
+    }
+    const eligible = completed.slice(0, completed.length - recent.length);
     if (eligible.length === 0) {
       return {
-        text: `There are not enough completed turns to compact yet. The latest ${RUNTIME_COMPACTION_RECENT_TURNS} completed turns stay verbatim.`,
+        text:
+          completed.length === 0
+            ? 'There are no completed model invocations to compact yet.'
+            : `No older model invocations fall outside the recent-history budget yet. The latest ${recent.length} completed invocation(s) stay verbatim (target: ${keepRecentTokens.toLocaleString()} tokens).`,
+        severity: 'error',
       };
     }
 
@@ -2792,7 +2853,8 @@ export class PicoRuntime {
     }
     if (summarizedBlocks.length === 0) {
       return {
-        text: `Nothing was compacted: the oldest eligible turn exceeds the ${RUNTIME_COMPACTION_MAX_SOURCE_CHARS.toLocaleString()} character safety limit.`,
+        text: `Nothing was compacted: the oldest eligible model invocation exceeds the ${RUNTIME_COMPACTION_MAX_SOURCE_CHARS.toLocaleString()} character safety limit.`,
+        severity: 'error',
       };
     }
 
@@ -2801,11 +2863,11 @@ export class PicoRuntime {
     const sourceHash = canonicalSourceHash(sourceRecords);
     const sourceText = [
       ...(previous ? [`Existing summary through Canonical seq ${previous.throughSeq}:\n${previous.summary}`] : []),
-      ...summarizedBlocks.map((block) => `New Canonical turn:\n${block.text}`),
+      ...summarizedBlocks.map((block) => `New Canonical model invocation:\n${block.text}`),
     ].join('\n\n');
     const prompt: ModelPrompt = {
       system:
-        "You are Pico Runtime's conversation compaction helper. Produce a concise, reliable working summary for continuing this same conversation. Preserve the user's goals and explicit constraints, verified facts and their Canonical sequence references, decisions and reasons, unresolved questions, failures, and next actions. Clearly mark uncertainty and never invent facts. Incorporate the existing summary with the new turns. Return plain text only.",
+        "You are Pico Runtime's conversation compaction helper. Produce a concise, reliable working summary for continuing this same conversation. Preserve the user's goals and explicit constraints, verified facts and their Canonical sequence references, decisions and reasons, unresolved questions, failures, and next actions. Clearly mark uncertainty and never invent facts. Incorporate the existing summary with the new model invocations. Return plain text only.",
       turns: [{ kind: 'message', role: 'user', content: sourceText }],
       tools: [],
       model: this.threadModelSelection(thread.id).model,
@@ -2848,6 +2910,7 @@ export class PicoRuntime {
     if (!summary || summary.length > RUNTIME_COMPACTION_MAX_SUMMARY_CHARS || call.response.toolCalls.length > 0) {
       return {
         text: `The model did not return a usable compaction summary. No history was changed; retry /compact after checking the selected model.`,
+        severity: 'error',
       };
     }
 
@@ -2862,7 +2925,7 @@ export class PicoRuntime {
       model: call.model,
     });
     return {
-      text: `Compacted ${summarizedBlocks.length} completed turn(s) through Canonical seq ${throughSeq}. Canonical History is preserved, and the latest ${RUNTIME_COMPACTION_RECENT_TURNS} completed turns remain verbatim.`,
+      text: `Compacted ${summarizedBlocks.length} completed model invocation(s) through Canonical seq ${throughSeq}. Canonical History is preserved, and the latest ${recent.length} invocation(s) remain verbatim (target: ${keepRecentTokens.toLocaleString()} tokens).`,
     };
   }
 
@@ -3447,10 +3510,16 @@ export class PicoRuntime {
       stored.compactionThresholdTokens > 0
         ? stored.compactionThresholdTokens
         : DEFAULT_CONTEXT_MANAGEMENT_SETTINGS.compactionThresholdTokens;
+    const keepRecentTokens =
+      typeof stored.keepRecentTokens === 'number' &&
+      Number.isSafeInteger(stored.keepRecentTokens) &&
+      stored.keepRecentTokens > 0
+        ? stored.keepRecentTokens
+        : DEFAULT_CONTEXT_MANAGEMENT_SETTINGS.keepRecentTokens;
     if (compactionThresholdTokens >= contextWindowTokens) {
       return { ...DEFAULT_CONTEXT_MANAGEMENT_SETTINGS };
     }
-    return { contextWindowTokens, compactionThresholdTokens };
+    return { contextWindowTokens, compactionThresholdTokens, keepRecentTokens };
   }
 
   updateContextManagementSettings(update: Partial<ContextManagementSettings>): ContextManagementSettings {
@@ -3461,10 +3530,32 @@ export class PicoRuntime {
     if (!Number.isSafeInteger(next.compactionThresholdTokens) || next.compactionThresholdTokens <= 0) {
       throw new Error('Compaction threshold must be a positive whole number of tokens.');
     }
+    if (!Number.isSafeInteger(next.keepRecentTokens) || next.keepRecentTokens <= 0) {
+      throw new Error('Recent history budget must be a positive whole number of tokens.');
+    }
     if (next.compactionThresholdTokens >= next.contextWindowTokens) {
       throw new Error('Compaction threshold must be lower than the context window.');
     }
     this.store.setSetting('context-management', next);
+    return next;
+  }
+
+  getMiscellaneousSettings(): MiscellaneousSettings {
+    const stored = objectValue(this.store.getSetting<unknown>('miscellaneous', {})) ?? {};
+    return {
+      toolCardsExpandedByDefault:
+        typeof stored.toolCardsExpandedByDefault === 'boolean'
+          ? stored.toolCardsExpandedByDefault
+          : DEFAULT_MISCELLANEOUS_SETTINGS.toolCardsExpandedByDefault,
+    };
+  }
+
+  updateMiscellaneousSettings(update: Partial<MiscellaneousSettings>): MiscellaneousSettings {
+    if (typeof update.toolCardsExpandedByDefault !== 'boolean') {
+      throw new Error('Default tool card expansion must be a boolean.');
+    }
+    const next = { ...this.getMiscellaneousSettings(), ...update };
+    this.store.setSetting('miscellaneous', next);
     return next;
   }
 

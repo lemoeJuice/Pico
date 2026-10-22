@@ -40,7 +40,7 @@ export interface ProjectionProvenance {
 export interface SubmitResult {
   accepted: boolean;
   duplicate?: boolean;
-  command?: { text?: string; openThreadId?: string };
+  command?: { text?: string; openThreadId?: string; severity?: 'notice' | 'error' };
 }
 
 export interface ModelInputAttempt {

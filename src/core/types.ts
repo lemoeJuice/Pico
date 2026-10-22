@@ -147,6 +147,11 @@ export interface ModelSettings {
 export interface ContextManagementSettings {
   contextWindowTokens: number;
   compactionThresholdTokens: number;
+  keepRecentTokens: number;
+}
+
+export interface MiscellaneousSettings {
+  toolCardsExpandedByDefault: boolean;
 }
 
 export interface ToolDefinition {

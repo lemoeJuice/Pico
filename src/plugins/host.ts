@@ -50,6 +50,7 @@ export type CommandEnvironment = Omit<CommandContext, 'rawArgs'>;
 export interface CommandResult {
   text?: string;
   openThreadId?: string;
+  severity?: 'notice' | 'error';
 }
 
 export interface PluginCommand {
@@ -218,7 +219,7 @@ export class CommandRegistry {
     const args = rawArgs.trim() ? rawArgs.trim().split(/\s+/) : [];
     const name = (rawName ?? '').toLowerCase();
     const entry = this.commands.get(name);
-    if (!entry) return { text: `Unknown command /${name || '?'}; use /help to see available commands.` };
+    if (!entry) return { text: `Unknown command /${name || '?'}; use /help to see available commands.`, severity: 'error' };
     return (await entry.command.execute(args, { ...context, rawArgs })) ?? {};
   }
 }

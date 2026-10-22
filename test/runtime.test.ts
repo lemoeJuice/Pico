@@ -70,6 +70,7 @@ describe('durable Thread runtime invariants', () => {
     const thread = env.runtime.createThread(env.project.id, 'runtime');
     try {
       expect(runtime.commands.list()).toContainEqual(expect.objectContaining({ name: 'compact' }));
+      runtime.updateContextManagementSettings({ keepRecentTokens: 1 });
       for (let turn = 1; turn <= 4; turn += 1) {
         const user = env.store.appendCanonical(thread.id, `compact-user-${turn}`, 'message', {
           role: 'user',
@@ -87,7 +88,7 @@ describe('durable Thread runtime invariants', () => {
       }
 
       const compact = await runtime.submit(thread.id, 'compact-without-plugin', '/compact');
-      expect(compact.command?.text).toContain('Compacted 2 completed turn(s)');
+      expect(compact.command?.text).toContain('Compacted 2 completed model invocation(s)');
       expect(env.store.listRecords(thread.id).filter((record) => record.kind === 'message')).toHaveLength(4);
       expect(
         env.store
@@ -128,7 +129,11 @@ describe('durable Thread runtime invariants', () => {
     const env = await setupRuntime(model);
     const thread = env.createThread();
     try {
-      env.runtime.updateContextManagementSettings({ contextWindowTokens: 2_000, compactionThresholdTokens: 1_000 });
+      env.runtime.updateContextManagementSettings({
+        contextWindowTokens: 2_000,
+        compactionThresholdTokens: 1_000,
+        keepRecentTokens: 1,
+      });
       for (let turn = 1; turn <= 4; turn += 1) {
         const user = env.store.appendCanonical(thread.id, `auto-compact-user-${turn}`, 'message', {
           role: 'user',
@@ -193,7 +198,7 @@ describe('durable Thread runtime invariants', () => {
       expect(model.prompts).toHaveLength(0);
       expect(env.runtime.getThread(thread.id)).toMatchObject({
         state: 'paused',
-        pauseReason: expect.stringContaining('no eligible history to compact'),
+        pauseReason: expect.stringContaining('outside the recent-history budget'),
       });
     } finally {
       await env.cleanup();

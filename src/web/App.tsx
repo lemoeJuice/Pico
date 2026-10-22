@@ -479,6 +479,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [contextManagementForm, setContextManagementForm] = useState({
     contextWindowTokens: '272000',
     compactionThresholdTokens: '256000',
+    keepRecentTokens: '16000',
   });
   const [remoteConnections, setRemoteConnections] = useState<RemoteExecutorConnectionView[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -989,6 +990,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         setContextManagementForm({
           contextWindowTokens: String(contextSettings.contextWindowTokens),
           compactionThresholdTokens: String(contextSettings.compactionThresholdTokens),
+          keepRecentTokens: String(contextSettings.keepRecentTokens),
         });
         setModelForm({ ...modelSettings, apiKey: '' });
         setCommands(commandList);
@@ -1799,13 +1801,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     event.preventDefault();
     const contextWindowTokens = Number(contextManagementForm.contextWindowTokens);
     const compactionThresholdTokens = Number(contextManagementForm.compactionThresholdTokens);
+    const keepRecentTokens = Number(contextManagementForm.keepRecentTokens);
     if (
       !Number.isSafeInteger(contextWindowTokens) ||
       contextWindowTokens <= 0 ||
       !Number.isSafeInteger(compactionThresholdTokens) ||
-      compactionThresholdTokens <= 0
+      compactionThresholdTokens <= 0 ||
+      !Number.isSafeInteger(keepRecentTokens) ||
+      keepRecentTokens <= 0
     ) {
-      setError('Enter positive whole numbers for both token limits.');
+      setError('Enter positive whole numbers for all token limits.');
       return;
     }
     if (compactionThresholdTokens >= contextWindowTokens) {
@@ -1817,12 +1822,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     try {
       const saved = await api<ContextManagementSettings>('/api/settings/context-management', {
         method: 'PUT',
-        body: JSON.stringify({ contextWindowTokens, compactionThresholdTokens }),
+        body: JSON.stringify({ contextWindowTokens, compactionThresholdTokens, keepRecentTokens }),
       });
       setContextManagement(saved);
       setContextManagementForm({
         contextWindowTokens: String(saved.contextWindowTokens),
         compactionThresholdTokens: String(saved.compactionThresholdTokens),
+        keepRecentTokens: String(saved.keepRecentTokens),
       });
       setNotice('Context management settings saved on this Pico Runtime.');
     } catch (caught) {
@@ -3252,9 +3258,24 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   }
                 />
               </label>
+              <label>
+                Recent history kept after compaction (tokens)
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  required
+                  value={contextManagementForm.keepRecentTokens}
+                  onChange={(event) =>
+                    setContextManagementForm((form) => ({ ...form, keepRecentTokens: event.target.value }))
+                  }
+                />
+              </label>
               <p className="field-note">
-                Defaults are 272,000 and 256,000 tokens. When the provider does not report input usage, Pico estimates
-                from conversation content; this estimate is approximate.
+                Defaults are a 272,000-token context window, a 256,000-token compaction threshold, and 16,000 tokens
+                of recent history. Pico keeps complete model invocations until this recent-history budget is met, with
+                at least two invocations retained. It uses differences between provider input-token reports and a
+                conservative estimate of the retained invocation content.
               </p>
               <div className="form-actions">
                 <span />
