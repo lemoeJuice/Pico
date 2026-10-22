@@ -2,84 +2,109 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { expect, it } from 'vitest';
 
-async function renderPermissionActions(status: string, approvalStatus: string | null = 'pending') {
-  let html = '';
-  let listener: (event: unknown) => void = () => {};
-  let portListener: (event: { data: unknown }) => void = () => {};
-  const root = {
-    set innerHTML(value: string) {
-      html = value;
-    },
-    querySelector: () => null,
-    querySelectorAll: () => [],
-    getBoundingClientRect: () => ({ height: 90 }),
-  };
+function createHarness(status = 'pending', approvalStatus: string | null = 'pending') {
+  let onWindowMessage: ((event: any) => void) | undefined;
+  let tree: any[] = [];
   const parent = {};
+  const requests: Array<Record<string, any>> = [];
   const port = {
-    postMessage(message: { type?: string; id?: string; action?: string }) {
-      if (message.action !== 'api' || !message.id) return;
-      portListener({
-        data: {
-          type: 'pico:plugin-ui:response',
-          id: message.id,
-          ok: true,
-          value: {
-            tools: [],
-            autoReview: false,
-            approvals:
-              approvalStatus === null
-                ? []
-                : [{ executionId: 'execution', status: approvalStatus, reviewer: undefined }],
-          },
-        },
-      });
+    onmessage: undefined as ((event: { data: any }) => void) | undefined,
+    postMessage(message: Record<string, any>) {
+      if (message.type === 'pico:plugin-ui:render') tree = message.tree;
+      if (message.type === 'pico:plugin-ui:request') {
+        requests.push(message);
+        const value = message.path.endsWith('/threads?threadId=thread')
+          ? {
+              tools: [],
+              autoReview: false,
+              approvals: approvalStatus ? [{ executionId: 'execution', status: approvalStatus }] : [],
+            }
+          : { ok: true };
+        queueMicrotask(() =>
+          port.onmessage?.({ data: { type: 'pico:plugin-ui:response', id: message.id, ok: true, value } }),
+        );
+      }
     },
     start() {},
-    set onmessage(callback: (event: { data: unknown }) => void) {
-      portListener = callback;
-    },
   };
   runInNewContext(readFileSync(new URL('../plugins/pico.permissions/webui/permissions.js', import.meta.url), 'utf8'), {
-    document: { getElementById: () => root, addEventListener() {} },
+    document: {},
     window: {
       parent,
-      addEventListener(_type: string, callback: typeof listener) {
-        listener = callback;
+      addEventListener(_type: string, callback: typeof onWindowMessage) {
+        onWindowMessage = callback;
       },
     },
-    requestAnimationFrame: (callback: () => void) => callback(),
+    queueMicrotask,
   });
-  listener({
+  onWindowMessage?.({
     source: parent,
     data: {
       type: 'pico:plugin-ui:init',
       protocolVersion: 1,
       pluginId: 'pico.permissions',
       entry: 'webui',
+      viewType: 'component',
       viewId: 'PermissionResultActions',
-      context: {
-        thread: null,
-        threadId: 'thread',
-        toolResult: { executionId: 'execution', status },
-      },
+      context: { thread: null, threadId: 'thread', toolResult: { executionId: 'execution', status } },
     },
     ports: [port],
   });
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  return html;
+  return {
+    get tree() {
+      return tree;
+    },
+    requests,
+    action(actionId: string) {
+      port.onmessage?.({ data: { type: 'pico:plugin-ui:action', actionId } });
+    },
+  };
 }
 
-it('keeps the framework Tool Card intact and adds approval actions only while an approval is pending', async () => {
-  const pending = await renderPermissionActions('pending');
-  expect(pending).toContain('Allow once');
-  expect(pending).toContain('Deny');
-  expect(pending).toContain('pico-ui-button--primary');
-  expect(pending).not.toContain('Arguments');
-  expect(pending).not.toContain('Result');
-  expect(pending).not.toContain('<article');
+const flush = async () => {
+  for (let i = 0; i < 8; i += 1) await Promise.resolve();
+};
 
+it('renders host-safe approval actions only while an approval is pending and routes the selected action through the bridge', async () => {
+  const harness = createHarness();
+  await flush();
+  const text = JSON.stringify(harness.tree);
+  expect(text).toContain('Allow once');
+  expect(text).toContain('Deny');
+  expect(harness.tree).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        type: 'group',
+        layout: 'spread',
+        children: expect.arrayContaining([
+          expect.objectContaining({
+            type: 'actions',
+            children: expect.arrayContaining([expect.objectContaining({ label: 'Allow once', tone: 'primary' })]),
+          }),
+        ]),
+      }),
+    ]),
+  );
+  expect(text).not.toContain('<article');
+  expect(harness.requests[0]?.path).toBe('/api/plugins/pico.permissions/threads?threadId=thread');
+
+  harness.action('decision:allow');
+  await flush();
+  const decision = harness.requests.find((request) => request.path === '/api/plugins/pico.permissions/approvals');
+  expect(decision?.init.method).toBe('POST');
+  expect(JSON.parse(decision?.init.body)).toEqual({ executionId: 'execution', allow: true, rememberForThread: false });
+  expect(
+    harness.requests.filter((request) => request.path.endsWith('/threads?threadId=thread')).length,
+  ).toBeGreaterThan(1);
+});
+
+it('does not render result actions for non-pending executions or resolved approvals', async () => {
   for (const status of ['running', 'completed', 'failed', 'interrupted']) {
-    expect(await renderPermissionActions(status)).toBe('');
+    const harness = createHarness(status);
+    await flush();
+    expect(JSON.stringify(harness.tree)).not.toContain('Allow once');
   }
-  expect(await renderPermissionActions('pending', 'allowed')).toBe('');
+  const resolved = createHarness('pending', 'allowed');
+  await flush();
+  expect(JSON.stringify(resolved.tree)).not.toContain('Allow once');
 });

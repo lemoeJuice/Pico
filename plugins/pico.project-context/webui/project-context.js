@@ -1,228 +1,123 @@
 (() => {
-  'use strict';
   const pluginId = 'pico.project-context';
-  const root = document.getElementById('root');
-  if (!root) return;
-  let port = null;
-  let context = { thread: null };
-  let entries = [];
-  let query = '';
-  let busy = false;
-  let error = '';
-  let editing = null;
-  let pendingSource = null;
-  let sequence = 0;
-  const pending = new Map();
+  const PAGE_SIZE = 40;
+  let port = null, context = { thread: null }, entries = [], pageStart = 0, query = '', busy = false, error = '', editing = null, pendingSource = null, sequence = 0, timer = 0;
+  let fields = { category: 'fact', text: '' };
+  const requests = new Map();
+  const para = (text) => ({ type: 'paragraph', text: String(text ?? '') });
+  const button = (label, actionId, options = {}) => ({ type: 'button', label, actionId, ...options });
+  const apiRoot = `/api/plugins/${pluginId}`;
+  const group = (...children) => {
+    const layouts = ['row', 'spread', 'grid-2', 'grid-compact', 'grid-standard', 'stack-compact'];
+    const layout = layouts.includes(children.at(-1)) ? children.pop() : undefined;
+    return { type: 'group', children, ...(layout ? { layout } : {}) };
+  };
+  const card = (...children) => ({ type: 'card', children: [group(...children, 'stack-compact')] });
   function send(action, payload = {}) {
-    if (!port) return Promise.reject(new Error('Pico plugin UI is not connected.'));
     const id = `${pluginId}-${++sequence}`;
-    return new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject });
-      port.postMessage({ type: 'pico:plugin-ui:request', id, action, ...payload });
-    });
+    return new Promise((resolve, reject) => { requests.set(id, { resolve, reject }); port.postMessage({ type: 'pico:plugin-ui:request', id, action, ...payload }); });
   }
-  function api(path, method = 'GET', body) {
-    return send('api', {
-      path: `/api/plugins/${pluginId}${path}`,
-      ...(method === 'GET' ? {} : { init: { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) } }),
-    });
-  }
-  function escape(value) {
-    return String(value ?? '').replace(
-      /[&<>"']/g,
-      (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
-    );
-  }
+  const api = (path, method = 'GET', body) => send('api', { path: `${apiRoot}${path}`, ...(method === 'GET' ? {} : { init: { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) } }) });
   async function refresh() {
-    if (!context.thread?.projectId) {
-      entries = [];
-      draw();
-      return;
-    }
-    try {
-      const result = await api(
-        `/memory?projectId=${encodeURIComponent(context.thread.projectId)}&q=${encodeURIComponent(query)}`,
-      );
-      entries = result.entries ?? [];
-      error = '';
-    } catch (reason) {
-      error = reason instanceof Error ? reason.message : String(reason);
-    }
+    if (!context.thread?.projectId) { entries = []; draw(); return; }
+    try { const result = await api(`/memory?projectId=${encodeURIComponent(context.thread.projectId)}&q=${encodeURIComponent(query)}`); entries = result.entries ?? []; if (pageStart >= entries.length) pageStart = Math.max(0, Math.floor((entries.length - 1) / PAGE_SIZE) * PAGE_SIZE); error = ''; }
+    catch (reason) { error = reason instanceof Error ? reason.message : String(reason); }
     draw();
-  }
-  function card(entry) {
-    const source = entry.sourceThreadId
-      ? `Source: ${entry.sourceThreadId}${entry.sourceSeq === null ? '' : ` · #${entry.sourceSeq}`}`
-      : `${entry.source} entry`;
-    return `<article class="pico-ui-card card"><div class="card-head"><span class="pico-ui-tag badge">${escape(entry.category)}${entry.status === 'conflicted' ? ' · conflict' : ''}${entry.status === 'expired' ? ' · expired' : ''}</span><button data-action="pin" data-id="${escape(entry.id)}" title="${entry.pinned ? 'Unpin' : 'Pin'}" class="pico-ui-button icon">${entry.pinned ? '★' : '☆'}</button></div>${editing === entry.id ? `<form class="form" data-edit="${escape(entry.id)}"><select class="pico-ui-control" name="category">${['fact', 'decision', 'activity', 'open-issue'].map((item) => `<option ${entry.category === item ? 'selected' : ''}>${item}</option>`).join('')}</select><textarea class="pico-ui-control" name="text" required>${escape(entry.text)}</textarea><div class="pico-ui-actions form-actions"><button class="pico-ui-button pico-ui-button--primary primary" type="submit">Save</button><button class="pico-ui-button" type="button" data-action="cancel">Cancel</button></div></form>` : `<div class="text">${escape(entry.text)}</div><div class="source">${escape(source)} · ${escape(entry.confidence)} confidence · ${escape(entry.source)}${entry.sourceThreadId && entry.sourceSeq !== null ? `<button data-action="source" data-thread="${escape(entry.sourceThreadId)}" data-seq="${entry.sourceSeq}" class="pico-ui-button source-link">Open source</button>` : ''}</div><div class="pico-ui-actions card-actions"><button class="pico-ui-button" data-action="edit" data-id="${escape(entry.id)}">Edit</button><button class="pico-ui-button" data-action="conflict" data-id="${escape(entry.id)}">Mark conflict</button><button class="pico-ui-button" data-action="expire" data-id="${escape(entry.id)}">Expire</button><button data-action="delete" data-id="${escape(entry.id)}" class="pico-ui-button pico-ui-button--danger danger">Delete</button></div>`}</article>`;
   }
   function draw() {
     if (!context.thread?.projectId) {
-      root.innerHTML =
-        '<div class="pico-ui-empty empty">Select a Thread attached to a Project to manage shared memory.</div>';
+      port?.postMessage({ type: 'pico:plugin-ui:render', tree: [para('Select a Thread attached to a Project to manage shared memory.')] });
       return;
     }
-    const categories = [
-      ['activity', 'Recent project activity'],
-      ['fact', 'Stable facts'],
-      ['decision', 'Decisions'],
-      ['open-issue', 'Open issues'],
+    const nodes = [
+      group(
+        { type: 'heading', text: 'Project Context' },
+        button('Add memory', 'add', { tone: 'primary', disabled: busy }),
+        'spread',
+      ),
+      para(`Shared notes for ${context.thread.title ?? 'this Project'}`),
+      { type: 'textInput', label: 'Search project memory', value: query, placeholder: 'Search project memory', actionId: 'search' },
     ];
-    root.innerHTML = `<section class="pico-ui-panel panel"><div class="top"><div><div class="title">Project Context</div><div class="muted">Shared notes for ${escape(context.thread.title ?? 'this Project')}</div></div><button class="pico-ui-button pico-ui-button--primary primary" data-action="add">Add memory</button></div><div class="search-wrap"><input class="pico-ui-control search" id="search" placeholder="Search project memory" value="${escape(query)}"></div>${editing === 'new' ? `<form class="form" id="new-form"><select class="pico-ui-control" name="category"><option value="fact">fact</option><option value="decision">decision</option><option value="activity">activity</option><option value="open-issue">open issue</option></select><textarea class="pico-ui-control" name="text" required maxlength="4000" placeholder="Add a sourced project note"></textarea><div class="pico-ui-actions form-actions"><button class="pico-ui-button pico-ui-button--primary primary" type="submit" ${busy ? 'disabled' : ''}>Save memory</button><button class="pico-ui-button" type="button" data-action="cancel">Cancel</button></div></form>` : ''}${categories
-      .map(([id, label]) => {
-        const group = entries.filter((entry) => entry.category === id);
-        return group.length ? `<div class="group"><h3>${label}</h3>${group.map(card).join('')}</div>` : '';
-      })
-      .join(
-        '',
-      )}${entries.length ? '' : '<div class="pico-ui-empty empty">No matching Project Memory entries.</div>'}${error ? `<div class="pico-ui-error error">${escape(error)}</div>` : ''}</section>`;
-    root.querySelector('#search')?.addEventListener('input', (event) => {
-      query = event.currentTarget.value;
-      void refresh();
-    });
-    root.querySelector('#new-form')?.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const data = new FormData(event.currentTarget);
-      busy = true;
-      draw();
-      try {
-        await api('/memory', 'POST', {
-          threadId: context.thread.id,
-          category: data.get('category'),
-          text: data.get('text'),
-        });
-        editing = null;
-        error = '';
-      } catch (reason) {
-        error = reason instanceof Error ? reason.message : String(reason);
-      } finally {
-        busy = false;
-        await refresh();
-      }
-    });
-    root.querySelectorAll('form[data-edit]').forEach((form) =>
-      form.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        const data = new FormData(event.currentTarget);
-        const id = event.currentTarget.dataset.edit;
-        try {
-          await api('/memory', 'PATCH', {
-            projectId: context.thread.projectId,
-            id,
-            category: data.get('category'),
-            text: data.get('text'),
-          });
-          editing = null;
-          await refresh();
-        } catch (reason) {
-          error = reason instanceof Error ? reason.message : String(reason);
-          draw();
+    const pageEnd = Math.min(entries.length, pageStart + PAGE_SIZE);
+    if (editing === 'new') nodes.push(card(
+      { type: 'heading', text: 'Add memory' },
+      { type: 'select', label: 'Category', value: fields.category, actionId: 'new.category', disabled: busy, options: ['fact', 'decision', 'activity', 'open-issue'].map((x) => ({ label: x === 'open-issue' ? 'Open issue' : x, value: x })) },
+      { type: 'textArea', label: 'Memory text', value: fields.text, placeholder: 'Add a sourced project note', actionId: 'new.text', rows: 'standard', maxLength: 4000, disabled: busy },
+      { type: 'actions', children: [button('Save memory', 'save-new', { tone: 'primary', disabled: busy || !fields.text.trim() }), button('Cancel', 'cancel', { disabled: busy })] },
+    ));
+    const categories = [['activity', 'Recent project activity'], ['fact', 'Stable facts'], ['decision', 'Decisions'], ['open-issue', 'Open issues']];
+    for (const [category, label] of categories) {
+      const groupEntries = entries.filter((entry) => entry.category === category);
+      if (!groupEntries.length) continue;
+      const items = groupEntries.filter((entry) => { const index = entries.indexOf(entry); return index >= pageStart && index < pageEnd; }).map((entry) => {
+        const source = entry.sourceThreadId ? `Source: ${entry.sourceThreadId}${entry.sourceSeq === null ? '' : ` · #${entry.sourceSeq}`}` : `${entry.source} entry`;
+        const state = entry.status === 'conflicted' ? { type: 'status', text: 'Conflict', tone: 'danger' }
+          : entry.status === 'expired' ? { type: 'status', text: 'Expired', tone: 'neutral' } : null;
+        const content = [group(
+          group({ type: 'status', text: entry.category, tone: 'neutral' }, ...(state ? [state] : []), 'row'),
+          button(entry.pinned ? '★ Unpin' : '☆ Pin', `pin:${entry.id}`, { tone: entry.pinned ? 'soft' : 'quiet', disabled: busy }),
+          'spread',
+        )];
+        if (editing === entry.id) {
+          content.push({ type: 'select', label: 'Category', value: fields.category, actionId: `edit:${entry.id}:category`, disabled: busy, options: ['fact', 'decision', 'activity', 'open-issue'].map((x) => ({ label: x === 'open-issue' ? 'Open issue' : x, value: x })) });
+          content.push({ type: 'textArea', label: 'Memory text', value: fields.text, actionId: `edit:${entry.id}:text`, rows: 'standard', maxLength: 4000, disabled: busy });
+          content.push({ type: 'actions', children: [button('Save', `save-edit:${entry.id}`, { tone: 'primary', disabled: busy || !fields.text.trim() }), button('Cancel', 'cancel', { disabled: busy })] });
+        } else {
+          content.push(para(entry.text));
+          content.push(para(`${source} · ${entry.confidence} confidence · ${entry.source}`));
+          const actions = [button('Edit', `edit:${entry.id}`, { disabled: busy }), button('Mark conflict', `conflict:${entry.id}`, { disabled: busy }), button('Expire', `expire:${entry.id}`, { disabled: busy }), button('Delete', `delete:${entry.id}`, { tone: 'danger', disabled: busy })];
+          if (entry.sourceThreadId && entry.sourceSeq !== null) actions.unshift(button('Open source', `source:${entry.id}`, { tone: 'quiet' }));
+          content.push({ type: 'actions', children: actions });
         }
-      }),
-    );
-    root.querySelectorAll('button[data-action]').forEach((button) =>
-      button.addEventListener('click', async () => {
-        const action = button.dataset.action;
-        const id = button.dataset.id;
-        if (action === 'source') {
-          const sourceThreadId = button.dataset.thread;
-          const seq = Number(button.dataset.seq);
-          if (!sourceThreadId || !Number.isSafeInteger(seq)) return;
-          try {
-            if (context.thread?.id === sourceThreadId) await send('open-message', { seq });
-            else {
-              pendingSource = { threadId: sourceThreadId, seq };
-              await send('open-thread', { threadId: sourceThreadId });
-            }
-          } catch (reason) {
-            error = reason instanceof Error ? reason.message : String(reason);
-            draw();
-          }
-          return;
-        }
-        if (action === 'add') {
-          editing = 'new';
-          draw();
-          return;
-        }
-        if (action === 'edit') {
-          editing = id;
-          draw();
-          return;
-        }
-        if (action === 'cancel') {
-          editing = null;
-          draw();
-          return;
-        }
-        const entry = entries.find((item) => item.id === id);
-        if (!entry) return;
-        try {
-          if (action === 'delete') await api('/memory', 'DELETE', { projectId: context.thread.projectId, id });
-          else
-            await api('/memory', 'PATCH', {
-              projectId: context.thread.projectId,
-              id,
-              ...(action === 'pin'
-                ? { pinned: !entry.pinned }
-                : { status: action === 'conflict' ? 'conflicted' : 'expired' }),
-            });
-          await refresh();
-        } catch (reason) {
-          error = reason instanceof Error ? reason.message : String(reason);
-          draw();
-        }
-      }),
-    );
-    requestAnimationFrame(() =>
-      port?.postMessage({ type: 'pico:plugin-ui:resize', height: root.getBoundingClientRect().height }),
-    );
+        return card(...content);
+      });
+      nodes.push(group({ type: 'heading', text: label }, ...items, 'stack-compact'));
+    }
+    if (entries.length > PAGE_SIZE) nodes.push({ type: 'actions', children: [
+      ...(pageStart > 0 ? [button('Previous entries', 'page.previous', { tone: 'soft' })] : []),
+      ...(pageEnd < entries.length ? [button('Next entries', 'page.next', { tone: 'soft' })] : []),
+    ] });
+    if (!entries.length) nodes.push(para('No matching Project Memory entries.'));
+    if (error) nodes.push({ type: 'status', text: error, tone: 'danger' });
+    port?.postMessage({ type: 'pico:plugin-ui:render', tree: nodes });
   }
-  function accept(message) {
-    if (!message || typeof message !== 'object') return;
-    if (message.type === 'pico:plugin-ui:response') {
-      const handler = pending.get(message.id);
-      if (!handler) return;
-      pending.delete(message.id);
-      if (message.ok) handler.resolve(message.value);
-      else handler.reject(new Error(message.error));
-    } else if (message.type === 'pico:plugin-ui:context') {
-      context = message.context ?? { thread: null };
-      editing = null;
-      query = '';
-      if (pendingSource && context.thread?.id === pendingSource.threadId) {
-        const seq = pendingSource.seq;
-        pendingSource = null;
-        void send('open-message', { seq }).catch((reason) => {
-          error = reason instanceof Error ? reason.message : String(reason);
-          draw();
-        });
-      }
-      void refresh();
-    } else if (
-      message.type === 'pico:plugin-ui:event' &&
-      message.event?.type === 'plugin.updated' &&
-      message.event.pluginId === pluginId
-    )
-      void refresh();
+  async function act(a) {
+    const id = a.actionId;
+    if (id === 'search' && typeof a.value === 'string') { query = a.value; pageStart = 0; draw(); clearTimeout(timer); timer = setTimeout(() => void refresh(), 250); return; }
+    if (id === 'new.category') fields.category = a.value;
+    else if (id === 'new.text') fields.text = a.value;
+    else if (id.startsWith('edit:') && (id.endsWith(':category') || id.endsWith(':text'))) { const key = id.endsWith(':category') ? 'category' : 'text'; const entryId = id.slice(5, -(key.length + 1)); if (editing !== entryId) { const entry = entries.find((item) => item.id === entryId); if (entry) { editing = entryId; fields = { category: entry.category, text: entry.text }; } } if (key === 'category') fields.category = a.value; if (key === 'text') fields.text = a.value; }
+    else if (id === 'add') { editing = 'new'; fields = { category: 'fact', text: '' }; draw(); return; }
+    else if (id === 'cancel') { editing = null; error = ''; draw(); return; }
+    else if (id.startsWith('edit:')) { const entry = entries.find((item) => item.id === id.slice(5)); if (entry) { editing = entry.id; fields = { category: entry.category, text: entry.text }; } draw(); return; }
+    else if (id.startsWith('source:')) { const entry = entries.find((item) => item.id === id.slice(7)); if (!entry) return; try { if (context.thread.id === entry.sourceThreadId) await send('open-message', { seq: entry.sourceSeq }); else { pendingSource = { threadId: entry.sourceThreadId, seq: entry.sourceSeq }; await send('open-thread', { threadId: entry.sourceThreadId }); } } catch (reason) { error = reason.message || String(reason); draw(); } return; }
+    else if (id === 'save-new' || id.startsWith('save-edit:')) {
+      const newEntry = id === 'save-new'; const entryId = newEntry ? null : id.slice(10); busy = true; error = ''; draw();
+      try { await api('/memory', newEntry ? 'POST' : 'PATCH', newEntry ? { threadId: context.thread.id, category: fields.category, text: fields.text } : { projectId: context.thread.projectId, id: entryId, category: fields.category, text: fields.text }); editing = null; await refresh(); }
+      catch (reason) { error = reason.message || String(reason); }
+      finally { busy = false; draw(); } return;
+    } else if (/^(pin|conflict|expire|delete):/.test(id)) {
+      const separator = id.indexOf(':'); const action = id.slice(0, separator); const entryId = id.slice(separator + 1); const entry = entries.find((item) => item.id === entryId); if (!entry) return;
+      busy = true; error = ''; draw();
+      try { if (action === 'delete') await api('/memory', 'DELETE', { projectId: context.thread.projectId, id: entryId }); else await api('/memory', 'PATCH', { projectId: context.thread.projectId, id: entryId, ...(action === 'pin' ? { pinned: !entry.pinned } : { status: action === 'conflict' ? 'conflicted' : 'expired' }) }); await refresh(); }
+      catch (reason) { error = reason.message || String(reason); }
+      finally { busy = false; draw(); } return;
+    }
+    if (id === 'page.next') { pageStart = Math.min(Math.floor((entries.length - 1) / PAGE_SIZE) * PAGE_SIZE, pageStart + PAGE_SIZE); draw(); return; }
+    if (id === 'page.previous') { pageStart = Math.max(0, pageStart - PAGE_SIZE); draw(); return; }
+    if (id.startsWith('category:')) return;
+    draw();
   }
   window.addEventListener('message', (event) => {
-    if (
-      event.source !== window.parent ||
-      event.data?.type !== 'pico:plugin-ui:init' ||
-      event.data.protocolVersion !== 1 ||
-      event.data.pluginId !== pluginId ||
-      event.data.entry !== 'webui' ||
-      event.ports.length !== 1
-    )
-      return;
-    context = event.data.context ?? { thread: null };
-    port = event.ports[0];
-    port.onmessage = (portEvent) => accept(portEvent.data);
-    port.start();
-    draw();
-    if (typeof event.data.attemptId === 'string')
-      port.postMessage({ type: 'pico:plugin-ui:ready', attemptId: event.data.attemptId });
-    void refresh();
+    const init = event.data;
+    if (event.source !== window.parent || init?.type !== 'pico:plugin-ui:init' || init.protocolVersion !== 1 || init.pluginId !== pluginId || init.entry !== 'webui' || event.ports.length !== 1) return;
+    context = init.context ?? { thread: null }; port = event.ports[0];
+    port.onmessage = ({ data }) => {
+      if (data?.type === 'pico:plugin-ui:response' && requests.has(data.id)) { const r = requests.get(data.id); requests.delete(data.id); data.ok ? r.resolve(data.value) : r.reject(new Error(data.error)); }
+      else if (data?.type === 'pico:plugin-ui:action') void act(data);
+      else if (data?.type === 'pico:plugin-ui:context') { context = data.context ?? { thread: null }; editing = null; query = ''; pageStart = 0; if (pendingSource && context.thread?.id === pendingSource.threadId) { const seq = pendingSource.seq; pendingSource = null; void send('open-message', { seq }).catch((reason) => { error = reason instanceof Error ? reason.message : String(reason); draw(); }); } void refresh(); }
+      else if (data?.type === 'pico:plugin-ui:event' && data.event?.type === 'plugin.updated' && data.event.pluginId === pluginId) void refresh();
+    };
+    port.start(); draw(); if (typeof init.attemptId === 'string') port.postMessage({ type: 'pico:plugin-ui:ready', attemptId: init.attemptId }); void refresh();
   });
 })();

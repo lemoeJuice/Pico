@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { PicoStore } from '../src/core/store.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
@@ -37,6 +37,19 @@ describe('dynamic first-party plugin entries', () => {
       expect(runtime.pluginInfo().ui).toContainEqual(
         expect.objectContaining({ pluginId: 'pico.project-context', slot: 'thread.toolbar' }),
       );
+      expect(runtime.pluginInfo().ui).not.toContainEqual(expect.objectContaining({ pluginId: 'pico.todo' }));
+      expect(runtime.pluginInfo().ui).toContainEqual(
+        expect.objectContaining({ pluginId: 'pico.chatgpt-plan', externalAuthOrigins: ['https://auth.openai.com'] }),
+      );
+      expect(runtime.pluginInfo().pages).toContainEqual(
+        expect.objectContaining({
+          pluginId: 'pico.chatgpt-plan',
+          id: 'account',
+          externalAuthOrigins: ['https://auth.openai.com'],
+        }),
+      );
+      expect(runtime.pluginInfo().pages).not.toContainEqual(expect.objectContaining({ pluginId: 'pico.todo' }));
+      expect(existsSync(resolve(process.cwd(), 'plugins/pico.todo/webui/index.html'))).toBe(false);
       expect(catalog).toContainEqual(
         expect.objectContaining({ id: 'pico.model-parameters', required: false, enabled: true, loaded: true }),
       );
