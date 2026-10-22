@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { expect, it } from 'vitest';
-import { ToolCard } from '../src/web/tool-card.js';
+import { ToolCard, ToolCardExpansionProvider } from '../src/web/tool-card.js';
 
 it('keeps arguments and the pending result visible without disclosure controls', () => {
   const html = renderToStaticMarkup(
@@ -35,4 +35,22 @@ it('uses the durable result status when execution history is outside the loaded 
   expect(html).toContain('status-completed');
   expect(html).not.toContain('<script>');
   expect(html).toContain('&lt;script&gt;');
+});
+
+it('renders a compact summary when tool cards are collapsed by the host preference', () => {
+  const html = renderToStaticMarkup(
+    <ToolCardExpansionProvider defaultExpanded={false}>
+      <ToolCard
+        call={{ id: 'a', name: 'shell', arguments: { command: 'git status --short' } }}
+        execution={undefined}
+        result={undefined}
+        expansionKey="thread-a:execution-a:0"
+      />
+    </ToolCardExpansionProvider>,
+  );
+
+  expect(html).toContain('aria-expanded="false"');
+  expect(html).toContain('Command: git status --short');
+  expect(html).not.toContain('tool-shell-body');
+  expect(html).toContain('data-status="pending"');
 });

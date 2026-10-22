@@ -799,9 +799,9 @@ button:disabled {
   cursor: pointer;
 }
 .banner-error {
-  color: #8e5f51;
-  background: #fbf2ee;
-  border-color: #f1dfd7;
+  color: #8f3d3d;
+  background: #fff1f0;
+  border-color: #f2d3d0;
 }
 .banner-notice {
   color: #5c7663;
@@ -1077,6 +1077,12 @@ button:disabled {
 }
 .native-tool-row:last-child {
   border-bottom: 0;
+}
+.general-setting-row {
+  padding: 13px 14px;
+  background: #fff;
+  border: 1px solid #edf0eb;
+  border-radius: 9px;
 }
 .native-tool-copy {
   min-width: 0;

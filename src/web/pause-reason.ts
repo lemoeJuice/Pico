@@ -9,3 +9,16 @@ export function visiblePauseReason(
   if (transientMessages.some((message) => message.length > 0 && pauseReason.includes(message))) return null;
   return pauseReason;
 }
+
+const informationalPauseReasonPrefixes = [
+  'Paused by user.',
+  'Interrupted by user.',
+  'Paused from parent collaboration panel',
+  'Rolling Context was manually compacted.',
+];
+
+export function pauseReasonIsError(pauseReason: string | null): boolean {
+  return Boolean(
+    pauseReason && !informationalPauseReasonPrefixes.some((prefix) => pauseReason.startsWith(prefix)),
+  );
+}

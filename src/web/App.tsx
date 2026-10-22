@@ -20,6 +20,7 @@ import type {
   Execution,
   ExecutorKind,
   MessagePayload,
+  MiscellaneousSettings,
   ModelProviderContribution,
   ModelSettings,
   Project,
@@ -33,7 +34,7 @@ import type {
 } from '../core/types.js';
 import type { ModelInputAttempt, ThreadSnapshot, ThreadToolView } from '../contracts/runtime.js';
 import { isSessionExpired } from './session.js';
-import { visiblePauseReason } from './pause-reason.js';
+import { pauseReasonIsError, visiblePauseReason } from './pause-reason.js';
 import { shouldSubmitOnEnter } from './composer-keys.js';
 import { upsertProjectThread } from './project-threads.js';
 import { fetchStableSnapshot, snapshotForSelection, snapshotThreadIsSelected } from './snapshot-consistency.js';
@@ -55,7 +56,7 @@ import {
   type PluginUiEvent,
   type PluginUiProps,
 } from '../plugins/ui-protocol.js';
-import { ToolCard } from './tool-card.js';
+import { ToolCard, ToolCardExpansionProvider } from './tool-card.js';
 import { reasoningSummaryMarkdown } from './reasoning-summary.js';
 import { Markdown } from './markdown.js';
 import {
@@ -476,6 +477,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [bootstrapping, setBootstrapping] = useState(true);
   const [settings, setSettings] = useState<PublicSettings | null>(null);
   const [contextManagement, setContextManagement] = useState<ContextManagementSettings | null>(null);
+  const [miscellaneousSettings, setMiscellaneousSettings] = useState<MiscellaneousSettings | null>(null);
   const [contextManagementForm, setContextManagementForm] = useState({
     contextWindowTokens: '272000',
     compactionThresholdTokens: '256000',
@@ -485,6 +487,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pluginPageSelection, setPluginPageSelection] = useState<{ pluginId: string; pageId: string } | null>(null);
   const [contextManagerOpen, setContextManagerOpen] = useState(false);
+  const [miscellaneousSettingsOpen, setMiscellaneousSettingsOpen] = useState(false);
   const [pluginManagerOpen, setPluginManagerOpen] = useState(false);
   const [memoryManagerOpen, setMemoryManagerOpen] = useState(false);
   const [archivedThreadsOpen, setArchivedThreadsOpen] = useState(false);
@@ -528,6 +531,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [unavailableModelExecutionIds, setUnavailableModelExecutionIds] = useState<Set<string>>(new Set());
   const [notice, setNotice] = useState('');
   const [threadNotices, setThreadNotices] = useState<ThreadNotices>({});
+  const [threadNoticeSeverities, setThreadNoticeSeverities] = useState<Record<string, 'notice' | 'error'>>({});
   const [loadingEarlierThreadIds, setLoadingEarlierThreadIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -776,7 +780,14 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     scroll.scrollTop = (thumbTop / maxThumbTop) * maxScroll;
   };
   const selectedThreadSending = selectedThread ? sendingThreadIds.has(selectedThread.id) : false;
-  const activeNotice = noticeForThread(threadId, threadNotices, notice);
+  const activeThreadNotice = threadId ? (threadNotices[threadId] ?? '') : '';
+  const activeThreadNoticeSeverity = threadId ? (threadNoticeSeverities[threadId] ?? 'notice') : 'notice';
+  const activeNotice =
+    activeThreadNotice && activeThreadNoticeSeverity === 'error'
+      ? activeThreadNotice
+      : noticeForThread(threadId, threadNotices, notice);
+  const activeNoticeSeverity =
+    activeThreadNotice && activeThreadNoticeSeverity === 'error' ? 'error' : 'notice';
   const filteredCommands = useMemo(() => {
     if (!draft.startsWith('/')) return [];
     const token = draft.slice(1).split(/\s/)[0]?.toLowerCase() ?? '';
@@ -972,6 +983,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           api<Project[]>('/api/projects'),
           api<PublicSettings>('/api/settings/model'),
           api<ContextManagementSettings>('/api/settings/context-management'),
+          api<MiscellaneousSettings>('/api/settings/miscellaneous'),
           api<Array<{ name: string; description: string }>>('/api/commands'),
           api<PluginInfo>('/api/plugins'),
           api<{ defaultWorkspace: string }>('/api/info'),
@@ -983,10 +995,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       .then((bootstrap) => {
         if (!alive || !bootstrap) return;
         setBootstrapping(false);
-        const [projectList, modelSettings, contextSettings, commandList, pluginResult, info, connections] = bootstrap;
+        const [projectList, modelSettings, contextSettings, miscellaneous, commandList, pluginResult, info, connections] =
+          bootstrap;
         setProjects(projectList);
         setSettings(modelSettings);
         setContextManagement(contextSettings);
+        setMiscellaneousSettings(miscellaneous);
         setContextManagementForm({
           contextWindowTokens: String(contextSettings.contextWindowTokens),
           compactionThresholdTokens: String(contextSettings.compactionThresholdTokens),
@@ -1348,6 +1362,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           setThreadNotices((current) =>
             withThreadNotice(current, event.threadId as string, String(event.message ?? 'Runtime notice')),
           );
+          setThreadNoticeSeverities((current) => ({ ...current, [event.threadId as string]: 'notice' }));
         } else if (event.type === 'settings.updated') {
           const value = event.settings as PublicSettings;
           setSettings(value);
@@ -1422,11 +1437,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       const result = await api<{
         accepted: boolean;
         duplicate?: boolean;
-        command?: { text?: string; openThreadId?: string };
+        command?: { text?: string; openThreadId?: string; severity?: 'notice' | 'error' };
       }>(`/api/threads/${sentThreadId}/messages`, messageSubmissionRequestInit(id, clean));
       acceptMessage(sentThreadId, id, clean);
       const commandText = result.command?.text;
-      if (commandText) setThreadNotices((current) => withThreadNotice(current, sentThreadId, commandText));
+      if (commandText) {
+        const severity = result.command?.severity ?? 'notice';
+        setThreadNotices((current) => withThreadNotice(current, sentThreadId, commandText));
+        setThreadNoticeSeverities((current) => ({ ...current, [sentThreadId]: severity }));
+      }
       if (activeThreadId.current === sentThreadId) {
         if (result.command?.openThreadId) setThreadId(result.command.openThreadId);
       }
@@ -1838,6 +1857,26 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     }
   };
 
+  const setToolCardsExpandedByDefault = async (enabled: boolean): Promise<void> => {
+    if (!miscellaneousSettings || settingsSaving) return;
+    const previous = miscellaneousSettings;
+    setMiscellaneousSettings({ ...previous, toolCardsExpandedByDefault: enabled });
+    setSettingsSaving(true);
+    setError('');
+    try {
+      const saved = await api<MiscellaneousSettings>('/api/settings/miscellaneous', {
+        method: 'PUT',
+        body: JSON.stringify({ toolCardsExpandedByDefault: enabled }),
+      });
+      setMiscellaneousSettings(saved);
+    } catch (caught) {
+      setMiscellaneousSettings(previous);
+      setError(caught instanceof Error ? caught.message : 'Miscellaneous settings could not be saved.');
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
   const updateModelSettingsFromPlugin: PluginUiProps['updateModelSettings'] = async (update, targetThreadId) => {
     if (targetThreadId) {
       const current = await api<ThreadModelSelection>(
@@ -1920,12 +1959,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     if (page?.group === 'memory') {
       setPluginPageSelection({ pluginId, pageId });
       setMemoryManagerOpen(true);
+      setMiscellaneousSettingsOpen(false);
+      setContextManagerOpen(false);
       setPluginManagerOpen(false);
       setSettingsOpen(true);
       setError('');
       return;
     }
     setPluginPageSelection({ pluginId, pageId });
+    setMiscellaneousSettingsOpen(false);
+    setContextManagerOpen(false);
     setPluginManagerOpen(false);
     setMemoryManagerOpen(false);
     setSettingsOpen(true);
@@ -2013,6 +2056,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     call: ToolCall,
     execution: Execution | undefined,
     result: ToolResultPayload | undefined,
+    expansionKey = call.id,
   ): ReactNode => {
     const contribution =
       execution?.status === 'pending' ? toolResultForCall(toolResultContributions, call.name) : undefined;
@@ -2044,6 +2088,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         execution={execution}
         result={result}
         resultActions={resultActions}
+        expansionKey={expansionKey}
       />
     );
   };
@@ -2107,6 +2152,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       return;
     }
     if (threadId) setThreadNotices((current) => withoutThreadNotice(current, threadId));
+    if (threadId) {
+      setThreadNoticeSeverities((current) => {
+        const next = { ...current };
+        delete next[threadId];
+        return next;
+      });
+    }
   };
 
   const loadEarlierRecords = async (): Promise<void> => {
@@ -2190,6 +2242,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const timeline = conversationTimeline(renderedRecords, executionGroups);
   const currentState = selectedThread?.state ?? 'idle';
   const pauseReason = visiblePauseReason(currentState, selectedThread?.pauseReason ?? null, [error, activeNotice]);
+  const pauseReasonIsErrorTone = pauseReasonIsError(pauseReason);
   const executorNoticeKey =
     selectedThread && executorConnected === false && executorError
       ? JSON.stringify([
@@ -2229,9 +2282,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   }, [dismissedPauseNoticeKey, pauseNoticeKey]);
 
   return (
-    <div
-      className={`app-shell ${desktopSidebarCollapsed ? 'desktop-sidebar-collapsed' : ''}${mobileSidebarOpen ? ' mobile-sidebar-open' : ''}`}
-    >
+    <ToolCardExpansionProvider defaultExpanded={miscellaneousSettings?.toolCardsExpandedByDefault ?? false}>
+      <div
+        className={`app-shell ${desktopSidebarCollapsed ? 'desktop-sidebar-collapsed' : ''}${mobileSidebarOpen ? ' mobile-sidebar-open' : ''}`}
+      >
       {mobileSidebarOpen ? (
         <button className="mobile-scrim" aria-label="Close navigation" onClick={() => setMobileSidebarOpen(false)} />
       ) : null}
@@ -2406,7 +2460,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         </header>
 
         {showPluginNotice && pluginNoticeKey && pluginInfo ? (
-          <div className="banner banner-error plugin-load-notice" role="status">
+          <div className="banner banner-error plugin-load-notice" role="alert">
             <span>A plugin could not be loaded: {pluginInfo.errors.join(' · ')}</span>
             <button type="button" onClick={() => setDismissedPluginNoticeKey(pluginNoticeKey)}>
               Dismiss
@@ -2414,7 +2468,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           </div>
         ) : null}
         {showExecutorNotice && selectedThread && executorError && executorNoticeKey ? (
-          <div className="banner banner-error executor-error" role="status">
+          <div className="banner banner-error executor-error" role="alert">
             <div className="executor-error-copy">
               <strong>
                 {executorDetails.compatible === false && executorDetails.updateAvailable
@@ -2448,7 +2502,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           </div>
         ) : null}
         {pauseReason && showPauseNotice && pauseNoticeKey ? (
-          <div className="banner banner-notice pause-reason" role="status">
+          <div
+            className={`banner ${pauseReasonIsErrorTone ? 'banner-error' : 'banner-notice'} pause-reason`}
+            role={pauseReasonIsErrorTone ? 'alert' : 'status'}
+          >
             <span>{pauseReason}</span>
             <button type="button" onClick={() => setDismissedPauseNoticeKey(pauseNoticeKey)}>
               Dismiss
@@ -2456,13 +2513,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           </div>
         ) : null}
         {error ? (
-          <div className="banner banner-error">
+          <div className="banner banner-error" role="alert">
             <span>{error}</span>
             <button onClick={() => setError('')}>Dismiss</button>
           </div>
         ) : null}
         {activeNotice ? (
-          <div className="banner banner-notice">
+          <div
+            className={`banner ${activeNoticeSeverity === 'error' ? 'banner-error' : 'banner-notice'}`}
+            role={activeNoticeSeverity === 'error' ? 'alert' : 'status'}
+          >
             <span>{activeNotice}</span>
             <button onClick={dismissNotice}>Dismiss</button>
           </div>
@@ -3038,14 +3098,17 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     ? 'Plugins'
                     : contextManagerOpen
                       ? 'Context management'
-                      : pluginPageSelection
-                        ? 'Plugin settings'
-                        : 'Model connections'
+                      : miscellaneousSettingsOpen
+                        ? 'General'
+                        : pluginPageSelection
+                          ? 'Plugin settings'
+                          : 'Model connections'
           }
           onClose={() => {
             setSettingsOpen(false);
             setPluginPageSelection(null);
             setContextManagerOpen(false);
+            setMiscellaneousSettingsOpen(false);
             setPluginManagerOpen(false);
             setMemoryManagerOpen(false);
             setArchivedThreadsOpen(false);
@@ -3059,10 +3122,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               <>
                 <button
                   type="button"
-                  className={`button ${!pluginPageSelection && !contextManagerOpen && !pluginManagerOpen && !memoryManagerOpen && !archivedThreadsOpen && !developerMenuOpen ? 'button-soft' : 'button-quiet'}`}
+                  className={`button ${!pluginPageSelection && !contextManagerOpen && !miscellaneousSettingsOpen && !pluginManagerOpen && !memoryManagerOpen && !archivedThreadsOpen && !developerMenuOpen ? 'button-soft' : 'button-quiet'}`}
                   onClick={() => {
                     setPluginPageSelection(null);
                     setContextManagerOpen(false);
+                    setMiscellaneousSettingsOpen(false);
                     setPluginManagerOpen(false);
                     setMemoryManagerOpen(false);
                     setArchivedThreadsOpen(false);
@@ -3077,6 +3141,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   onClick={() => {
                     setPluginPageSelection(null);
                     setContextManagerOpen(true);
+                    setMiscellaneousSettingsOpen(false);
                     setPluginManagerOpen(false);
                     setMemoryManagerOpen(false);
                     setArchivedThreadsOpen(false);
@@ -3087,10 +3152,26 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 </button>
                 <button
                   type="button"
+                  className={`button ${miscellaneousSettingsOpen ? 'button-soft' : 'button-quiet'}`}
+                  onClick={() => {
+                    setPluginPageSelection(null);
+                    setContextManagerOpen(false);
+                    setMiscellaneousSettingsOpen(true);
+                    setPluginManagerOpen(false);
+                    setMemoryManagerOpen(false);
+                    setArchivedThreadsOpen(false);
+                    setDeveloperMenuOpen(false);
+                  }}
+                >
+                  General
+                </button>
+                <button
+                  type="button"
                   className={`button ${pluginManagerOpen ? 'button-soft' : 'button-quiet'}`}
                   onClick={() => {
                     setPluginPageSelection(null);
                     setContextManagerOpen(false);
+                    setMiscellaneousSettingsOpen(false);
                     setPluginManagerOpen(true);
                     setMemoryManagerOpen(false);
                     setArchivedThreadsOpen(false);
@@ -3107,6 +3188,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       setPluginManagerOpen(false);
                       setPluginPageSelection(null);
                       setContextManagerOpen(false);
+                      setMiscellaneousSettingsOpen(false);
                       setMemoryManagerOpen(true);
                       setArchivedThreadsOpen(false);
                       setDeveloperMenuOpen(false);
@@ -3122,6 +3204,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     setPluginManagerOpen(false);
                     setPluginPageSelection(null);
                     setContextManagerOpen(false);
+                    setMiscellaneousSettingsOpen(false);
                     setMemoryManagerOpen(false);
                     setArchivedThreadsOpen(true);
                     setDeveloperMenuOpen(false);
@@ -3134,11 +3217,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   .map((page) => (
                     <button
                       type="button"
-                      className={`button ${!contextManagerOpen && !pluginManagerOpen && !memoryManagerOpen && !archivedThreadsOpen && !developerMenuOpen && pluginPageSelection?.pluginId === page.pluginId && pluginPageSelection.pageId === page.id ? 'button-soft' : 'button-quiet'}`}
+                      className={`button ${!contextManagerOpen && !miscellaneousSettingsOpen && !pluginManagerOpen && !memoryManagerOpen && !archivedThreadsOpen && !developerMenuOpen && pluginPageSelection?.pluginId === page.pluginId && pluginPageSelection.pageId === page.id ? 'button-soft' : 'button-quiet'}`}
                       key={`${page.pluginId}:${page.id}`}
                       onClick={() => {
                         setPluginManagerOpen(false);
                         setContextManagerOpen(false);
+                        setMiscellaneousSettingsOpen(false);
                         setMemoryManagerOpen(false);
                         setArchivedThreadsOpen(false);
                         setDeveloperMenuOpen(false);
@@ -3157,6 +3241,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               onClick={() => {
                 setPluginPageSelection(null);
                 setContextManagerOpen(false);
+                setMiscellaneousSettingsOpen(false);
                 setPluginManagerOpen(false);
                 setMemoryManagerOpen(false);
                 setArchivedThreadsOpen(false);
@@ -3284,6 +3369,32 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 </button>
               </div>
             </form>
+          ) : miscellaneousSettingsOpen ? (
+            <section className="plugin-settings-page general-settings-page" aria-label="General settings">
+              <p className="form-intro">Choose how tool call cards appear in Threads.</p>
+              <article className="native-tool-row general-setting-row">
+                <div className="native-tool-copy">
+                  <div className="native-tool-title">
+                    <strong>Expand tool cards by default</strong>
+                  </div>
+                  <p>
+                    When off, new cards start collapsed. Existing cards keep their current state, and this setting is
+                    saved automatically.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className={`native-tool-switch ${miscellaneousSettings?.toolCardsExpandedByDefault ? 'is-enabled' : ''}`}
+                  role="switch"
+                  aria-checked={miscellaneousSettings?.toolCardsExpandedByDefault ?? false}
+                  aria-label="Expand tool cards by default"
+                  disabled={settingsSaving || !miscellaneousSettings}
+                  onClick={() => void setToolCardsExpandedByDefault(!miscellaneousSettings?.toolCardsExpandedByDefault)}
+                >
+                  <span />
+                </button>
+              </article>
+            </section>
           ) : pluginManagerOpen ? (
             <section className="plugin-settings-page plugin-manager" aria-label="Plugin management">
               <p className="form-intro">
@@ -3777,7 +3888,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           ) : null}
         </Modal>
       ) : null}
-    </div>
+      </div>
+    </ToolCardExpansionProvider>
   );
 }
 
@@ -3801,7 +3913,12 @@ function MessageBubble({
   unavailableModelExecutionIds: ReadonlySet<string>;
   executions: Execution[];
   records: CanonicalRecord[];
-  renderTool(call: ToolCall, execution: Execution | undefined, result: ToolResultPayload | undefined): ReactNode;
+  renderTool(
+    call: ToolCall,
+    execution: Execution | undefined,
+    result: ToolResultPayload | undefined,
+    expansionKey: string,
+  ): ReactNode;
   onOpenThread(id: string): void;
   onRetryModelExecution(threadId: string, executionId: string): Promise<Execution>;
   retryDisabled: boolean;
@@ -3956,6 +4073,7 @@ const AssistantToolPreviewCard = memo(function AssistantToolPreviewCard({
       execution={undefined}
       result={undefined}
       preview={{ argumentsText: call.argumentsText }}
+      expansionKey={`${threadId}:${executionId}:${index}`}
     />
   );
 });
@@ -3989,7 +4107,12 @@ function ModelExecutionBranchGroup({
   unavailableModelExecutionIds: ReadonlySet<string>;
   executions: Execution[];
   records: CanonicalRecord[];
-  renderTool(call: ToolCall, execution: Execution | undefined, result: ToolResultPayload | undefined): ReactNode;
+  renderTool(
+    call: ToolCall,
+    execution: Execution | undefined,
+    result: ToolResultPayload | undefined,
+    expansionKey: string,
+  ): ReactNode;
   onRetryModelExecution(threadId: string, executionId: string): Promise<Execution>;
   retryDisabled: boolean;
 }) {
@@ -4113,7 +4236,12 @@ function ModelExecutionVariantView({
   outputUnavailable: boolean;
   executions: Execution[];
   records: CanonicalRecord[];
-  renderTool(call: ToolCall, execution: Execution | undefined, result: ToolResultPayload | undefined): ReactNode;
+  renderTool(
+    call: ToolCall,
+    execution: Execution | undefined,
+    result: ToolResultPayload | undefined,
+    expansionKey: string,
+  ): ReactNode;
 }) {
   const record = variant.assistantRecord;
   if (!record) {
@@ -4350,7 +4478,12 @@ function AssistantBubble({
   executions: Execution[];
   records: CanonicalRecord[];
   threadId: string;
-  renderTool(call: ToolCall, execution: Execution | undefined, result: ToolResultPayload | undefined): ReactNode;
+  renderTool(
+    call: ToolCall,
+    execution: Execution | undefined,
+    result: ToolResultPayload | undefined,
+    expansionKey: string,
+  ): ReactNode;
   attemptActions?: ReactNode;
   emptyOutput?: boolean;
 }) {
@@ -4402,8 +4535,9 @@ function AssistantBubble({
               <Sparkles size={12} aria-hidden="true" /> {calls.length} tool {calls.length === 1 ? 'call' : 'calls'} ·
               parallel batch
             </div>
-            {calls.map((call) => {
+            {calls.map((call, index) => {
               const executionId = `${threadId}:${record.id.replace(/:assistant$/, '')}:${call.id}`;
+              const expansionKey = `${threadId}:${record.id.replace(/:assistant$/, '')}:${index}`;
               const execution = executions.find((item) => item.id === executionId);
               const resultRecord = records.find(
                 (item) =>
@@ -4411,7 +4545,7 @@ function AssistantBubble({
                   (item.payload as unknown as ToolResultPayload).executionId === executionId,
               );
               const result = resultRecord ? recordPayload<ToolResultPayload>(resultRecord) : undefined;
-              return renderTool(call, execution, result);
+              return renderTool(call, execution, result, expansionKey);
             })}
           </div>
         ) : null}

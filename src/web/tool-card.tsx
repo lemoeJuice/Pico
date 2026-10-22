@@ -1,10 +1,46 @@
 import type { Execution, ToolCall, ToolResultPayload } from '../core/types.js';
 import { isMultimodalToolResultEnvelope, redactMultimodalToolResult } from '../contracts/multimodal.js';
-import type { ReactNode } from 'react';
-import { useEffect, useState } from 'react';
+import { ChevronRight } from 'lucide-react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import './tool-card.css';
 
 type JsonRecord = Record<string, unknown>;
+
+type ToolCardExpansionContextValue = {
+  defaultExpanded: boolean;
+  getExpanded(key: string): boolean | undefined;
+  register(key: string, expanded: boolean): void;
+  setExpanded(key: string, expanded: boolean): void;
+};
+
+const ToolCardExpansionContext = createContext<ToolCardExpansionContextValue | null>(null);
+
+export function ToolCardExpansionProvider({
+  defaultExpanded,
+  children,
+}: {
+  defaultExpanded: boolean;
+  children: ReactNode;
+}) {
+  const states = useRef(new Map<string, boolean>());
+  const getExpanded = useCallback((key: string) => states.current.get(key), []);
+  const register = useCallback((key: string, expanded: boolean) => {
+    if (!states.current.has(key)) states.current.set(key, expanded);
+  }, []);
+  const setExpanded = useCallback((key: string, expanded: boolean) => {
+    states.current.set(key, expanded);
+  }, []);
+  const value = useMemo<ToolCardExpansionContextValue>(
+    () => ({
+      defaultExpanded,
+      getExpanded,
+      register,
+      setExpanded,
+    }),
+    [defaultExpanded, getExpanded, register, setExpanded],
+  );
+  return <ToolCardExpansionContext.Provider value={value}>{children}</ToolCardExpansionContext.Provider>;
+}
 
 const toolTitles: Record<string, string> = {
   shell: 'Shell',
@@ -271,6 +307,48 @@ function previewArguments(call: ToolCall, preview?: { argumentsText: string }): 
     }
   }
   return isRecord(call.arguments) ? call.arguments : {};
+}
+
+function collapsedArgumentSummary(name: string, args: JsonRecord, preview?: { argumentsText: string }): string {
+  const preferredOrder: Record<string, string[]> = {
+    shell: ['command'],
+    read_file: ['path'],
+    search_files: ['pattern', 'path'],
+    apply_patch: ['patch'],
+    todo_add: ['title', 'next_action'],
+    todo_update: ['id', 'title'],
+    todo_complete: ['id'],
+    goal_checkpoint: ['progress', 'status', 'blocker'],
+    rolling_recall: ['segment_id'],
+    rolling_pin: ['segment_id'],
+    rolling_warm: ['segment_id'],
+    project_memory_record: ['category', 'text'],
+    project_memory_search: ['query'],
+    memory_search: ['query'],
+    memory_save: ['text', 'category'],
+    memory_replace: ['id', 'text'],
+    memory_delete: ['id'],
+    spawn_thread: ['title', 'prompt'],
+    send_thread_message: ['thread_id', 'message'],
+    read_thread_history: ['thread_id', 'after_seq'],
+  };
+  const order = preferredOrder[name] ?? [];
+  const keys = [...order, ...Object.keys(args).filter((key) => !order.includes(key))];
+  const key = keys.find((candidate) => args[candidate] !== undefined && args[candidate] !== '');
+  if (!key) return preview ? 'Generating arguments…' : 'No input required.';
+
+  const value = args[key];
+  const compact =
+    typeof value === 'string'
+      ? value.replace(/\s+/g, ' ').trim()
+      : Array.isArray(value)
+        ? `${value.length} items`
+        : isRecord(value)
+          ? `${Object.keys(value).length} fields`
+          : String(value);
+  const label = argumentLabels[key] ?? key;
+  const text = compact.length > 120 ? `${compact.slice(0, 117)}…` : compact;
+  return text ? `${label}: ${text}` : `${label}: (empty)`;
 }
 
 function readableArguments(name: string, args: JsonRecord, preview?: { argumentsText: string }): ReactNode {
@@ -566,14 +644,32 @@ export function ToolCard({
   result,
   preview,
   resultActions,
+  expansionKey = call.id,
+  defaultExpanded = true,
 }: {
   call: ToolCall;
   execution: Execution | undefined;
   result: ToolResultPayload | undefined;
   preview?: { argumentsText: string };
   resultActions?: ReactNode;
+  expansionKey?: string;
+  defaultExpanded?: boolean;
 }) {
   const [view, setView] = useState<'readable' | 'raw'>('readable');
+  const expansion = useContext(ToolCardExpansionContext);
+  const initialExpanded = useRef(
+    expansion?.getExpanded(expansionKey) ?? expansion?.defaultExpanded ?? defaultExpanded,
+  ).current;
+  const [localExpanded, setLocalExpanded] = useState(initialExpanded);
+  const registerExpansion = expansion?.register;
+  useEffect(() => {
+    registerExpansion?.(expansionKey, initialExpanded);
+  }, [expansionKey, initialExpanded, registerExpansion]);
+  const expanded = localExpanded;
+  const setExpanded = (next: boolean): void => {
+    if (expansion) expansion.setExpanded(expansionKey, next);
+    setLocalExpanded(next);
+  };
   const status = execution?.status ?? result?.status ?? 'pending';
   const shellResult = result?.result ?? execution?.result;
   const shellExitCode = isRecord(shellResult) && typeof shellResult.exitCode === 'number' ? shellResult.exitCode : null;
@@ -653,6 +749,12 @@ export function ToolCard({
         : status === 'running'
           ? 'running'
           : 'pending';
+  const argumentSummary = collapsedArgumentSummary(call.name, args, preview);
+  const collapsedError =
+    execution?.error ??
+    result?.error ??
+    (shellExitFailure ? `Exited with code ${shellExitCode}.` : null) ??
+    resultStatusMessage;
 
   return (
     <article
@@ -669,9 +771,19 @@ export function ToolCard({
           {preview ? 'Generating' : shellExitFailure ? `Exit ${shellExitCode}` : status}
         </span>
         {(shellMeta ?? terminalTime) ? <span className="tool-card-meta">{shellMeta ?? terminalTime}</span> : null}
-        <Toggle value={view} onChange={setView} label={`${toolTitles[call.name] ?? call.name} card`} />
+        {expanded ? <Toggle value={view} onChange={setView} label={`${toolTitles[call.name] ?? call.name} card`} /> : null}
+        <button
+          type="button"
+          className="tool-card-disclosure"
+          aria-expanded={expanded}
+          aria-label={`${expanded ? 'Collapse' : 'Expand'} ${toolTitles[call.name] ?? call.name} details`}
+          title={`${expanded ? 'Collapse' : 'Expand'} tool details`}
+          onClick={() => setExpanded(!expanded)}
+        >
+          <ChevronRight className={expanded ? 'is-expanded' : ''} size={14} aria-hidden="true" />
+        </button>
       </div>
-      {call.name === 'shell' ? (
+      {expanded ? (call.name === 'shell' ? (
         <div className={`tool-card-body tool-shell-body${view === 'readable' ? ' tool-shell-body-readable' : ''}`}>
           <div className="tool-shell-command">
             {view === 'raw' ? (
@@ -758,6 +870,11 @@ export function ToolCard({
             ) : null}
             {resultActions}
           </section>
+        </div>
+      )) : (
+        <div className={`tool-card-collapsed-summary${hasError ? ' has-error' : ''}`}>
+          <span className="tool-card-summary-text">{argumentSummary}</span>
+          {collapsedError ? <span className="tool-card-summary-error">{collapsedError}</span> : null}
         </div>
       )}
     </article>
