@@ -117,7 +117,6 @@ interface PreparedPluginModelCall {
 const THREAD_TOOL_SURFACES_SETTING = 'thread-tool-surfaces';
 const DISABLED_THREAD_TOOLS_SETTING = 'disabled-thread-tools';
 const RUNTIME_COMPACTION_MIN_RECENT_TURNS = 2;
-const RUNTIME_COMPACTION_MAX_SOURCE_CHARS = 60_000;
 const RUNTIME_COMPACTION_MAX_SUMMARY_CHARS = 12_000;
 const DEFAULT_CONTEXT_MANAGEMENT_SETTINGS: ContextManagementSettings = {
   contextWindowTokens: 272_000,
@@ -172,6 +171,140 @@ function canonicalSourceHash(records: readonly CanonicalRecord[]): string {
   return createHash('sha256')
     .update(JSON.stringify(records.map(({ id, seq, kind, payload }) => ({ id, seq, kind, payload }))))
     .digest('hex');
+}
+
+function activeRuntimeContextCompaction(records: readonly CanonicalRecord[]) {
+  let resetIndex = -1;
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index]!;
+    if (record.kind !== 'plugin') continue;
+    const payload = objectValue(record.payload);
+    if (isRuntimeContextCompactionReset(payload)) {
+      resetIndex = index;
+      break;
+    }
+  }
+  if (resetIndex < 0) return runtimeContextCompaction(records);
+  return runtimeContextCompaction(records.filter((record, index) => record.kind !== 'plugin' || index > resetIndex));
+}
+
+function isRuntimeContextCompactionReset(payload: Record<string, unknown> | null): boolean {
+  return Boolean(
+    payload?.pluginId === 'pico.runtime' &&
+    payload.action === 'context-compaction-reset' &&
+    payload.version === 1 &&
+    Number.isSafeInteger(payload.resetThroughSeq) &&
+    (payload.resetThroughSeq as number) >= 0 &&
+    typeof payload.resetSourceHash === 'string' &&
+    /^[a-f0-9]{64}$/i.test(payload.resetSourceHash),
+  );
+}
+
+function latestRuntimeContextProjectionSeq(records: readonly CanonicalRecord[]): number | null {
+  const active = activeRuntimeContextCompaction(records);
+  if (active) {
+    const marker = [...records].reverse().find((record) => {
+      if (record.kind !== 'plugin') return false;
+      const payload = objectValue(record.payload);
+      return (
+        payload?.pluginId === 'pico.runtime' &&
+        payload.action === 'context-compacted' &&
+        payload.throughSeq === active.throughSeq &&
+        payload.sourceHash === active.sourceHash
+      );
+    });
+    if (marker) return marker.seq;
+  }
+
+  for (const record of [...records].reverse()) {
+    if (record.kind !== 'plugin') continue;
+    const payload = objectValue(record.payload);
+    if (isRuntimeContextCompactionReset(payload)) return record.seq;
+  }
+  return null;
+}
+
+interface ProjectedCompactionPrefix {
+  throughSeq: number;
+  turns: PromptTurn[];
+}
+
+function projectedCompactionPrefix(
+  records: readonly CanonicalRecord[],
+  thread: Thread,
+  projection: ProjectionInput,
+  candidateThroughSeq: number,
+): ProjectedCompactionPrefix | null {
+  const provenance = projection.provenance ?? [];
+  const hasRollingProjection = provenance.some(
+    (item) => item.sourcePluginId === 'pico.rolling-context' && item.kind === 'rolling_segment',
+  );
+  let throughSeq = 0;
+  let turnLimit = 0;
+
+  if (hasRollingProjection) {
+    const rollingSources = provenance.filter(
+      (item) =>
+        item.sourcePluginId === 'pico.rolling-context' &&
+        Number.isSafeInteger(item.canonicalStartSeq) &&
+        Number.isSafeInteger(item.canonicalEndSeq) &&
+        (item.canonicalStartSeq as number) > 0 &&
+        (item.canonicalEndSeq as number) >= (item.canonicalStartSeq as number),
+    );
+    const rollingByStartSeq = new Map(rollingSources.map((item) => [item.canonicalStartSeq!, item]));
+    const runtimeCompaction = activeRuntimeContextCompaction(records);
+    if (runtimeCompaction && runtimeCompaction.throughSeq <= candidateThroughSeq) {
+      turnLimit = 1;
+      throughSeq = runtimeCompaction.throughSeq;
+    }
+    for (const record of canonicalConversationRecords(records)) {
+      if (record.seq <= throughSeq) continue;
+      if (record.seq > candidateThroughSeq) break;
+
+      const projectedSource = rollingByStartSeq.get(record.seq);
+      if (projectedSource) {
+        const endSeq = projectedSource.canonicalEndSeq!;
+        if (endSeq > candidateThroughSeq) break;
+        const sourceRecords = canonicalConversationRecords(records).filter(
+          (item) => item.seq >= record.seq && item.seq <= endSeq,
+        );
+        if (projectedSource.disposition === 'summary') turnLimit += 1;
+        else if (projectedSource.disposition === 'raw') {
+          turnLimit += canonicalBlockToPromptTurns(sourceRecords, thread).length;
+        }
+        throughSeq = endSeq;
+        continue;
+      }
+
+      // Rolling Context can pass through records individually when an active
+      // Runtime summary ends inside one of its user-turn blocks; those turns
+      // remain in the same order in the final projection.
+      turnLimit += canonicalBlockToPromptTurns([record], thread).length;
+      throughSeq = record.seq;
+    }
+  } else {
+    const runtimeCompaction = activeRuntimeContextCompaction(records);
+    const compactedPrefixTurns = runtimeCompaction && runtimeCompaction.throughSeq <= candidateThroughSeq ? 1 : 0;
+    const rawPrefix = canonicalConversationRecords(records).filter(
+      (record) =>
+        record.seq <= candidateThroughSeq && (!runtimeCompaction || record.seq > runtimeCompaction.throughSeq),
+    );
+    turnLimit = compactedPrefixTurns + canonicalRecordsToPromptTurns(rawPrefix, thread).length;
+    throughSeq = candidateThroughSeq;
+  }
+
+  if (throughSeq <= 0 || turnLimit <= 0 || turnLimit > projection.turns.length) return null;
+  const pluginTurnIndexes = new Set(
+    provenance
+      .filter(
+        (item) => item.kind === 'plugin' && Number.isSafeInteger(item.turnIndex) && (item.turnIndex as number) >= 0,
+      )
+      .map((item) => item.turnIndex as number),
+  );
+  return {
+    throughSeq,
+    turns: projection.turns.slice(0, turnLimit).filter((_turn, index) => !pluginTurnIndexes.has(index)),
+  };
 }
 
 function validateModelParameters(value: unknown): ModelRequestParameters {
@@ -504,6 +637,7 @@ function commandResultFromRecord(
   if (typeof value.text === 'string') command.text = value.text;
   if (typeof value.openThreadId === 'string') command.openThreadId = value.openThreadId;
   if (value.severity === 'notice' || value.severity === 'error') command.severity = value.severity;
+  if (value.presentation === 'timeline') command.presentation = value.presentation;
   return command;
 }
 
@@ -2027,9 +2161,9 @@ export class PicoRuntime {
       await this.runModelStep(currentThread, pendingRetry);
     } else {
       if (currentThread.pauseRequested || !this.needsModelStep(thread.id)) return;
-      await this.autoCompactBeforeModelStep(currentThread);
+      const projectedInput = await this.autoCompactBeforeModelStep(currentThread);
       if (this.shuttingDown || this.store.getThread(thread.id)?.pauseRequested) return;
-      await this.runModelStep(currentThread);
+      await this.runModelStep(currentThread, undefined, projectedInput ?? undefined);
     }
 
     if (this.shuttingDown) return;
@@ -2038,20 +2172,70 @@ export class PicoRuntime {
     if (afterModel && modelBatch) await this.runToolBatch(afterModel, modelBatch);
   }
 
-  private async autoCompactBeforeModelStep(thread: Thread): Promise<void> {
+  private async autoCompactBeforeModelStep(thread: Thread): Promise<ProjectionInput | null> {
     const settings = this.getContextManagementSettings();
     const records = this.store.listRecords(thread.id);
-    const contextUsage = this.estimateContextUsage(thread, records);
-    if (contextUsage.inputTokens < settings.compactionThresholdTokens) return;
+    const latestAssistant = [...records].reverse().find((record) => record.kind === 'assistant');
+    // A compaction/reset projection changes the next prompt before there is a
+    // new provider usage record. Do not reuse usage measured against the old prompt.
+    const latestProjectionSeq = latestRuntimeContextProjectionSeq(records);
+    if (latestProjectionSeq !== null && (!latestAssistant || latestProjectionSeq > latestAssistant.seq)) {
+      try {
+        const through = records.at(-1)?.seq ?? 0;
+        const projectedInput = await this.projectModelInput(thread, records, through);
+        if (
+          estimatePromptCharacters(projectedInput.turns, settings.contextWindowTokens) >= settings.contextWindowTokens
+        ) {
+          const previousCompactionThrough = activeRuntimeContextCompaction(records)?.throughSeq ?? 0;
+          const result = await this.compactThread(thread, true, false, projectedInput);
+          const recordsAfterCompaction = this.store.listRecords(thread.id);
+          const compactedContext = activeRuntimeContextCompaction(recordsAfterCompaction);
+          if (compactedContext && compactedContext.throughSeq > previousCompactionThrough) {
+            const compactedThrough = recordsAfterCompaction.at(-1)?.seq ?? 0;
+            const compactedProjection = await this.projectModelInput(thread, recordsAfterCompaction, compactedThrough);
+            if (
+              estimatePromptCharacters(compactedProjection.turns, settings.contextWindowTokens) <
+              settings.contextWindowTokens
+            ) {
+              return compactedProjection;
+            }
+          }
+          const detail = result.text?.trim();
+          this.store.setPause(
+            thread.id,
+            true,
+            `The projected conversation still reaches the configured context window after compaction. The next model request was blocked; review or shorten recent history, then Continue.${detail ? ` ${detail}` : ''}`,
+          );
+          this.publishThreadUpdate(thread.id);
+          return null;
+        }
+        return projectedInput;
+      } catch {
+        this.store.setPause(
+          thread.id,
+          true,
+          'The projected conversation could not be prepared safely after compaction. The next model request was blocked; review the Thread history and projection plugins before continuing.',
+        );
+        this.publishThreadUpdate(thread.id);
+        return null;
+      }
+    }
+    if (!latestAssistant) return null;
+    const assistantPayload = objectValue(latestAssistant.payload);
+    const inputTokens = diagnosticUsage(assistantPayload?.usage)?.inputTokens;
+    if (inputTokens === undefined) return null;
+    if (inputTokens < settings.compactionThresholdTokens) return null;
 
     const latestCompaction = [...records].reverse().find((record) => {
       if (record.kind !== 'plugin') return false;
       const payload = objectValue(record.payload);
       return payload?.pluginId === 'pico.runtime' && payload.action === 'context-compacted';
     });
-    const previousThroughSeq = runtimeContextCompaction(records)?.throughSeq ?? 0;
+    const previousThroughSeq = activeRuntimeContextCompaction(records)?.throughSeq ?? 0;
     try {
-      const result = await this.compactThread(thread, true);
+      const through = records.at(-1)?.seq ?? 0;
+      const projectedInput = await this.projectModelInput(thread, records, through);
+      const result = await this.compactThread(thread, true, false, projectedInput);
       const recordsAfterCompaction = this.store.listRecords(thread.id);
       const latestCompactionAfter = [...recordsAfterCompaction].reverse().find((record) => {
         if (record.kind !== 'plugin') return false;
@@ -2059,7 +2243,7 @@ export class PicoRuntime {
         return payload?.pluginId === 'pico.runtime' && payload.action === 'context-compacted';
       });
       if (latestCompactionAfter && latestCompactionAfter.seq > (latestCompaction?.seq ?? 0)) {
-        const compactedContext = runtimeContextCompaction(recordsAfterCompaction);
+        const compactedContext = activeRuntimeContextCompaction(recordsAfterCompaction);
         if (!compactedContext || compactedContext.throughSeq <= previousThroughSeq) {
           this.store.setPause(
             thread.id,
@@ -2067,14 +2251,13 @@ export class PicoRuntime {
             'Automatic context compaction produced an invalid history marker. The next model request was blocked; review the Thread history before continuing.',
           );
           this.publishThreadUpdate(thread.id);
-          return;
+          return null;
         }
 
-        const remainingConversation = canonicalConversationRecords(recordsAfterCompaction).filter(
-          (record) => record.seq > compactedContext.throughSeq,
-        );
+        const compactedThrough = recordsAfterCompaction.at(-1)?.seq ?? 0;
+        const compactedProjection = await this.projectModelInput(thread, recordsAfterCompaction, compactedThrough);
         const postCompactionEstimate = estimatePromptCharacters(
-          [runtimeCompactionTurn(compactedContext), ...canonicalRecordsToPromptTurns(remainingConversation, thread)],
+          compactedProjection.turns,
           settings.contextWindowTokens,
         );
         if (postCompactionEstimate >= settings.contextWindowTokens) {
@@ -2084,9 +2267,9 @@ export class PicoRuntime {
             'The compacted conversation still exceeds the configured context window. The next model request was blocked; review or shorten recent history, then Continue.',
           );
           this.publishThreadUpdate(thread.id);
-          return;
+          return null;
         }
-        return;
+        return compactedProjection;
       }
 
       const failureDetail = result.text?.trim();
@@ -2095,6 +2278,7 @@ export class PicoRuntime {
         : 'Automatic context compaction did not complete, so the next model request was blocked. Review the compaction settings or recent history, then Continue.';
       this.store.setPause(thread.id, true, reason);
       this.publishThreadUpdate(thread.id);
+      return null;
     } catch {
       this.store.setPause(
         thread.id,
@@ -2102,7 +2286,65 @@ export class PicoRuntime {
         'Automatic context compaction failed, so the next model request was blocked. Review the selected model and connection, then Continue.',
       );
       this.publishThreadUpdate(thread.id);
+      return null;
     }
+  }
+
+  private async projectModelInput(
+    thread: Thread,
+    records: readonly CanonicalRecord[],
+    through: number,
+  ): Promise<ProjectionInput> {
+    const projectionRecords = records.filter((record) => record.seq <= through).map((record) => deepFreeze(record));
+    const toolSurface = await this.toolSurfaceFor(thread);
+    const disabledTools = new Set(this.disabledThreadToolNames(thread.id));
+    const enabledTools = toolSurface.tools.filter((tool) => !disabledTools.has(tool.name));
+    const enabledToolSources = Object.fromEntries(
+      enabledTools.map((tool) => [tool.name, toolSurface.sources[tool.name]!]),
+    );
+    const runtimeCompaction = activeRuntimeContextCompaction(projectionRecords);
+    const projectedCanonicalRecords = canonicalConversationRecords(projectionRecords).filter(
+      (record) => !runtimeCompaction || record.seq > runtimeCompaction.throughSeq,
+    );
+    const compactionStartSeq = runtimeCompaction
+      ? (projectionRecords.find((record) => record.id === runtimeCompaction.sourceRecordIds[0])?.seq ?? 1)
+      : null;
+    const baseProjection: ProjectionInput = {
+      thread,
+      records: projectionRecords,
+      through,
+      systemPrompt: `${baseSystemPrompt}\n\n${thread.executorKind === 'runtime' ? 'This Thread uses Chat mode. It has no project workspace, filesystem, shell, or external execution environment. It can use tools provided by Runtime plugins.' : ''}\n\nCurrent Thread ID: ${thread.id}\n${thread.parentThreadId ? `Parent Thread ID: ${thread.parentThreadId}` : 'This Thread has no parent.'}`,
+      turns: this.projectTurns(projectionRecords, thread),
+      tools: enabledTools,
+      toolSources: enabledToolSources,
+      provenance: [
+        ...(runtimeCompaction
+          ? [
+              {
+                id: `runtime-compaction:${runtimeCompaction.sourceHash}`,
+                sourcePluginId: 'pico.runtime',
+                label: `Runtime compaction ${compactionStartSeq}-${runtimeCompaction.throughSeq}`,
+                kind: 'canonical' as const,
+                disposition: 'summary' as const,
+                canonicalStartSeq: compactionStartSeq!,
+                canonicalEndSeq: runtimeCompaction.throughSeq,
+                reason: 'A Runtime-owned summary replaces this preserved Canonical prefix.',
+                turnIndex: 0,
+              },
+            ]
+          : []),
+        ...projectedCanonicalRecords.map((record): ProjectionProvenance => ({
+          id: `canonical:${record.id}`,
+          sourcePluginId: 'pico.core',
+          label: `Canonical ${record.kind}`,
+          kind: 'canonical',
+          disposition: 'raw',
+          canonicalStartSeq: record.seq,
+          canonicalEndSeq: record.seq,
+        })),
+      ],
+    };
+    return this.pipelines.run('projection', baseProjection, async (value) => value);
   }
 
   private estimateContextUsage(thread: Thread, records = this.store.listRecords(thread.id)): ContextUsageEstimate {
@@ -2122,12 +2364,12 @@ export class PicoRuntime {
       const payload = objectValue(record.payload);
       return payload?.pluginId === 'pico.runtime' && payload.action === 'context-compacted';
     });
-    const compaction = runtimeContextCompaction(records);
+    const compaction = activeRuntimeContextCompaction(records);
     const conversation = canonicalConversationRecords(records);
     const hasProviderUsage = usage?.inputTokens !== undefined;
     const compactedSinceLastAssistant = Boolean(
       compaction &&
-        (!hasProviderUsage || !latestAssistant || (latestCompaction && latestCompaction.seq > latestAssistant.seq)),
+      (!hasProviderUsage || !latestAssistant || (latestCompaction && latestCompaction.seq > latestAssistant.seq)),
     );
     const estimatedTurns =
       compactedSinceLastAssistant && compaction
@@ -2139,9 +2381,7 @@ export class PicoRuntime {
             ),
           ]
         : canonicalRecordsToPromptTurns(
-            hasProviderUsage
-              ? conversation.filter((record) => record.seq > projectionThrough)
-              : conversation,
+            hasProviderUsage ? conversation.filter((record) => record.seq > projectionThrough) : conversation,
             thread,
           );
     const additionalInputEstimate = estimatePromptCharacters(estimatedTurns, settings.contextWindowTokens);
@@ -2490,7 +2730,11 @@ export class PicoRuntime {
     }
   }
 
-  private async runModelStep(thread: Thread, retryExecution?: Execution): Promise<void> {
+  private async runModelStep(
+    thread: Thread,
+    retryExecution?: Execution,
+    preparedProjection?: ProjectionInput,
+  ): Promise<void> {
     const allRecords = this.store.listRecords(thread.id);
     const retryThrough = retryExecution ? modelExecutionProjectionThrough(retryExecution) : null;
     if (retryExecution && retryThrough === null) {
@@ -2500,8 +2744,10 @@ export class PicoRuntime {
       this.executionChanged(failed);
       return;
     }
-    const through = retryThrough ?? allRecords.at(-1)?.seq ?? 0;
-    const projectionRecords = allRecords.filter((record) => record.seq <= through).map((record) => deepFreeze(record));
+    const through = preparedProjection?.through ?? retryThrough ?? allRecords.at(-1)?.seq ?? 0;
+    const projectionRecords =
+      preparedProjection?.records ??
+      allRecords.filter((record) => record.seq <= through).map((record) => deepFreeze(record));
     const modelExecutionId = retryExecution?.id ?? randomUUID();
     const modelSelection = this.threadModelSelection(thread.id);
     const modelSettings = this.resolveModelSettings(modelSelection);
@@ -2528,55 +2774,7 @@ export class PicoRuntime {
           records: ignoredLegacyFields,
         });
       }
-      const toolSurface = await this.toolSurfaceFor(thread);
-      const disabledTools = new Set(this.disabledThreadToolNames(thread.id));
-      const enabledTools = toolSurface.tools.filter((tool) => !disabledTools.has(tool.name));
-      const enabledToolSources = Object.fromEntries(
-        enabledTools.map((tool) => [tool.name, toolSurface.sources[tool.name]!]),
-      );
-      const runtimeCompaction = runtimeContextCompaction(projectionRecords);
-      const projectedCanonicalRecords = canonicalConversationRecords(projectionRecords).filter(
-        (record) => !runtimeCompaction || record.seq > runtimeCompaction.throughSeq,
-      );
-      const compactionStartSeq = runtimeCompaction
-        ? (projectionRecords.find((record) => record.id === runtimeCompaction.sourceRecordIds[0])?.seq ?? 1)
-        : null;
-      const baseProjection: ProjectionInput = {
-        thread,
-        records: projectionRecords,
-        through,
-        systemPrompt: `${baseSystemPrompt}\n\n${thread.executorKind === 'runtime' ? 'This Thread uses Chat mode. It has no project workspace, filesystem, shell, or external execution environment. It can use tools provided by Runtime plugins.' : ''}\n\nCurrent Thread ID: ${thread.id}\n${thread.parentThreadId ? `Parent Thread ID: ${thread.parentThreadId}` : 'This Thread has no parent.'}`,
-        turns: this.projectTurns(projectionRecords, thread),
-        tools: enabledTools,
-        toolSources: enabledToolSources,
-        provenance: [
-          ...(runtimeCompaction
-            ? [
-                {
-                  id: `runtime-compaction:${runtimeCompaction.sourceHash}`,
-                  sourcePluginId: 'pico.runtime',
-                  label: `Runtime compaction ${compactionStartSeq}-${runtimeCompaction.throughSeq}`,
-                  kind: 'canonical' as const,
-                  disposition: 'summary' as const,
-                  canonicalStartSeq: compactionStartSeq!,
-                  canonicalEndSeq: runtimeCompaction.throughSeq,
-                  reason: 'A Runtime-owned summary replaces this preserved Canonical prefix.',
-                  turnIndex: 0,
-                },
-              ]
-            : []),
-          ...projectedCanonicalRecords.map((record): ProjectionProvenance => ({
-            id: `canonical:${record.id}`,
-            sourcePluginId: 'pico.core',
-            label: `Canonical ${record.kind}`,
-            kind: 'canonical',
-            disposition: 'raw',
-            canonicalStartSeq: record.seq,
-            canonicalEndSeq: record.seq,
-          })),
-        ],
-      };
-      const projected = await this.pipelines.run('projection', baseProjection, async (value) => value);
+      const projected = preparedProjection ?? (await this.projectModelInput(thread, projectionRecords, through));
       const projectedTools = projected.tools;
       const prompt: ModelPrompt = {
         system: projected.systemPrompt,
@@ -2786,13 +2984,18 @@ export class PicoRuntime {
   }
 
   private projectTurns(records: readonly CanonicalRecord[], thread: Thread): PromptTurn[] {
-    const compaction = runtimeContextCompaction(records);
+    const compaction = activeRuntimeContextCompaction(records);
     if (!compaction) return canonicalRecordsToPromptTurns(records, thread);
     const remaining = canonicalConversationRecords(records).filter((record) => record.seq > compaction.throughSeq);
     return [runtimeCompactionTurn(compaction), ...canonicalRecordsToPromptTurns(remaining, thread)];
   }
 
-  private async compactThread(thread: Thread | null, allowActiveLoop = false): Promise<CommandResult> {
+  private async compactThread(
+    thread: Thread | null,
+    allowActiveLoop = false,
+    rebuildFromCanonical = false,
+    projectedInput?: ProjectionInput,
+  ): Promise<CommandResult> {
     if (!thread) return { text: 'Choose a Thread first.', severity: 'error' };
     const inFlightOperations = this.inFlightThreadOperations.get(thread.id) ?? 0;
     const hasRunningModelCall = this.store
@@ -2811,8 +3014,8 @@ export class PicoRuntime {
 
     const records = this.store.listRecords(thread.id);
     const conversation = canonicalConversationRecords(records);
-    const previous = runtimeContextCompaction(records);
-    const previousThroughSeq = previous?.throughSeq ?? 0;
+    const previous = activeRuntimeContextCompaction(records);
+    const previousThroughSeq = rebuildFromCanonical ? 0 : (previous?.throughSeq ?? 0);
     const keepRecentTokens = this.getContextManagementSettings().keepRecentTokens;
     const completed = completedCanonicalModelInvocationBlocks(conversation).filter(
       (block) => (block.at(-1)?.seq ?? 0) > previousThroughSeq,
@@ -2840,35 +3043,55 @@ export class PicoRuntime {
       };
     }
 
-    const summarizedBlocks: Array<{ records: CanonicalRecord[]; text: string }> = [];
-    let sourceChars = previous?.summary.length ?? 0;
-    for (const block of eligible) {
-      const text = JSON.stringify({
-        canonicalSeqs: block.map((record) => record.seq),
-        turns: canonicalBlockToPromptTurns(block, thread),
-      });
-      if (sourceChars + text.length > RUNTIME_COMPACTION_MAX_SOURCE_CHARS) break;
-      summarizedBlocks.push({ records: block, text });
-      sourceChars += text.length;
-    }
-    if (summarizedBlocks.length === 0) {
+    const candidateThroughSeq = eligible.at(-1)!.at(-1)!.seq;
+    const projectedPrefix = projectedInput
+      ? projectedCompactionPrefix(records, thread, projectedInput, candidateThroughSeq)
+      : null;
+    if (projectedInput && !projectedPrefix) {
       return {
-        text: `Nothing was compacted: the oldest eligible model invocation exceeds the ${RUNTIME_COMPACTION_MAX_SOURCE_CHARS.toLocaleString()} character safety limit.`,
+        text: 'Nothing was compacted: the completed invocation boundary could not be mapped safely to the projected Model Input.',
         severity: 'error',
       };
     }
-
-    const throughSeq = summarizedBlocks.at(-1)!.records.at(-1)!.seq;
+    const throughSeq = projectedPrefix?.throughSeq ?? candidateThroughSeq;
+    const summarizedBlocks = eligible.filter((block) => (block.at(-1)?.seq ?? 0) <= throughSeq);
+    if (summarizedBlocks.length === 0) {
+      return {
+        text: 'Nothing was compacted: the projected history groups the eligible invocations with the recent context.',
+        severity: 'error',
+      };
+    }
     const sourceRecords = conversation.filter((record) => record.seq <= throughSeq);
-    const sourceHash = canonicalSourceHash(sourceRecords);
+    const canonicalHash = canonicalSourceHash(sourceRecords);
+    const sourceHash = projectedPrefix
+      ? createHash('sha256').update(canonicalHash).update(JSON.stringify(projectedPrefix.turns)).digest('hex')
+      : canonicalHash;
     const sourceText = [
-      ...(previous ? [`Existing summary through Canonical seq ${previous.throughSeq}:\n${previous.summary}`] : []),
-      ...summarizedBlocks.map((block) => `New Canonical model invocation:\n${block.text}`),
+      ...(!rebuildFromCanonical && previous
+        ? [`Existing summary through Canonical seq ${previous.throughSeq}:\n${previous.summary}`]
+        : []),
+      ...summarizedBlocks.map(
+        (block) =>
+          `New Canonical model invocation:\n${JSON.stringify({
+            canonicalSeqs: block.map((record) => record.seq),
+            turns: canonicalBlockToPromptTurns(block, thread),
+          })}`,
+      ),
     ].join('\n\n');
+
     const prompt: ModelPrompt = {
       system:
-        "You are Pico Runtime's conversation compaction helper. Produce a concise, reliable working summary for continuing this same conversation. Preserve the user's goals and explicit constraints, verified facts and their Canonical sequence references, decisions and reasons, unresolved questions, failures, and next actions. Clearly mark uncertainty and never invent facts. Incorporate the existing summary with the new model invocations. Return plain text only.",
-      turns: [{ kind: 'message', role: 'user', content: sourceText }],
+        "You are Pico Runtime's conversation compaction helper. Produce a concise, reliable working summary for continuing this same conversation. Preserve the user's goals and explicit constraints, verified facts and their Canonical sequence references, decisions and reasons, unresolved questions, failures, and next actions. Clearly mark uncertainty and never invent facts. Summarize the supplied projected conversation, which reflects the context that the main Model Input would receive. Return plain text only.",
+      turns: projectedPrefix
+        ? [
+            {
+              kind: 'message',
+              role: 'user',
+              content: `Summarize projected history through Canonical seq ${throughSeq}. Preserve relevant source sequence references.`,
+            },
+            ...projectedPrefix.turns,
+          ]
+        : [{ kind: 'message', role: 'user', content: sourceText }],
       tools: [],
       model: this.threadModelSelection(thread.id).model,
       temperature: 0,
@@ -2917,6 +3140,15 @@ export class PicoRuntime {
         };
       }
 
+      if (rebuildFromCanonical && previous) {
+        this.store.appendCanonical(thread.id, `pico:runtime-compaction-reset:${previous.sourceHash}`, 'plugin', {
+          pluginId: 'pico.runtime',
+          action: 'context-compaction-reset',
+          version: 1,
+          resetThroughSeq: previous.throughSeq,
+          resetSourceHash: previous.sourceHash,
+        });
+      }
       this.store.appendCanonical(thread.id, `pico:runtime-compaction:${sourceHash}`, 'plugin', {
         pluginId: 'pico.runtime',
         action: 'context-compacted',
@@ -2928,6 +3160,7 @@ export class PicoRuntime {
         model: call.model,
       });
       compactionSaved = true;
+      if (rebuildFromCanonical && previous) this.publishThreadUpdate(thread.id);
       return {
         text: `Compacted ${summarizedBlocks.length} completed model invocation(s) through Canonical seq ${throughSeq}. Canonical History is preserved, and the latest ${recent.length} invocation(s) remain verbatim (target: ${keepRecentTokens.toLocaleString()} tokens).`,
         presentation: 'timeline',
