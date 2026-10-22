@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import type { AssistantPayload, Execution } from '../src/core/types.js';
+import type { AssistantPayload, CanonicalRecord, Execution } from '../src/core/types.js';
 import { PicoStore } from '../src/core/store.js';
 import type { PicoPlugin } from '../src/plugins/host.js';
 import { permissionPlugin } from '../src/plugins/permissions.js';
@@ -258,6 +258,11 @@ describe('durable Thread runtime invariants', () => {
       const secondExecutionId = secondAssistant.id.replace(/:assistant$/, '');
       const diagnosticPrompt = env.runtime.getModelInputAttempts(thread.id, secondExecutionId)?.[0]?.promptSummary;
       expect(diagnosticPrompt?.turns.some((turn) => turn.kind === 'message' && turn.role === 'assistant')).toBe(true);
+      const recordedPrompt = env.runtime.getModelInputAttempts(thread.id, secondExecutionId)?.[0]?.prompt;
+      expect(recordedPrompt?.turns).toContainEqual(
+        expect.objectContaining({ kind: 'message', role: 'assistant', content: 'First answer.' }),
+      );
+      expect(JSON.stringify(recordedPrompt)).not.toContain('opaque-payload');
       const diagnosticLog = env.store.listExecutionLog(secondExecutionId, 'model-input-requested');
       expect(JSON.stringify(diagnosticLog)).not.toContain('opaque-payload');
       expect(diagnosticLog[0]?.detail).not.toHaveProperty('prompt');
@@ -828,11 +833,14 @@ describe('durable Thread runtime invariants', () => {
   });
 
   it('passes Model stage input replacements to the default model adapter', async () => {
+    let readPluginCanonicalHistory: (threadId: string) => CanonicalRecord[] = () => [];
     const plugin: PicoPlugin = {
       id: 'test.model-prompt',
       name: 'Model prompt modifier',
       version: '1',
-      activate({ pipelines }) {
+      activate(context) {
+        const { pipelines } = context;
+        readPluginCanonicalHistory = context.canonical.list;
         pipelines.use<ProjectionInput, ProjectionInput>('projection', async (input, next) =>
           next({ ...input, systemPrompt: `${input.systemPrompt}\nProject context: stable architecture.` }),
         );
@@ -858,7 +866,7 @@ describe('durable Thread runtime invariants', () => {
       const records = env.store.listRecords(thread.id);
       const assistant = records.find((record) => record.kind === 'assistant');
       expect(records.filter((record) => record.kind === 'assistant')).toHaveLength(1);
-      expect(records).toHaveLength(2);
+      expect(records).toHaveLength(3);
       expect(assistant).toBeDefined();
       const modelExecutionId = assistant!.id.replace(/:assistant$/, '');
       const attempts = env.runtime.getModelInputAttempts(thread.id, modelExecutionId);
@@ -874,10 +882,28 @@ describe('durable Thread runtime invariants', () => {
       expect(attempts?.[0]?.promptSummary.systemCharacters).toBeGreaterThan(0);
       expect(attempts?.[0]?.promptSummary.systemFingerprint).toMatch(/^[a-f0-9]{64}$/);
       expect(attempts?.[0]?.promptSummary.toolsFingerprint).toMatch(/^[a-f0-9]{64}$/);
+      expect(attempts?.[0]?.prompt).toMatchObject({
+        version: 1,
+        system: expect.stringContaining('Project context: stable architecture.'),
+        turns: [{ kind: 'message', role: 'user', content: 'Hello' }],
+      });
+      const modelInputRecord = readPluginCanonicalHistory(thread.id).find(
+        (record) => record.kind === 'plugin' && record.payload.action === 'model-input-recorded',
+      );
+      expect(modelInputRecord).toMatchObject({
+        kind: 'plugin',
+        payload: {
+          pluginId: 'pico.runtime',
+          action: 'model-input-recorded',
+          executionId: modelExecutionId,
+          prompt: { turns: [{ kind: 'message', content: 'Hello' }] },
+        },
+      });
       const diagnosticLog = env.store.listExecutionLog(modelExecutionId, 'model-input-requested');
+      expect(diagnosticLog[0]?.detail).toHaveProperty('modelInputRecordId', modelInputRecord?.id);
       expect(diagnosticLog[0]?.detail).not.toHaveProperty('prompt');
       expect(JSON.stringify(diagnosticLog)).not.toContain('Hello');
-      expect(JSON.stringify(attempts)).not.toContain('stable architecture');
+      expect(JSON.stringify(attempts)).toContain('stable architecture');
       expect(env.runtime.getModelInputAttempts(env.createThread().id, modelExecutionId)).toBeNull();
       expect(env.store.listRecords(thread.id)).toEqual(records);
     } finally {
@@ -1415,6 +1441,8 @@ describe('durable Thread runtime invariants', () => {
         CREATE TRIGGER fail_permission_denial_audit
         BEFORE INSERT ON canonical_records
         WHEN NEW.thread_id = '${thread.id}' AND NEW.kind = 'plugin'
+          AND json_extract(NEW.payload_json, '$.pluginId') = 'pico.permissions'
+          AND json_extract(NEW.payload_json, '$.action') = 'decision'
         BEGIN SELECT RAISE(ABORT, 'simulated permission denial audit failure'); END;
       `);
 
@@ -1651,7 +1679,7 @@ describe('durable Thread runtime invariants', () => {
           promptSummary: { turns: [{ kind: 'message', role: 'user', characters: 'Write something'.length }] },
         },
       ]);
-      expect(env.store.listRecords(thread.id).map((record) => record.kind)).toEqual(['message']);
+      expect(env.store.listRecords(thread.id).map((record) => record.kind)).toEqual(['message', 'plugin']);
       expect(env.runtime.getThread(thread.id)?.state).toBe('paused');
     } finally {
       await env.cleanup();
@@ -1750,7 +1778,7 @@ describe('durable Thread runtime invariants', () => {
       await env.runtime.drain();
 
       const turns = model.prompts[0]?.turns ?? [];
-      expect(fullHistoryReads).toBe(1);
+      expect(fullHistoryReads).toBe(2);
       expect(turns).toHaveLength(historySteps * 3 + 1);
       expect(turns[0]).toMatchObject({ kind: 'message', content: 'User fact 0' });
       expect(turns.filter((turn) => turn.kind === 'assistant_tools')).toHaveLength(historySteps);

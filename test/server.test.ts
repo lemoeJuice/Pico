@@ -180,13 +180,18 @@ describe('Pico server access boundary', () => {
       const modelInputResponse = await fetch(modelInputUrl, { headers: cookieHeaders });
       expect(modelInputResponse.status).toBe(200);
       const modelInputPayload = await modelInputResponse.json();
-      expect(JSON.stringify(modelInputPayload)).not.toContain('Pico test system prompt');
-      expect(JSON.stringify(modelInputPayload)).not.toContain('Hello');
+      expect(JSON.stringify(modelInputPayload)).toContain('Pico test system prompt');
+      expect(JSON.stringify(modelInputPayload)).toContain('Hello');
       expect(modelInputPayload).toMatchObject({
         attempts: [
           {
             id: 'approval-step-request',
             status: 'completed',
+            prompt: {
+              version: 1,
+              system: 'Pico test system prompt',
+              turns: [{ kind: 'message', role: 'user', content: 'Hello' }],
+            },
             promptSummary: { model: 'test-model', turns: [{ kind: 'message', role: 'user', characters: 5 }] },
           },
         ],

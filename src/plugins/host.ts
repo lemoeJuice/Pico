@@ -91,7 +91,6 @@ export interface PluginContext extends Omit<PluginServices, 'models' | 'continua
       request: Parameters<PluginServices['models']['complete']>[1],
     ) => ReturnType<PluginServices['models']['complete']>;
     history: PluginServices['models']['history'];
-    inputs: PluginServices['models']['inputs'];
     subscribe: PluginServices['models']['subscribe'];
     registerProvider(provider: ModelProviderContribution, handler: RegisteredModelHandler): void;
     registerSelectionNormalizer(
@@ -593,7 +592,6 @@ export class PluginHost {
       models: {
         complete: (request) => this.services.models.complete(plugin.id, request),
         history: this.services.models.history,
-        inputs: this.services.models.inputs,
         subscribe: (listener) => {
           const unsubscribe = this.services.models.subscribe(listener);
           subscriptions.push(unsubscribe);

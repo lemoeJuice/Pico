@@ -536,7 +536,33 @@ export const rollingContextPlugin: PicoPlugin = {
     http.register('GET', '/inputs', ({ query }) => {
       const threadId = requireThread(query.get('threadId'));
       if (!context.threads.get(threadId)) throw new Error('Thread not found.');
-      return { inputs: context.models.inputs(threadId) };
+      const inputs = context.canonical.list(threadId).flatMap((record) => {
+        if (record.kind !== 'plugin') return [];
+        const payload = object(record.payload);
+        if (payload.pluginId !== 'pico.runtime' || payload.action !== 'model-input-recorded') return [];
+        if (
+          typeof payload.executionId !== 'string' ||
+          typeof payload.requestId !== 'string' ||
+          !payload.prompt ||
+          typeof payload.prompt !== 'object' ||
+          Array.isArray(payload.prompt)
+        ) {
+          return [];
+        }
+        const execution = context.executions.get(payload.executionId);
+        return [
+          {
+            executionId: payload.executionId,
+            attempt: {
+              id: payload.requestId,
+              prompt: payload.prompt,
+              status: execution?.status ?? 'recorded',
+              createdAt: record.createdAt,
+            },
+          },
+        ];
+      });
+      return { inputs };
     });
     http.register('GET', '/source', ({ query }) => {
       const threadId = requireThread(query.get('threadId'));

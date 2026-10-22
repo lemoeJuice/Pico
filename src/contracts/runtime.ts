@@ -39,6 +39,7 @@ export interface SubmitResult {
 
 export interface ModelInputAttempt {
   id: string;
+  prompt?: ModelInputPromptSnapshot;
   promptSummary: ModelPromptDiagnostics;
   projectionProvenance?: ProjectionProvenance[];
   status: 'running' | 'completed' | 'failed' | 'interrupted';
@@ -47,6 +48,22 @@ export interface ModelInputAttempt {
   partialOutputCharacters?: number;
   providerRequests?: ProviderRequestAttempt[];
   createdAt: string;
+}
+
+type ModelInputMessageTurn = Extract<ModelPrompt['turns'][number], { kind: 'message' }>;
+type ModelInputAssistantToolsTurn = Extract<ModelPrompt['turns'][number], { kind: 'assistant_tools' }>;
+type ModelInputToolResultTurn = Extract<ModelPrompt['turns'][number], { kind: 'tool_result' }>;
+
+/** Text-bearing input captured for an actual model request; inline image bytes and provider replay data are omitted. */
+export interface ModelInputPromptSnapshot extends Omit<ModelPrompt, 'turns'> {
+  version: 1;
+  turns: Array<
+    | Omit<ModelInputMessageTurn, 'reasoningReplay'>
+    | Omit<ModelInputAssistantToolsTurn, 'reasoningReplay'>
+    | (Omit<ModelInputToolResultTurn, 'images'> & {
+        images?: Array<{ mimeType: string; name?: string; byteLength: number }>;
+      })
+  >;
 }
 
 export interface ModelPromptDiagnostics {

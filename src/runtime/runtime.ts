@@ -30,6 +30,7 @@ import {
 } from '../contracts/multimodal.js';
 import type {
   ModelInputAttempt,
+  ModelInputPromptSnapshot,
   ModelInputResultSummary,
   ModelPromptDiagnostics,
   ProviderRequestAttempt,
@@ -261,6 +262,66 @@ function promptForDiagnostics(prompt: ModelPrompt): ModelPrompt {
       return diagnosticTurn;
     }),
   };
+}
+
+function modelInputPromptSnapshotForDiagnostics(prompt: ModelPrompt): ModelInputPromptSnapshot {
+  const turns = prompt.turns.map((turn) => {
+    if (turn.kind === 'tool_result') {
+      return {
+        ...turn,
+        ...(turn.images?.length
+          ? {
+              images: turn.images.map((image) => ({
+                mimeType: image.mimeType,
+                ...(image.name ? { name: image.name } : {}),
+                byteLength:
+                  Math.floor((image.data.length * 3) / 4) -
+                  (image.data.endsWith('==') ? 2 : image.data.endsWith('=') ? 1 : 0),
+              })),
+            }
+          : {}),
+      };
+    }
+    const { reasoningReplay: _reasoningReplay, ...textTurn } = turn;
+    return textTurn;
+  }) as unknown as ModelInputPromptSnapshot['turns'];
+  return {
+    version: 1,
+    system: prompt.system,
+    turns,
+    tools: prompt.tools,
+    model: prompt.model,
+    temperature: prompt.temperature,
+  };
+}
+
+function modelInputPromptSnapshotFrom(value: unknown): ModelInputPromptSnapshot | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const candidate = value as Partial<ModelInputPromptSnapshot> & Partial<ModelPrompt>;
+  if (
+    typeof candidate.system !== 'string' ||
+    !Array.isArray(candidate.turns) ||
+    !Array.isArray(candidate.tools) ||
+    typeof candidate.model !== 'string' ||
+    typeof candidate.temperature !== 'number'
+  ) {
+    return undefined;
+  }
+  try {
+    if (candidate.version === 1) {
+      const validTurns = candidate.turns.every(
+        (turn) =>
+          Boolean(turn) &&
+          typeof turn === 'object' &&
+          (turn.kind === 'message' || turn.kind === 'assistant_tools' || turn.kind === 'tool_result') &&
+          typeof turn.content === 'string',
+      );
+      return validTurns ? (structuredClone(candidate) as ModelInputPromptSnapshot) : undefined;
+    }
+    return modelInputPromptSnapshotForDiagnostics(candidate as ModelPrompt);
+  } catch {
+    return undefined;
+  }
 }
 
 function promptSummaryForDiagnostics(prompt: ModelPrompt): ModelPromptDiagnostics {
@@ -793,16 +854,6 @@ export class PicoRuntime {
       models: {
         complete: (pluginId, request) => this.completePluginModelCall(pluginId, request),
         history: (filter = {}) => this.store.listPluginModelCalls(filter),
-        inputs: (threadId) =>
-          this.store
-            .listExecutions(threadId)
-            .filter((execution) => execution.kind === 'model')
-            .flatMap((execution) =>
-              (this.getModelInputAttempts(threadId, execution.id) ?? []).map((attempt) => ({
-                executionId: execution.id,
-                attempt,
-              })),
-            ),
         subscribe: (listener) => this.store.subscribePluginModelCalls(listener),
       },
       continuations: {
@@ -1443,36 +1494,79 @@ export class PicoRuntime {
       providerRequestsByModelRequestId.set(requestId, grouped);
     }
 
-    return this.store.listExecutionLog(executionId, 'model-input-requested').flatMap((entry): ModelInputAttempt[] => {
-      const requestId = entry.detail.requestId;
-      const promptSummary = modelPromptDiagnosticsFrom(entry.detail.promptSummary ?? entry.detail.prompt);
-      if (typeof requestId !== 'string' || !promptSummary) {
-        return [];
-      }
+    const attempts = new Map<string, ModelInputAttempt>();
+    const attemptFrom = (
+      requestId: string,
+      createdAt: string,
+      promptSource: unknown,
+      summarySource: unknown,
+      provenanceSource: unknown,
+    ): ModelInputAttempt | null => {
+      const prompt = modelInputPromptSnapshotFrom(promptSource);
+      const promptSummary = modelPromptDiagnosticsFrom(summarySource ?? promptSource);
+      if (!promptSummary) return null;
       const outcome = outcomes.get(requestId);
       const status =
         outcome?.status ??
         (execution.status === 'interrupted' || execution.status === 'failed' || execution.status === 'completed'
           ? execution.status
           : 'running');
-      return [
-        {
-          id: requestId,
-          promptSummary,
-          ...(Array.isArray(entry.detail.projectionProvenance)
-            ? { projectionProvenance: entry.detail.projectionProvenance as ProjectionProvenance[] }
-            : {}),
-          status,
-          ...(outcome?.error ? { error: outcome.error } : {}),
-          ...(outcome?.result ? { result: outcome.result } : {}),
-          ...(outcome?.partialOutputCharacters === undefined
-            ? {}
-            : { partialOutputCharacters: outcome.partialOutputCharacters }),
-          providerRequests: providerRequestsByModelRequestId.get(requestId) ?? [],
-          createdAt: entry.createdAt,
-        },
-      ];
-    });
+      return {
+        id: requestId,
+        ...(prompt ? { prompt } : {}),
+        promptSummary,
+        ...(Array.isArray(provenanceSource)
+          ? { projectionProvenance: provenanceSource as ProjectionProvenance[] }
+          : {}),
+        status,
+        ...(outcome?.error ? { error: outcome.error } : {}),
+        ...(outcome?.result ? { result: outcome.result } : {}),
+        ...(outcome?.partialOutputCharacters === undefined
+          ? {}
+          : { partialOutputCharacters: outcome.partialOutputCharacters }),
+        providerRequests: providerRequestsByModelRequestId.get(requestId) ?? [],
+        createdAt,
+      };
+    };
+    const recordedRequestIds = new Set<string>();
+    for (const record of this.store.listRecords(threadId)) {
+      if (record.kind !== 'plugin') continue;
+      const payload = objectValue(record.payload);
+      if (
+        payload?.pluginId !== 'pico.runtime' ||
+        payload.action !== 'model-input-recorded' ||
+        payload.executionId !== executionId ||
+        typeof payload.requestId !== 'string'
+      ) {
+        continue;
+      }
+      const requestId = payload.requestId;
+      const attempt = attemptFrom(
+        requestId,
+        record.createdAt,
+        payload.prompt,
+        payload.promptSummary,
+        payload.projectionProvenance,
+      );
+      if (!attempt) continue;
+      attempts.set(requestId, attempt);
+      recordedRequestIds.add(requestId);
+    }
+
+    // Older databases stored the full request in execution diagnostics; read them as a migration path only.
+    for (const entry of this.store.listExecutionLog(executionId, 'model-input-requested')) {
+      const requestId = entry.detail.requestId;
+      if (typeof requestId !== 'string' || recordedRequestIds.has(requestId)) continue;
+      const attempt = attemptFrom(
+        requestId,
+        entry.createdAt,
+        entry.detail.prompt,
+        entry.detail.promptSummary,
+        entry.detail.projectionProvenance,
+      );
+      if (attempt) attempts.set(requestId, attempt);
+    }
+    return [...attempts.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
 
   async submit(threadId: string, id: string, content: string): Promise<SubmitResult> {
@@ -2298,11 +2392,19 @@ export class PicoRuntime {
         actualProvider = provider;
         this.executionChanged(this.store.setModelExecutionModel(modelExecutionId, actualPrompt.model));
         requestId = randomUUID();
+        const prompt = modelInputPromptSnapshotForDiagnostics(actualPrompt);
+        const promptSummary = promptSummaryForDiagnostics(actualPrompt);
+        const modelInputRecord = this.store.appendPluginRecord(thread.id, 'pico.runtime', {
+          action: 'model-input-recorded',
+          executionId: modelExecutionId,
+          requestId,
+          prompt,
+          promptSummary,
+          projectionProvenance: structuredClone(provenance ?? projected.provenance ?? []),
+        });
         this.appendExecutionDiagnostic(modelExecutionId, 'model-input-requested', {
           requestId,
-          promptSummary: promptSummaryForDiagnostics(actualPrompt),
-          projectionProvenance: structuredClone(provenance ?? projected.provenance ?? []),
-          provider,
+          modelInputRecordId: modelInputRecord.id,
         });
       };
       const requestTrace: ModelRequestTrace = {

@@ -2,7 +2,6 @@ import type { Execution, ExecutorBinding, ExecutorKind, Project, Thread, ToolDef
 import type { ModelPrompt, ModelResponse, ModelStreamEvent } from '../contracts/model.js';
 import type { PluginModelCallRecord } from '../contracts/store.js';
 import type { ThreadModelSelection } from '../core/types.js';
-import type { ModelInputAttempt } from '../contracts/runtime.js';
 
 /** Domain operations available to workflow plugins, independent of Runtime implementation. */
 export interface PluginServices {
@@ -64,7 +63,6 @@ export interface PluginServices {
       },
     ): Promise<PluginModelCallRecord & { response: ModelResponse }>;
     history(filter?: { pluginId?: string; threadId?: string; projectId?: string }): PluginModelCallRecord[];
-    inputs(threadId: string): Array<{ executionId: string; attempt: ModelInputAttempt }>;
     subscribe(listener: (call: PluginModelCallRecord) => void): () => void;
   };
   continuations: {
@@ -93,6 +91,6 @@ export const unavailablePluginServices: PluginServices = {
     resume: unavailable,
   },
   executions: { get: unavailable, subscribe: unavailable },
-  models: { complete: unavailable, history: unavailable, inputs: unavailable, subscribe: unavailable },
+  models: { complete: unavailable, history: unavailable, subscribe: unavailable },
   continuations: { register: unavailable, hasPendingWork: unavailable },
 };
