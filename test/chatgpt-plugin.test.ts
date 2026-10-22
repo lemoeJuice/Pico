@@ -31,7 +31,6 @@ describe('ChatGPT provider plugin', () => {
           throw new Error('not used by this test');
         },
         history: () => [],
-        inputs: () => [],
         subscribe: () => () => undefined,
         registerProvider: (provider, handler) => providers.push({ provider, handler: typeof handler }),
         registerSelectionNormalizer: () => undefined,

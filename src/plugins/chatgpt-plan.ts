@@ -211,6 +211,7 @@ export function createChatGptPlanPlugin(): PicoPlugin {
         label: 'ChatGPT',
         description: 'Connect and configure a ChatGPT plan account.',
         entry: 'webui',
+        externalAuthOrigins: ['https://auth.openai.com'],
       });
       context.ui.contribute({
         slot: 'composer.model',
@@ -220,6 +221,7 @@ export function createChatGptPlanPlugin(): PicoPlugin {
         entry: 'webui',
         component: 'ChatGptPlanComposerModel',
         providers: ['chatgpt-plan'],
+        externalAuthOrigins: ['https://auth.openai.com'],
       });
 
       context.http.register('GET', '/status', () => auth!.status());

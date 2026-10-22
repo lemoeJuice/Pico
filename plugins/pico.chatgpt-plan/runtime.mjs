@@ -1462,7 +1462,8 @@ function createChatGptPlanPlugin() {
         id: "account",
         label: "ChatGPT",
         description: "Connect and configure a ChatGPT plan account.",
-        entry: "webui"
+        entry: "webui",
+        externalAuthOrigins: ["https://auth.openai.com"]
       });
       context.ui.contribute({
         slot: "composer.model",
@@ -1471,7 +1472,8 @@ function createChatGptPlanPlugin() {
         description: "Choose the ChatGPT model, reasoning effort, and Fast mode for this provider.",
         entry: "webui",
         component: "ChatGptPlanComposerModel",
-        providers: ["chatgpt-plan"]
+        providers: ["chatgpt-plan"],
+        externalAuthOrigins: ["https://auth.openai.com"]
       });
       context.http.register("GET", "/status", () => auth.status());
       context.http.register("GET", "/models", async () => await auth.listModels());

@@ -1,60 +1,369 @@
-import { useEffect, useState, type CSSProperties, type ReactElement } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
-import './webui.css';
 import {
   createPluginUiClient,
   PLUGIN_UI_PROTOCOL_VERSION,
   type PluginUiContext,
   type PluginUiInitMessage,
+  type PluginUiNode,
 } from '../ui-protocol.js';
-import { pluginWebUi } from './webui.js';
 
 const pluginId = 'pico.chatgpt-plan';
-const entry = 'webui';
+const apiRoot = '/api/plugins/pico.chatgpt-plan';
 const rootElement = document.getElementById('root');
 if (!rootElement) throw new Error('ChatGPT plugin UI root element is missing.');
 const root = createRoot(rootElement);
+const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+type ApiClient = ReturnType<typeof createPluginUiClient>;
 
-function PluginView({
-  init,
-  client,
-}: {
-  init: PluginUiInitMessage;
-  client: ReturnType<typeof createPluginUiClient>;
-}): ReactElement {
+function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiClient }): ReactElement | null {
   const [settings, setSettings] = useState(init.settings);
-  const [context, setContext] = useState(init.context);
-  const Component =
-    init.viewType === 'page'
-      ? pluginWebUi.pages[init.viewId as keyof typeof pluginWebUi.pages]
-      : pluginWebUi.components[init.viewId as keyof typeof pluginWebUi.components];
-
-  useEffect(() => () => client.close(), [client]);
-  useEffect(() => client.ready(init.attemptId), [client, init.attemptId]);
-  useEffect(() => client.subscribeSettings(setSettings), [client]);
-  useEffect(() => client.subscribeContext(setContext), [client]);
-  useEffect(() => {
-    const reportSize = (): void => client.resize(document.documentElement.scrollHeight);
-    const observer = new ResizeObserver(reportSize);
-    observer.observe(document.documentElement);
-    reportSize();
-    return () => observer.disconnect();
-  }, [client]);
-
-  if (!Component) return <p>This ChatGPT plugin view is not available.</p>;
-  return (
-    <div
-      className={`plugin-ui plugin-ui-${init.viewType}`}
-      data-pico-ui-slot={init.uiSlot}
-      style={
-        init.controlHeightPx === undefined
-          ? undefined
-          : ({ '--pico-composer-control-height': `${init.controlHeightPx}px` } as CSSProperties)
-      }
-    >
-      <Component {...client.props(settings, context as PluginUiContext)} />
-    </div>
+  const [context, setContext] = useState(init.context as PluginUiContext);
+  const [status, setStatus] = useState<{ connected: boolean; accountLabel?: string | null } | null>(null);
+  const [models, setModels] = useState<Array<{ slug: string; displayName: string }>>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [operationId, setOperationId] = useState<string | null>(null);
+  const expectedOperationId = useRef<string | null>(null);
+  const [callbackUrl, setCallbackUrl] = useState('');
+  const [retryExchange, setRetryExchange] = useState(false);
+  const [retrySent, setRetrySent] = useState(false);
+  const api = useCallback(
+    <T,>(path: string, init?: { method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'; body?: string }) =>
+      client.props(settings, context).api<T>(`${apiRoot}${path}`, init),
+    [client, settings, context],
   );
+
+  const refresh = useCallback(
+    async (force = false) => {
+      setBusy(true);
+      setError('');
+      try {
+        const next = await api<{ connected: boolean; accountLabel?: string | null }>('/status');
+        setStatus(next);
+        setModels(next.connected ? await api(force ? '/models/refresh' : '/models') : []);
+      } catch (reason) {
+        const message = errorText(reason);
+        setError(message);
+        client.props(settings, context).onError(message);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [api, client, settings, context],
+  );
+  useEffect(() => client.subscribeSettings(setSettings), [client]);
+  useEffect(() => client.subscribeContext((value) => setContext(value as PluginUiContext)), [client]);
+  useEffect(() => () => client.close(), [client]);
+  useEffect(() => {
+    client.ready(init.attemptId);
+  }, [client, init.attemptId]);
+  useEffect(() => {
+    if (
+      init.viewType === 'page' ||
+      context.modelSelection?.provider === 'chatgpt-plan' ||
+      settings.provider === 'chatgpt-plan'
+    )
+      void refresh();
+  }, [init.viewType, context.modelSelection?.provider, settings.provider, refresh]);
+  useEffect(
+    () =>
+      client.subscribeEvents((event) => {
+        if (event.type !== 'external-auth-popup-result' || !event.data || typeof event.data !== 'object') return;
+        const message = event.data as Record<string, unknown>;
+        if (
+          message.type !== 'pico:plugin-auth' ||
+          message.pluginId !== pluginId ||
+          typeof message.operationId !== 'string' ||
+          message.operationId !== expectedOperationId.current ||
+          !['connected', 'failed'].includes(String(message.status))
+        )
+          return;
+        setOperationId(null);
+        expectedOperationId.current = null;
+        setCallbackUrl('');
+        setRetryExchange(false);
+        setRetrySent(false);
+        if (message.status === 'connected') {
+          setError('');
+          client
+            .props(settings, context)
+            .onNotice(typeof message.message === 'string' ? message.message : 'ChatGPT account connected.');
+          void refresh();
+        } else {
+          const text = typeof message.message === 'string' ? message.message : 'ChatGPT sign-in failed.';
+          setError(text);
+          client.props(settings, context).onError(text);
+          if (message.retryable !== true) setOperationId(null);
+          if (message.retryExchange === true) setRetryExchange(true);
+        }
+      }),
+    [client, settings, context, refresh],
+  );
+
+  useEffect(
+    () =>
+      client.subscribeActions((action) => {
+        const id = action.actionId;
+        if (id === 'account.refresh') {
+          void refresh(true);
+          return;
+        }
+        if (id === 'account.disconnect') {
+          setBusy(true);
+          void api('/account', { method: 'DELETE' })
+            .then((result: any) => {
+              setStatus({ connected: false, accountLabel: null });
+              setModels([]);
+              client
+                .props(settings, context)
+                .onNotice(
+                  result.remoteRevoked
+                    ? 'ChatGPT account disconnected.'
+                    : 'Signed out locally; remote revocation was not confirmed.',
+                );
+            })
+            .catch((reason: unknown) => {
+              setError(errorText(reason));
+              client.props(settings, context).onError(errorText(reason));
+            })
+            .finally(() => setBusy(false));
+          return;
+        }
+        if (id === 'callback.url') {
+          setCallbackUrl(String(action.value ?? ''));
+          return;
+        }
+        if (id === 'callback.complete') {
+          const operation = operationId,
+            callback = callbackUrl.trim();
+          if (!operation || !callback) return;
+          setBusy(true);
+          setError('');
+          void api<any>('/sign-in/complete', {
+            method: 'POST',
+            body: JSON.stringify({ operationId: operation, callbackUrl: callback }),
+          })
+            .then(async (result) => {
+              if (result.status === 'connected') {
+                setOperationId(null);
+                setCallbackUrl('');
+                setRetryExchange(false);
+                client.props(settings, context).onNotice(result.message);
+                await refresh();
+              } else {
+                setError(result.message);
+                if (result.retryExchange) setRetryExchange(true);
+                else if (!result.retryable) setOperationId(null);
+              }
+            })
+            .catch((reason: unknown) => {
+              setError(errorText(reason));
+              client.props(settings, context).onError(errorText(reason));
+            })
+            .finally(() => setBusy(false));
+          return;
+        }
+        if (id === 'callback.retry') {
+          if (!operationId || busy || retrySent) return;
+          setBusy(true);
+          setRetrySent(true);
+          setRetryExchange(false);
+          setError('');
+          void api<any>('/sign-in/retry', { method: 'POST', body: JSON.stringify({ operationId }) })
+            .then(async (result) => {
+              if (result.status === 'connected') {
+                setOperationId(null);
+                client.props(settings, context).onNotice(result.message);
+                await refresh();
+              } else {
+                setError(result.message);
+                if (!result.retryExchange) setOperationId(null);
+              }
+            })
+            .catch(async (reason: unknown) => {
+              const message = errorText(reason);
+              try {
+                const state = await api<any>('/status');
+                setStatus(state);
+                if (state.connected) {
+                  setModels(await api('/models'));
+                  client
+                    .props(settings, context)
+                    .onNotice('The retry response was lost, but Runtime confirms ChatGPT is connected.');
+                  return;
+                }
+              } catch {
+                /* status could not confirm the lost response */
+              }
+              setError(`${message} The retry result could not be confirmed; start a new ChatGPT sign-in.`);
+            })
+            .finally(() => setBusy(false));
+          return;
+        }
+        if (id === 'account.connect') {
+          const leaseId = action.popupLeaseId;
+          setBusy(true);
+          setError('');
+          setOperationId(null);
+          expectedOperationId.current = null;
+          setCallbackUrl('');
+          setRetryExchange(false);
+          setRetrySent(false);
+          if (!leaseId) {
+            setBusy(false);
+            const message = 'The host could not open a secure sign-in popup. Try again.';
+            setError(message);
+            client.props(settings, context).onError(message);
+            return;
+          }
+          void api<any>('/sign-in', { method: 'POST', body: '{}' })
+            .then(async (result) => {
+              if (typeof result.operationId !== 'string' || result.operationId.length === 0) {
+                throw new Error('Runtime returned an invalid ChatGPT sign-in operation.');
+              }
+              expectedOperationId.current = result.operationId;
+              setOperationId(result.operationId);
+              await client.navigateAuthPopup(
+                leaseId,
+                result.authorizationUrl,
+                result.callbackOrigin,
+                result.operationId,
+              );
+            })
+            .catch((reason: unknown) => {
+              setError(errorText(reason));
+              client.props(settings, context).onError(errorText(reason));
+            })
+            .finally(() => setBusy(false));
+          return;
+        }
+        if (id.startsWith('model:')) {
+          const model = String(action.value ?? '');
+          if (model)
+            void client
+              .props(settings, context)
+              .updateModelSettings({ provider: 'chatgpt-plan', model }, context.thread?.id)
+              .catch((reason: unknown) => {
+                setError(errorText(reason));
+                client.props(settings, context).onError(errorText(reason));
+              });
+        }
+      }),
+    [client, api, refresh, settings, context, operationId, callbackUrl, busy, retrySent],
+  );
+
+  if (init.viewType === 'component') {
+    const provider = context.modelSelection?.provider ?? settings.provider;
+    const selected = context.modelSelection?.model ?? settings.model;
+    const options = models.map((model) => ({ label: model.displayName, value: model.slug }));
+    const nodes: PluginUiNode[] =
+      provider === 'chatgpt-plan'
+        ? status?.connected
+          ? [
+              {
+                type: 'select',
+                label: 'Model',
+                value: options.some((x) => x.value === selected) ? selected : '',
+                actionId: 'model:select',
+                disabled: busy,
+                options: [{ label: busy ? 'Loading models…' : 'Choose model', value: '' }, ...options],
+              },
+            ]
+          : [
+              {
+                type: 'select',
+                label: 'Model',
+                value: '',
+                actionId: 'model:select',
+                disabled: true,
+                options: [{ label: busy ? 'Loading models…' : 'Connect ChatGPT account', value: '' }],
+              },
+              { type: 'button', label: 'Connect', actionId: 'account.connect', disabled: busy, externalAuth: true },
+            ]
+        : [];
+    client.render(nodes);
+    return null;
+  }
+
+  const nodes: PluginUiNode[] = [
+    { type: 'heading', text: 'ChatGPT account' },
+    {
+      type: 'paragraph',
+      text: 'Sign in with ChatGPT to use models available to your account. OAuth returns to 127.0.0.1. If the browser cannot reach Pico Runtime there, copy the full callback URL from the browser address bar and paste it below. Credentials remain with the Runtime.',
+    },
+  ];
+  if (status?.connected)
+    nodes.push(
+      {
+        type: 'status',
+        text: `Connected as ${status.accountLabel ?? 'ChatGPT account'}`,
+        tone: 'success',
+      },
+      { type: 'text', text: `${models.length} available model${models.length === 1 ? '' : 's'}` },
+      {
+        type: 'actions',
+        children: [
+          {
+            type: 'button',
+            label: busy ? 'Refreshing…' : 'Refresh models',
+            actionId: 'account.refresh',
+            tone: 'soft',
+            disabled: busy,
+          },
+          { type: 'button', label: 'Disconnect', actionId: 'account.disconnect', tone: 'danger', disabled: busy },
+        ],
+      },
+    );
+  else
+    nodes.push({
+      type: 'button',
+      label: busy ? 'Loading…' : 'Continue with ChatGPT',
+      actionId: 'account.connect',
+      tone: 'primary',
+      disabled: busy,
+      externalAuth: true,
+    });
+  if (operationId) {
+    if (retryExchange)
+      nodes.push(
+        {
+          type: 'paragraph',
+          text: 'Pico received the callback, but the token request did not return a response. Retry that request once without repeating sign-in. If ChatGPT already used the one-time code, the retry will fail and you will need to start a new sign-in.',
+        },
+        {
+          type: 'button',
+          label: busy ? 'Retrying…' : retrySent ? 'Retry request sent' : 'Retry token exchange',
+          actionId: 'callback.retry',
+          disabled: busy || retrySent,
+        },
+      );
+    else
+      nodes.push(
+        {
+          type: 'paragraph',
+          text: 'If the sign-in popup shows a connection error, copy its full address bar URL and paste it here. The URL contains a one-time authorization code; do not share it.',
+        },
+        {
+          type: 'textInput',
+          label: 'Callback URL',
+          value: callbackUrl,
+          placeholder: 'Paste the full callback URL',
+          actionId: 'callback.url',
+          maxLength: 20000,
+          disabled: busy,
+        },
+        {
+          type: 'button',
+          label: busy ? 'Completing…' : 'Complete sign-in',
+          actionId: 'callback.complete',
+          disabled: busy || !callbackUrl.trim(),
+        },
+      );
+  }
+  if (error) nodes.push({ type: 'paragraph', text: error });
+  client.render(nodes);
+  return null;
 }
 
 window.addEventListener('message', (event: MessageEvent<unknown>) => {
@@ -65,22 +374,15 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
     init.type !== 'pico:plugin-ui:init' ||
     init.protocolVersion !== PLUGIN_UI_PROTOCOL_VERSION ||
     init.pluginId !== pluginId ||
-    init.entry !== entry ||
+    init.entry !== 'webui' ||
     (init.viewType !== 'page' && init.viewType !== 'component') ||
     typeof init.viewId !== 'string' ||
-    (init.uiSlot !== undefined &&
-      !['thread.toolbar', 'composer.action', 'composer.model', 'sidebar.panel'].includes(init.uiSlot)) ||
-    (init.controlHeightPx !== undefined &&
-      (init.uiSlot !== 'composer.model' ||
-        typeof init.controlHeightPx !== 'number' ||
-        !Number.isFinite(init.controlHeightPx) ||
-        init.controlHeightPx < 24 ||
-        init.controlHeightPx > 64)) ||
+    (init.viewType === 'page' && init.viewId !== 'account') ||
+    (init.viewType === 'component' && init.viewId !== 'ChatGptPlanComposerModel') ||
     !init.settings ||
     event.ports.length !== 1
-  ) {
+  )
     return;
-  }
   const client = createPluginUiClient(event.ports[0]!, init.settings);
-  root.render(<PluginView init={init as PluginUiInitMessage} client={client} />);
+  root.render(<Controller init={init as PluginUiInitMessage} client={client} />);
 });
