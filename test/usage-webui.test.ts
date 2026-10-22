@@ -1,41 +1,45 @@
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { expect, it } from 'vitest';
+import { validatePluginUiTree } from '../src/plugins/ui-protocol.js';
 
-function createComposerHarness() {
+function createHarness(viewType: 'page' | 'component' = 'component') {
   const summarySource = readFileSync(new URL('../plugins/pico.usage/webui/usage-summary.js', import.meta.url), 'utf8');
   const source = readFileSync(new URL('../plugins/pico.usage/webui/usage.js', import.meta.url), 'utf8');
-  let html = '';
-  const root = {
-    set innerHTML(value: string) {
-      html = value;
-    },
-    get innerHTML() {
-      return html;
-    },
-    scrollHeight: 24,
-  };
+  let tree: any[] = [];
   let onWindowMessage: ((event: any) => void) | undefined;
   const parent = {};
   const requests: Array<Record<string, any>> = [];
   const port = {
-    onmessage: undefined as ((event: { data: unknown }) => void) | undefined,
-    postMessage: (message: Record<string, any>) => {
+    onmessage: undefined as ((event: { data: any }) => void) | undefined,
+    postMessage(message: Record<string, any>) {
+      if (message.type === 'pico:plugin-ui:render') tree = message.tree;
       if (message.type === 'pico:plugin-ui:request') requests.push(message);
     },
     start() {},
   };
-  const window = {
-    parent,
-    addEventListener(_type: string, listener: (event: any) => void) {
-      onWindowMessage = listener;
-    },
-  };
   const globals = {
-    document: { getElementById: () => root, body: { classList: { add() {} } } },
-    window,
+    document: {},
+    window: {
+      PicoUsageSummary: {
+        formatUsageSummary: () => ({
+          input: '0',
+          output: '0',
+          cached: '0',
+          cacheRate: 'unknown',
+          cacheCoverage: 'No data',
+        }),
+      },
+      parent,
+      addEventListener(_type: string, listener: (event: any) => void) {
+        onWindowMessage = listener;
+      },
+    },
     location: { search: '' },
     URLSearchParams,
+    Intl,
+    Date,
+    queueMicrotask,
   };
   runInNewContext(summarySource, globals);
   runInNewContext(source, globals);
@@ -46,295 +50,158 @@ function createComposerHarness() {
       protocolVersion: 1,
       pluginId: 'pico.usage',
       entry: 'webui',
-      viewType: 'component',
-      viewId: 'ComposerUsage',
+      viewType,
+      viewId: viewType === 'component' ? 'ComposerUsage' : 'Usage',
       context: { thread: { id: 'thread-a' } },
     },
     ports: [port],
   });
   const sendContext = (threadId?: string) =>
     port.onmessage?.({
-      data: {
-        type: 'pico:plugin-ui:context',
-        context: threadId ? { thread: { id: threadId } } : { thread: null },
-      },
+      data: { type: 'pico:plugin-ui:context', context: threadId ? { thread: { id: threadId } } : { thread: null } },
     });
-  const respond = (request: Record<string, any>, inputTokens: number) =>
-    port.onmessage?.({
-      data: {
-        type: 'pico:plugin-ui:response',
-        id: request.id,
-        ok: true,
-        value: {
-          totals: { inputTokens, outputTokens: 1, cachedInputTokens: 0 },
-          coverage: {},
-          rows: [],
-        },
-      },
-    });
+  const respond = (request: Record<string, any>, value: unknown) =>
+    port.onmessage?.({ data: { type: 'pico:plugin-ui:response', id: request.id, ok: true, value } });
   const reject = (request: Record<string, any>) =>
-    port.onmessage?.({
-      data: { type: 'pico:plugin-ui:response', id: request.id, ok: false, error: 'stale failure' },
-    });
+    port.onmessage?.({ data: { type: 'pico:plugin-ui:response', id: request.id, ok: false, error: 'stale failure' } });
+  const action = (actionId: string, value?: string) =>
+    port.onmessage?.({ data: { type: 'pico:plugin-ui:action', actionId, ...(value === undefined ? {} : { value }) } });
   const flush = async () => {
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let i = 0; i < 8; i += 1) await Promise.resolve();
   };
-  return { get html() { return html; }, requests, sendContext, respond, reject, flush };
+  return {
+    get tree() {
+      return tree;
+    },
+    requests,
+    sendContext,
+    respond,
+    reject,
+    action,
+    flush,
+  };
 }
 
+const treeText = (tree: unknown) => JSON.stringify(tree);
+
 it('keeps Composer Usage on the current Thread when reports finish out of order', async () => {
-  const harness = createComposerHarness();
-  const firstA = harness.requests[0];
+  const h = createHarness();
+  const firstA = h.requests[0];
   if (!firstA) throw new Error('Expected initial Thread A report');
-
-  harness.sendContext('thread-b');
-  const reportB = harness.requests[1];
+  h.sendContext('thread-b');
+  const reportB = h.requests[1];
   if (!reportB) throw new Error('Expected Thread B report');
-  harness.respond(reportB, 222);
-  await harness.flush();
-  expect(harness.html).toContain('In 222');
-
-  harness.respond(firstA, 111);
-  await harness.flush();
-  expect(harness.html).toContain('In 222');
-  expect(harness.html).not.toContain('In 111');
+  h.respond(reportB, { totals: { inputTokens: 222, outputTokens: 1, cachedInputTokens: 0 }, coverage: {}, rows: [] });
+  await h.flush();
+  expect(treeText(h.tree)).toContain('In 222');
+  h.respond(firstA, { totals: { inputTokens: 111, outputTokens: 1, cachedInputTokens: 0 }, coverage: {}, rows: [] });
+  await h.flush();
+  expect(treeText(h.tree)).toContain('In 222');
+  expect(treeText(h.tree)).not.toContain('In 111');
 });
 
-it('ignores stale Composer Usage failures, same-Thread refreshes, and responses after clearing Thread context', async () => {
-  const harness = createComposerHarness();
-  const firstA = harness.requests[0];
-  if (!firstA) throw new Error('Expected initial Thread A report');
-  harness.sendContext('thread-b');
-  const reportB = harness.requests[1];
-  if (!reportB) throw new Error('Expected Thread B report');
-  harness.respond(reportB, 222);
-  await harness.flush();
-  harness.reject(firstA);
-  await harness.flush();
-  expect(harness.html).toContain('In 222');
+it('ignores stale failures and same-Thread refreshes, and clears the host tree when Thread context disappears', async () => {
+  const h = createHarness();
+  const firstA = h.requests[0]!;
+  h.sendContext('thread-b');
+  const reportB = h.requests[1]!;
+  h.respond(reportB, { totals: { inputTokens: 222, outputTokens: 1, cachedInputTokens: 0 }, coverage: {}, rows: [] });
+  await h.flush();
+  h.reject(firstA);
+  await h.flush();
+  expect(treeText(h.tree)).toContain('In 222');
 
-  harness.sendContext('thread-b');
-  const olderRefresh = harness.requests[2];
-  harness.sendContext('thread-b');
-  const newerRefresh = harness.requests[3];
-  if (!olderRefresh || !newerRefresh) throw new Error('Expected same-Thread refresh requests');
-  harness.respond(newerRefresh, 333);
-  await harness.flush();
-  harness.respond(olderRefresh, 444);
-  await harness.flush();
-  expect(harness.html).toContain('In 333');
-  expect(harness.html).not.toContain('In 444');
-
-  harness.sendContext('thread-b');
-  const pendingBeforeClear = harness.requests[4];
-  if (!pendingBeforeClear) throw new Error('Expected report before clearing Thread context');
-  harness.sendContext();
-  expect(harness.html).toBe('');
-  harness.respond(pendingBeforeClear, 555);
-  await harness.flush();
-  expect(harness.html).toBe('');
+  h.sendContext('thread-b');
+  const older = h.requests[2]!;
+  h.sendContext('thread-b');
+  const newer = h.requests[3]!;
+  h.respond(newer, { totals: { inputTokens: 333, outputTokens: 1, cachedInputTokens: 0 }, coverage: {}, rows: [] });
+  await h.flush();
+  h.respond(older, { totals: { inputTokens: 444, outputTokens: 1, cachedInputTokens: 0 }, coverage: {}, rows: [] });
+  await h.flush();
+  expect(treeText(h.tree)).toContain('In 333');
+  expect(treeText(h.tree)).not.toContain('In 444');
+  h.sendContext('thread-b');
+  const beforeClear = h.requests[4]!;
+  h.sendContext();
+  expect(h.tree).toEqual([]);
+  h.respond(beforeClear, {
+    totals: { inputTokens: 555, outputTokens: 1, cachedInputTokens: 0 },
+    coverage: {},
+    rows: [],
+  });
+  await h.flush();
+  expect(h.tree).toEqual([]);
 });
 
-it('uses project and Thread names in linked Usage filters and report rows', async () => {
-  const summarySource = readFileSync(new URL('../plugins/pico.usage/webui/usage-summary.js', import.meta.url), 'utf8');
-  const source = readFileSync(new URL('../plugins/pico.usage/webui/usage.js', import.meta.url), 'utf8');
-  const fields: Record<string, { value: string; innerHTML: string; disabled: boolean }> = Object.fromEntries(
-    ['projectId', 'threadId', 'provider', 'model', 'purpose', 'from', 'to'].map((name) => [
-      name,
-      { value: '', innerHTML: '', disabled: false },
-    ]),
-  );
-  const listeners = new Map<string, (event: any) => void>();
-  let html = '';
-  const fieldElement = (name: string) => {
-    const field = fields[name];
-    if (!field) return null;
-    return {
-      get value() {
-        return field.value;
-      },
-      set value(value: string) {
-        field.value = value;
-      },
-      get innerHTML() {
-        return field.innerHTML;
-      },
-      set innerHTML(value: string) {
-        field.innerHTML = value;
-      },
-      get disabled() {
-        return field.disabled;
-      },
-      set disabled(value: boolean) {
-        field.disabled = value;
-      },
-      addEventListener(type: string, listener: (event: any) => void) {
-        listeners.set(`${name}:${type}`, listener);
-      },
-    };
-  };
-  const makeForm = (id: string) => ({
-    addEventListener: (type: string, listener: (event: any) => void) => listeners.set(`${id}:${type}`, listener),
-    querySelector(selector: string) {
-      const match = selector.match(/^\[name="([^"]+)"\]$/);
-      return match?.[1] ? fieldElement(match[1]) : null;
-    },
+it('renders Usage filters as plain tree data and refreshes reports through host actions', async () => {
+  const h = createHarness('page');
+  const catalog = h.requests.find((request) => request.path.endsWith('/catalog'))!;
+  const options = h.requests.find((request) => request.path.endsWith('/options'))!;
+  const report = h.requests.find((request) => request.path.endsWith('/report'))!;
+  h.respond(catalog, {
+    projects: [{ id: 'project-1', name: 'Garden project' }],
+    threads: [{ id: 'thread-1', projectId: 'project-1', title: 'Planning session' }],
   });
-  const form = makeForm('filters');
-  const rateForm = makeForm('rate');
-  let onWindowMessage: ((event: unknown) => void) | undefined;
-  const parent = {};
-  const root = {
-    set innerHTML(value: string) {
-      html = value;
-      for (const [name, field] of Object.entries(fields)) {
-        const select = value.match(new RegExp(`<select name="${name}">(.*?)</select>`));
-        if (select) {
-          const options = [...(select[1] ?? '').matchAll(/<option value="([^"]*)"([^>]*)>/g)];
-          field.value = options.find((option) => option[2]?.includes('selected'))?.[1] ?? '';
-          continue;
-        }
-        const input = value.match(new RegExp(`<input name="${name}"[^>]*value="([^"]*)"`));
-        if (input) field.value = input[1] ?? '';
-      }
-    },
-    querySelector(selector: string) {
-      if (selector === '#filters') return form;
-      if (selector === '#rate-form') return rateForm;
-      if (selector === '#refresh') return { addEventListener() {} };
-      const match = selector.match(/^\[name="([^"]+)"\]$/);
-      const name = match?.[1];
-      if (!name) return null;
-      return fieldElement(name);
-    },
-    querySelectorAll: () => [],
-  };
-  const requests: Array<Record<string, unknown>> = [];
-  const port = {
-    onmessage: undefined as ((event: { data: unknown }) => void) | undefined,
-    postMessage: (message: Record<string, unknown>) => requests.push(message),
-    start() {},
-  };
-  class FakeFormData {
-    entries() {
-      return Object.entries(fields).map(([key, field]) => [key, field.value]);
-    }
-  }
-
-  const window = {
-    parent,
-    addEventListener(_type: string, listener: (event: unknown) => void) {
-      onWindowMessage = listener;
-    },
-  };
-  const globals = {
-    document: { getElementById: () => root },
-    window,
-    location: { search: '' },
-    FormData: FakeFormData,
-    URLSearchParams,
-  };
-  runInNewContext(summarySource, globals);
-  runInNewContext(source, globals);
-
-  onWindowMessage?.({
-    source: parent,
-    data: {
-      type: 'pico:plugin-ui:init',
-      protocolVersion: 1,
-      pluginId: 'pico.usage',
-      entry: 'webui',
-      viewType: 'page',
-      context: { thread: { id: 'thread-1', projectId: 'project-1' } },
-    },
-    ports: [port],
-  });
-  expect(requests.map((request) => request.path)).toEqual([
-    '/api/plugins/pico.usage/catalog',
-    '/api/plugins/pico.usage/options',
-    '/api/plugins/pico.usage/report',
-  ]);
-
-  const catalogRequest = requests[0];
-  const optionsRequest = requests[1];
-  const reportRequest = requests[2];
-  if (!catalogRequest || !optionsRequest || !reportRequest)
-    throw new Error('Expected catalog, options, and report requests');
-  const respond = (request: Record<string, unknown>, value: unknown) =>
-    port.onmessage?.({
-      data: { type: 'pico:plugin-ui:response', id: request.id, ok: true, value },
-    });
-  respond(catalogRequest, {
-    projects: [
-      { id: 'project-1', name: 'Garden project' },
-      { id: 'project-2', name: 'Workshop project' },
-    ],
-    threads: [
-      { id: 'thread-1', projectId: 'project-1', title: 'Planning session' },
-      { id: 'thread-2', projectId: 'project-2', title: 'Build notes' },
-    ],
-  });
-  respond(optionsRequest, { providerModels: [], purposes: [] });
-  respond(reportRequest, {
-    rows: [
-      {
-        createdAt: '2026-10-15T12:00:00.000Z',
-        kind: 'main',
-        purpose: 'main-model',
-        provider: 'provider-a',
-        model: 'model-a',
-        threadId: 'thread-1',
-        status: 'completed',
-        usage: { inputTokens: 10, outputTokens: 2 },
-        estimatedCost: null,
-        currency: null,
-        attempts: [],
-      },
-      {
-        createdAt: '2026-10-15T12:01:00.000Z',
-        kind: 'auxiliary',
-        purpose: 'todo-review',
-        provider: 'provider-a',
-        model: 'reviewer-a',
-        threadId: 'thread-1',
-        status: 'failed',
-        usage: null,
-        estimatedCost: null,
-        currency: null,
-        attempts: [],
-      },
-    ],
+  h.respond(options, { providerModels: [], purposes: [] });
+  h.respond(report, {
     totals: { inputTokens: 10, outputTokens: 2 },
-    coverage: {
-      inputTokens: { reported: 1, total: 2 },
-      outputTokens: { reported: 1, total: 2 },
-      cachedInputTokens: { reported: 0, total: 2 },
-      cacheWriteTokens: { reported: 0, total: 2 },
-      reasoningTokens: { reported: 0, total: 2 },
-    },
-    counts: { completedMainCalls: 1, auxiliaryCalls: 0, providerAttempts: 0 },
+    rows: [],
+    coverage: {},
+    groups: { thread: [], project: [], provider: [], model: [], purpose: [], day: [] },
+    rates: [],
+    limitations: [],
+  });
+  await h.flush();
+  const serialized = treeText(h.tree);
+  expect(serialized).toContain('Garden project');
+  expect(serialized).toContain('Planning session');
+  expect(serialized).toContain('Apply filters');
+  expect(serialized).not.toContain('<select');
+
+  h.action('filter.projectId', 'project-1');
+  await h.flush();
+  h.action('apply-filters');
+  await h.flush();
+  expect(h.requests.at(-1)?.path).toBe('/api/plugins/pico.usage/report?projectId=project-1');
+  expect(h.requests.at(-1)?.action).toBe('api');
+});
+
+it('restores the Usage overview layout and keeps 300-call pages within host tree limits', async () => {
+  const h = createHarness('page');
+  const reportRequest = h.requests.find((request) => request.path.endsWith('/report'));
+  if (!reportRequest) throw new Error('Expected the initial Usage report request');
+  const rows = Array.from({ length: 317 }, (_, index) => ({
+    createdAt: new Date(Date.UTC(2026, 9, 22, 0, index)).toISOString(),
+    kind: 'main',
+    purpose: 'chat',
+    provider: 'chatgpt-plan',
+    model: 'gpt-6-luna',
+    threadId: 'thread-a',
+    status: 'completed',
+    usage: { inputTokens: 200, outputTokens: 40, cachedInputTokens: 120 },
+    estimatedCost: 0.0004,
+    currency: 'USD',
+    attempts: [{ outcome: 'completed', model: 'gpt-6-luna' }],
+  }));
+  h.respond(reportRequest, {
+    rows,
+    totals: { inputTokens: 63_400, outputTokens: 12_680, cachedInputTokens: 38_040 },
+    coverage: {},
+    counts: { completedMainCalls: rows.length, auxiliaryCalls: 0 },
     groups: {
       thread: [
         {
-          key: 'thread-1',
-          totals: { inputTokens: 10, outputTokens: 2 },
+          key: 'thread-a',
+          count: rows.length,
+          totals: { inputTokens: 63_400, outputTokens: 12_680 },
           coverage: {
-            inputTokens: { reported: 1, total: 2 },
-            outputTokens: { reported: 1, total: 2 },
+            inputTokens: { reported: rows.length, total: rows.length },
+            outputTokens: { reported: rows.length, total: rows.length },
           },
         },
       ],
-      project: [
-        {
-          key: 'project-1',
-          totals: { inputTokens: 10, outputTokens: 2 },
-          coverage: {
-            inputTokens: { reported: 1, total: 2 },
-            outputTokens: { reported: 1, total: 2 },
-          },
-        },
-      ],
+      project: [],
       provider: [],
       model: [],
       purpose: [],
@@ -343,37 +210,27 @@ it('uses project and Thread names in linked Usage filters and report rows', asyn
     rates: [],
     limitations: [],
   });
-  await Promise.resolve();
-  await Promise.resolve();
+  await h.flush();
 
-  expect(html).toContain('<option value="" selected>All projects</option>');
-  expect(html).toContain('<option value="" selected>All threads</option>');
-  expect(html).toContain('<option value="project-1" >Garden project</option>');
-  expect(html).toContain('<option value="thread-1" >Planning session</option>');
-  expect(html).toContain('By Thread');
-  expect(html).toContain('Planning session');
-  expect(html).toContain('By Project');
-  expect(html).toContain('Garden project');
-  expect(html).toContain(
-    '<div class="card metric-card pico-ui-metric-card">Input tokens<strong>10</strong><span class="coverage">Partial · 1/2 calls</span></div>',
-  );
-  expect(html).toContain('Token totals include reported values only; missing values are excluded, never estimated.');
-  expect(html).toContain('<div class="card metric-card pico-ui-metric-card">Estimated cost<strong>unknown</strong>');
-  expect(html).not.toMatch(/<input[^>]+name="(?:projectId|threadId)"/);
-  expect(html).not.toContain('>thread-1<');
-  expect(html).not.toContain('>project-1<');
+  const table = () => h.tree.find((node) => node.type === 'table');
+  const groups = h.tree.filter((node) => node.type === 'group');
+  expect(validatePluginUiTree(h.tree, 'settings.page')).toBe(true);
+  expect(groups.some((node) => node.layout === 'grid-2')).toBe(true);
+  expect(groups.some((node) => node.layout === 'grid-standard')).toBe(true);
+  expect(groups.some((node) => node.layout === 'grid-compact')).toBe(true);
+  expect(treeText(h.tree)).toContain('Input tokens');
+  expect(treeText(h.tree)).toContain('By Thread');
+  const breakdown = groups.find((node) => node.layout === 'grid-standard');
+  expect(JSON.stringify(breakdown)).toContain('"type":"card"');
+  expect(JSON.stringify(breakdown)).toContain('63,400 in / 12,680 out');
+  expect(JSON.stringify(breakdown)).toContain('Known · 317/317 calls');
+  expect(table()?.rows).toHaveLength(300);
+  expect(treeText(h.tree)).toContain('Showing 1–300 of 317 calls.');
 
-  const projectSelect = root.querySelector('[name="projectId"]') as { value: string };
-  projectSelect.value = 'project-2';
-  listeners.get('projectId:change')?.({ currentTarget: projectSelect });
-  expect(html).toContain('<option value="thread-2" >Build notes</option>');
-  expect(html.match(/<select[^>]*name="threadId"[^>]*>.*?<\/select>/)?.[0]).not.toContain('thread-1');
-  expect(requests.at(-1)?.path).toBe('/api/plugins/pico.usage/report?projectId=project-2');
-
-  fields.provider!.value = 'provider-b';
-  fields.from!.value = '2026-10-01';
-  listeners.get('filters:submit')?.({ preventDefault() {}, currentTarget: form });
-  expect(requests.at(-1)?.path).toBe(
-    '/api/plugins/pico.usage/report?projectId=project-2&provider=provider-b&from=2026-10-01',
-  );
+  h.action('model-calls.next');
+  expect(table()?.rows).toHaveLength(17);
+  expect(treeText(h.tree)).toContain('Showing 301–317 of 317 calls.');
+  h.action('model-calls.previous');
+  expect(table()?.rows).toHaveLength(300);
+  expect(treeText(h.tree)).toContain('Showing 1–300 of 317 calls.');
 });
