@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import {
   isPluginApiPath,
   isPluginModelSettingsUpdate,
@@ -7,16 +8,289 @@ import {
   pluginUiEventMatchesPlugin,
   pluginUiUrl,
   samePluginUiContext,
+  validatePluginUiTree,
   type PluginUiContext,
 } from '../src/plugins/ui-protocol.js';
 
 describe('dynamic plugin UI boundary', () => {
+  it('accepts only bounded host-rendered components allowed by their semantic slot', () => {
+    expect(validatePluginUiTree([{ type: 'text', text: '<b>literal</b>' }], 'composer.status')).toBe(true);
+    expect(validatePluginUiTree([{ type: 'button', label: 'Refresh', actionId: 'refresh' }], 'thread.toolbar')).toBe(
+      true,
+    );
+    expect(
+      validatePluginUiTree(
+        [{ type: 'button', label: 'Continue', actionId: 'connect', externalAuth: true }],
+        'settings.page',
+      ),
+    ).toBe(true);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'button', label: 'Continue', actionId: 'connect', externalAuth: 'https://example.test' }],
+        'settings.page',
+      ),
+    ).toBe(false);
+    expect(validatePluginUiTree([{ type: 'button', label: 'Send', actionId: 'send' }], 'composer.status')).toBe(false);
+    expect(validatePluginUiTree([{ type: 'text', text: 'x', className: 'arbitrary' }], 'sidebar.panel')).toBe(false);
+    expect(validatePluginUiTree([{ type: 'image', src: 'https://example.test/a.png' }], 'settings.page')).toBe(false);
+    expect(
+      validatePluginUiTree(
+        [
+          {
+            type: 'disclosure',
+            label: 'History',
+            open: false,
+            actionId: 'history',
+            children: [{ type: 'list', ordered: false, items: [{ type: 'text', text: 'Updated' }] }],
+          },
+        ],
+        'thread.toolbar',
+      ),
+    ).toBe(true);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'table', columns: ['Name', 'Status'], rows: [['Goal', 'active']] }],
+        'settings.page',
+      ),
+    ).toBe(true);
+    expect(
+      validatePluginUiTree([{ type: 'table', columns: ['Name', 'Status'], rows: [['Goal']] }], 'settings.page'),
+    ).toBe(false);
+  });
+
+  it('accepts only framework-defined group layouts and safe common input types', () => {
+    expect(
+      validatePluginUiTree(
+        [
+          {
+            type: 'group',
+            layout: 'grid-2',
+            children: [
+              { type: 'textInput', label: 'From', inputType: 'date', actionId: 'from' },
+              { type: 'textInput', label: 'Rate', inputType: 'number', min: 0, step: 'any', actionId: 'rate' },
+            ],
+          },
+        ],
+        'settings.page',
+      ),
+    ).toBe(true);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'group', layout: 'grid-arbitrary', children: [{ type: 'text', text: 'x' }] }],
+        'settings.page',
+      ),
+    ).toBe(false);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'textInput', label: 'Rate', inputType: 'number', min: 0, actionId: 'rate' }],
+        'settings.page',
+      ),
+    ).toBe(true);
+    expect(
+      validatePluginUiTree([{ type: 'textInput', label: 'Name', inputType: 'url', actionId: 'name' }], 'settings.page'),
+    ).toBe(false);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'textInput', label: 'Name', inputType: 'text', step: 1, actionId: 'name' }],
+        'settings.page',
+      ),
+    ).toBe(false);
+  });
+
+  it('fails closed on excessive trees, nesting, action values and invalid textarea sizing', () => {
+    expect(
+      validatePluginUiTree(
+        Array.from({ length: 2049 }, () => ({ type: 'text', text: 'x' })),
+        'settings.page',
+      ),
+    ).toBe(false);
+    expect(validatePluginUiTree([{ type: 'button', label: 'Go', actionId: 'x'.repeat(81) }], 'settings.page')).toBe(
+      false,
+    );
+    expect(
+      validatePluginUiTree([{ type: 'textArea', label: 'Goal', actionId: 'goal', rows: 'small' }], 'settings.page'),
+    ).toBe(false);
+    expect(validatePluginUiTree([{ type: 'paragraph', text: 'x'.repeat(20001) }], 'settings.page')).toBe(false);
+    expect(
+      validatePluginUiTree(
+        [
+          {
+            type: 'select',
+            label: 'Model',
+            actionId: 'model',
+            options: Array.from({ length: 81 }, () => ({ label: 'x', value: 'x' })),
+          },
+        ],
+        'composer.model',
+      ),
+    ).toBe(false);
+  });
+
+  it('enforces each slot allowlist and exact select option fields', () => {
+    expect(
+      validatePluginUiTree(
+        [{ type: 'textInput', label: 'Temperature', value: '0.5', actionId: 'temperature' }],
+        'composer.model',
+      ),
+    ).toBe(true);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'switch', label: 'Fast mode', checked: true, actionId: 'fast-mode' }],
+        'composer.model',
+      ),
+    ).toBe(true);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'range', label: 'Reasoning budget', value: 16384, min: 0, max: 32768, step: 256, actionId: 'budget' }],
+        'composer.model',
+      ),
+    ).toBe(true);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'range', label: 'Reasoning budget', value: 32769, min: 0, max: 32768, step: 256, actionId: 'budget' }],
+        'composer.model',
+      ),
+    ).toBe(false);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'checkbox', label: 'Fast mode', checked: true, actionId: 'fast-mode' }],
+        'composer.model',
+      ),
+    ).toBe(false);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'switch', label: 'Auto memory', checked: true, actionId: 'auto' }],
+        'settings.page',
+      ),
+    ).toBe(true);
+    expect(
+      validatePluginUiTree([{ type: 'status', text: 'Connected as account', tone: 'success' }], 'settings.page'),
+    ).toBe(true);
+    expect(validatePluginUiTree([{ type: 'status', text: 'Connected', tone: 'success' }], 'composer.status')).toBe(
+      false,
+    );
+    expect(
+      validatePluginUiTree(
+        [
+          { type: 'button', label: 'Refresh', actionId: 'refresh', tone: 'soft' },
+          { type: 'button', label: 'Disconnect', actionId: 'disconnect', tone: 'danger' },
+        ],
+        'settings.page',
+      ),
+    ).toBe(true);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'checkbox', label: 'Reasoning', checked: true, actionId: 'reasoning' }],
+        'composer.action',
+      ),
+    ).toBe(false);
+    expect(validatePluginUiTree([{ type: 'paragraph', text: 'Connected' }], 'composer.status')).toBe(false);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'disclosure', label: 'Details', open: false, actionId: 'details', children: [] }],
+        'tool.result',
+      ),
+    ).toBe(false);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'select', label: 'Model', actionId: 'model', options: [{ label: 'A', value: 'a', disabled: true }] }],
+        'settings.page',
+      ),
+    ).toBe(false);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'select', label: 'Model', actionId: 'model', options: [{ label: 'A' }] }],
+        'settings.page',
+      ),
+    ).toBe(false);
+    expect(
+      validatePluginUiTree(
+        [
+          { type: 'button', label: 'A', actionId: 'same' },
+          { type: 'button', label: 'B', actionId: 'same' },
+        ],
+        'settings.page',
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps host input sizing semantic and supports six-row Goal fields', () => {
+    const css = readFileSync(new URL('../src/web/styles.css', import.meta.url), 'utf8');
+    const renderer = readFileSync(new URL('../src/web/plugin-ui-tree.tsx', import.meta.url), 'utf8');
+    expect(css).toMatch(/\.plugin-ui-text-input\s*\{[^}]*white-space:\s*nowrap;[^}]*overflow-x:\s*auto;/s);
+    expect(css).toMatch(/\.plugin-ui-text-area\s*\{[^}]*line-height:\s*1\.5;[^}]*overflow:\s*hidden;/s);
+    expect(css).toMatch(/\.plugin-ui-control\s*\{[^}]*padding:\s*8px 10px;/s);
+    expect(css).toMatch(/\.plugin-ui-switch-control\s*\{[^}]*width:\s*30px;[^}]*height:\s*18px;[^}]*padding:\s*2px;/s);
+    expect(css).toMatch(/\.plugin-ui-switch-thumb\s*\{[^}]*width:\s*14px;[^}]*height:\s*14px;[^}]*flex:\s*0 0 14px;/s);
+    expect(css).not.toContain('.plugin-ui-switch-track');
+    expect(css).toMatch(/\.plugin-ui-switch--compact\s*\{[^}]*border-radius:\s*10px;/s);
+    expect(css).toMatch(/\.plugin-ui-range-control\s*\{[^}]*accent-color:\s*#698e70;/s);
+    expect(renderer).toMatch(/className=\{`plugin-ui-switch/);
+    expect(renderer).toMatch(/role="switch"/);
+    expect(renderer).toContain('role="combobox"');
+    expect(renderer).toContain('role="listbox"');
+    expect(renderer).toContain("event.key === 'ArrowDown' || event.key === 'ArrowUp'");
+    expect(renderer).not.toMatch(/<select\b/);
+    expect(css).toContain('.plugin-ui-select-menu {\n  position: fixed;');
+    expect(css).toMatch(/\.plugin-ui-status--success\s*\{[^}]*background:\s*color-mix\(/s);
+    expect(css).toMatch(/\.composer-plugin-controls\s*\{[^}]*display:\s*flex;[^}]*overflow-x:\s*auto;/s);
+    expect(css).toMatch(
+      /\.composer-plugin-controls \.plugin-ui-host-rendered--component\s*\{[^}]*width:\s*max-content;[^}]*display:\s*block;[^}]*flex:\s*0 0 auto;[^}]*overflow:\s*visible;/s,
+    );
+    expect(css).toMatch(
+      /\.composer-plugin-controls \.plugin-ui-host-rendered--component \.plugin-ui-tree--composer-scroll\s*\{[^}]*display:\s*block;[^}]*width:\s*max-content;[^}]*overflow:\s*visible;/s,
+    );
+    expect(renderer).toContain('plugin-ui-tree--composer-content');
+    expect(renderer).toContain('plugin-ui-tree--composer-scroll');
+    expect(css).toMatch(/\.plugin-ui-sr-only\s*\{[^}]*clip:\s*rect\(0, 0, 0, 0\);/s);
+    expect(css).toMatch(/\.plugin-ui-button,\s*\.plugin-ui-control\s*\{[^}]*border:\s*1px solid var\(--line\);/s);
+    expect(css).toMatch(/\.plugin-ui-text-area--compact\s*\{[^}]*calc\(2 \* 1\.5em \+ 18px\)/s);
+    expect(css).toMatch(/\.plugin-ui-text-area--standard\s*\{[^}]*calc\(4 \* 1\.5em \+ 18px\)/s);
+    expect(css).toMatch(/\.plugin-ui-text-area--large\s*\{[^}]*calc\(6 \* 1\.5em \+ 18px\)/s);
+    expect(css).not.toMatch(/\.plugin-ui-text-area[^}]*max-height:/s);
+    const pluginWebView = readFileSync(new URL('../src/web/plugin-web-view.tsx', import.meta.url), 'utf8');
+    expect(pluginWebView).toContain(
+      "setUiError('The plugin interface did not respond. Check Plugin UI diagnostics for details.')",
+    );
+    expect(pluginWebView).toContain("'load-timeout'");
+    expect(pluginWebView).toContain('PLUGIN_UI_FRAME_LOAD_TIMEOUT_MS = 15_000');
+    expect(pluginWebView).toContain('scheduleMissingRenderError(');
+    expect(pluginWebView).toContain('          5000,');
+    expect(pluginWebView).toMatch(/document\.body,[\s\S]*?\)\}\s*\{iframe\}\s*<\/>/);
+    const developerSettings = readFileSync(new URL('../src/web/developer-settings.tsx', import.meta.url), 'utf8');
+    expect(developerSettings).toContain("case 'load-timeout':");
+    expect(
+      validatePluginUiTree(
+        [
+          {
+            type: 'textArea',
+            label: 'Goal',
+            value: 'A long goal that wraps',
+            rows: 'large',
+            actionId: 'goal',
+            maxLength: 8000,
+          },
+        ],
+        'thread.toolbar',
+      ),
+    ).toBe(true);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'textArea', label: 'Constraints', rows: 'standard', actionId: 'constraints', maxLength: 4000 }],
+        'thread.toolbar',
+      ),
+    ).toBe(true);
+  });
+
   it('builds semantic entry URLs without exposing a host component contract', () => {
     expect(pluginUiUrl('pico.example', 'settings', 'page', 'account')).toBe(
       '/_pico/plugin-ui/pico.example/settings/index.html?viewType=page&viewId=account',
     );
     expect(pluginUiUrl('pico.example', 'web ui', 'component', 'model/picker')).toContain(
       'pico.example/web%20ui/index.html?viewType=component&viewId=model%2Fpicker',
+    );
+    expect(pluginUiUrl('pico.example', 'web ui', 'component', 'model/picker', 'composer.model')).toContain(
+      'viewType=component&viewId=model%2Fpicker&uiSlot=composer.model',
     );
   });
 
@@ -71,6 +345,37 @@ describe('dynamic plugin UI boundary', () => {
         command: 'x'.repeat(201),
       }),
     ).toBe(false);
+  });
+
+  it('sends host component trees and receives host actions through the MessagePort', () => {
+    const sent: unknown[] = [];
+    const port = {
+      onmessage: null as ((event: MessageEvent<unknown>) => void) | null,
+      start: () => undefined,
+      close: () => undefined,
+      postMessage: (message: unknown) => sent.push(message),
+    } as unknown as MessagePort;
+    const client = createPluginUiClient(port, {
+      baseUrl: '',
+      model: '',
+      temperature: 0.2,
+      provider: '',
+      hasApiKey: false,
+    });
+    const actions: unknown[] = [];
+    client.subscribeActions((action) => actions.push(action));
+    const tree = [{ type: 'textArea', label: 'Goal', actionId: 'goal', rows: 'large' }] as const;
+    client.render([...tree]);
+    expect(sent).toEqual([{ type: 'pico:plugin-ui:render', tree }]);
+    port.onmessage?.({
+      data: { type: 'pico:plugin-ui:action', actionId: 'goal', value: 'Make progress' },
+    } as MessageEvent<unknown>);
+    expect(actions).toEqual([{ actionId: 'goal', value: 'Make progress' }]);
+    port.onmessage?.({
+      data: { type: 'pico:plugin-ui:action', actionId: 'connect', popupLeaseId: 'lease-once' },
+    } as MessageEvent<unknown>);
+    expect(actions.at(-1)).toEqual({ actionId: 'connect', popupLeaseId: 'lease-once' });
+    client.close();
   });
 
   it('exposes Thread and tool context and forwards context updates and plugin events', async () => {
@@ -152,4 +457,50 @@ describe('dynamic plugin UI boundary', () => {
       pluginUiEventMatchesPlugin({ type: 'execution.updated', pluginId: 'pico.permissions' }, 'pico.permissions'),
     ).toBe(false);
   });
+});
+
+it('requests navigation only through the host-created popup lease bridge', async () => {
+  const sent: unknown[] = [];
+  const port = {
+    onmessage: null,
+    start() {},
+    close() {},
+    postMessage(message: unknown) {
+      sent.push(message);
+    },
+  } as unknown as MessagePort;
+  const client = createPluginUiClient(port, {
+    baseUrl: '',
+    model: '',
+    temperature: 0.2,
+    provider: '',
+    hasApiKey: false,
+  });
+  const navigation = client.navigateAuthPopup(
+    'one-shot-lease',
+    'https://auth.example.test/authorize?state=runtime',
+    'http://127.0.0.1:43210',
+    'op-123',
+  );
+  const request = sent[0] as {
+    id: string;
+    action: string;
+    leaseId: string;
+    authorizationUrl: string;
+    callbackOrigin: string;
+    operationId: string;
+  };
+  expect(request).toMatchObject({
+    type: 'pico:plugin-ui:request',
+    action: 'auth-popup-navigate',
+    leaseId: 'one-shot-lease',
+    authorizationUrl: 'https://auth.example.test/authorize?state=runtime',
+    callbackOrigin: 'http://127.0.0.1:43210',
+    operationId: 'op-123',
+  });
+  port.onmessage?.({
+    data: { type: 'pico:plugin-ui:response', id: request.id, ok: true, value: null },
+  } as MessageEvent<unknown>);
+  await navigation;
+  client.close();
 });

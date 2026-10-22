@@ -1,5 +1,15 @@
 import type { UiContribution } from '../core/types.js';
 
+export function pluginUiContributionKey(contribution: UiContribution): string {
+  return JSON.stringify([
+    contribution.slot,
+    contribution.pluginId ?? '',
+    contribution.entry ?? '',
+    contribution.component ?? '',
+    contribution.id,
+  ]);
+}
+
 export function uiContributionsAt(
   contributions: readonly UiContribution[],
   slot: UiContribution['slot'],

@@ -167,7 +167,8 @@ export interface UiContribution {
   toolNames?: string[];
   providers?: ModelProvider[];
   supportsPopover?: boolean;
-  preferredWidth?: number;
+  /** Explicit HTTPS origins that may receive one-time host-created auth popups for marked buttons. */
+  externalAuthOrigins?: string[];
 }
 
 export interface ModelProviderContribution {

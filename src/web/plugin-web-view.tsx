@@ -1,7 +1,13 @@
 import { createPortal } from 'react-dom';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactElement } from 'react';
 import type { PublicSettings } from '../core/types.js';
+import { PluginUiTreeView } from './plugin-ui-tree.js';
 import { clampPluginPopoverWidth } from './plugin-ui-sizing.js';
+import {
+  validatePluginAuthPopupCallback,
+  validatePluginAuthPopupNavigation,
+  type PluginAuthPopupLease,
+} from './plugin-auth-popup.js';
 import {
   markPluginUiDiagnosticMounted,
   reportPluginUiDiagnostic,
@@ -12,10 +18,8 @@ import {
 import {
   isPluginApiPath,
   isPluginModelSettingsUpdate,
-  isPluginUiPopoverMessage,
   isPluginUiRequest,
   isPluginUiToolbarStateMessage,
-  isPluginUiVisibilityMessage,
   pluginUiLayoutForSlot,
   pluginUiEventMatchesPlugin,
   samePluginUiContext,
@@ -28,6 +32,8 @@ import {
   type PluginUiEvent,
   type PluginUiRequest,
   type PluginUiSlot,
+  type PluginUiNode,
+  validatePluginUiTree,
 } from '../plugins/ui-protocol.js';
 
 type PluginWebViewProps = {
@@ -39,7 +45,7 @@ type PluginWebViewProps = {
   controlLabel?: string | undefined;
   controlClassName?: string | undefined;
   supportsPopover?: boolean | undefined;
-  preferredWidth?: number | undefined;
+  externalAuthOrigins?: string[] | undefined;
   context: PluginUiContext;
   events?: Array<{ sequence: number; event: PluginUiEvent }>;
   settings: PublicSettings;
@@ -55,6 +61,7 @@ type PluginWebViewProps = {
 };
 
 const pluginApiMethods = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
+const PLUGIN_UI_FRAME_LOAD_TIMEOUT_MS = 15_000;
 
 function serializedInit(value: PluginApiInit | undefined): PluginApiInit | undefined {
   if (!value) return undefined;
@@ -73,11 +80,21 @@ function serializedInit(value: PluginApiInit | undefined): PluginApiInit | undef
   };
 }
 
+function containsExternalAuthButton(node: PluginUiNode): boolean {
+  if (node.type === 'button') return node.externalAuth === true;
+  if ('children' in node) return node.children.some(containsExternalAuthButton);
+  if (node.type === 'list') return node.items.some(containsExternalAuthButton);
+  return false;
+}
+
 export function PluginWebView(props: PluginWebViewProps): ReactElement {
   const frame = useRef<HTMLIFrameElement>(null);
   const toolbarAnchor = useRef<HTMLButtonElement>(null);
   const popoverSurface = useRef<HTMLDivElement>(null);
   const portRef = useRef<MessagePort | null>(null);
+  const authPopupLeases = useRef(
+    new Map<string, PluginAuthPopupLease & { popup: Window; expiryTimer: number; portCloseListener: () => void }>(),
+  );
   const connected = useRef(false);
   const connectionReady = useRef(false);
   const communicationStarted = useRef(false);
@@ -86,21 +103,74 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
   const attemptSequence = useRef(0);
   const activeAttemptId = useRef<string | null>(null);
   const probeTimeout = useRef<number | null>(null);
+  const iframeLoadTimeout = useRef<number | null>(null);
   const readyTimeout = useRef<number | null>(null);
+  const renderTimeout = useRef<number | null>(null);
+  const hasRenderedUi = useRef(false);
   const probeListener = useRef<((event: MessageEvent) => void) | null>(null);
   const popoverOpenRef = useRef(false);
-  const toolbarContentHeight = useRef(240);
   const deliveredEventSequence = useRef(props.events?.at(-1)?.sequence ?? 0);
   const deliveredContext = useRef(props.context);
   const current = useRef(props);
   current.current = props;
+  useEffect(() => {
+    const onPopupMessage = (event: MessageEvent<unknown>): void => {
+      for (const [leaseId, lease] of authPopupLeases.current) {
+        if (lease.expiresAt <= Date.now() || lease.port !== portRef.current) {
+          lease.popup.close();
+          window.clearTimeout(lease.expiryTimer);
+          (lease.port as MessagePort).removeEventListener('close', lease.portCloseListener);
+          authPopupLeases.current.delete(leaseId);
+          continue;
+        }
+        const data = event.data;
+        if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).length > 12) return;
+        const callbackOperationId = (data as Record<string, unknown>).operationId;
+        if (
+          !validatePluginAuthPopupCallback(
+            lease,
+            event.source as object | null,
+            event.origin,
+            typeof callbackOperationId === 'string' ? callbackOperationId : undefined,
+            portRef.current ?? {},
+          ) ||
+          lease.pluginId !== current.current.pluginId ||
+          lease.entry !== current.current.entry ||
+          lease.viewId !== current.current.viewId ||
+          lease.actionId.length === 0
+        )
+          continue;
+        const safe: Record<string, string | boolean> = {};
+        for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+          if (
+            !/^[a-zA-Z][a-zA-Z0-9]{0,40}$/.test(key) ||
+            (typeof value !== 'string' && typeof value !== 'boolean') ||
+            (typeof value === 'string' && value.length > 2000)
+          )
+            return;
+          safe[key] = value;
+        }
+        lease.callbackConsumed = true;
+        authPopupLeases.current.delete(leaseId);
+        window.clearTimeout(lease.expiryTimer);
+        (lease.port as MessagePort).removeEventListener('close', lease.portCloseListener);
+        (lease.port as MessagePort).postMessage({
+          type: 'pico:plugin-ui:event',
+          event: { type: 'external-auth-popup-result', leaseId, actionId: lease.actionId, data: safe },
+        });
+        return;
+      }
+    };
+    window.addEventListener('message', onPopupMessage);
+    return () => window.removeEventListener('message', onPopupMessage);
+  }, []);
   const [anchorPosition, setAnchorPosition] = useState<{ left: number; top: number; height: number } | null>(null);
   const [popover, setPopover] = useState<{ width: number; height: number } | null>(null);
   const [badgeCount, setBadgeCount] = useState<number | null>(null);
-  const [inlineVisible, setInlineVisible] = useState(true);
-  const [inlineWidth, setInlineWidth] = useState<number | null>(null);
+  const [uiTree, setUiTree] = useState<PluginUiNode[] | null>(null);
+  const [uiError, setUiError] = useState<string | null>(null);
 
-  const src = pluginUiUrl(props.pluginId, props.entry, props.viewType, props.viewId);
+  const src = pluginUiUrl(props.pluginId, props.entry, props.viewType, props.viewId, props.uiSlot);
   const reportDiagnostic = useCallback(
     (
       stage: PluginUiDiagnosticStage,
@@ -113,9 +183,6 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
           | 'initAcknowledged'
           | 'readyReceived'
           | 'mounted'
-          | 'lastResizePx'
-          | 'visible'
-          | 'widthPx'
           | 'frameSecureContext'
           | 'frameRandomUUID'
           | 'frameResizeObserver'
@@ -140,10 +207,20 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
     window.clearTimeout(probeTimeout.current);
     probeTimeout.current = null;
   };
+  const clearIframeLoadTimeout = (): void => {
+    if (iframeLoadTimeout.current === null) return;
+    window.clearTimeout(iframeLoadTimeout.current);
+    iframeLoadTimeout.current = null;
+  };
   const clearReadyTimeout = (): void => {
     if (readyTimeout.current === null) return;
     window.clearTimeout(readyTimeout.current);
     readyTimeout.current = null;
+  };
+  const clearRenderTimeout = (): void => {
+    if (renderTimeout.current === null) return;
+    window.clearTimeout(renderTimeout.current);
+    renderTimeout.current = null;
   };
   const removeProbeListener = (): void => {
     if (!probeListener.current) return;
@@ -158,8 +235,9 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       viewId: props.viewId,
       ...(props.uiSlot === undefined ? {} : { uiSlot: props.uiSlot }),
     };
-    setInlineVisible(true);
-    setInlineWidth(null);
+    setUiTree(null);
+    setUiError(null);
+    hasRenderedUi.current = false;
     connectionReady.current = false;
     communicationStarted.current = false;
     initializationAcknowledged.current = false;
@@ -171,9 +249,6 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       initSent: false,
       initAcknowledged: false,
       readyReceived: false,
-      lastResizePx: null,
-      visible: null,
-      widthPx: null,
       frameSecureContext: null,
       frameRandomUUID: null,
       frameResizeObserver: null,
@@ -181,16 +256,35 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
     });
     markPluginUiDiagnosticMounted(diagnosticIdentity, true);
     clearProbeTimeout();
+    clearIframeLoadTimeout();
     clearReadyTimeout();
+    clearRenderTimeout();
     removeProbeListener();
     portRef.current?.close();
     portRef.current = null;
+    iframeLoadTimeout.current = window.setTimeout(() => {
+      iframeLoadTimeout.current = null;
+      if (connected.current || activeAttemptId.current !== null) return;
+      setUiError('The plugin interface did not finish loading. Check Plugin UI diagnostics for details.');
+      reportDiagnostic(
+        'load-timeout',
+        `The iframe did not fire its load event within ${PLUGIN_UI_FRAME_LOAD_TIMEOUT_MS / 1000} seconds; check the plugin asset response, content security policy, and browser network errors.`,
+      );
+    }, PLUGIN_UI_FRAME_LOAD_TIMEOUT_MS);
     return () => {
       markPluginUiDiagnosticMounted(diagnosticIdentity, false);
       clearProbeTimeout();
+      clearIframeLoadTimeout();
       clearReadyTimeout();
+      clearRenderTimeout();
       removeProbeListener();
       portRef.current?.close();
+      for (const lease of authPopupLeases.current.values()) {
+        window.clearTimeout(lease.expiryTimer);
+        (lease.port as MessagePort).removeEventListener('close', lease.portCloseListener);
+        lease.popup.close();
+      }
+      authPopupLeases.current.clear();
       portRef.current = null;
       connectionReady.current = false;
       communicationStarted.current = false;
@@ -218,6 +312,10 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       if (detail) {
         runtimeError.current = detail;
         clearReadyTimeout();
+        clearRenderTimeout();
+        if (!hasRenderedUi.current) {
+          setUiError('The plugin interface failed to start. Check Plugin UI diagnostics for details.');
+        }
       }
     };
     window.addEventListener('message', onRuntimeError);
@@ -225,7 +323,6 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       window.removeEventListener('message', onRuntimeError);
     };
   }, [reportDiagnostic]);
-  const layout = pluginUiLayoutForSlot(props.uiSlot);
   const hostPopover =
     props.viewType === 'component' &&
     (props.uiSlot === 'thread.toolbar' || props.uiSlot === 'composer.model') &&
@@ -242,14 +339,14 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
     const rect = toolbarAnchor.current?.getBoundingClientRect();
     const top = anchorTop ?? rect?.top;
     const height = anchorHeight ?? rect?.height;
-    if (top === undefined || height === undefined) return Math.max(120, window.innerHeight - 32);
+    if (top === undefined || height === undefined) return Math.max(0, window.innerHeight - 24);
     const spaceAbove = top - 12;
     const spaceBelow = window.innerHeight - top - height - 12;
-    return Math.max(80, Math.max(spaceAbove, spaceBelow));
+    return Math.max(0, Math.min(window.innerHeight - 24, Math.max(spaceAbove, spaceBelow)));
   };
 
   const toolbarPopoverWidth = (): number => {
-    return clampPluginPopoverWidth(props.preferredWidth, window.innerWidth);
+    return clampPluginPopoverWidth(window.innerWidth);
   };
 
   const updateAnchor = (): void => {
@@ -269,10 +366,6 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
             }
           : previous,
       );
-      portRef.current?.postMessage({
-        type: 'pico:plugin-ui:popover-viewport',
-        maxHeight: availablePopoverHeight(rect.top, rect.height),
-      });
     }
   };
 
@@ -338,6 +431,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
   }, [props.events, props.pluginId]);
 
   const connectFrame = (): void => {
+    clearIframeLoadTimeout();
     reportDiagnostic(
       runtimeError.current ? 'error' : 'document-loaded',
       runtimeError.current ?? 'Iframe onLoad fired; this confirms navigation, not that the plugin UI rendered.',
@@ -351,17 +445,40 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
     initializationAcknowledged.current = false;
     const attemptId = `pico-ui-${Date.now().toString(36)}-${++attemptSequence.current}`;
     activeAttemptId.current = attemptId;
+    const scheduleMissingRenderError = (timeoutMs: number, detail: string, stage: 'ready-timeout' | 'error'): void => {
+      clearRenderTimeout();
+      renderTimeout.current = window.setTimeout(() => {
+        renderTimeout.current = null;
+        if (hasRenderedUi.current || activeAttemptId.current !== attemptId) return;
+        setUiError('The plugin interface did not render. Check Plugin UI diagnostics for details.');
+        reportDiagnostic(stage, detail);
+      }, timeoutMs);
+    };
 
     const markReady = (): void => {
       if (activeAttemptId.current !== attemptId) return;
       connectionReady.current = true;
       clearReadyTimeout();
+      if (!hasRenderedUi.current) {
+        scheduleMissingRenderError(
+          5000,
+          'The plugin UI sent ready without a supported component description.',
+          'ready-timeout',
+        );
+      }
       reportDiagnostic('ready', 'Plugin UI sent a ready response.', { readyReceived: true });
     };
     const markCommunicating = (): void => {
       if (activeAttemptId.current !== attemptId || connectionReady.current || communicationStarted.current) return;
       communicationStarted.current = true;
       clearReadyTimeout();
+      if (!hasRenderedUi.current) {
+        scheduleMissingRenderError(
+          5000,
+          'The plugin UI communicated with the host but did not send a component description.',
+          'error',
+        );
+      }
       reportDiagnostic('communicating', 'The plugin UI sent a message, but did not send an explicit ready response.');
     };
 
@@ -382,6 +499,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       try {
         channel = new MessageChannel();
       } catch {
+        setUiError('The plugin interface could not be initialized. Check Plugin UI diagnostics for details.');
         reportDiagnostic('error', 'The host could not create a MessageChannel for this plugin UI.');
         return;
       }
@@ -413,83 +531,33 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
           );
           return;
         }
-        markCommunicating();
-        if (isPluginUiPopoverMessage(popoverMessage)) {
-          if (!hostPopover) return;
-          const height = Math.max(80, Math.min(Math.ceil(popoverMessage.height) + 4, availablePopoverHeight()));
-          if (popoverMessage.open) toolbarContentHeight.current = height;
-          setToolbarPopover(popoverMessage.open ? { width: toolbarPopoverWidth(), height } : null);
+        if (message?.type === 'pico:plugin-ui:render') {
+          markCommunicating();
+          const tree = (event.data as { tree?: unknown }).tree;
+          const slot = current.current.uiSlot ?? 'settings.page';
+          if (
+            !validatePluginUiTree(tree, slot) ||
+            ((tree as PluginUiNode[]).some((node) => containsExternalAuthButton(node)) &&
+              !current.current.externalAuthOrigins?.length)
+          ) {
+            clearRenderTimeout();
+            setUiTree(null);
+            hasRenderedUi.current = false;
+            setUiError(
+              'This plugin sent an interface that Pico cannot display. Check Plugin UI diagnostics for details.',
+            );
+            reportDiagnostic('error', 'Plugin UI supplied an unsupported or invalid component description.');
+            return;
+          }
+          setUiTree(tree);
+          hasRenderedUi.current = true;
+          clearRenderTimeout();
+          setUiError(null);
           return;
         }
+        markCommunicating();
         if (isPluginUiToolbarStateMessage(popoverMessage)) {
           setBadgeCount(popoverMessage.badgeCount);
-          return;
-        }
-        if (isPluginUiVisibilityMessage(popoverMessage)) {
-          reportPluginUiDiagnostic(
-            {
-              pluginId: current.current.pluginId,
-              entry: current.current.entry,
-              viewType: current.current.viewType,
-              viewId: current.current.viewId,
-              ...(current.current.uiSlot === undefined ? {} : { uiSlot: current.current.uiSlot }),
-            },
-            {
-              stage: connectionReady.current
-                ? 'ready'
-                : communicationStarted.current
-                  ? 'communicating'
-                  : 'initializing',
-              visible: popoverMessage.visible,
-              ...(popoverMessage.width === undefined ? {} : { widthPx: Math.ceil(popoverMessage.width) }),
-            },
-          );
-          if (current.current.viewType === 'component' && current.current.uiSlot === 'composer.model' && !hostPopover) {
-            setInlineVisible(popoverMessage.visible);
-            setInlineWidth(popoverMessage.width === undefined ? null : Math.ceil(popoverMessage.width));
-          }
-          return;
-        }
-        if (message?.type === 'pico:plugin-ui:resize' && typeof message.height === 'number') {
-          reportPluginUiDiagnostic(
-            {
-              pluginId: current.current.pluginId,
-              entry: current.current.entry,
-              viewType: current.current.viewType,
-              viewId: current.current.viewId,
-              ...(current.current.uiSlot === undefined ? {} : { uiSlot: current.current.uiSlot }),
-            },
-            {
-              stage: connectionReady.current
-                ? 'ready'
-                : communicationStarted.current
-                  ? 'communicating'
-                  : 'initializing',
-              lastResizePx: Math.ceil(message.height),
-            },
-          );
-          if (hostPopover) {
-            const height = Math.max(80, Math.min(Math.ceil(message.height) + 4, availablePopoverHeight()));
-            toolbarContentHeight.current = height;
-            setPopover((previous) => (previous ? { width: toolbarPopoverWidth(), height } : previous));
-            return;
-          }
-          const isPopover = current.current.supportsPopover === true;
-          const fixedHeight = pluginUiLayoutForSlot(current.current.uiSlot, isPopover).controlHeightPx;
-          if (fixedHeight !== undefined) {
-            if (frame.current) frame.current.style.height = `${fixedHeight}px`;
-            return;
-          }
-          const limits =
-            current.current.uiSlot === 'tool.result'
-              ? { min: 0, max: 180 }
-              : current.current.uiSlot === 'composer.status'
-                ? { min: 24, max: 90 }
-              : current.current.viewType === 'page'
-                ? { min: 220, max: 620 }
-                : { min: 46, max: 180 };
-          const height = Math.max(limits.min, Math.min(limits.max, Math.ceil(message.height)));
-          if (frame.current) frame.current.style.height = `${height}px`;
           return;
         }
         if (!isPluginUiRequest(event.data)) return;
@@ -521,12 +589,14 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
         viewId: props.viewId,
         attemptId,
         ...pluginUiLayoutForSlot(props.uiSlot, hostPopover),
+        ...(props.externalAuthOrigins ? { externalAuthOrigins: props.externalAuthOrigins } : {}),
         settings: props.settings,
         context: props.context,
       };
       try {
         frameWindow.postMessage(init, '*', [channel.port2]);
       } catch {
+        setUiError('The plugin interface could not be initialized. Check Plugin UI diagnostics for details.');
         reportDiagnostic('error', 'The host could not send the initialization message to this frame.');
         return;
       }
@@ -545,20 +615,18 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
           reportDiagnostic('error', runtimeError.current);
           return;
         }
-        reportDiagnostic(
-          initializationAcknowledged.current ? 'ready-timeout' : 'init-timeout',
-          initializationAcknowledged.current
-            ? 'The bridge received initialization, but the plugin UI sent no ready or other message within 5 seconds.'
-            : hasDiagnosticBridge
-              ? 'The diagnostic bridge answered the probe, but did not acknowledge initialization or the transferred port within 5 seconds.'
-              : 'No diagnostic bridge answered the probe, and no message arrived over the transferred port within 5 seconds; init receipt could not be confirmed.',
-        );
+        const detail = initializationAcknowledged.current
+          ? 'The bridge received initialization, but the plugin UI sent no ready or other message within 5 seconds.'
+          : hasDiagnosticBridge
+            ? 'The diagnostic bridge answered the probe, but did not acknowledge initialization or the transferred port within 5 seconds.'
+            : 'No diagnostic bridge answered the probe, and no message arrived over the transferred port within 5 seconds; init receipt could not be confirmed.';
+        setUiError('The plugin interface did not respond. Check Plugin UI diagnostics for details.');
+        reportDiagnostic(initializationAcknowledged.current ? 'ready-timeout' : 'init-timeout', detail);
       }, 5000);
       if (hostPopover) {
         hostPort.postMessage({
           type: 'pico:plugin-ui:toolbar-toggle',
           open: popoverOpenRef.current,
-          maxHeight: availablePopoverHeight(),
         });
       }
       for (const queued of current.current.events ?? []) {
@@ -615,6 +683,36 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
 
   const handleRequest = async (message: PluginUiRequest): Promise<unknown> => {
     const latest = current.current;
+    if (message.action === 'auth-popup-navigate') {
+      const lease = authPopupLeases.current.get(message.leaseId);
+      const navigation = validatePluginAuthPopupNavigation(
+        lease ? { ...lease, popup: lease.popup } : undefined,
+        {
+          pluginId: latest.pluginId,
+          entry: latest.entry,
+          viewId: latest.viewId,
+          leaseId: message.leaseId,
+          authorizationUrl: message.authorizationUrl,
+          callbackOrigin: message.callbackOrigin,
+          operationId: message.operationId,
+        },
+        portRef.current ?? {},
+        latest.externalAuthOrigins ?? [],
+      );
+      if (!lease || !navigation) {
+        if (lease) {
+          lease.popup.close();
+          window.clearTimeout(lease.expiryTimer);
+          (lease.port as MessagePort).removeEventListener('close', lease.portCloseListener);
+          authPopupLeases.current.delete(message.leaseId);
+        }
+        throw new Error('External auth popup lease is invalid, expired, or already used.');
+      }
+      lease.callbackOrigin = navigation.callbackOrigin.origin;
+      lease.operationId = message.operationId;
+      lease.popup.location.replace(navigation.authorizationUrl.href);
+      return null;
+    }
     if (message.action === 'api') {
       if (!isPluginApiPath(message.path, latest.pluginId)) {
         throw new Error('A plugin UI may only call its own plugin API.');
@@ -666,28 +764,104 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
   const iframe = (
     <iframe
       ref={frame}
-      className={`plugin-web-view plugin-web-view-${props.viewType}`}
-      style={
-        hostPopover
-          ? { display: popover ? 'block' : 'none', width: '100%', height: '100%' }
-          : layout.controlHeightPx === undefined
-            ? undefined
-            : {
-                height: `${layout.controlHeightPx}px`,
-                ...(inlineWidth === null ? {} : { width: `${inlineWidth}px`, minWidth: 0, flex: '0 1 auto' }),
-                ...(inlineVisible ? {} : { display: 'none' }),
-              }
-      }
+      className={`plugin-web-view plugin-web-view-${props.viewType}${props.uiSlot === 'composer.status' ? ' plugin-web-view-composer-status' : ''}`}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        width: '100vw',
+        height: '100vh',
+        opacity: 0,
+        pointerEvents: 'none',
+        zIndex: -1,
+      }}
       title={`${props.pluginId} ${props.viewType} ${props.viewId}`}
+      aria-hidden="true"
+      tabIndex={-1}
       src={src}
       sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
       referrerPolicy="no-referrer"
       onLoad={connectFrame}
-      onError={() => reportDiagnostic('error', 'The browser reported that the iframe failed to load.')}
+      onError={() => {
+        clearIframeLoadTimeout();
+        setUiError('The plugin interface could not be loaded. Check that its Web UI entry is available.');
+        reportDiagnostic('error', 'The browser reported that the iframe failed to load.');
+      }}
     />
   );
 
-  if (!hostPopover) return iframe;
+  const renderedUi =
+    uiTree !== null ? (
+      <PluginUiTreeView
+        nodes={uiTree}
+        compactComposerControls={props.uiSlot === 'composer.model' && !hostPopover}
+        onAction={(actionId, value, actionEvent, externalAuth) => {
+          const activePort = portRef.current;
+          if (!activePort) return;
+          let popupLeaseId: string | undefined;
+          if (externalAuth) {
+            if (!current.current.externalAuthOrigins?.length) return;
+            const popup = window.open('about:blank', '_blank', 'popup,width=520,height=720');
+            if (!popup) {
+              current.current.onError('Allow pop-up windows for this plugin to continue.');
+              return;
+            }
+            popupLeaseId = window.crypto.randomUUID();
+            const latest = current.current;
+            const expiresAt = Date.now() + 120_000;
+            const portCloseListener = (): void => {
+              const lease = authPopupLeases.current.get(popupLeaseId!);
+              if (lease?.port !== activePort) return;
+              window.clearTimeout(lease.expiryTimer);
+              lease.popup.close();
+              authPopupLeases.current.delete(popupLeaseId!);
+            };
+            const expiryTimer = window.setTimeout(() => {
+              const lease = authPopupLeases.current.get(popupLeaseId!);
+              if (lease?.port === activePort) {
+                lease.popup.close();
+                (lease.port as MessagePort).removeEventListener('close', lease.portCloseListener);
+                authPopupLeases.current.delete(popupLeaseId!);
+              }
+            }, 120_000);
+            activePort.addEventListener('close', portCloseListener, { once: true });
+            authPopupLeases.current.set(popupLeaseId, {
+              pluginId: latest.pluginId,
+              entry: latest.entry,
+              viewId: latest.viewId,
+              actionId,
+              port: activePort,
+              popup,
+              expiresAt,
+              expiryTimer,
+              portCloseListener,
+            });
+          }
+          activePort.postMessage({
+            type: 'pico:plugin-ui:action',
+            actionId,
+            ...(value === undefined ? {} : { value }),
+            ...(actionEvent === undefined ? {} : { event: actionEvent }),
+            ...(popupLeaseId ? { popupLeaseId } : {}),
+          });
+        }}
+      />
+    ) : (
+      <p className={uiError ? 'plugin-ui-unavailable' : 'plugin-ui-loading'} role="status">
+        {uiError ?? 'Loading plugin interface…'}
+      </p>
+    );
+
+  if (!hostPopover)
+    return (
+      <>
+        {iframe}
+        <div
+          className={`plugin-ui-host-rendered plugin-ui-host-rendered--${props.viewType}${props.uiSlot ? ` plugin-ui-host-rendered--${props.uiSlot.replaceAll('.', '-')}` : ''}${props.supportsPopover ? ' plugin-ui-host-rendered--popover-content' : ''}`}
+        >
+          {renderedUi}
+        </div>
+      </>
+    );
   return (
     <>
       <button
@@ -705,7 +879,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
             const maxHeight = availablePopoverHeight(rect?.top, rect?.height);
             setToolbarPopover({
               width: toolbarPopoverWidth(),
-              height: Math.max(80, Math.min(toolbarContentHeight.current, maxHeight)),
+              height: maxHeight,
             });
           } else {
             setToolbarPopover(null);
@@ -713,7 +887,6 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
           portRef.current?.postMessage({
             type: 'pico:plugin-ui:toolbar-toggle',
             open: nextOpen,
-            maxHeight: availablePopoverHeight(rect?.top, rect?.height),
           });
         }}
       >
@@ -728,8 +901,8 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
           aria-label={`${props.controlLabel} panel`}
           style={(() => {
             const anchor = anchorPosition ?? { left: -1000, top: -1000, height: 0 };
-            const width = clampPluginPopoverWidth(popover?.width ?? props.preferredWidth, window.innerWidth);
-            const height = popover ? Math.min(popover.height, Math.max(80, window.innerHeight - 24)) : 0;
+            const width = toolbarPopoverWidth();
+            const height = popover ? Math.min(popover.height, Math.max(0, window.innerHeight - 24)) : 0;
             const belowTop = anchor.top + anchor.height + 9;
             const belowSpace = window.innerHeight - belowTop - 12;
             const top = belowSpace >= height ? belowTop : Math.max(12, anchor.top - height - 9);
@@ -737,16 +910,22 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
               left: Math.max(12, Math.min(anchor.left, window.innerWidth - width - 12)),
               top,
               width,
-              height,
-              display: popover ? 'flex' : 'none',
+              height: 'auto',
+              maxHeight: popover ? availablePopoverHeight(anchor.top, anchor.height) : 0,
+              display: popover ? 'block' : 'none',
             };
           })()}
         >
-          {iframe}
+          <div
+            className={`plugin-ui-host-rendered plugin-ui-host-rendered--${props.uiSlot?.replaceAll('.', '-') ?? 'settings-page'}`}
+          >
+            {renderedUi}
+          </div>
         </div>,
         document.body,
         `${props.pluginId}:${props.viewId}`,
       )}
+      {iframe}
     </>
   );
 }

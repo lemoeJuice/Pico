@@ -21,6 +21,23 @@ import type {
   RegisteredModelHandler,
 } from '../runtime/provider-registry.js';
 
+function validExternalAuthOrigins(origins: unknown): origins is string[] {
+  if (!Array.isArray(origins) || origins.length === 0 || origins.length > 8) return false;
+  const seen = new Set<string>();
+  return origins.every((origin) => {
+    if (typeof origin !== 'string') return false;
+    try {
+      const url = new URL(origin);
+      if (url.protocol !== 'https:' || url.origin !== origin || url.username || url.password || seen.has(origin))
+        return false;
+      seen.add(origin);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 export interface CommandContext {
   thread: Thread | null;
   projectId: string | null;
@@ -57,6 +74,8 @@ export interface PluginPageContribution {
   description?: string;
   entry: string;
   group?: string;
+  /** Explicit HTTPS origins authorized for marked external-auth buttons in this page. */
+  externalAuthOrigins?: string[];
 }
 
 export interface PluginHttpRequest {
@@ -624,9 +643,7 @@ export class PluginHost {
               'composer.status',
               'sidebar.panel',
               'tool.result',
-            ].includes(
-              contribution.slot,
-            )
+            ].includes(contribution.slot)
           ) {
             throw new Error(`Unsupported UI semantic slot: ${contribution.slot}`);
           }
@@ -654,6 +671,12 @@ export class PluginHost {
             throw new Error('Provider filters require valid provider IDs in the composer.model slot.');
           }
           if (
+            contribution.externalAuthOrigins !== undefined &&
+            !validExternalAuthOrigins(contribution.externalAuthOrigins)
+          ) {
+            throw new Error('External auth popup origins must be unique HTTPS origins.');
+          }
+          if (
             (contribution.supportsPopover !== undefined && typeof contribution.supportsPopover !== 'boolean') ||
             (contribution.supportsPopover &&
               (!['thread.toolbar', 'composer.model'].includes(contribution.slot) ||
@@ -662,16 +685,13 @@ export class PluginHost {
           ) {
             throw new Error('Popover controls require a Web UI component in thread.toolbar or composer.model.');
           }
-          if (
-            contribution.preferredWidth !== undefined &&
-            (!Number.isFinite(contribution.preferredWidth) || contribution.preferredWidth < 120)
-          ) {
-            throw new Error('Preferred UI width must be a finite value of at least 120 pixels.');
-          }
           this.contributions.push({ ...contribution, pluginId: plugin.id, id: `${plugin.id}:${contribution.id}` });
         },
         registerPage: (page) => {
           if (!/^[a-z0-9][a-z0-9._-]*$/.test(page.id)) throw new Error(`Invalid plugin page ID: ${page.id}`);
+          if (page.externalAuthOrigins !== undefined && !validExternalAuthOrigins(page.externalAuthOrigins)) {
+            throw new Error('External auth popup origins must be unique HTTPS origins.');
+          }
           if (!page.label.trim() || !/^[a-z0-9][a-z0-9._-]*$/.test(page.entry)) {
             throw new Error('Plugin pages require a label and a simple Web UI entry name.');
           }

@@ -1,5 +1,6 @@
 export type PluginUiDiagnosticStage =
   | 'loading'
+  | 'load-timeout'
   | 'document-loaded'
   | 'bridge-ready'
   | 'initializing'
@@ -30,9 +31,6 @@ export type PluginUiDiagnostic = {
   frameResizeObserver?: boolean | null;
   frameMessageChannel?: boolean | null;
   detail?: string;
-  lastResizePx?: number | null;
-  visible?: boolean | null;
-  widthPx?: number | null;
 };
 
 export type PluginUiDiagnosticIdentity = Pick<
@@ -65,9 +63,6 @@ export function reportPluginUiDiagnostic(
       Pick<
         PluginUiDiagnostic,
         | 'detail'
-        | 'lastResizePx'
-        | 'visible'
-        | 'widthPx'
         | 'bridgeResponded'
         | 'initSent'
         | 'initAcknowledged'

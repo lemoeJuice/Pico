@@ -700,7 +700,6 @@ export const rollingContextPlugin: PicoPlugin = {
       entry: 'webui',
       component: 'RollingContextPanel',
       supportsPopover: true,
-      preferredWidth: 640,
     });
   },
 };

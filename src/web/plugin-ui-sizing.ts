@@ -1,4 +1,4 @@
-export function clampPluginPopoverWidth(preferredWidth: number | undefined, viewportWidth: number): number {
+export function clampPluginPopoverWidth(viewportWidth: number): number {
   const available = Math.max(0, viewportWidth - 24);
-  return Math.min(Math.max(120, preferredWidth ?? 360), available);
+  return Math.min(360, available);
 }

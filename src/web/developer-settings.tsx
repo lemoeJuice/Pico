@@ -47,6 +47,8 @@ function diagnosticLabel(stage: PluginUiDiagnostic['stage']): string {
   switch (stage) {
     case 'loading':
       return 'Waiting for iframe load';
+    case 'load-timeout':
+      return 'Iframe load timed out';
     case 'document-loaded':
       return 'Document loaded';
     case 'bridge-ready':
@@ -69,7 +71,7 @@ function diagnosticLabel(stage: PluginUiDiagnostic['stage']): string {
 }
 
 function isDiagnosticWarning(stage: PluginUiDiagnostic['stage']): boolean {
-  return stage === 'error' || stage === 'init-timeout' || stage === 'ready-timeout';
+  return stage === 'error' || stage === 'load-timeout' || stage === 'init-timeout' || stage === 'ready-timeout';
 }
 
 function capabilityLabel(value: boolean | null | undefined): string {
@@ -292,13 +294,6 @@ export function DeveloperSettings({ plugins, catalog, pluginErrors }: DeveloperS
                   </small>
                   <small>
                     Updated {new Date(view.updatedAt).toLocaleTimeString()}
-                    {view.lastResizePx === undefined || view.lastResizePx === null
-                      ? ''
-                      : ` · reported height ${view.lastResizePx}px`}
-                    {view.visible === undefined || view.visible === null
-                      ? ''
-                      : ` · ${view.visible ? 'visible' : 'hidden'}`}
-                    {view.widthPx === undefined || view.widthPx === null ? '' : ` · width ${view.widthPx}px`}
                   </small>
                 </span>
                 <span
