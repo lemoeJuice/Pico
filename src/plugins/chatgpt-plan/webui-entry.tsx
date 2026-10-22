@@ -115,13 +115,11 @@ function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiCl
             .then((result: any) => {
               setStatus({ connected: false, accountLabel: null });
               setModels([]);
-              client
-                .props(settings, context)
-                .onNotice(
-                  result.remoteRevoked
-                    ? 'ChatGPT account disconnected.'
-                    : 'Signed out locally; remote revocation was not confirmed.',
-                );
+              if (result.remoteRevoked) {
+                client.props(settings, context).onNotice('ChatGPT account disconnected.');
+              } else {
+                client.props(settings, context).onError('Signed out locally; remote revocation was not confirmed.');
+              }
             })
             .catch((reason: unknown) => {
               setError(errorText(reason));
