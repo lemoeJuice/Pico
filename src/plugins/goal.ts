@@ -138,7 +138,8 @@ export const goalPlugin: PicoPlugin = {
         ...(goal.completionCriteria ? [`Completion criteria: ${goal.completionCriteria}`] : []),
         ...(goal.status === 'active'
           ? [
-              'Work toward this Goal. Do not claim completion without calling goal_checkpoint with verifiable evidence from this Thread.',
+              'Work toward this Goal continuously. An active goal_checkpoint records progress; it does not finish the work. After recording an active checkpoint, continue with the next concrete action in this Thread until the completion criteria are met or an external blocker requires user input or a pause.',
+              'Use needs_input or paused only when work is genuinely blocked or should wait for the user. Set completed only after the completion criteria are met, and provide verifiable evidence from this Thread when calling goal_checkpoint.',
             ]
           : [
               `Status: ${goal.status}`,
@@ -172,12 +173,17 @@ export const goalPlugin: PicoPlugin = {
       {
         name: 'goal_checkpoint',
         description:
-          'Record meaningful progress or report a blocker for the current user-defined Goal. This cannot edit or clear the Goal.',
+          'Record meaningful progress or report a blocker for the current user-defined Goal. An active checkpoint is non-terminal: continue the Goal with the next concrete action after recording it. Use needs_input or paused only when work must wait. This cannot edit or clear the Goal.',
         parameters: {
           type: 'object',
           properties: {
             progress: { type: 'string', description: 'Concise, concrete progress made since the previous checkpoint.' },
-            status: { type: 'string', enum: ['active', 'needs_input', 'paused', 'completed'] },
+            status: {
+              type: 'string',
+              enum: ['active', 'needs_input', 'paused', 'completed'],
+              description:
+                'Use active to record progress and keep working; use needs_input or paused only when work must wait; use completed only when the Goal criteria are met and verification evidence is available.',
+            },
             blocker: { type: 'string', description: 'What is blocking progress or what input is needed.' },
             verificationExecutionId: {
               type: 'string',
