@@ -1,5 +1,6 @@
 import {
   createContext,
+  memo,
   useCallback,
   useContext,
   useEffect,
@@ -7,6 +8,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type CSSProperties,
   type FormEvent,
   type ReactNode,
@@ -14,6 +16,7 @@ import {
 import type {
   AssistantPayload,
   CanonicalRecord,
+  ContextManagementSettings,
   Execution,
   ExecutorKind,
   MessagePayload,
@@ -38,18 +41,14 @@ import { isNearScrollEnd } from './scroll-follow.js';
 import { threadCanBeInterrupted } from './thread-controls.js';
 import { executorStatusFromProbe } from './executor-status.js';
 import {
-  appendAssistantDraft,
-  appendAssistantPreview,
   assistantStreamsAfterDisconnect,
-  assistantDraftForThread,
   canAppendAssistantDelta,
-  clearAssistantDraft,
   observeAssistantExecutions,
-  type AssistantDrafts,
   type AssistantStreamExecutions,
 } from './assistant-drafts.js';
+import { assistantDraftStore } from './assistant-drafts-store.js';
 import { noticeForThread, withThreadNotice, withoutThreadNotice, type ThreadNotices } from './thread-notices.js';
-import { toolResultForCall, uiContributionsAt } from './ui-contributions.js';
+import { pluginUiContributionKey, toolResultForCall, uiContributionsAt } from './ui-contributions.js';
 import {
   PLUGIN_COMPOSER_CONTROL_HEIGHT_PX,
   type PluginUiContext,
@@ -130,7 +129,15 @@ type PluginInfo = {
     error?: string;
   }>;
   ui: UiContribution[];
-  pages: Array<{ id: string; label: string; description?: string; entry: string; pluginId: string; group?: string }>;
+  pages: Array<{
+    id: string;
+    label: string;
+    description?: string;
+    entry: string;
+    pluginId: string;
+    group?: string;
+    externalAuthOrigins?: string[];
+  }>;
   providers: ModelProviderContribution[];
   pipelines: Array<{ stage: string; pluginId: string; order: number }>;
   errors: string[];
@@ -422,6 +429,7 @@ function PluginContributionView({
   if (pluginProps && item.pluginId && item.entry && item.component) {
     return (
       <PluginWebView
+        key={pluginUiContributionKey(item)}
         pluginId={item.pluginId}
         entry={item.entry}
         viewType="component"
@@ -430,6 +438,7 @@ function PluginContributionView({
         controlLabel={item.label}
         controlClassName={buttonClassName}
         supportsPopover={item.supportsPopover}
+        externalAuthOrigins={item.externalAuthOrigins}
         events={events}
         {...pluginProps}
         isRegisteredPage={isRegisteredPage}
@@ -449,6 +458,10 @@ function PluginContributionView({
   );
 }
 
+function formatTokenCount(tokens: number): string {
+  return tokens < 1_000 ? String(tokens) : `${Math.round(tokens / 1_000)}k`;
+}
+
 export function App({ authRequired = false, onSignOut }: { authRequired?: boolean; onSignOut?(): Promise<void> }) {
   const composerState = useRef<ComposerState | null>(null);
   if (composerState.current === null) composerState.current = readComposerState();
@@ -461,9 +474,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [snapshot, setSnapshot] = useState<ThreadSnapshot | null>(null);
   const [bootstrapping, setBootstrapping] = useState(true);
   const [settings, setSettings] = useState<PublicSettings | null>(null);
+  const [contextManagement, setContextManagement] = useState<ContextManagementSettings | null>(null);
+  const [contextManagementForm, setContextManagementForm] = useState({
+    contextWindowTokens: '272000',
+    compactionThresholdTokens: '256000',
+  });
   const [remoteConnections, setRemoteConnections] = useState<RemoteExecutorConnectionView[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pluginPageSelection, setPluginPageSelection] = useState<{ pluginId: string; pageId: string } | null>(null);
+  const [contextManagerOpen, setContextManagerOpen] = useState(false);
   const [pluginManagerOpen, setPluginManagerOpen] = useState(false);
   const [memoryManagerOpen, setMemoryManagerOpen] = useState(false);
   const [archivedThreadsOpen, setArchivedThreadsOpen] = useState(false);
@@ -504,7 +523,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [draftsByThread, setDraftsByThread] = useState<Record<string, string>>(
     () => composerState.current!.draftsByThread,
   );
-  const [assistantDrafts, setAssistantDrafts] = useState<AssistantDrafts>({});
   const [unavailableModelExecutionIds, setUnavailableModelExecutionIds] = useState<Set<string>>(new Set());
   const [notice, setNotice] = useState('');
   const [threadNotices, setThreadNotices] = useState<ThreadNotices>({});
@@ -558,7 +576,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const snapshotVersions = useRef(new Map<string, number>());
   const pendingMessageIds = useRef<PendingMessageIds>(composerState.current.pendingMessages);
   const pendingSubmissionThreads = useRef(new Set<string>());
-  const assistantDraftsRef = useRef(assistantDrafts);
   const activeModelExecutions = useRef<AssistantStreamExecutions>(new Map());
   const pluginEventSequence = useRef(0);
   const unavailableModelExecutions = useRef<AssistantStreamExecutions>(new Map());
@@ -570,7 +587,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   activeProjectId.current = projectId;
   const activeThreadId = useRef(threadId);
   activeThreadId.current = threadId;
-  assistantDraftsRef.current = assistantDrafts;
   draftRef.current = { threadId, value: draft };
 
   const toggleThinking = useCallback(
@@ -688,6 +704,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     (connection) => connection.id === newThreadRemoteConnectionId,
   );
   const activeSnapshot = snapshotForSelection(snapshot, threadId, projectId);
+  const activeSnapshotThreadId = activeSnapshot?.thread.id;
+  const activeSnapshotLatestSeq = activeSnapshot?.records.at(-1)?.seq;
   const selectedThread =
     activeSnapshot?.thread ??
     threads.find((thread) => thread.id === threadId && thread.projectId === projectId) ??
@@ -757,8 +775,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   };
   const selectedThreadSending = selectedThread ? sendingThreadIds.has(selectedThread.id) : false;
   const activeNotice = noticeForThread(threadId, threadNotices, notice);
-  const assistantDraft = assistantDraftForThread(assistantDrafts, threadId);
-  const assistantPreview = threadId ? assistantDrafts[threadId] : undefined;
   const filteredCommands = useMemo(() => {
     if (!draft.startsWith('/')) return [];
     const token = draft.slice(1).split(/\s/)[0]?.toLowerCase() ?? '';
@@ -953,6 +969,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         Promise.all([
           api<Project[]>('/api/projects'),
           api<PublicSettings>('/api/settings/model'),
+          api<ContextManagementSettings>('/api/settings/context-management'),
           api<Array<{ name: string; description: string }>>('/api/commands'),
           api<PluginInfo>('/api/plugins'),
           api<{ defaultWorkspace: string }>('/api/info'),
@@ -964,9 +981,14 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       .then((bootstrap) => {
         if (!alive || !bootstrap) return;
         setBootstrapping(false);
-        const [projectList, modelSettings, commandList, pluginResult, info, connections] = bootstrap;
+        const [projectList, modelSettings, contextSettings, commandList, pluginResult, info, connections] = bootstrap;
         setProjects(projectList);
         setSettings(modelSettings);
+        setContextManagement(contextSettings);
+        setContextManagementForm({
+          contextWindowTokens: String(contextSettings.contextWindowTokens),
+          compactionThresholdTokens: String(contextSettings.compactionThresholdTokens),
+        });
         setModelForm({ ...modelSettings, apiKey: '' });
         setCommands(commandList);
         setPluginInfo(pluginResult);
@@ -1221,7 +1243,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           if (recordThreadId && record?.kind === 'assistant' && record.id.endsWith(':assistant')) {
             const executionId = record.id.slice(0, -':assistant'.length);
             settleModelExecution(executionId);
-            setAssistantDrafts((current) => clearAssistantDraft(current, recordThreadId, executionId));
+            assistantDraftStore.clear(recordThreadId, executionId);
           }
         } else if (event.type === 'execution.updated') {
           const execution = event.execution as Execution | undefined;
@@ -1274,7 +1296,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           ) {
             return;
           }
-          setAssistantDrafts((current) => appendAssistantDraft(current, draftThreadId, executionId, delta));
+          assistantDraftStore.appendText(draftThreadId, executionId, delta);
         } else if (
           (event.type === 'model.reasoning_summary.delta' || event.type === 'model.tool_call.preview') &&
           typeof event.threadId === 'string' &&
@@ -1292,9 +1314,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             return;
           if (event.type === 'model.reasoning_summary.delta' && typeof event.delta === 'string') {
             const delta = event.delta;
-            setAssistantDrafts((current) =>
-              appendAssistantPreview(current, previewThreadId, executionId, { type: 'reasoning', delta }),
-            );
+            assistantDraftStore.appendPreview(previewThreadId, executionId, { type: 'reasoning', delta });
           } else if (typeof event.index === 'number' && typeof event.argumentsText === 'string') {
             const call = {
               index: event.index,
@@ -1302,9 +1322,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               ...(typeof event.id === 'string' ? { id: event.id } : {}),
               ...(typeof event.name === 'string' ? { name: event.name } : {}),
             };
-            setAssistantDrafts((current) =>
-              appendAssistantPreview(current, previewThreadId, executionId, { type: 'tool', call }),
-            );
+            assistantDraftStore.appendPreview(previewThreadId, executionId, { type: 'tool', call });
           }
         } else if (
           event.type === 'model.draft-ended' &&
@@ -1314,11 +1332,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           const draftThreadId = event.threadId;
           const executionId = event.executionId;
           settleModelExecution(executionId);
-          setAssistantDrafts((current) => clearAssistantDraft(current, draftThreadId, executionId));
+          assistantDraftStore.clear(draftThreadId, executionId);
         } else if (event.type === 'runtime.error') {
           const failedThreadId = typeof event.threadId === 'string' ? event.threadId : null;
           if (failedThreadId) {
-            setAssistantDrafts((current) => clearAssistantDraft(current, failedThreadId));
+            assistantDraftStore.clear(failedThreadId);
           }
           if (failedThreadId === activeThreadId.current && event.source !== 'model-execution') {
             setError(String(event.message ?? 'Runtime error'));
@@ -1343,12 +1361,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           // WebSocket deltas are transient and cannot be replayed after reconnect.
           const unavailable = assistantStreamsAfterDisconnect(
             activeModelExecutions.current,
-            assistantDraftsRef.current,
+            assistantDraftStore.getAll(),
             unavailableModelExecutions.current,
           );
           unavailableModelExecutions.current = unavailable;
           setUnavailableModelExecutionIds(new Set(unavailable.keys()));
-          setAssistantDrafts({});
+          assistantDraftStore.clearAll();
           timer = window.setTimeout(connect, retry);
           retry = Math.min(retry * 1.7, 12_000);
         }
@@ -1371,9 +1389,19 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   }, [threadId]);
 
   useEffect(() => {
+    if (!activeSnapshotThreadId || activeSnapshotLatestSeq === undefined) return;
+    const timer = window.setTimeout(() => {
+      void loadSnapshot(activeSnapshotThreadId).catch((caught: unknown) => {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      });
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [activeSnapshotLatestSeq, activeSnapshotThreadId, loadSnapshot]);
+
+  useEffect(() => {
     const list = listRef.current;
     if (list && followLatest.current) list.scrollTop = list.scrollHeight;
-  }, [threadId, activeSnapshot?.records.length, activeSnapshot?.executions, assistantDraft, assistantPreview]);
+  }, [threadId, activeSnapshot?.records.length, activeSnapshot?.executions]);
 
   const sendMessage = async (content = draft): Promise<void> => {
     const clean = content.trim();
@@ -1766,6 +1794,43 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     }
   };
 
+  const saveContextManagementSettings = async (event: FormEvent): Promise<void> => {
+    event.preventDefault();
+    const contextWindowTokens = Number(contextManagementForm.contextWindowTokens);
+    const compactionThresholdTokens = Number(contextManagementForm.compactionThresholdTokens);
+    if (
+      !Number.isSafeInteger(contextWindowTokens) ||
+      contextWindowTokens <= 0 ||
+      !Number.isSafeInteger(compactionThresholdTokens) ||
+      compactionThresholdTokens <= 0
+    ) {
+      setError('Enter positive whole numbers for both token limits.');
+      return;
+    }
+    if (compactionThresholdTokens >= contextWindowTokens) {
+      setError('The compaction threshold must be lower than the context window.');
+      return;
+    }
+    setSettingsSaving(true);
+    setError('');
+    try {
+      const saved = await api<ContextManagementSettings>('/api/settings/context-management', {
+        method: 'PUT',
+        body: JSON.stringify({ contextWindowTokens, compactionThresholdTokens }),
+      });
+      setContextManagement(saved);
+      setContextManagementForm({
+        contextWindowTokens: String(saved.contextWindowTokens),
+        compactionThresholdTokens: String(saved.compactionThresholdTokens),
+      });
+      setNotice('Context management settings saved on this Pico Runtime.');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
   const updateModelSettingsFromPlugin: PluginUiProps['updateModelSettings'] = async (update, targetThreadId) => {
     if (targetThreadId) {
       const current = await api<ThreadModelSelection>(
@@ -1931,8 +1996,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     : undefined;
   const memoryPages = pluginInfo?.pages.filter((page) => page.group === 'memory') ?? [];
   const selectedMemoryPage =
-    memoryPages.find((page) => page.pluginId === pluginPageSelection?.pluginId && page.id === pluginPageSelection.pageId) ??
-    memoryPages[0];
+    memoryPages.find(
+      (page) => page.pluginId === pluginPageSelection?.pluginId && page.id === pluginPageSelection.pageId,
+    ) ?? memoryPages[0];
   const isRegisteredPluginPage = (pluginId: string, pageId: string): boolean =>
     Boolean(pluginInfo?.pages.some((page) => page.pluginId === pluginId && page.id === pageId));
 
@@ -2235,7 +2301,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             <section className="plugin-sidebar-panels" aria-label="Plugin panels">
               <span className="eyebrow">PLUGIN PANELS</span>
               {sidebarPanels.map((item) => (
-                <div className="plugin-sidebar-panel" key={item.id}>
+                <div className="plugin-sidebar-panel" key={pluginUiContributionKey(item)}>
                   {item.entry && item.component ? (
                     <PluginContributionView
                       item={item}
@@ -2532,7 +2598,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 </button>
                 {toolbarContributions.map((item) => (
                   <PluginContributionView
-                    key={item.id}
+                    key={pluginUiContributionKey(item)}
                     item={item}
                     pluginProps={pluginUiContext}
                     events={pluginEvents}
@@ -2599,7 +2665,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                           renderTool={renderToolView}
                           onRetryModelExecution={retryModelExecution}
                           retryDisabled={currentState === 'running' || currentState === 'pausing'}
-                          draftExecutionId={assistantDrafts[selectedThread.id]?.executionId}
                         />
                       ) : item.record.kind === 'message' ? (
                         <MessageBubble
@@ -2627,49 +2692,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                         />
                       ),
                     )}
-                    {assistantPreview ? (
-                      <div className="assistant-message draft-message">
-                        <div className="assistant-avatar">
-                          <Sparkles size={13} aria-hidden="true" />
-                        </div>
-                        <div className="message-body">
-                          <div className="message-author">
-                            Pico <span className="typing-label">writing</span>
-                          </div>
-                          {assistantPreview.reasoningSummary ? (
-                            <Reasoning text={assistantPreview.reasoningSummary} />
-                          ) : null}
-                          {assistantDraft ? <Markdown>{assistantDraft}</Markdown> : null}
-                          {assistantPreview.tools?.map((call) => (
-                            <ToolCard
-                              key={call.id ?? `${assistantPreview.executionId}:${call.index}`}
-                              call={{
-                                id: call.id ?? `preview:${assistantPreview.executionId}:${call.index}`,
-                                name: call.name ?? 'Tool call',
-                                arguments: {},
-                              }}
-                              execution={undefined}
-                              result={undefined}
-                              preview={{ argumentsText: call.argumentsText }}
-                            />
-                          ))}
-                          {!assistantPreview.tools?.some((call) => call.name === 'shell') ? (
-                            <span className="cursor-block" />
-                          ) : null}
-                        </div>
-                      </div>
-                    ) : null}
-                    {renderedRecords.length === 0 && !assistantPreview ? (
-                      <div className="empty-thread">
-                        <div className="empty-orbit">
-                          <Sparkles size={19} aria-hidden="true" />
-                        </div>
-                        <h2>A fresh Thread</h2>
-                        <p>
-                          Send a message to begin. This Thread is bound to the {executorLabel(selectedThread)}{' '}
-                          environment.
-                        </p>
-                      </div>
+                    <AssistantDraftMessage threadId={selectedThread.id} />
+                    {renderedRecords.length === 0 ? (
+                      <EmptyThreadPlaceholder
+                        threadId={selectedThread.id}
+                        executorName={executorLabel(selectedThread)}
+                      />
                     ) : null}
                   </div>
                 </ThinkingDisclosureContext.Provider>
@@ -2801,7 +2829,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                         {composerModelContributions.map((item) => {
                           return item.pluginId && item.entry && item.component ? (
                             <PluginWebView
-                              key={item.id}
+                              key={pluginUiContributionKey(item)}
                               pluginId={item.pluginId}
                               entry={item.entry}
                               viewType="component"
@@ -2810,14 +2838,14 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                               controlLabel={item.label}
                               controlClassName="composer-plugin-action"
                               supportsPopover={item.supportsPopover}
-        preferredWidth={item.preferredWidth}
+                              externalAuthOrigins={item.externalAuthOrigins}
                               events={pluginEvents}
                               {...pluginUiContext}
                               isRegisteredPage={isRegisteredPluginPage}
                               runCommand={runPluginCommand}
                             />
                           ) : (
-                            <span className="field-note" key={item.id}>
+                            <span className="field-note" key={pluginUiContributionKey(item)}>
                               {item.label} requires a plugin Web UI entry.
                             </span>
                           );
@@ -2827,7 +2855,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     <div className="composer-footer-actions">
                       {composerActions.map((item) => (
                         <PluginContributionView
-                          key={item.id}
+                          key={pluginUiContributionKey(item)}
                           item={item}
                           pluginProps={pluginUiContext}
                           events={pluginEvents}
@@ -2868,31 +2896,50 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 </div>
               </div>
               <div className="composer-caption composer-meta">
-                {pluginUiContext && composerStatusContributions.map((item) =>
-                  item.pluginId && item.entry && item.component ? (
-                    <PluginWebView
-                      key={item.id}
-                      pluginId={item.pluginId}
-                      entry={item.entry}
-                      viewType="component"
-                      viewId={item.component}
-                      uiSlot={item.slot}
-                      events={pluginEvents}
-                      {...pluginUiContext}
-                      isRegisteredPage={isRegisteredPluginPage}
-                      runCommand={runPluginCommand}
-                    />
-                  ) : null,
-                )}
-                {activeSnapshot?.thread.id === selectedThread.id && activeSnapshot.modelSelection.model ? (
-                  <span className="composer-model-name">{activeSnapshot.modelSelection.model}</span>
-                ) : settings?.model ? (
-                  <span className="composer-model-name">{settings.model}</span>
-                ) : (
-                  <button className="setup-caption composer-model-name" onClick={() => setSettingsOpen(true)}>
-                    Choose a model <ArrowRight size={12} aria-hidden="true" />
-                  </button>
-                )}
+                {pluginUiContext &&
+                  composerStatusContributions.map((item) =>
+                    item.pluginId && item.entry && item.component ? (
+                      <PluginWebView
+                        key={pluginUiContributionKey(item)}
+                        pluginId={item.pluginId}
+                        entry={item.entry}
+                        viewType="component"
+                        viewId={item.component}
+                        uiSlot={item.slot}
+                        events={pluginEvents}
+                        {...pluginUiContext}
+                        isRegisteredPage={isRegisteredPluginPage}
+                        runCommand={runPluginCommand}
+                      />
+                    ) : null,
+                  )}
+                <div className="composer-status-info">
+                  {activeSnapshot?.thread.id === selectedThread.id && activeSnapshot.modelSelection.model ? (
+                    <span className="composer-model-name">{activeSnapshot.modelSelection.model}</span>
+                  ) : settings?.model ? (
+                    <span className="composer-model-name">{settings.model}</span>
+                  ) : (
+                    <button className="setup-caption composer-model-name" onClick={() => setSettingsOpen(true)}>
+                      Choose a model <ArrowRight size={12} aria-hidden="true" />
+                    </button>
+                  )}
+                  {activeSnapshot?.thread.id === selectedThread.id && contextManagement ? (
+                    <span
+                      className="composer-context-usage"
+                      title={
+                        activeSnapshot.contextUsage.source === 'provider'
+                          ? 'Provider-reported input tokens for the latest model request.'
+                          : activeSnapshot.contextUsage.source === 'provider+estimate'
+                            ? 'Provider-reported input tokens for the latest model request plus an estimate of newer conversation content. System prompt and tool schemas may not be included.'
+                            : 'Estimated from conversation content because provider input usage is unavailable. System prompt and tool schemas may not be included.'
+                      }
+                      aria-label={`Context usage ${formatTokenCount(activeSnapshot.contextUsage.inputTokens)} of ${formatTokenCount(contextManagement.contextWindowTokens)} tokens`}
+                    >
+                      {formatTokenCount(activeSnapshot.contextUsage.inputTokens)}/
+                      {formatTokenCount(contextManagement.contextWindowTokens)}
+                    </span>
+                  ) : null}
+                </div>
               </div>
             </div>
           </>
@@ -2982,13 +3029,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   ? 'Memory'
                   : pluginManagerOpen
                     ? 'Plugins'
-                    : pluginPageSelection
-                      ? 'Plugin settings'
-                      : 'Model connections'
+                    : contextManagerOpen
+                      ? 'Context management'
+                      : pluginPageSelection
+                        ? 'Plugin settings'
+                        : 'Model connections'
           }
           onClose={() => {
             setSettingsOpen(false);
             setPluginPageSelection(null);
+            setContextManagerOpen(false);
             setPluginManagerOpen(false);
             setMemoryManagerOpen(false);
             setArchivedThreadsOpen(false);
@@ -3002,9 +3052,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               <>
                 <button
                   type="button"
-                  className={`button ${!pluginPageSelection && !pluginManagerOpen && !memoryManagerOpen && !archivedThreadsOpen && !developerMenuOpen ? 'button-soft' : 'button-quiet'}`}
+                  className={`button ${!pluginPageSelection && !contextManagerOpen && !pluginManagerOpen && !memoryManagerOpen && !archivedThreadsOpen && !developerMenuOpen ? 'button-soft' : 'button-quiet'}`}
                   onClick={() => {
                     setPluginPageSelection(null);
+                    setContextManagerOpen(false);
                     setPluginManagerOpen(false);
                     setMemoryManagerOpen(false);
                     setArchivedThreadsOpen(false);
@@ -3015,9 +3066,24 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 </button>
                 <button
                   type="button"
+                  className={`button ${contextManagerOpen ? 'button-soft' : 'button-quiet'}`}
+                  onClick={() => {
+                    setPluginPageSelection(null);
+                    setContextManagerOpen(true);
+                    setPluginManagerOpen(false);
+                    setMemoryManagerOpen(false);
+                    setArchivedThreadsOpen(false);
+                    setDeveloperMenuOpen(false);
+                  }}
+                >
+                  Context management
+                </button>
+                <button
+                  type="button"
                   className={`button ${pluginManagerOpen ? 'button-soft' : 'button-quiet'}`}
                   onClick={() => {
                     setPluginPageSelection(null);
+                    setContextManagerOpen(false);
                     setPluginManagerOpen(true);
                     setMemoryManagerOpen(false);
                     setArchivedThreadsOpen(false);
@@ -3033,6 +3099,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     onClick={() => {
                       setPluginManagerOpen(false);
                       setPluginPageSelection(null);
+                      setContextManagerOpen(false);
                       setMemoryManagerOpen(true);
                       setArchivedThreadsOpen(false);
                       setDeveloperMenuOpen(false);
@@ -3047,6 +3114,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   onClick={() => {
                     setPluginManagerOpen(false);
                     setPluginPageSelection(null);
+                    setContextManagerOpen(false);
                     setMemoryManagerOpen(false);
                     setArchivedThreadsOpen(true);
                     setDeveloperMenuOpen(false);
@@ -3059,10 +3127,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   .map((page) => (
                     <button
                       type="button"
-                      className={`button ${!pluginManagerOpen && !memoryManagerOpen && !archivedThreadsOpen && !developerMenuOpen && pluginPageSelection?.pluginId === page.pluginId && pluginPageSelection.pageId === page.id ? 'button-soft' : 'button-quiet'}`}
+                      className={`button ${!contextManagerOpen && !pluginManagerOpen && !memoryManagerOpen && !archivedThreadsOpen && !developerMenuOpen && pluginPageSelection?.pluginId === page.pluginId && pluginPageSelection.pageId === page.id ? 'button-soft' : 'button-quiet'}`}
                       key={`${page.pluginId}:${page.id}`}
                       onClick={() => {
                         setPluginManagerOpen(false);
+                        setContextManagerOpen(false);
                         setMemoryManagerOpen(false);
                         setArchivedThreadsOpen(false);
                         setDeveloperMenuOpen(false);
@@ -3080,6 +3149,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               className={`button ${developerMenuOpen ? 'button-soft' : 'button-quiet'}`}
               onClick={() => {
                 setPluginPageSelection(null);
+                setContextManagerOpen(false);
                 setPluginManagerOpen(false);
                 setMemoryManagerOpen(false);
                 setArchivedThreadsOpen(false);
@@ -3147,6 +3217,51 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 </div>
               )}
             </section>
+          ) : contextManagerOpen ? (
+            <form
+              className="form-stack context-management-form"
+              onSubmit={(event) => void saveContextManagementSettings(event)}
+            >
+              <p className="form-intro">
+                Pico will compact Runtime Threads before a model request when their context reaches the threshold.
+              </p>
+              <label>
+                Context window (tokens)
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  required
+                  value={contextManagementForm.contextWindowTokens}
+                  onChange={(event) =>
+                    setContextManagementForm((form) => ({ ...form, contextWindowTokens: event.target.value }))
+                  }
+                />
+              </label>
+              <label>
+                Compaction threshold (tokens)
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  required
+                  value={contextManagementForm.compactionThresholdTokens}
+                  onChange={(event) =>
+                    setContextManagementForm((form) => ({ ...form, compactionThresholdTokens: event.target.value }))
+                  }
+                />
+              </label>
+              <p className="field-note">
+                Defaults are 272,000 and 256,000 tokens. When the provider does not report input usage, Pico estimates
+                from conversation content; this estimate is approximate.
+              </p>
+              <div className="form-actions">
+                <span />
+                <button className="button button-primary" disabled={settingsSaving || !contextManagement}>
+                  {settingsSaving ? 'Saving…' : 'Save settings'}
+                </button>
+              </div>
+            </form>
           ) : pluginManagerOpen ? (
             <section className="plugin-settings-page plugin-manager" aria-label="Plugin management">
               <p className="form-intro">
@@ -3196,6 +3311,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   entry={selectedMemoryPage.entry}
                   viewType="page"
                   viewId={selectedMemoryPage.id}
+                  externalAuthOrigins={selectedMemoryPage.externalAuthOrigins}
                   {...pluginUiContext}
                   isRegisteredPage={isRegisteredPluginPage}
                   runCommand={runPluginCommand}
@@ -3213,6 +3329,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   entry={selectedPluginPage.entry}
                   viewType="page"
                   viewId={selectedPluginPage.id}
+                  externalAuthOrigins={selectedPluginPage.externalAuthOrigins}
                   {...pluginUiContext}
                   isRegisteredPage={isRegisteredPluginPage}
                   runCommand={runPluginCommand}
@@ -3720,6 +3837,122 @@ function MessageBubble({
   );
 }
 
+function useAssistantDraftContent(threadId: string) {
+  const subscribe = useCallback(
+    (listener: () => void) => assistantDraftStore.subscribeContent(threadId, listener),
+    [threadId],
+  );
+  const getSnapshot = useCallback(() => assistantDraftStore.getContent(threadId), [threadId]);
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+function useAssistantExecutionId(threadId: string) {
+  const subscribe = useCallback(
+    (listener: () => void) => assistantDraftStore.subscribeExecution(threadId, listener),
+    [threadId],
+  );
+  const getSnapshot = useCallback(() => assistantDraftStore.getExecutionId(threadId), [threadId]);
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+function AssistantDraftMessage({ threadId }: { threadId: string }) {
+  const draft = useAssistantDraftContent(threadId);
+  if (!draft) return null;
+  return (
+    <div className="assistant-message draft-message">
+      <div className="assistant-avatar">
+        <Sparkles size={13} aria-hidden="true" />
+      </div>
+      <div className="message-body">
+        <div className="message-author">
+          Pico <span className="typing-label">writing</span>
+        </div>
+        {draft.reasoningSummary ? <Reasoning text={draft.reasoningSummary} /> : null}
+        {draft.text ? <Markdown>{draft.text}</Markdown> : null}
+        <AssistantToolPreviewSection threadId={threadId} executionId={draft.executionId} />
+      </div>
+    </div>
+  );
+}
+
+const AssistantToolPreviewSection = memo(function AssistantToolPreviewSection({
+  threadId,
+  executionId,
+}: {
+  threadId: string;
+  executionId: string;
+}) {
+  const subscribe = useCallback(
+    (listener: () => void) => assistantDraftStore.subscribeToolSlots(threadId, executionId, listener),
+    [executionId, threadId],
+  );
+  const getSnapshot = useCallback(
+    () => assistantDraftStore.getToolSlots(threadId, executionId),
+    [executionId, threadId],
+  );
+  const slots = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  return (
+    <>
+      {slots.map((slot) => (
+        <AssistantToolPreviewCard
+          key={`${executionId}:${slot.index}`}
+          threadId={threadId}
+          executionId={executionId}
+          index={slot.index}
+        />
+      ))}
+      {!slots.some((slot) => slot.name === 'shell') ? <span className="cursor-block" /> : null}
+    </>
+  );
+});
+
+const AssistantToolPreviewCard = memo(function AssistantToolPreviewCard({
+  threadId,
+  executionId,
+  index,
+}: {
+  threadId: string;
+  executionId: string;
+  index: number;
+}) {
+  const subscribe = useCallback(
+    (listener: () => void) => assistantDraftStore.subscribeToolPreview(threadId, executionId, index, listener),
+    [executionId, index, threadId],
+  );
+  const getSnapshot = useCallback(
+    () => assistantDraftStore.getToolPreview(threadId, executionId, index),
+    [executionId, index, threadId],
+  );
+  const call = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  if (!call) return null;
+  return (
+    <ToolCard
+      call={{
+        id: call.id ?? `preview:${executionId}:${call.index}`,
+        name: call.name ?? 'Tool call',
+        arguments: {},
+      }}
+      execution={undefined}
+      result={undefined}
+      preview={{ argumentsText: call.argumentsText }}
+    />
+  );
+});
+
+function EmptyThreadPlaceholder({ threadId, executorName }: { threadId: string; executorName: string }) {
+  const executionId = useAssistantExecutionId(threadId);
+  if (executionId) return null;
+  return (
+    <div className="empty-thread">
+      <div className="empty-orbit">
+        <Sparkles size={19} aria-hidden="true" />
+      </div>
+      <h2>A fresh Thread</h2>
+      <p>Send a message to begin. This Thread is bound to the {executorName} environment.</p>
+    </div>
+  );
+}
+
 function ModelExecutionBranchGroup({
   group,
   threadId,
@@ -3729,9 +3962,7 @@ function ModelExecutionBranchGroup({
   renderTool,
   onRetryModelExecution,
   retryDisabled,
-  draftExecutionId,
 }: {
-  draftExecutionId?: string | undefined;
   group: ModelExecutionGroup;
   threadId: string;
   unavailableModelExecutionIds: ReadonlySet<string>;
@@ -3741,6 +3972,7 @@ function ModelExecutionBranchGroup({
   onRetryModelExecution(threadId: string, executionId: string): Promise<Execution>;
   retryDisabled: boolean;
 }) {
+  const draftExecutionId = useAssistantExecutionId(threadId);
   const [attemptSelection, setAttemptSelection] = useState<{ id: string; latestId: string } | null>(null);
   const [retryingExecutionId, setRetryingExecutionId] = useState<string | null>(null);
   const [retryError, setRetryError] = useState('');
@@ -3917,8 +4149,8 @@ function ModelInputDisclosure({
         <ChevronRight className="detail-chevron projection-chevron" size={13} aria-hidden="true" /> Model input
       </summary>
       <p className="projection-note">
-        Prompt structure, lengths, and instruction/tool fingerprints are shown without message, tool, or image content.
-        Provider request metadata is included for troubleshooting.
+        The recorded text-bearing prompt and provider request metadata are shown for inspection and compaction tooling.
+        Inline image bytes and opaque provider reasoning replay data are summarized or omitted.
       </p>
       {modelInputsLoading ? <p className="projection-state">Loading model input…</p> : null}
       {modelInputsError ? <p className="projection-error">{modelInputsError}</p> : null}
@@ -3982,7 +4214,21 @@ function ModelInputDisclosure({
               </pre>
             </details>
           ))}
-          <pre className="projection-view">{toJson(attempt.promptSummary)}</pre>
+          {!attempt.prompt ? (
+            <p className="projection-note">
+              The full prompt was not retained for this historical attempt; showing its summary.
+            </p>
+          ) : null}
+          <pre className="projection-view">{toJson(attempt.prompt ?? attempt.promptSummary)}</pre>
+          {attempt.prompt ? (
+            <details className="conversation-detail-row projection-attempt">
+              <summary>
+                <ChevronRight className="detail-chevron projection-chevron" size={13} aria-hidden="true" /> Prompt
+                diagnostics
+              </summary>
+              <pre className="projection-view">{toJson(attempt.promptSummary)}</pre>
+            </details>
+          ) : null}
         </details>
       ))}
     </details>
