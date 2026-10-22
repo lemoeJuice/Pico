@@ -51,6 +51,7 @@ export interface CommandResult {
   text?: string;
   openThreadId?: string;
   severity?: 'notice' | 'error';
+  presentation?: 'timeline';
 }
 
 export interface PluginCommand {

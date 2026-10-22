@@ -85,6 +85,7 @@ import {
   Folder,
   FolderOpen,
   Info,
+  Layers,
   LoaderCircle,
   LogOut,
   Menu,
@@ -228,6 +229,24 @@ function toJson(value: unknown): string {
 
 function recordPayload<T>(record: CanonicalRecord): T {
   return record.payload as unknown as T;
+}
+
+type RuntimeCompactionPayload = { throughSeq: number; summary: string };
+
+function runtimeCompactionPayload(record: CanonicalRecord): RuntimeCompactionPayload | null {
+  if (record.kind !== 'plugin') return null;
+  const payload = recordPayload<Record<string, unknown>>(record);
+  if (
+    payload.pluginId !== 'pico.runtime' ||
+    payload.action !== 'context-compacted' ||
+    payload.version !== 1 ||
+    !Number.isSafeInteger(payload.throughSeq) ||
+    typeof payload.summary !== 'string' ||
+    !payload.summary.trim()
+  ) {
+    return null;
+  }
+  return { throughSeq: payload.throughSeq as number, summary: payload.summary };
 }
 
 function modelExecutionModelId(execution: Execution): string | null {
@@ -525,6 +544,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [executorUpdateError, setExecutorUpdateError] = useState('');
   const [socketConnected, setSocketConnected] = useState(false);
   const [sendingThreadIds, setSendingThreadIds] = useState<Set<string>>(new Set());
+  const [compactingThreadIds, setCompactingThreadIds] = useState<Set<string>>(() => new Set());
   const [draftsByThread, setDraftsByThread] = useState<Record<string, string>>(
     () => composerState.current!.draftsByThread,
   );
@@ -780,6 +800,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     scroll.scrollTop = (thumbTop / maxThumbTop) * maxScroll;
   };
   const selectedThreadSending = selectedThread ? sendingThreadIds.has(selectedThread.id) : false;
+  const selectedThreadCompacting = selectedThread ? compactingThreadIds.has(selectedThread.id) : false;
   const activeThreadNotice = threadId ? (threadNotices[threadId] ?? '') : '';
   const activeThreadNoticeSeverity = threadId ? (threadNoticeSeverities[threadId] ?? 'notice') : 'notice';
   const activeNotice =
@@ -1363,6 +1384,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             withThreadNotice(current, event.threadId as string, String(event.message ?? 'Runtime notice')),
           );
           setThreadNoticeSeverities((current) => ({ ...current, [event.threadId as string]: 'notice' }));
+        } else if (event.type === 'runtime.compaction' && typeof event.threadId === 'string') {
+          const targetThreadId = event.threadId;
+          setCompactingThreadIds((current) => {
+            const started = event.status === 'started';
+            if (current.has(targetThreadId) === started) return current;
+            const next = new Set(current);
+            if (started) next.add(targetThreadId);
+            else next.delete(targetThreadId);
+            return next;
+          });
         } else if (event.type === 'settings.updated') {
           const value = event.settings as PublicSettings;
           setSettings(value);
@@ -1372,6 +1403,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       socket.onclose = () => {
         if (closed) return;
         setSocketConnected(false);
+        setCompactingThreadIds(new Set());
         void isSessionExpired().then((expired) => {
           if (expired) window.dispatchEvent(new Event('pico:auth-expired'));
         });
@@ -1419,7 +1451,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   useEffect(() => {
     const list = listRef.current;
     if (list && followLatest.current) list.scrollTop = list.scrollHeight;
-  }, [threadId, activeSnapshot?.records.length, activeSnapshot?.executions]);
+  }, [threadId, activeSnapshot?.records.length, activeSnapshot?.executions, selectedThreadCompacting]);
 
   const sendMessage = async (content = draft): Promise<void> => {
     const clean = content.trim();
@@ -1437,11 +1469,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       const result = await api<{
         accepted: boolean;
         duplicate?: boolean;
-        command?: { text?: string; openThreadId?: string; severity?: 'notice' | 'error' };
+        command?: {
+          text?: string;
+          openThreadId?: string;
+          severity?: 'notice' | 'error';
+          presentation?: 'timeline';
+        };
       }>(`/api/threads/${sentThreadId}/messages`, messageSubmissionRequestInit(id, clean));
       acceptMessage(sentThreadId, id, clean);
       const commandText = result.command?.text;
-      if (commandText) {
+      if (commandText && result.command?.presentation !== 'timeline') {
         const severity = result.command?.severity ?? 'notice';
         setThreadNotices((current) => withThreadNotice(current, sentThreadId, commandText));
         setThreadNoticeSeverities((current) => ({ ...current, [sentThreadId]: severity }));
@@ -2237,7 +2274,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     );
   };
   const renderedRecords = records.filter(
-    (record) => record.kind === 'message' || (record.kind === 'assistant' && !groupedAssistantRecordIds.has(record.id)),
+    (record) =>
+      record.kind === 'message' ||
+      (record.kind === 'assistant' && !groupedAssistantRecordIds.has(record.id)) ||
+      runtimeCompactionPayload(record) !== null,
   );
   const timeline = conversationTimeline(renderedRecords, executionGroups);
   const currentState = selectedThread?.state ?? 'idle';
@@ -2748,7 +2788,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                           onRetryModelExecution={retryModelExecution}
                           retryDisabled={currentState === 'running' || currentState === 'pausing'}
                         />
-                      ) : (
+                      ) : item.record.kind === 'assistant' ? (
                         <AssistantBubble
                           key={item.record.id}
                           record={item.record}
@@ -2757,8 +2797,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                           threadId={selectedThread.id}
                           renderTool={renderToolView}
                         />
+                      ) : (
+                        <ContextCompactionResultCard key={item.record.id} record={item.record} />
                       ),
                     )}
+                    {selectedThreadCompacting ? <ContextCompactionProgressCard /> : null}
                     <AssistantDraftMessage threadId={selectedThread.id} />
                     {renderedRecords.length === 0 ? (
                       <EmptyThreadPlaceholder
@@ -4561,5 +4604,51 @@ function AssistantBubble({
         ) : null}
       </div>
     </div>
+  );
+}
+
+function ContextCompactionProgressCard() {
+  return (
+    <div className="context-compaction-card context-compaction-card--progress" role="status" aria-live="polite">
+      <div className="context-compaction-icon" aria-hidden="true">
+        <i className="tiny-spinner" />
+      </div>
+      <div className="context-compaction-content">
+        <strong className="context-compaction-title">Summarizing earlier context…</strong>
+        <p className="context-compaction-copy">
+          Pico is condensing earlier context. Your original messages remain in this Thread.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function ContextCompactionResultCard({ record }: { record: CanonicalRecord }) {
+  const compacted = runtimeCompactionPayload(record);
+  if (!compacted) return null;
+
+  return (
+    <aside className="context-compaction-card" aria-label="Context compacted">
+      <div className="context-compaction-icon" aria-hidden="true">
+        <Layers size={15} />
+      </div>
+      <div className="context-compaction-content">
+        <div className="context-compaction-heading">
+          <strong className="context-compaction-title">Earlier context summarized</strong>
+          <time className="context-compaction-time" dateTime={record.createdAt}>
+            {new Date(record.createdAt).toLocaleTimeString()}
+          </time>
+        </div>
+        <p className="context-compaction-copy">
+          Pico will use this summary for future model input. The original messages remain in this Thread history.
+        </p>
+        <details className="context-compaction-details">
+          <summary>View summary used by Pico</summary>
+          <div className="context-compaction-summary">
+            <Markdown>{compacted.summary}</Markdown>
+          </div>
+        </details>
+      </div>
+    </aside>
   );
 }

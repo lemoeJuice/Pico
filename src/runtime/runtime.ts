@@ -2898,35 +2898,47 @@ export class PicoRuntime {
         : latestCall && (latestCall.status !== 'completed' || !latestIsUsable)
           ? `${baseCallKey}:retry:${priorCalls.length}`
           : baseCallKey;
-    const call = await this.completePluginModelCall('pico.runtime', {
-      threadId: thread.id,
-      projectId: thread.projectId,
-      purpose: 'runtime-compaction-summary',
-      idempotencyKey,
-      prompt,
-      requestParameters: { temperature: 0, fields: {} },
-    });
-    const summary = call.response.content.trim();
-    if (!summary || summary.length > RUNTIME_COMPACTION_MAX_SUMMARY_CHARS || call.response.toolCalls.length > 0) {
-      return {
-        text: `The model did not return a usable compaction summary. No history was changed; retry /compact after checking the selected model.`,
-        severity: 'error',
-      };
-    }
+    this.publish({ type: 'runtime.compaction', threadId: thread.id, status: 'started' });
+    let compactionSaved = false;
+    try {
+      const call = await this.completePluginModelCall('pico.runtime', {
+        threadId: thread.id,
+        projectId: thread.projectId,
+        purpose: 'runtime-compaction-summary',
+        idempotencyKey,
+        prompt,
+        requestParameters: { temperature: 0, fields: {} },
+      });
+      const summary = call.response.content.trim();
+      if (!summary || summary.length > RUNTIME_COMPACTION_MAX_SUMMARY_CHARS || call.response.toolCalls.length > 0) {
+        return {
+          text: `The model did not return a usable compaction summary. No history was changed; retry /compact after checking the selected model.`,
+          severity: 'error',
+        };
+      }
 
-    this.store.appendCanonical(thread.id, `pico:runtime-compaction:${sourceHash}`, 'plugin', {
-      pluginId: 'pico.runtime',
-      action: 'context-compacted',
-      version: 1,
-      throughSeq,
-      sourceRecordIds: sourceRecords.map((record) => record.id),
-      sourceHash,
-      summary,
-      model: call.model,
-    });
-    return {
-      text: `Compacted ${summarizedBlocks.length} completed model invocation(s) through Canonical seq ${throughSeq}. Canonical History is preserved, and the latest ${recent.length} invocation(s) remain verbatim (target: ${keepRecentTokens.toLocaleString()} tokens).`,
-    };
+      this.store.appendCanonical(thread.id, `pico:runtime-compaction:${sourceHash}`, 'plugin', {
+        pluginId: 'pico.runtime',
+        action: 'context-compacted',
+        version: 1,
+        throughSeq,
+        sourceRecordIds: sourceRecords.map((record) => record.id),
+        sourceHash,
+        summary,
+        model: call.model,
+      });
+      compactionSaved = true;
+      return {
+        text: `Compacted ${summarizedBlocks.length} completed model invocation(s) through Canonical seq ${throughSeq}. Canonical History is preserved, and the latest ${recent.length} invocation(s) remain verbatim (target: ${keepRecentTokens.toLocaleString()} tokens).`,
+        presentation: 'timeline',
+      };
+    } finally {
+      this.publish({
+        type: 'runtime.compaction',
+        threadId: thread.id,
+        status: compactionSaved ? 'completed' : 'failed',
+      });
+    }
   }
 
   private async toolSurfaceFor(thread: Thread): Promise<{
