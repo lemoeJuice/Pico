@@ -13,6 +13,7 @@
   let report = null;
   let error = '';
   let busy = false;
+  let savingRate = false;
   let composer = false;
   let catalog = { projects: [], threads: [], providerModels: [], purposes: [] };
   let filters = Object.fromEntries(
@@ -397,7 +398,7 @@
           }),
           input('Currency', rateDraft.currency, 'rate.currency', 'text', 'e.g. USD', { maxLength: 8 }),
           fieldButton(
-            busy ? 'Saving rate…' : 'Save rate',
+            savingRate ? 'Saving rate…' : 'Save rate',
             'save-rate',
             busy ||
               !rateDraft.provider ||
@@ -416,16 +417,44 @@
       nodes.push({
         type: 'group',
         layout: 'stack-compact',
-        children: rates.map((rate) => ({
-          type: 'group',
-          layout: 'spread',
-          children: [
-            paragraph(
-              `${rate.provider} / ${rate.model} · ${rate.currency} ${rate.inputPerMillion}/${rate.outputPerMillion} per 1M`,
-            ),
-            button('Remove', `delete-rate:${rate.id}`, busy, 'danger'),
-          ],
-        })),
+        children: rates.map((rate) => {
+          const price = (value) => `${rate.currency} ${value}`;
+          const priceLine = (label, value) => ({
+            type: 'group',
+            layout: 'spread',
+            children: [
+              { type: 'text', text: label },
+              { type: 'text', text: value == null ? '—' : `${price(value)} / 1M` },
+            ],
+          });
+          return {
+            type: 'card',
+            children: [
+              {
+                type: 'group',
+                layout: 'spread',
+                children: [
+                  {
+                    type: 'group',
+                    layout: 'stack-compact',
+                    children: [{ type: 'heading', level: 4, text: `${rate.provider} / ${rate.model}` }],
+                  },
+                  button('Remove', `delete-rate:${rate.id}`, busy, 'danger'),
+                ],
+              },
+              {
+                type: 'group',
+                layout: 'stack-compact',
+                children: [
+                  priceLine('Input', rate.inputPerMillion),
+                  priceLine('Output', rate.outputPerMillion),
+                  priceLine('Cache read', rate.cachedInputPerMillion),
+                  priceLine('Cache write', rate.cacheWritePerMillion),
+                ],
+              },
+            ],
+          };
+        }),
       });
     } else {
       nodes.push(paragraph('No rates configured.'));
@@ -494,6 +523,7 @@
         ...(rateDraft.cacheWritePerMillion ? { cacheWritePerMillion: valueFor('cacheWritePerMillion') } : {}),
       };
       busy = true;
+      savingRate = true;
       draw();
       try {
         await api('/rates', 'PUT', { rate });
@@ -510,6 +540,7 @@
       } catch (reason) {
         error = reason.message || String(reason);
       } finally {
+        savingRate = false;
         busy = false;
         draw();
       }
@@ -551,7 +582,7 @@
         void act(data);
       } else if (data?.type === 'pico:plugin-ui:context') {
         context = data.context || context;
-        void (composer ? refreshComposer() : refresh());
+        if (composer) void refreshComposer();
       } else if (data?.type === 'pico:plugin-ui:event' && composer) {
         void refreshComposer();
       }

@@ -22,7 +22,7 @@ import {
   isPluginUiToolbarStateMessage,
   pluginUiLayoutForSlot,
   pluginUiEventMatchesPlugin,
-  samePluginUiContext,
+  samePluginUiContextForSlot,
   PLUGIN_UI_PROTOCOL_VERSION,
   pluginUiUrl,
   type PluginApiInit,
@@ -349,6 +349,60 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
     return clampPluginPopoverWidth(window.innerWidth);
   };
 
+  const handleUiAction = useCallback(
+    (actionId: string, value?: string, actionEvent?: 'submit', externalAuth?: boolean): void => {
+      const activePort = portRef.current;
+      if (!activePort) return;
+      let popupLeaseId: string | undefined;
+      if (externalAuth) {
+        if (!current.current.externalAuthOrigins?.length) return;
+        const popup = window.open('about:blank', '_blank', 'popup,width=520,height=720');
+        if (!popup) {
+          current.current.onError('Allow pop-up windows for this plugin to continue.');
+          return;
+        }
+        popupLeaseId = window.crypto.randomUUID();
+        const latest = current.current;
+        const expiresAt = Date.now() + 120_000;
+        const portCloseListener = (): void => {
+          const lease = authPopupLeases.current.get(popupLeaseId!);
+          if (lease?.port !== activePort) return;
+          window.clearTimeout(lease.expiryTimer);
+          lease.popup.close();
+          authPopupLeases.current.delete(popupLeaseId!);
+        };
+        const expiryTimer = window.setTimeout(() => {
+          const lease = authPopupLeases.current.get(popupLeaseId!);
+          if (lease?.port === activePort) {
+            lease.popup.close();
+            (lease.port as MessagePort).removeEventListener('close', lease.portCloseListener);
+            authPopupLeases.current.delete(popupLeaseId!);
+          }
+        }, 120_000);
+        activePort.addEventListener('close', portCloseListener, { once: true });
+        authPopupLeases.current.set(popupLeaseId, {
+          pluginId: latest.pluginId,
+          entry: latest.entry,
+          viewId: latest.viewId,
+          actionId,
+          port: activePort,
+          popup,
+          expiresAt,
+          expiryTimer,
+          portCloseListener,
+        });
+      }
+      activePort.postMessage({
+        type: 'pico:plugin-ui:action',
+        actionId,
+        ...(value === undefined ? {} : { value }),
+        ...(actionEvent === undefined ? {} : { event: actionEvent }),
+        ...(popupLeaseId ? { popupLeaseId } : {}),
+      });
+    },
+    [],
+  );
+
   const updateAnchor = (): void => {
     const rect = toolbarAnchor.current?.getBoundingClientRect();
     if (!rect) return;
@@ -413,7 +467,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
   }, [props.settings]);
 
   useEffect(() => {
-    if (samePluginUiContext(deliveredContext.current, props.context)) return;
+    if (samePluginUiContextForSlot(deliveredContext.current, props.context, props.uiSlot)) return;
     deliveredContext.current = props.context;
     portRef.current?.postMessage({ type: 'pico:plugin-ui:context', context: props.context });
   }, [props.context]);
@@ -794,56 +848,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       <PluginUiTreeView
         nodes={uiTree}
         compactComposerControls={props.uiSlot === 'composer.model' && !hostPopover}
-        onAction={(actionId, value, actionEvent, externalAuth) => {
-          const activePort = portRef.current;
-          if (!activePort) return;
-          let popupLeaseId: string | undefined;
-          if (externalAuth) {
-            if (!current.current.externalAuthOrigins?.length) return;
-            const popup = window.open('about:blank', '_blank', 'popup,width=520,height=720');
-            if (!popup) {
-              current.current.onError('Allow pop-up windows for this plugin to continue.');
-              return;
-            }
-            popupLeaseId = window.crypto.randomUUID();
-            const latest = current.current;
-            const expiresAt = Date.now() + 120_000;
-            const portCloseListener = (): void => {
-              const lease = authPopupLeases.current.get(popupLeaseId!);
-              if (lease?.port !== activePort) return;
-              window.clearTimeout(lease.expiryTimer);
-              lease.popup.close();
-              authPopupLeases.current.delete(popupLeaseId!);
-            };
-            const expiryTimer = window.setTimeout(() => {
-              const lease = authPopupLeases.current.get(popupLeaseId!);
-              if (lease?.port === activePort) {
-                lease.popup.close();
-                (lease.port as MessagePort).removeEventListener('close', lease.portCloseListener);
-                authPopupLeases.current.delete(popupLeaseId!);
-              }
-            }, 120_000);
-            activePort.addEventListener('close', portCloseListener, { once: true });
-            authPopupLeases.current.set(popupLeaseId, {
-              pluginId: latest.pluginId,
-              entry: latest.entry,
-              viewId: latest.viewId,
-              actionId,
-              port: activePort,
-              popup,
-              expiresAt,
-              expiryTimer,
-              portCloseListener,
-            });
-          }
-          activePort.postMessage({
-            type: 'pico:plugin-ui:action',
-            actionId,
-            ...(value === undefined ? {} : { value }),
-            ...(actionEvent === undefined ? {} : { event: actionEvent }),
-            ...(popupLeaseId ? { popupLeaseId } : {}),
-          });
-        }}
+        onAction={handleUiAction}
       />
     ) : (
       <p className={uiError ? 'plugin-ui-unavailable' : 'plugin-ui-loading'} role="status">

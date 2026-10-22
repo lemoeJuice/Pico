@@ -1,8 +1,8 @@
 import { createPortal } from 'react-dom';
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactElement } from 'react';
+import { memo, useEffect, useId, useLayoutEffect, useRef, useState, type ReactElement } from 'react';
 import type { PluginUiNode } from '../plugins/ui-protocol.js';
 
-export function PluginUiTreeView({
+export const PluginUiTreeView = memo(function PluginUiTreeView({
   nodes,
   onAction,
   compactComposerControls = false,
@@ -213,7 +213,7 @@ export function PluginUiTreeView({
       {compactComposerControls ? <div className="plugin-ui-tree--composer-content">{children}</div> : children}
     </div>
   );
-}
+});
 
 export function PluginUiSelect({
   label,

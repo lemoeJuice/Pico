@@ -405,7 +405,11 @@ export interface PluginUiContext {
 
 export function samePluginUiContext(left: PluginUiContext, right: PluginUiContext): boolean {
   return (
-    left.thread === right.thread &&
+    (left.thread === right.thread ||
+      (left.thread !== null &&
+        right.thread !== null &&
+        left.thread.id === right.thread.id &&
+        JSON.stringify(left.thread) === JSON.stringify(right.thread))) &&
     JSON.stringify(left.modelSelection ?? null) === JSON.stringify(right.modelSelection ?? null) &&
     left.execution === right.execution &&
     left.toolCall === right.toolCall &&
@@ -413,6 +417,18 @@ export function samePluginUiContext(left: PluginUiContext, right: PluginUiContex
     left.threadId === right.threadId &&
     left.toolResult?.executionId === right.toolResult?.executionId &&
     left.toolResult?.status === right.toolResult?.status
+  );
+}
+
+export function samePluginUiContextForSlot(
+  left: PluginUiContext,
+  right: PluginUiContext,
+  slot: PluginUiSlot | undefined,
+): boolean {
+  if (slot !== 'composer.model') return samePluginUiContext(left, right);
+  return (
+    left.thread?.id === right.thread?.id &&
+    JSON.stringify(left.modelSelection ?? null) === JSON.stringify(right.modelSelection ?? null)
   );
 }
 
