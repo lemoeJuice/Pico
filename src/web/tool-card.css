@@ -122,8 +122,35 @@
   flex-wrap: wrap;
 }
 
+.tool-card.tool-card-collapsed {
+  padding-bottom: 12px;
+}
+
+.tool-card-heading-main {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  max-width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 7px;
+}
+
 .tool-card .tool-card-heading .tool-status {
   margin-left: 0;
+}
+
+.tool-card-status-group {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.tool-card-status-group > .tool-status {
+  margin-left: 0 !important;
 }
 
 .tool-card-meta {
@@ -134,7 +161,15 @@
   white-space: nowrap;
 }
 
-.tool-card .tool-card-heading > .tool-view-toggle {
+.tool-card .tool-card-heading-controls > .tool-view-toggle {
+  margin-left: 0;
+}
+
+.tool-card-heading-controls {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
   margin-left: auto;
 }
 

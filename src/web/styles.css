@@ -1982,6 +1982,17 @@ button:disabled {
 .plugin-ui-field-label {
   min-width: 0;
 }
+.plugin-ui-field--action > .plugin-ui-field-label {
+  display: block;
+  min-height: 1.2em;
+}
+.plugin-ui-field--action > .plugin-ui-button {
+  align-self: stretch;
+  width: 100%;
+  height: 36px;
+  min-height: 36px;
+  padding: 8px 10px;
+}
 .plugin-ui-sr-only {
   position: absolute;
   width: 1px;
@@ -2084,6 +2095,7 @@ button:disabled {
 }
 .plugin-ui-control {
   width: 100%;
+  min-height: 36px;
   padding: 8px 10px;
 }
 .plugin-ui-select-trigger {

@@ -30,6 +30,13 @@ export type PluginUiNode =
       externalAuth?: true;
     }
   | {
+      type: 'fieldButton';
+      label: string;
+      actionId: string;
+      tone?: 'primary' | 'soft' | 'danger' | 'quiet';
+      disabled?: boolean;
+    }
+  | {
       type: 'textInput';
       label: string;
       value?: string;
@@ -107,6 +114,7 @@ const uiNodeTypesBySlot: Record<PluginUiSlot, ReadonlySet<PluginUiNode['type']>>
     'card',
     'actions',
     'button',
+    'fieldButton',
     'textInput',
     'checkbox',
     'switch',
@@ -129,6 +137,7 @@ const uiNodeTypesBySlot: Record<PluginUiSlot, ReadonlySet<PluginUiNode['type']>>
     'card',
     'actions',
     'button',
+    'fieldButton',
     'textInput',
     'checkbox',
     'switch',
@@ -157,6 +166,7 @@ export function validatePluginUiTree(value: unknown, slot: PluginUiSlot | 'setti
           'card',
           'actions',
           'button',
+          'fieldButton',
           'textInput',
           'checkbox',
           'switch',
@@ -193,6 +203,7 @@ export function validatePluginUiTree(value: unknown, slot: PluginUiSlot | 'setti
       card: ['type', 'children'],
       actions: ['type', 'children'],
       button: ['type', 'label', 'actionId', 'tone', 'disabled', 'externalAuth'],
+      fieldButton: ['type', 'label', 'actionId', 'tone', 'disabled'],
       textInput: [
         'type',
         'label',
@@ -283,6 +294,13 @@ export function validatePluginUiTree(value: unknown, slot: PluginUiSlot | 'setti
           (item.tone === undefined || ['primary', 'soft', 'danger', 'quiet'].includes(String(item.tone))) &&
           (item.disabled === undefined || typeof item.disabled === 'boolean') &&
           (item.externalAuth === undefined || item.externalAuth === true)
+        );
+      case 'fieldButton':
+        return (
+          textOk(item.label) &&
+          action() &&
+          (item.tone === undefined || ['primary', 'soft', 'danger', 'quiet'].includes(String(item.tone))) &&
+          (item.disabled === undefined || typeof item.disabled === 'boolean')
         );
       case 'checkbox':
       case 'switch':

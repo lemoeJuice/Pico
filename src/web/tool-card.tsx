@@ -758,30 +758,36 @@ export function ToolCard({
 
   return (
     <article
-      className={`conversation-detail-card pico-ui-card tool-card tool-${status}${hasError ? ' tool-has-error' : ''}${call.name === 'shell' ? ' tool-shell-card' : ''}`}
+      className={`conversation-detail-card pico-ui-card tool-card tool-${status}${!expanded ? ' tool-card-collapsed' : ''}${hasError ? ' tool-has-error' : ''}${call.name === 'shell' ? ' tool-shell-card' : ''}`}
       data-phase={preview ? 'generating' : status}
       data-outcome={call.name === 'shell' ? shellOutcome : undefined}
     >
       <div className="tool-card-heading pico-ui-heading">
-        <span className="tool-name">{toolTitles[call.name] ?? call.name}</span>
-        <span
-          className={`tool-status pico-ui-status status-${shellExitFailure ? 'failed' : status}`}
-          data-status={shellExitFailure ? 'failed' : status}
-        >
-          {preview ? 'Generating' : shellExitFailure ? `Exit ${shellExitCode}` : status}
-        </span>
-        {(shellMeta ?? terminalTime) ? <span className="tool-card-meta">{shellMeta ?? terminalTime}</span> : null}
-        {expanded ? <Toggle value={view} onChange={setView} label={`${toolTitles[call.name] ?? call.name} card`} /> : null}
-        <button
-          type="button"
-          className="tool-card-disclosure"
-          aria-expanded={expanded}
-          aria-label={`${expanded ? 'Collapse' : 'Expand'} ${toolTitles[call.name] ?? call.name} details`}
-          title={`${expanded ? 'Collapse' : 'Expand'} tool details`}
-          onClick={() => setExpanded(!expanded)}
-        >
-          <ChevronRight className={expanded ? 'is-expanded' : ''} size={14} aria-hidden="true" />
-        </button>
+        <div className="tool-card-heading-main">
+          <span className="tool-name">{toolTitles[call.name] ?? call.name}</span>
+          <span className="tool-card-status-group">
+            <span
+              className={`tool-status pico-ui-status status-${shellExitFailure ? 'failed' : status}`}
+              data-status={shellExitFailure ? 'failed' : status}
+            >
+              {preview ? 'Generating' : shellExitFailure ? `Exit ${shellExitCode}` : status}
+            </span>
+            {(shellMeta ?? terminalTime) ? <span className="tool-card-meta">{shellMeta ?? terminalTime}</span> : null}
+          </span>
+        </div>
+        <div className="tool-card-heading-controls">
+          {expanded ? <Toggle value={view} onChange={setView} label={`${toolTitles[call.name] ?? call.name} card`} /> : null}
+          <button
+            type="button"
+            className="tool-card-disclosure"
+            aria-expanded={expanded}
+            aria-label={`${expanded ? 'Collapse' : 'Expand'} ${toolTitles[call.name] ?? call.name} details`}
+            title={`${expanded ? 'Collapse' : 'Expand'} tool details`}
+            onClick={() => setExpanded(!expanded)}
+          >
+            <ChevronRight className={expanded ? 'is-expanded' : ''} size={14} aria-hidden="true" />
+          </button>
+        </div>
       </div>
       {expanded ? (call.name === 'shell' ? (
         <div className={`tool-card-body tool-shell-body${view === 'readable' ? ' tool-shell-body-readable' : ''}`}>

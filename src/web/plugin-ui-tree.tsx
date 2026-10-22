@@ -92,6 +92,20 @@ export function PluginUiTreeView({
             {node.label}
           </button>
         );
+      case 'fieldButton':
+        return (
+          <div className="plugin-ui-field plugin-ui-field--action" key={key}>
+            <span className="plugin-ui-field-label" aria-hidden="true" />
+            <button
+              type="button"
+              className={`plugin-ui-button${node.tone ? ` plugin-ui-button--${node.tone}` : ''}`}
+              disabled={node.disabled}
+              onClick={() => onAction(node.actionId)}
+            >
+              {node.label}
+            </button>
+          </div>
+        );
       case 'checkbox':
         return (
           <label className="plugin-ui-checkbox" key={key}>

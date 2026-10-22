@@ -27,55 +27,50 @@
       ] },
     ] }];
     const content = [
+      { type: 'heading', text: 'Automatic review' },
+      para('Reviewer behavior for tools set to Ask.'),
       { type: 'group', layout: 'stack-compact', children: [
-        { type: 'heading', text: 'Tool permissions' },
-        para('Saved for this Thread'),
-      ] },
-      { type: 'group', layout: 'stack-compact', children: [
-        { type: 'heading', text: 'Automatic review' },
         { type: 'group', layout: 'spread', children: [
-          { type: 'group', layout: 'stack-compact', children: [
-            { type: 'heading', level: 4, text: 'Auto-review' },
-            para('Use an independent reviewer for tools set to Ask.'),
-          ] },
+          { type: 'heading', level: 4, text: 'Auto-review' },
           { type: 'group', layout: 'row', children: [
             { type: 'status', text: data.autoReview ? 'Enabled' : 'Disabled', tone: data.autoReview ? 'success' : 'neutral' },
             { type: 'switch', label: 'Auto-review', checked: data.autoReview, actionId: 'reviewer', disabled: busy, visuallyHidden: true },
           ] },
         ] },
+        para('Use an independent reviewer for tools set to Ask.'),
         { type: 'group', layout: 'spread', children: [
-          { type: 'group', layout: 'stack-compact', children: [
-            { type: 'heading', level: 4, text: 'Apply reviewer denials directly' },
-            para('Skip manual review for denials. A timeout fails temporarily without a decision; other reviewer errors still need human review.'),
-          ] },
+          { type: 'heading', level: 4, text: 'Apply reviewer denials directly' },
           { type: 'group', layout: 'row', children: [
             { type: 'status', text: data.autoReviewDenials ? 'Enabled' : 'Disabled', tone: data.autoReviewDenials ? 'success' : 'neutral' },
             { type: 'switch', label: 'Apply reviewer denials directly', checked: data.autoReviewDenials, actionId: 'reviewer-denials', disabled: busy || !data.autoReview, visuallyHidden: true },
           ] },
         ] },
+        para('Skip manual review for denials. A timeout fails temporarily without a decision; other reviewer errors still need human review.'),
       ] },
     ];
     if (error) content.push({ type: 'status', text: error, tone: 'danger' });
     const toolRows = data.tools.map((tool) => {
       const hidden = tool.policy === 'deny';
       const allowed = tool.policy === 'allow';
-      return { type: 'group', layout: 'spread', children: [
-        { type: 'group', layout: 'stack-compact', children: [
+      return { type: 'group', layout: 'stack-compact', children: [
+        { type: 'group', layout: 'spread', children: [
           { type: 'heading', level: 4, text: tool.name },
-          para(tool.description),
+          { type: 'group', layout: 'row', children: [
+            { type: 'status', text: hidden ? 'Hidden' : allowed ? 'Allow by default' : 'Ask each time', tone: hidden ? 'danger' : allowed ? 'success' : 'neutral' },
+            { type: 'switch', label: `Allow ${tool.name} by default`, checked: allowed, actionId: `tool:${tool.name}`, disabled: busy || hidden, visuallyHidden: true },
+          ] },
         ] },
-        { type: 'group', layout: 'row', children: [
-          { type: 'status', text: hidden ? 'Hidden' : allowed ? 'Default allow' : 'Ask', tone: hidden ? 'danger' : allowed ? 'success' : 'neutral' },
-          { type: 'switch', label: `Allow ${tool.name} by default`, checked: allowed, actionId: `tool:${tool.name}`, disabled: busy || hidden, visuallyHidden: true },
-        ] },
+        para(tool.description),
       ] };
     });
-    content.push({ type: 'group', layout: 'stack-compact', children: [
+    return [
+      { type: 'card', children: [{ type: 'group', layout: 'stack-compact', children: content }] },
+      { type: 'card', children: [{ type: 'group', layout: 'stack-compact', children: [
       { type: 'heading', text: 'Per-tool defaults' },
-      para('On allows by default; off routes through Ask.'),
+      para('These are each tool’s default permission. They are separate from automatic review above.'),
       { type: 'group', layout: 'stack-compact', children: toolRows.length ? toolRows : [para('Tool definitions will appear after the next Model projection.')] },
-    ] });
-    return [{ type: 'card', children: [{ type: 'group', layout: 'stack-compact', children: content }] }];
+      ] }] },
+    ];
   }
   function resultActions() {
     const execution = context.toolResult ?? context.execution, approval = currentApproval();

@@ -38,6 +38,13 @@
     disabled,
     ...(tone ? { tone } : {}),
   });
+  const fieldButton = (label, actionId, disabled = busy, tone) => ({
+    type: 'fieldButton',
+    label,
+    actionId,
+    disabled,
+    ...(tone ? { tone } : {}),
+  });
   const select = (label, value, actionId, options) => ({
     type: 'select',
     label,
@@ -275,7 +282,7 @@
             'filter.purpose',
             optionsWith(catalog.purposes, filterDraft.purpose, 'Any purpose'),
           ),
-          button('Apply filters', 'apply-filters', busy, 'primary'),
+          fieldButton('Apply filters', 'apply-filters', busy, 'primary'),
         ],
       },
       ...(error ? [{ type: 'status', text: error, tone: 'danger' }] : []),
@@ -389,7 +396,7 @@
             step: 'any',
           }),
           input('Currency', rateDraft.currency, 'rate.currency', 'text', 'e.g. USD', { maxLength: 8 }),
-          button(
+          fieldButton(
             busy ? 'Saving rate…' : 'Save rate',
             'save-rate',
             busy ||
