@@ -148,7 +148,11 @@ export function PluginUiTreeView({
               {node.label}
             </span>
             <input
-              className="plugin-ui-control plugin-ui-text-input"
+              className={
+                node.inputType === 'date'
+                  ? 'plugin-ui-control plugin-ui-text-input plugin-ui-date-input'
+                  : 'plugin-ui-control plugin-ui-text-input'
+              }
               type={node.inputType ?? 'text'}
               aria-label={node.label}
               value={node.value ?? ''}
@@ -197,7 +201,7 @@ export function PluginUiTreeView({
   );
 }
 
-function PluginUiSelect({
+export function PluginUiSelect({
   label,
   value,
   options,

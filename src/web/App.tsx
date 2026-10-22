@@ -69,6 +69,7 @@ import {
 } from './model-execution-groups.js';
 import { conversationTimeline } from './conversation-timeline.js';
 import { PluginWebView } from './plugin-web-view.js';
+import { PluginUiSelect } from './plugin-ui-tree.js';
 import { DeveloperSettings } from './developer-settings.js';
 import { appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from './history-pages.js';
 import {
@@ -3347,22 +3348,21 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 <p className="form-intro">Choose how this Runtime connects to its model provider.</p>
                 <label>
                   Provider
-                  <select
+                  <PluginUiSelect
+                    label="Provider"
                     value={modelForm.provider}
-                    onChange={(event) =>
+                    compact={false}
+                    options={
+                      pluginInfo?.providers.map((provider) => ({ value: provider.id, label: provider.label })) ?? []
+                    }
+                    onChange={(provider) =>
                       setModelForm((form) => ({
                         ...form,
-                        provider: event.target.value,
-                        model: settings?.modelsByProvider?.[event.target.value] ?? '',
+                        provider,
+                        model: settings?.modelsByProvider?.[provider] ?? '',
                       }))
                     }
-                  >
-                    {pluginInfo?.providers.map((provider) => (
-                      <option value={provider.id} key={provider.id}>
-                        {provider.label}
-                      </option>
-                    ))}
-                  </select>
+                  />
                 </label>
                 {modelForm.provider === 'openai-compatible' ? (
                   <>
