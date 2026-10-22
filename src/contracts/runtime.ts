@@ -4,11 +4,17 @@ import type { ModelPrompt, ProviderRequestOutcome, ProviderRequestStart, Provide
 export interface ThreadSnapshot {
   thread: Thread;
   modelSelection: ThreadModelSelection;
+  contextUsage: ContextUsageEstimate;
   records: CanonicalRecord[];
   executions: Execution[];
   children: Thread[];
   hasEarlierRecords: boolean;
   historyPageSize: number;
+}
+
+export interface ContextUsageEstimate {
+  inputTokens: number;
+  source: 'provider' | 'provider+estimate' | 'estimate';
 }
 
 export interface ThreadToolView {

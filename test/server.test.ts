@@ -141,6 +141,20 @@ describe('Pico server access boundary', () => {
       expect(await fetch(`${base}/api/projects`, { headers: cookieHeaders }).then((response) => response.status)).toBe(
         200,
       );
+      const defaultContextManagement = await fetch(`${base}/api/settings/context-management`, {
+        headers: cookieHeaders,
+      }).then((response) => response.json());
+      expect(defaultContextManagement).toEqual({ contextWindowTokens: 272_000, compactionThresholdTokens: 256_000 });
+      const contextManagementUpdate = await fetch(`${base}/api/settings/context-management`, {
+        method: 'PUT',
+        headers: { ...cookieHeaders, 'content-type': 'application/json' },
+        body: JSON.stringify({ contextWindowTokens: 4_000, compactionThresholdTokens: 3_000 }),
+      });
+      expect(contextManagementUpdate.status).toBe(200);
+      expect(await contextManagementUpdate.json()).toEqual({
+        contextWindowTokens: 4_000,
+        compactionThresholdTokens: 3_000,
+      });
       expect(await upgradeStatus(wsUrl, { cookie })).toBe(101);
       expect(await upgradeStatus(wsUrl, { cookie, origin: 'https://attacker.example' })).toBe(403);
       await waitForConnected(wsUrl, cookieHeaders);

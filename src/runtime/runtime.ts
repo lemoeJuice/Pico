@@ -5,6 +5,7 @@ import { DEFAULT_THREAD_TITLE } from '../core/types.js';
 import type {
   AssistantPayload,
   CanonicalRecord,
+  ContextManagementSettings,
   Execution,
   ExecutionStatus,
   ExecutorBinding,
@@ -33,6 +34,7 @@ import type {
   ModelInputPromptSnapshot,
   ModelInputResultSummary,
   ModelPromptDiagnostics,
+  ContextUsageEstimate,
   ProviderRequestAttempt,
   SubmitResult,
   ThreadSnapshot,
@@ -116,6 +118,10 @@ const DISABLED_THREAD_TOOLS_SETTING = 'disabled-thread-tools';
 const RUNTIME_COMPACTION_RECENT_TURNS = 2;
 const RUNTIME_COMPACTION_MAX_SOURCE_CHARS = 60_000;
 const RUNTIME_COMPACTION_MAX_SUMMARY_CHARS = 12_000;
+const DEFAULT_CONTEXT_MANAGEMENT_SETTINGS: ContextManagementSettings = {
+  contextWindowTokens: 272_000,
+  compactionThresholdTokens: 256_000,
+};
 
 function canonicalSourceHash(records: readonly CanonicalRecord[]): string {
   return createHash('sha256')
@@ -551,6 +557,32 @@ function diagnosticUsage(value: unknown): TokenUsage | null {
     ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
     ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
   };
+}
+
+function estimatePromptCharacters(turns: readonly PromptTurn[], limit: number): number {
+  const pending: unknown[] = [...turns];
+  let characters = 0;
+  while (pending.length > 0 && characters < limit) {
+    const value = pending.pop();
+    if (typeof value === 'string') {
+      characters = Math.min(limit, characters + value.length);
+    } else if (typeof value === 'number' || typeof value === 'boolean') {
+      characters = Math.min(limit, characters + String(value).length);
+    } else if (value === null) {
+      characters = Math.min(limit, characters + 4);
+    } else if (Array.isArray(value)) {
+      for (const entry of value) {
+        pending.push(entry);
+      }
+    } else if (value && typeof value === 'object') {
+      for (const key of Object.keys(value)) {
+        characters = Math.min(limit, characters + key.length);
+        pending.push((value as Record<string, unknown>)[key]);
+        if (characters >= limit) break;
+      }
+    }
+  }
+  return characters;
 }
 
 function sanitizeRequestStart(details: ProviderRequestStart): ProviderRequestStart {
@@ -1256,6 +1288,7 @@ export class PicoRuntime {
     }
     const thread = this.getThread(threadId);
     if (!thread) return null;
+    const contextUsage = this.estimateContextUsage(thread);
     const page = this.store.listRecordPage(threadId, beforeSeq, THREAD_HISTORY_PAGE_SIZE);
     const executions = this.store.listSnapshotExecutions(threadId, page.records).map((execution) => {
       if (execution.kind !== 'model' || typeof execution.arguments?.model === 'string') return execution;
@@ -1268,6 +1301,7 @@ export class PicoRuntime {
     return {
       thread,
       modelSelection: this.threadModelSelection(threadId),
+      contextUsage,
       records: page.records.map(redactReasoningReplay),
       executions: executions.map(redactExecutionImages),
       children: this.listThreads(thread.projectId).filter((candidate) => candidate.parentThreadId === threadId),
@@ -1947,6 +1981,8 @@ export class PicoRuntime {
       await this.runModelStep(currentThread, pendingRetry);
     } else {
       if (currentThread.pauseRequested || !this.needsModelStep(thread.id)) return;
+      await this.autoCompactBeforeModelStep(currentThread);
+      if (this.shuttingDown || this.store.getThread(thread.id)?.pauseRequested) return;
       await this.runModelStep(currentThread);
     }
 
@@ -1954,6 +1990,127 @@ export class PicoRuntime {
     const afterModel = this.store.getThread(thread.id);
     const modelBatch = afterModel ? this.latestActiveBatch(thread.id) : null;
     if (afterModel && modelBatch) await this.runToolBatch(afterModel, modelBatch);
+  }
+
+  private async autoCompactBeforeModelStep(thread: Thread): Promise<void> {
+    const settings = this.getContextManagementSettings();
+    const records = this.store.listRecords(thread.id);
+    const contextUsage = this.estimateContextUsage(thread, records);
+    if (contextUsage.inputTokens < settings.compactionThresholdTokens) return;
+
+    const latestCompaction = [...records].reverse().find((record) => {
+      if (record.kind !== 'plugin') return false;
+      const payload = objectValue(record.payload);
+      return payload?.pluginId === 'pico.runtime' && payload.action === 'context-compacted';
+    });
+    const estimatedInputTokens = contextUsage.inputTokens;
+
+    try {
+      const result = await this.compactThread(thread, true);
+      const recordsAfterCompaction = this.store.listRecords(thread.id);
+      const latestCompactionAfter = [...recordsAfterCompaction].reverse().find((record) => {
+        if (record.kind !== 'plugin') return false;
+        const payload = objectValue(record.payload);
+        return payload?.pluginId === 'pico.runtime' && payload.action === 'context-compacted';
+      });
+      if (latestCompactionAfter && latestCompactionAfter.seq > (latestCompaction?.seq ?? 0)) {
+        const compactedContext = runtimeContextCompaction(recordsAfterCompaction);
+        if (compactedContext) {
+          const remainingConversation = canonicalConversationRecords(recordsAfterCompaction).filter(
+            (record) => record.seq > compactedContext.throughSeq,
+          );
+          const postCompactionEstimate = estimatePromptCharacters(
+            [runtimeCompactionTurn(compactedContext), ...canonicalRecordsToPromptTurns(remainingConversation, thread)],
+            settings.contextWindowTokens,
+          );
+          if (postCompactionEstimate >= settings.contextWindowTokens) {
+            this.store.setPause(
+              thread.id,
+              true,
+              'The compacted conversation still exceeds the configured context window. Review or shorten recent turns, then Continue.',
+            );
+            this.publishThreadUpdate(thread.id);
+            return;
+          }
+        }
+        return;
+      }
+
+      if (result.text?.startsWith('The model did not return a usable compaction summary.')) {
+        this.store.setPause(
+          thread.id,
+          true,
+          'Automatic context compaction could not produce a usable summary. Review the selected model, then Continue.',
+        );
+        this.publishThreadUpdate(thread.id);
+      } else if (estimatedInputTokens >= settings.contextWindowTokens) {
+        this.store.setPause(
+          thread.id,
+          true,
+          'The context window is full and there is no eligible history to compact. Review the conversation, then Continue.',
+        );
+        this.publishThreadUpdate(thread.id);
+      }
+    } catch {
+      this.store.setPause(
+        thread.id,
+        true,
+        'Automatic context compaction failed. Review the selected model and connection, then Continue.',
+      );
+      this.publishThreadUpdate(thread.id);
+    }
+  }
+
+  private estimateContextUsage(thread: Thread, records = this.store.listRecords(thread.id)): ContextUsageEstimate {
+    const settings = this.getContextManagementSettings();
+    const latestAssistant = [...records].reverse().find((record) => record.kind === 'assistant');
+    const assistantPayload = latestAssistant ? objectValue(latestAssistant.payload) : null;
+    // Use provider-reported input usage from the last settled request; Pico has no universal tokenizer.
+    const usage = diagnosticUsage(assistantPayload?.usage);
+    const projectionThrough =
+      typeof assistantPayload?.projectionThrough === 'number' &&
+      Number.isSafeInteger(assistantPayload.projectionThrough) &&
+      assistantPayload.projectionThrough >= 0
+        ? assistantPayload.projectionThrough
+        : Math.max(0, (latestAssistant?.seq ?? 1) - 1);
+    const latestCompaction = [...records].reverse().find((record) => {
+      if (record.kind !== 'plugin') return false;
+      const payload = objectValue(record.payload);
+      return payload?.pluginId === 'pico.runtime' && payload.action === 'context-compacted';
+    });
+    const compaction = runtimeContextCompaction(records);
+    const conversation = canonicalConversationRecords(records);
+    const hasProviderUsage = usage?.inputTokens !== undefined;
+    const compactedSinceLastAssistant = Boolean(
+      compaction &&
+        (!hasProviderUsage || !latestAssistant || (latestCompaction && latestCompaction.seq > latestAssistant.seq)),
+    );
+    const estimatedTurns =
+      compactedSinceLastAssistant && compaction
+        ? [
+            runtimeCompactionTurn(compaction),
+            ...canonicalRecordsToPromptTurns(
+              conversation.filter((record) => record.seq > compaction.throughSeq),
+              thread,
+            ),
+          ]
+        : canonicalRecordsToPromptTurns(
+            hasProviderUsage
+              ? conversation.filter((record) => record.seq > projectionThrough)
+              : conversation,
+            thread,
+          );
+    const additionalInputEstimate = estimatePromptCharacters(estimatedTurns, settings.contextWindowTokens);
+    // Canonical prompt characters are a rough heuristic, not a tokenizer or a guaranteed upper bound.
+    const includeProviderUsage = hasProviderUsage && !compactedSinceLastAssistant;
+    const estimatedInputTokens = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      (includeProviderUsage ? (usage?.inputTokens ?? 0) : 0) + additionalInputEstimate,
+    );
+    return {
+      inputTokens: estimatedInputTokens,
+      source: includeProviderUsage ? (additionalInputEstimate > 0 ? 'provider+estimate' : 'provider') : 'estimate',
+    };
   }
 
   private async runToolBatch(thread: Thread, activeBatch: { batchId: string; calls: ToolCall[] }): Promise<void> {
@@ -2591,16 +2748,16 @@ export class PicoRuntime {
     return [runtimeCompactionTurn(compaction), ...canonicalRecordsToPromptTurns(remaining, thread)];
   }
 
-  private async compactThread(thread: Thread | null): Promise<CommandResult> {
+  private async compactThread(thread: Thread | null, allowActiveLoop = false): Promise<CommandResult> {
     if (!thread) return { text: 'Choose a Thread first.' };
     const inFlightOperations = this.inFlightThreadOperations.get(thread.id) ?? 0;
     const hasRunningModelCall = this.store
       .listPluginModelCalls({ threadId: thread.id })
       .some((call) => call.status === 'running');
     if (
-      thread.state === 'running' ||
+      (!allowActiveLoop && thread.state === 'running') ||
       thread.state === 'pausing' ||
-      this.loops.has(thread.id) ||
+      (!allowActiveLoop && this.loops.has(thread.id)) ||
       this.store.listActiveExecutions(thread.id).length > 0 ||
       inFlightOperations > 1 ||
       hasRunningModelCall
@@ -3274,6 +3431,41 @@ export class PicoRuntime {
     });
     this.publish({ type: 'settings.updated', settings: this.publicModelSettings() });
     return this.publicModelSettings();
+  }
+
+  getContextManagementSettings(): ContextManagementSettings {
+    const stored = objectValue(this.store.getSetting<unknown>('context-management', {})) ?? {};
+    const contextWindowTokens =
+      typeof stored.contextWindowTokens === 'number' &&
+      Number.isSafeInteger(stored.contextWindowTokens) &&
+      stored.contextWindowTokens > 0
+        ? stored.contextWindowTokens
+        : DEFAULT_CONTEXT_MANAGEMENT_SETTINGS.contextWindowTokens;
+    const compactionThresholdTokens =
+      typeof stored.compactionThresholdTokens === 'number' &&
+      Number.isSafeInteger(stored.compactionThresholdTokens) &&
+      stored.compactionThresholdTokens > 0
+        ? stored.compactionThresholdTokens
+        : DEFAULT_CONTEXT_MANAGEMENT_SETTINGS.compactionThresholdTokens;
+    if (compactionThresholdTokens >= contextWindowTokens) {
+      return { ...DEFAULT_CONTEXT_MANAGEMENT_SETTINGS };
+    }
+    return { contextWindowTokens, compactionThresholdTokens };
+  }
+
+  updateContextManagementSettings(update: Partial<ContextManagementSettings>): ContextManagementSettings {
+    const next = { ...this.getContextManagementSettings(), ...update };
+    if (!Number.isSafeInteger(next.contextWindowTokens) || next.contextWindowTokens <= 0) {
+      throw new Error('Context window must be a positive whole number of tokens.');
+    }
+    if (!Number.isSafeInteger(next.compactionThresholdTokens) || next.compactionThresholdTokens <= 0) {
+      throw new Error('Compaction threshold must be a positive whole number of tokens.');
+    }
+    if (next.compactionThresholdTokens >= next.contextWindowTokens) {
+      throw new Error('Compaction threshold must be lower than the context window.');
+    }
+    this.store.setSetting('context-management', next);
+    return next;
   }
 
   availableCommands(): Array<{ name: string; description: string }> {

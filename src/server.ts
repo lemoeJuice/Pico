@@ -18,6 +18,7 @@ import { currentExecutorVersion } from './executor/bundle.js';
 import { PicoStore } from './core/store.js';
 import {
   DEFAULT_THREAD_TITLE,
+  type ContextManagementSettings,
   type ExecutorKind,
   type ModelSettings,
   type ThreadModelSelection,
@@ -330,6 +331,31 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     if (typeof body.temperature === 'number') update.temperature = body.temperature;
     if (typeof body.provider === 'string') update.provider = body.provider;
     response.json(runtime.updateModelSettings(update));
+  });
+  app.get('/api/settings/context-management', (_request, response) => {
+    response.json(runtime.getContextManagementSettings());
+  });
+  app.put('/api/settings/context-management', (request, response) => {
+    const body = bodyObject(request);
+    const update: Partial<ContextManagementSettings> = {};
+    const hasContextWindowTokens = Object.hasOwn(body, 'contextWindowTokens');
+    const hasCompactionThresholdTokens = Object.hasOwn(body, 'compactionThresholdTokens');
+    if (!hasContextWindowTokens && !hasCompactionThresholdTokens) {
+      throw new Error('Provide a context window or compaction threshold to update.');
+    }
+    if (hasContextWindowTokens) {
+      if (typeof body.contextWindowTokens !== 'number') {
+        throw new Error('Context window must be a number of tokens.');
+      }
+      update.contextWindowTokens = body.contextWindowTokens;
+    }
+    if (hasCompactionThresholdTokens) {
+      if (typeof body.compactionThresholdTokens !== 'number') {
+        throw new Error('Compaction threshold must be a number of tokens.');
+      }
+      update.compactionThresholdTokens = body.compactionThresholdTokens;
+    }
+    response.json(runtime.updateContextManagementSettings(update));
   });
   app.get('/api/commands', (_request, response) => response.json(runtime.availableCommands()));
   app.post('/api/commands/execute', async (request, response) => {

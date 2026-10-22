@@ -121,6 +121,85 @@ describe('durable Thread runtime invariants', () => {
     }
   });
 
+  it('automatically compacts eligible history before the next model request when the configured threshold is reached', async () => {
+    const model = new FakeModel((_prompt, callNumber) =>
+      response(callNumber === 1 ? 'Earlier turns summary: objective alpha; verified result beta.' : 'Continued safely.'),
+    );
+    const env = await setupRuntime(model);
+    const thread = env.createThread();
+    try {
+      env.runtime.updateContextManagementSettings({ contextWindowTokens: 2_000, compactionThresholdTokens: 1_000 });
+      for (let turn = 1; turn <= 4; turn += 1) {
+        const user = env.store.appendCanonical(thread.id, `auto-compact-user-${turn}`, 'message', {
+          role: 'user',
+          source: 'user',
+          content: `request turn ${turn}`,
+        });
+        env.store.appendCanonical(
+          thread.id,
+          `auto-compact-assistant-${turn}`,
+          'assistant',
+          assistantPayload({
+            content: `response turn ${turn}`,
+            projectionThrough: user.record.seq,
+            usage: { inputTokens: 1_500, outputTokens: 10, totalTokens: 1_510 },
+          }),
+        );
+      }
+
+      await env.runtime.submit(thread.id, 'auto-compact-threshold', 'Continue from the recent work.');
+      await env.runtime.drain();
+
+      const records = env.store.listRecords(thread.id);
+      expect(
+        records.filter((record) => record.kind === 'plugin' && record.payload.action === 'context-compacted'),
+      ).toHaveLength(1);
+      expect(model.prompts).toHaveLength(2);
+      const continuation = JSON.stringify(model.prompts.at(-1)?.turns);
+      expect(continuation).toContain('Earlier turns summary: objective alpha; verified result beta.');
+      expect(continuation).toContain('request turn 3');
+      expect(continuation).not.toContain('request turn 1');
+      expect(env.runtime.getThread(thread.id)?.state).not.toBe('paused');
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('pauses an over-window request when recent-turn retention leaves no history eligible for compaction', async () => {
+    const model = new FakeModel(() => response('This request must not be sent.'));
+    const env = await setupRuntime(model);
+    const thread = env.createThread();
+    try {
+      env.runtime.updateContextManagementSettings({ contextWindowTokens: 1_000, compactionThresholdTokens: 500 });
+      const user = env.store.appendCanonical(thread.id, 'over-window-user', 'message', {
+        role: 'user',
+        source: 'user',
+        content: 'Keep this recent turn intact.',
+      });
+      env.store.appendCanonical(
+        thread.id,
+        'over-window-assistant',
+        'assistant',
+        assistantPayload({
+          content: 'There is no older completed turn to summarize.',
+          projectionThrough: user.record.seq,
+          usage: { inputTokens: 1_500, outputTokens: 20, totalTokens: 1_520 },
+        }),
+      );
+
+      await env.runtime.submit(thread.id, 'over-window-next-request', 'Continue.');
+      await env.runtime.drain();
+
+      expect(model.prompts).toHaveLength(0);
+      expect(env.runtime.getThread(thread.id)).toMatchObject({
+        state: 'paused',
+        pauseReason: expect.stringContaining('no eligible history to compact'),
+      });
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it('rejects stored semantic model options when their owner is disabled but permits empty options', async () => {
     const model = new FakeModel(() => response('completed without optional parameters'));
     const env = await setupRuntime(model);

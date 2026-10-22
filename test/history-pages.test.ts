@@ -18,6 +18,7 @@ function snapshot(
       model: 'test-model',
       parameters: { temperature: 0.2, options: {} },
     } satisfies ThreadModelSelection,
+    contextUsage: { inputTokens: 0, source: 'estimate' },
     records,
     executions,
     children: [],

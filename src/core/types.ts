@@ -144,6 +144,11 @@ export interface ModelSettings {
   provider: ModelProvider;
 }
 
+export interface ContextManagementSettings {
+  contextWindowTokens: number;
+  compactionThresholdTokens: number;
+}
+
 export interface ToolDefinition {
   name: string;
   description: string;
