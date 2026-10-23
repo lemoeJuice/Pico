@@ -149,6 +149,12 @@ type PluginHostUiProps = Omit<PluginUiProps, 'executeCommand'>;
 
 type RuntimeEvent = Record<string, unknown> & { type: string };
 type ThreadExecutorChoice = ExecutorKind | 'remote';
+type SidebarWidth = 'narrow' | 'standard' | 'wide';
+const SIDEBAR_WIDTH_OPTIONS: Array<{ value: SidebarWidth; label: string }> = [
+  { value: 'narrow', label: 'Narrow' },
+  { value: 'standard', label: 'Default' },
+  { value: 'wide', label: 'Wide' },
+];
 type ExecutorStatusDetails = {
   updateAvailable?: boolean;
   compatible?: boolean;
@@ -170,6 +176,23 @@ function readComposerState(): ComposerState {
     );
   } catch {
     return parseComposerState(null);
+  }
+}
+
+function readSidebarWidthPreference(): SidebarWidth {
+  try {
+    const stored = typeof window === 'undefined' ? null : window.localStorage.getItem('pico.sidebar-width');
+    return stored === 'narrow' || stored === 'wide' || stored === 'standard' ? stored : 'standard';
+  } catch {
+    return 'standard';
+  }
+}
+
+function persistSidebarWidthPreference(width: SidebarWidth): void {
+  try {
+    if (typeof window !== 'undefined') window.localStorage.setItem('pico.sidebar-width', width);
+  } catch {
+    // Keep the selected width for this session when browser storage is unavailable.
   }
 }
 
@@ -399,32 +422,51 @@ function ThreadListItem({
   thread,
   active,
   child = false,
+  hasChildren,
+  childrenExpanded,
+  onToggleChildren,
   onSelect,
 }: {
   thread: Thread;
   active: boolean;
   child?: boolean;
+  hasChildren: boolean;
+  childrenExpanded: boolean;
+  onToggleChildren(): void;
   onSelect(): void;
 }) {
   return (
-    <button
-      className={`thread-list-item ${active ? 'selected' : ''} ${child ? 'child-thread-item' : ''}`}
-      onClick={onSelect}
-    >
-      <span className="thread-item-icon" aria-hidden="true">
-        {child ? <GitBranch size={14} /> : <MessageSquare size={14} />}
+    <div className={`thread-list-item ${active ? 'selected' : ''} ${child ? 'child-thread-item' : ''}`}>
+      <button className="thread-list-item-select" type="button" onClick={onSelect}>
+        <span className="thread-item-icon" aria-hidden="true">
+          {child ? <GitBranch size={14} /> : <MessageSquare size={14} />}
+        </span>
+        <span className="thread-item-copy">
+          <span className="thread-item-title">{thread.title}</span>
+          <span className="thread-item-meta">{executorLabel(thread)}</span>
+        </span>
+      </button>
+      <span className="thread-item-trailing">
+        {hasChildren ? (
+          <button
+            className="thread-tree-toggle"
+            type="button"
+            aria-label={`${childrenExpanded ? 'Hide' : 'Show'} child Threads for ${thread.title}`}
+            aria-expanded={childrenExpanded}
+            title={`${childrenExpanded ? 'Hide' : 'Show'} child Threads`}
+            onClick={onToggleChildren}
+          >
+            <ChevronRight className={childrenExpanded ? 'expanded' : ''} size={13} aria-hidden="true" />
+          </button>
+        ) : null}
+        <span
+          className={`thread-state-dot state-${thread.state}`}
+          role="img"
+          aria-label={thread.state}
+          title={thread.state}
+        />
       </span>
-      <span className="thread-item-copy">
-        <span className="thread-item-title">{thread.title}</span>
-        <span className="thread-item-meta">{executorLabel(thread)}</span>
-      </span>
-      <span
-        className={`thread-state-dot state-${thread.state}`}
-        role="img"
-        aria-label={thread.state}
-        title={thread.state}
-      />
-    </button>
+    </div>
   );
 }
 
@@ -489,6 +531,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [projects, setProjects] = useState<Project[]>([]);
   const [threadsByProject, setThreadsByProject] = useState<Record<string, Thread[]>>({});
   const [expandedProjectIds, setExpandedProjectIds] = useState<Set<string>>(() => new Set());
+  const [expandedChildThreadIds, setExpandedChildThreadIds] = useState<Set<string>>(() => new Set());
   const [projectId, setProjectId] = useState<string | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
   const [threadId, setThreadId] = useState<string | null>(null);
@@ -523,6 +566,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [newThreadOpen, setNewThreadOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [desktopSidebarCollapsed, setDesktopSidebarCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState<SidebarWidth>(readSidebarWidthPreference);
   const [defaultWorkspace, setDefaultWorkspace] = useState('');
   const [pluginInfo, setPluginInfo] = useState<PluginInfo | null>(null);
   const [threadTools, setThreadTools] = useState<ThreadToolView[]>([]);
@@ -2253,17 +2297,31 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       children.push(thread);
       childrenByParent.set(thread.parentThreadId, children);
     }
-    const renderThreadTree = (thread: Thread, child = false, depth = 0): ReactNode => (
-      <div key={thread.id} style={depth > 1 ? { marginLeft: `${Math.min(depth - 1, 4) * 8}px` } : undefined}>
-        <ThreadListItem
-          thread={thread}
-          active={thread.id === threadId && project.id === projectId}
-          child={child}
-          onSelect={() => chooseThread(thread.id, project.id)}
-        />
-        {(childrenByParent.get(thread.id) ?? []).map((nested) => renderThreadTree(nested, true, depth + 1))}
-      </div>
-    );
+    const renderThreadTree = (thread: Thread, child = false, depth = 0): ReactNode => {
+      const children = childrenByParent.get(thread.id) ?? [];
+      const childrenExpanded = expandedChildThreadIds.has(thread.id);
+      return (
+        <div key={thread.id} style={depth > 1 ? { marginLeft: `${Math.min(depth - 1, 4) * 8}px` } : undefined}>
+          <ThreadListItem
+            thread={thread}
+            active={thread.id === threadId && project.id === projectId}
+            child={child}
+            hasChildren={children.length > 0}
+            childrenExpanded={childrenExpanded}
+            onToggleChildren={() => {
+              setExpandedChildThreadIds((current) => {
+                const next = new Set(current);
+                if (next.has(thread.id)) next.delete(thread.id);
+                else next.add(thread.id);
+                return next;
+              });
+            }}
+            onSelect={() => chooseThread(thread.id, project.id)}
+          />
+          {childrenExpanded ? children.map((nested) => renderThreadTree(nested, true, depth + 1)) : null}
+        </div>
+      );
+    };
     const roots = visibleThreads.filter(
       (thread) => !thread.parentThreadId || !visibleThreadIds.has(thread.parentThreadId),
     );
@@ -2324,7 +2382,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   return (
     <ToolCardExpansionProvider defaultExpanded={miscellaneousSettings?.toolCardsExpandedByDefault ?? false}>
       <div
-        className={`app-shell ${desktopSidebarCollapsed ? 'desktop-sidebar-collapsed' : ''}${mobileSidebarOpen ? ' mobile-sidebar-open' : ''}`}
+        className={`app-shell sidebar-width-${sidebarWidth} ${desktopSidebarCollapsed ? 'desktop-sidebar-collapsed' : ''}${mobileSidebarOpen ? ' mobile-sidebar-open' : ''}`}
       >
       {mobileSidebarOpen ? (
         <button className="mobile-scrim" aria-label="Close navigation" onClick={() => setMobileSidebarOpen(false)} />
@@ -2355,6 +2413,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           {projects.map((project) => {
             const expanded = expandedProjectIds.has(project.id);
             const projectThreads = threadsByProject[project.id] ?? [];
+            const topLevelThreadCount = projectThreads.filter((thread) => !thread.parentThreadId).length;
             return (
               <section className="project-group" key={project.id}>
                 <div className={`project-group-heading ${project.id === projectId ? 'active' : ''}`}>
@@ -2380,7 +2439,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       {expanded ? <FolderOpen size={15} /> : <Folder size={15} />}
                     </span>
                     <span className="project-group-name">{project.name}</span>
-                    <span className="project-group-count">{projectThreads.length}</span>
+                    <span className="project-group-count">{topLevelThreadCount}</span>
                     <ChevronRight className={`project-group-chevron ${expanded ? 'expanded' : ''}`} size={14} />
                   </button>
                   <button
@@ -2454,6 +2513,26 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             <Settings size={15} aria-hidden="true" />
             <span>Settings</span>
           </button>
+          <div className="sidebar-width-control">
+            <span className="sidebar-width-label">Sidebar width</span>
+            <div className="sidebar-width-options" role="group" aria-label="Sidebar width">
+              {SIDEBAR_WIDTH_OPTIONS.map((option) => (
+                <button
+                  className="sidebar-width-option"
+                  type="button"
+                  key={option.value}
+                  aria-pressed={sidebarWidth === option.value}
+                  title={`${option.label} sidebar width`}
+                  onClick={() => {
+                    setSidebarWidth(option.value);
+                    persistSidebarWidthPreference(option.value);
+                  }}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
           {authRequired ? (
             <button className="session-logout" onClick={() => void onSignOut?.()} type="button">
               <LogOut size={14} aria-hidden="true" />
