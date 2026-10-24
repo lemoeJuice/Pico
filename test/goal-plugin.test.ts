@@ -260,7 +260,7 @@ describe('Goal plugin', () => {
     expect(cleared.goal.status).toBe('cleared');
   });
 
-  it('requires verifiable same-Thread evidence before completion and does not pause by model-step count', async () => {
+  it('allows a completion report without a mandatory evidence reference and stops continuation', async () => {
     const env = setup();
     env.route('/goal', {
       threadId: env.thread.id,
@@ -268,19 +268,98 @@ describe('Goal plugin', () => {
       completionCriteria: 'Regression test passes',
     });
     const checkpoint = env.tools.get('goal_checkpoint')!;
-    await expect(
-      Promise.resolve(
-        checkpoint(
-          {
-            progress: 'Done',
-            status: 'completed',
-            verificationSummary: 'Looks good',
-            verificationExecutionId: 'missing',
-          },
-          { thread: env.thread },
-        ),
-      ),
-    ).rejects.toThrow('completed execution in this Thread');
+    const result = await checkpoint(
+      { progress: 'The regression test passed and the fix is complete.', status: 'completed' },
+      { thread: env.thread },
+    );
+    expect(result).toMatchObject({
+      status: 'completed',
+      progress: 'The regression test passed and the fix is complete.',
+      evidence: null,
+    });
+    expect(env.continuation()(env.thread.id)).toBe(false);
+    expect(env.pauseCalls).toEqual([]);
+  });
+
+  it('attaches an optional same-Thread Canonical citation by the seq exposed in history', async () => {
+    const env = setup();
+    env.route('/goal', {
+      threadId: env.thread.id,
+      text: 'Verify the fix',
+      completionCriteria: 'Regression test passes',
+    });
+    env.records.push({
+      id: 'actual-canonical-id',
+      threadId: env.thread.id,
+      seq: 1,
+      kind: 'tool_result',
+      payload: { toolName: 'test', status: 'completed', result: 'pass' },
+      createdAt: '',
+    });
+    // Runtime commits the assistant record that calls goal_checkpoint before the tool runs.
+    env.records.push({
+      id: 'checkpoint-assistant-record',
+      threadId: env.thread.id,
+      seq: 2,
+      kind: 'assistant',
+      payload: { content: '', toolCalls: [] },
+      createdAt: '',
+    });
+    const checkpoint = env.tools.get('goal_checkpoint')!;
+    const result = await checkpoint(
+      {
+        progress: 'The regression test passed and the fix is complete.',
+        status: 'completed',
+        verificationRecordSeq: 1,
+      },
+      { thread: env.thread },
+    );
+    expect(result).toMatchObject({
+      status: 'completed',
+      evidence: { kind: 'canonical', id: 'actual-canonical-id', summary: 'The regression test passed and the fix is complete.' },
+    });
+    expect(env.continuation()(env.thread.id)).toBe(false);
+  });
+
+  it('does not let an invalid optional reference block completion', async () => {
+    const env = setup();
+    env.route('/goal', {
+      threadId: env.thread.id,
+      text: 'Verify the fix',
+      completionCriteria: 'Regression test passes',
+    });
+    env.records.push({
+      id: 'checkpoint-assistant-record',
+      threadId: env.thread.id,
+      seq: 1,
+      kind: 'assistant',
+      payload: { content: '', toolCalls: [] },
+      createdAt: '',
+    });
+    const checkpoint = env.tools.get('goal_checkpoint')!;
+    const result = await checkpoint(
+      {
+        progress: 'The regression test passed and the fix is complete.',
+        status: 'completed',
+        verificationRecordId: '963',
+      },
+      { thread: env.thread },
+    );
+    expect(result).toMatchObject({
+      status: 'completed',
+      evidence: null,
+      evidenceWarning: expect.stringContaining('Completion was recorded without a citation.'),
+    });
+    expect(env.continuation()(env.thread.id)).toBe(false);
+  });
+
+  it('still attaches a valid completed Execution when its exact ID is available', async () => {
+    const env = setup();
+    env.route('/goal', {
+      threadId: env.thread.id,
+      text: 'Verify the fix',
+      completionCriteria: 'Regression test passes',
+    });
     env.executions.set('exec-1', {
       id: 'exec-1',
       threadId: env.thread.id,
@@ -294,6 +373,7 @@ describe('Goal plugin', () => {
       createdAt: '',
       updatedAt: '',
     });
+    const checkpoint = env.tools.get('goal_checkpoint')!;
     await checkpoint(
       {
         progress: 'Regression test passed',
@@ -310,27 +390,7 @@ describe('Goal plugin', () => {
         }
       ).goal,
     ).toMatchObject({ status: 'completed', evidence: { id: 'exec-1' } });
-
-    env.route('/goal', { threadId: env.thread.id, text: 'Another task', completionCriteria: 'Verified' });
-    for (let index = 1; index <= 13; index += 1) {
-      env.records.push({
-        id: `assistant-${index}`,
-        threadId: env.thread.id,
-        seq: env.records.length + 1,
-        kind: 'assistant',
-        payload: { content: `step ${index}`, toolCalls: [] },
-        createdAt: '',
-      });
-      expect(env.continuation()(env.thread.id)).toBe(true);
-    }
-    expect(env.continuation()(env.thread.id)).toBe(true);
     expect(env.pauseCalls).toEqual([]);
-    expect(
-      (
-        env.route('/goal', {}, new URLSearchParams({ threadId: env.thread.id })) as {
-          goal: { status: string; blocker: string };
-        }
-      ).goal,
-    ).toMatchObject({ status: 'active', blocker: '' });
+    expect(env.continuation()(env.thread.id)).toBe(false);
   });
 });

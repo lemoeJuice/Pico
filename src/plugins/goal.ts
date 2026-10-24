@@ -139,7 +139,7 @@ export const goalPlugin: PicoPlugin = {
         ...(goal.status === 'active'
           ? [
               'Work toward this Goal continuously. An active goal_checkpoint records progress; it does not finish the work. After recording an active checkpoint, continue with the next concrete action in this Thread until the completion criteria are met or an external blocker requires user input or a pause.',
-              'Use needs_input or paused only when work is genuinely blocked or should wait for the user. Set completed only after the completion criteria are met, and provide verifiable evidence from this Thread when calling goal_checkpoint.',
+              'Use needs_input or paused only when work is genuinely blocked or should wait for the user. When the completion criteria are met, call goal_checkpoint once with status=completed and put a concise completion report in progress; evidence citations are optional. If you want to attach a Canonical record, call read_thread_history without thread_id to read this Thread. In its returned records, find the original message or tool result containing the verification and copy that record’s seq into verificationRecordSeq; do not use the seq of the read_thread_history call itself or invent a reference. Do not read history just to complete the Goal. After a successful completed checkpoint, stop this Goal and give the user a concise result. If a checkpoint call fails, correct the call or continue useful work; do not repeat the same completion message while this Goal remains active.',
             ]
           : [
               `Status: ${goal.status}`,
@@ -173,7 +173,7 @@ export const goalPlugin: PicoPlugin = {
       {
         name: 'goal_checkpoint',
         description:
-          'Record meaningful progress or report a blocker for the current user-defined Goal. An active checkpoint is non-terminal: continue the Goal with the next concrete action after recording it. Use needs_input or paused only when work must wait. This cannot edit or clear the Goal.',
+          'Record meaningful progress or report a blocker for the current user-defined Goal. For completion, put a concise completion report in progress; evidence references are optional. To attach a Canonical record, call read_thread_history without thread_id and use the seq beside the original verification record in its returned records (not the seq of the history-read call) as verificationRecordSeq. An active checkpoint is non-terminal: continue the Goal with the next concrete action after recording it. Use needs_input or paused only when work must wait. This cannot edit or clear the Goal.',
         parameters: {
           type: 'object',
           properties: {
@@ -182,20 +182,28 @@ export const goalPlugin: PicoPlugin = {
               type: 'string',
               enum: ['active', 'needs_input', 'paused', 'completed'],
               description:
-                'Use active to record progress and keep working; use needs_input or paused only when work must wait; use completed only when the Goal criteria are met and verification evidence is available.',
+                'Use active to record progress and keep working; use needs_input or paused only when work must wait; use completed when the Goal criteria are met. Put the completion report in progress; evidence references are optional.',
             },
             blocker: { type: 'string', description: 'What is blocking progress or what input is needed.' },
+            verificationRecordSeq: {
+              type: 'integer',
+              minimum: 1,
+              description:
+                'Optional Canonical History reference. Call read_thread_history with thread_id omitted (the current Thread); in its returned records, use the seq beside the original message or tool result containing the verification, not the seq of the history-read call. Omit this field when you do not need a citation; never guess a seq.',
+            },
             verificationExecutionId: {
               type: 'string',
-              description: 'Completed same-Thread execution that verifies the completion criteria.',
+              description:
+                'Legacy optional exact execution ID. Prefer verificationRecordSeq from read_thread_history; omit this field if the exact ID is not already available.',
             },
             verificationRecordId: {
               type: 'string',
-              description: 'Same-Thread canonical record that contains verification evidence.',
+              description:
+                'Legacy optional opaque Canonical record ID. Prefer verificationRecordSeq from read_thread_history; do not pass a seq in this field.',
             },
             verificationSummary: {
               type: 'string',
-              description: 'What the referenced verification evidence establishes.',
+              description: 'Optional note about what an attached evidence reference establishes; defaults to progress.',
             },
           },
           required: ['progress'],
@@ -218,23 +226,42 @@ export const goalPlugin: PicoPlugin = {
           throw new Error('Only the user can resume a paused Goal');
         }
         let evidence: GoalEvidence | null = goal.evidence;
+        let evidenceWarning: string | undefined;
         if (requestedStatus === 'completed') {
-          const summary = requiredString(args.verificationSummary, 'verificationSummary');
-          if (typeof args.verificationExecutionId === 'string' && args.verificationExecutionId.trim()) {
+          const summary =
+            typeof args.verificationSummary === 'string' && args.verificationSummary.trim()
+              ? args.verificationSummary.trim()
+              : progress;
+          evidence = null;
+          if (args.verificationRecordSeq !== undefined) {
+            const seq = args.verificationRecordSeq;
+            const record =
+              typeof seq === 'number' && Number.isSafeInteger(seq) && seq >= 1
+                ? canonical.list(thread.id).find((item) => item.seq === seq)
+                : undefined;
+            if (!record || record.kind === 'plugin' || record.seq >= maxSeq(thread.id)) {
+              evidenceWarning =
+                'Optional evidence was not attached: the supplied seq is not a prior non-plugin Canonical record in this Thread. Completion was recorded without a citation.';
+            } else {
+              evidence = { kind: 'canonical', id: record.id, summary };
+            }
+          } else if (typeof args.verificationExecutionId === 'string' && args.verificationExecutionId.trim()) {
             const execution: Execution | null = executions.get(args.verificationExecutionId.trim());
             if (!execution || execution.threadId !== thread.id || execution.status !== 'completed') {
-              throw new Error('Completion evidence must reference a completed execution in this Thread');
+              evidenceWarning =
+                'Optional evidence was not attached: the supplied execution ID is not a completed execution in this Thread. Completion was recorded without a citation.';
+            } else {
+              evidence = { kind: 'execution', id: execution.id, summary };
             }
-            evidence = { kind: 'execution', id: execution.id, summary };
           } else if (typeof args.verificationRecordId === 'string' && args.verificationRecordId.trim()) {
             const recordId = args.verificationRecordId.trim();
             const record = canonical.list(thread.id).find((item) => item.id === recordId);
             if (!record || record.kind === 'plugin' || record.seq >= maxSeq(thread.id)) {
-              throw new Error('Completion evidence must reference a prior canonical record in this Thread');
+              evidenceWarning =
+                'Optional evidence was not attached: the supplied record ID is not a prior non-plugin Canonical record in this Thread. Completion was recorded without a citation.';
+            } else {
+              evidence = { kind: 'canonical', id: record.id, summary };
             }
-            evidence = { kind: 'canonical', id: record.id, summary };
-          } else {
-            throw new Error('completed requires a same-Thread verificationExecutionId or verificationRecordId');
           }
         }
         const status = requestedStatus as GoalStatus;
@@ -248,11 +275,17 @@ export const goalPlugin: PicoPlugin = {
         };
         state.transaction(() => {
           save(goal!);
-          audit(thread.id, 'checkpoint', { status, progress, blocker: goal!.blocker, evidence });
+          audit(thread.id, 'checkpoint', {
+            status,
+            progress,
+            blocker: goal!.blocker,
+            evidence,
+            ...(evidenceWarning ? { evidenceWarning } : {}),
+          });
           if (status === 'paused' || status === 'needs_input')
             threads.pause(thread.id, goal!.blocker || `Goal ${status}`);
         });
-        return { status, progress, blocker: goal.blocker, evidence };
+        return { status, progress, blocker: goal.blocker, evidence, ...(evidenceWarning ? { evidenceWarning } : {}) };
       },
     );
 
