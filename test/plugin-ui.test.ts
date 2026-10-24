@@ -11,8 +11,132 @@ import {
   validatePluginUiTree,
   type PluginUiContext,
 } from '../src/plugins/ui-protocol.js';
+import {
+  reconcilePluginUiInputDraft,
+  samePluginUiTextInputProps,
+  sharePluginUiTree,
+} from '../src/web/plugin-ui-tree.js';
 
 describe('dynamic plugin UI boundary', () => {
+  it('keeps multi-character host drafts through delayed and stale plugin snapshots', () => {
+    let draft = '';
+    let pendingEcho = false;
+    for (const character of ['U', 'S', 'D']) {
+      draft += character;
+      pendingEcho = true;
+      const result = reconcilePluginUiInputDraft(draft, '', true, pendingEcho);
+      draft = result.draft;
+      pendingEcho = result.pendingEcho;
+    }
+    expect(draft).toBe('USD');
+    expect(reconcilePluginUiInputDraft(draft, '', true, pendingEcho)).toEqual({ draft: 'USD', pendingEcho: true });
+    expect(reconcilePluginUiInputDraft('USD', 'USD', true, true)).toEqual({ draft: 'USD', pendingEcho: false });
+    expect(reconcilePluginUiInputDraft('USD', '', false, true)).toEqual({ draft: 'USD', pendingEcho: true });
+    expect(reconcilePluginUiInputDraft('USD', 'USD', false, true)).toEqual({ draft: 'USD', pendingEcho: false });
+  });
+
+  it('keeps unaffected text input components stable across unrelated tree snapshots', () => {
+    const action = (): void => undefined;
+    const previous = {
+      node: { type: 'textInput' as const, label: 'Currency', value: 'USD', actionId: 'currency' },
+      onAction: action,
+      compact: false,
+    };
+    expect(samePluginUiTextInputProps(previous, { ...previous, node: { ...previous.node } })).toBe(true);
+    expect(
+      samePluginUiTextInputProps(previous, {
+        ...previous,
+        node: { ...previous.node, value: 'EUR' },
+      }),
+    ).toBe(false);
+  });
+
+  it('shares unchanged sibling and nested subtrees when one field changes', () => {
+    const previous = [
+      {
+        type: 'group' as const,
+        layout: 'stack-compact' as const,
+        children: [
+          { type: 'textInput' as const, label: 'Currency', value: 'USD', actionId: 'currency' },
+          { type: 'card' as const, children: [{ type: 'text' as const, text: 'Unchanged' }] },
+        ],
+      },
+      { type: 'paragraph' as const, text: 'Outside subtree' },
+    ];
+    const incoming = [
+      {
+        type: 'group' as const,
+        layout: 'stack-compact' as const,
+        children: [
+          { type: 'textInput' as const, label: 'Currency', value: 'EUR', actionId: 'currency' },
+          { type: 'card' as const, children: [{ type: 'text' as const, text: 'Unchanged' }] },
+        ],
+      },
+      { type: 'paragraph' as const, text: 'Outside subtree' },
+    ];
+    const shared = sharePluginUiTree(previous, incoming);
+    expect(shared).not.toBe(previous);
+    const oldGroup = previous[0];
+    const newGroup = shared[0];
+    expect(newGroup).not.toBe(oldGroup);
+    if (oldGroup?.type !== 'group' || newGroup?.type !== 'group') throw new Error('Expected group roots.');
+    expect(newGroup.children[0]).not.toBe(oldGroup.children[0]);
+    expect(newGroup.children[1]).toBe(oldGroup.children[1]);
+    expect(shared[1]).toBe(previous[1]);
+  });
+
+  it('reuses select and table nodes whose nested values were rebuilt but unchanged', () => {
+    const previousSelect = {
+      type: 'select' as const,
+      label: 'Provider',
+      value: 'openai',
+      actionId: 'provider',
+      options: [
+        { label: 'OpenAI', value: 'openai' },
+        { label: 'Anthropic', value: 'anthropic' },
+      ],
+    };
+    const selectTree = [previousSelect];
+    const recreatedSelect = JSON.parse(JSON.stringify(selectTree)) as typeof selectTree;
+    expect(sharePluginUiTree(selectTree, recreatedSelect)).toBe(selectTree);
+    const changedSelect = JSON.parse(JSON.stringify(selectTree)) as typeof selectTree;
+    changedSelect[0]!.options[1]!.label = 'Anthropic Models';
+    expect(sharePluginUiTree(selectTree, changedSelect)[0]).not.toBe(previousSelect);
+
+    const previousTable = { type: 'table' as const, columns: ['Name', 'Status'], rows: [['Goal', 'active']] };
+    const tableTree = [previousTable];
+    const recreatedTable = JSON.parse(JSON.stringify(tableTree)) as typeof tableTree;
+    expect(sharePluginUiTree(tableTree, recreatedTable)).toBe(tableTree);
+    const changedTable = JSON.parse(JSON.stringify(tableTree)) as typeof tableTree;
+    changedTable[0]!.rows[0]![1] = 'paused';
+    expect(sharePluginUiTree(tableTree, changedTable)[0]).not.toBe(previousTable);
+  });
+
+  it('keeps text area drafts through repeated edits and stale or matching echoes', () => {
+    const sequence = (initial: string, entered: string): { draft: string; pending: boolean } => {
+      let draft = initial;
+      let pending = false;
+      for (const character of entered) {
+        draft += character;
+        pending = true;
+        const next = reconcilePluginUiInputDraft(draft, initial, true, pending);
+        draft = next.draft;
+        pending = next.pendingEcho;
+      }
+      return { draft, pending };
+    };
+    const state = sequence('', 'multi-line');
+    expect(state).toEqual({ draft: 'multi-line', pending: true });
+    expect(reconcilePluginUiInputDraft(state.draft, '', false, state.pending)).toEqual({
+      draft: 'multi-line',
+      pendingEcho: true,
+    });
+    expect(reconcilePluginUiInputDraft(state.draft, state.draft, false, state.pending)).toEqual({
+      draft: 'multi-line',
+      pendingEcho: false,
+    });
+  });
+
   it('accepts only bounded host-rendered components allowed by their semantic slot', () => {
     expect(validatePluginUiTree([{ type: 'text', text: '<b>literal</b>' }], 'composer.status')).toBe(true);
     expect(validatePluginUiTree([{ type: 'button', label: 'Refresh', actionId: 'refresh' }], 'thread.toolbar')).toBe(

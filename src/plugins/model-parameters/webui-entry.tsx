@@ -17,6 +17,22 @@ const root = createRoot(rootElement);
 const apiRoot = '/api/plugins/pico.model-parameters';
 const errorText = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
+function reportUiError(
+  reason: unknown,
+  setError: (message: string) => void,
+  onError: (message: string) => void,
+  onNotice: (message: string) => void,
+): void {
+  const message = errorText(reason);
+  if (message === 'Thread model selection changed.') {
+    setError('');
+    onNotice('Model selection changed. Refreshing its settings.');
+    return;
+  }
+  setError(message);
+  onError(message);
+}
+
 function Controller({ init, client }: { init: PluginUiInitMessage; client: ReturnType<typeof createPluginUiClient> }): ReactElement | null {
   const [settings, setSettings] = useState(init.settings);
   const [context, setContext] = useState(init.context as PluginUiContext);
@@ -39,11 +55,11 @@ function Controller({ init, client }: { init: PluginUiInitMessage; client: Retur
   useEffect(() => client.subscribeContext((value) => setContext(value as PluginUiContext)), [client]);
   useEffect(() => () => client.close(), [client]);
   useEffect(() => { client.ready(init.attemptId); }, [client, init.attemptId]);
-  useEffect(() => { let live = true; if (!threadId || !target.endpoint || !target.model) { setProfile(null); return; } setLoading(true); void client.props(settings, context).api<ModelParameterProfileView>(profileUrl).then((value) => { if (live) { setProfile(value); setError(''); } }).catch((reason: unknown) => { if (live) { setProfile(null); setError(errorText(reason)); client.props(settings, context).onError(errorText(reason)); } }).finally(() => { if (live) setLoading(false); }); return () => { live = false; }; }, [client, profileUrl, threadId, target.endpoint, target.model, settings, context]);
+  useEffect(() => { let live = true; if (!threadId || !target.endpoint || !target.model) { setProfile(null); return; } setLoading(true); void client.props(settings, context).api<ModelParameterProfileView>(profileUrl).then((value) => { if (live) { setProfile(value); setError(''); } }).catch((reason: unknown) => { if (live) { setProfile(null); const props = client.props(settings, context); reportUiError(reason, setError, props.onError, props.onNotice); } }).finally(() => { if (live) setLoading(false); }); return () => { live = false; }; }, [client, profileUrl, threadId, target.endpoint, target.model, settings, context]);
   useEffect(() => setTemperatureDraft(context.modelSelection?.parameters.temperature ?? settings.temperature), [settings.temperature, context.modelSelection?.parameters.temperature, threadId]);
   useEffect(() => {
     if (!profile || init.viewId !== 'ModelParameterOthers' || profile.temperature.mode !== 'adjustable' || temperatureDraft === (context.modelSelection?.parameters.temperature ?? settings.temperature)) return;
-    const timer = window.setTimeout(() => { void client.props(settings, context).updateModelSettings({ temperature: temperatureDraft }, threadId).catch((reason: unknown) => { setError(errorText(reason)); setTemperatureDraft(context.modelSelection?.parameters.temperature ?? settings.temperature); }); }, 180);
+    const timer = window.setTimeout(() => { void client.props(settings, context).updateModelSettings({ temperature: temperatureDraft }, threadId).catch((reason: unknown) => { const props = client.props(settings, context); reportUiError(reason, setError, props.onError, props.onNotice); setTemperatureDraft(context.modelSelection?.parameters.temperature ?? settings.temperature); }); }, 180);
     return () => window.clearTimeout(timer);
   }, [client, profile, init.viewId, temperatureDraft, context, settings, threadId]);
   useEffect(() => client.subscribeActions((action) => {
@@ -63,7 +79,7 @@ function Controller({ init, client }: { init: PluginUiInitMessage; client: Retur
     if (control.kind === 'range' && !Number.isFinite(value as number)) return;
     const selection: ModelParameterSelection = { ...profile.values, [control.id]: value };
     setSaving(true); setError('');
-    void client.props(settings, context).api<ModelParameterProfileView>(`${apiRoot}/selection`, { method: 'PUT', body: JSON.stringify({ target, selection, threadId }) }).then(setProfile).catch((reason: unknown) => { setError(errorText(reason)); client.props(settings, context).onError(errorText(reason)); }).finally(() => setSaving(false));
+    void client.props(settings, context).api<ModelParameterProfileView>(`${apiRoot}/selection`, { method: 'PUT', body: JSON.stringify({ target, selection, threadId }) }).then(setProfile).catch((reason: unknown) => { const props = client.props(settings, context); reportUiError(reason, setError, props.onError, props.onNotice); }).finally(() => setSaving(false));
   }), [client, actions, profile, threadId, settings, context, target]);
   if (!profile) {
     client.render(
