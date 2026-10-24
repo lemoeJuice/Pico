@@ -308,6 +308,13 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     const thread = runtime.pause(request.params.threadId!);
     response.json(thread);
   });
+  app.post('/api/threads/:threadId/context/restore', (request, response) => {
+    response.json(runtime.restoreContextCheckpoint(request.params.threadId!));
+  });
+  app.post('/api/threads/:threadId/context/rewind', (request, response) => {
+    const body = bodyObject(request);
+    response.json(runtime.rewindContextToMessage(request.params.threadId!, requiredText(body, 'targetRecordId')));
+  });
   app.post('/api/threads/:threadId/continue', (request, response) => {
     const thread = runtime.continue(request.params.threadId!);
     response.json(thread);

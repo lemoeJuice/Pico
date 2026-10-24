@@ -585,6 +585,8 @@ var ChatGptPlanAuth = class {
 var responsesUrl = "https://api.openai.com/v1/responses";
 var FETCH_FAILED_RETRY_INTERVAL_MS = 2e3;
 var MAX_FETCH_FAILED_RETRIES = 5;
+var MAX_PROVIDER_ERROR_BODY_BYTES = 16 * 1024;
+var MAX_PROVIDER_ERROR_READ_MS = 2e3;
 var RETRYABLE_FETCH_ERROR_CODES = /* @__PURE__ */ new Set([
   "ECONNREFUSED",
   "ECONNRESET",
@@ -670,6 +672,101 @@ function responseTools(tools) {
 }
 function object(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function boundedString(value, maxLength) {
+  if (typeof value !== "string" || value.length > maxLength) return void 0;
+  const result = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  return result || void 0;
+}
+function providerErrorLabel(value) {
+  const label = boundedString(value, 80);
+  return label && /^[a-z0-9_.:-]+$/i.test(label) ? label : void 0;
+}
+function providerErrorParam(value) {
+  const param = boundedString(value, 160);
+  return param && /^[a-z0-9_.:-]+(?:\[[a-z0-9_.:-]*\][a-z0-9_.:-]*)*$/i.test(param) ? param : void 0;
+}
+function providerErrorReason(error) {
+  const diagnostic = `${typeof error.code === "string" ? error.code : ""} ${typeof error.message === "string" ? error.message : ""}`.replace(/[_-]+/g, " ").toLowerCase();
+  if (/unsupported\s+(?:request\s+)?parameter|parameter\s+(?:is\s+)?not\s+supported|unrecognized\s+(?:request\s+)?(?:parameter|argument)|unknown\s+parameter/i.test(
+    diagnostic
+  )) {
+    return "unsupported_parameter";
+  }
+  if (/missing\s+(?:required\s+)?parameter|required\s+(?:parameter|field)|(?:parameter|field)\s+is\s+required/i.test(diagnostic)) {
+    return "missing_parameter";
+  }
+  if (/invalid\s+type|expected\s+(?:a\s+|an\s+)?(?:string|number|integer|boolean|array|object)|must\s+be\s+(?:a\s+|an\s+)?(?:string|number|integer|boolean|array|object)/i.test(
+    diagnostic
+  )) {
+    return "invalid_type";
+  }
+  if (/invalid\s+value|unsupported\s+value|(?:must|expected)\s+be\s+one\s+of|not\s+one\s+of|valid\s+values?/i.test(
+    diagnostic
+  )) {
+    return "invalid_value";
+  }
+  return "unknown";
+}
+function providerHttpError(value) {
+  const payload = object(value);
+  if (!payload) return void 0;
+  const nestedError = object(payload.error);
+  const error = nestedError ?? payload;
+  const reason = providerErrorReason(error);
+  const type = providerErrorLabel(error.type);
+  const code = providerErrorLabel(error.code);
+  const param = providerErrorParam(error.param);
+  if (!type && !code && !param && reason === "unknown") return void 0;
+  const details = {
+    reason,
+    ...type ? { type } : {},
+    ...code ? { code } : {},
+    ...param ? { param } : {}
+  };
+  return details;
+}
+async function readProviderHttpError(response) {
+  const reader = response.body?.getReader();
+  if (!reader) return void 0;
+  const chunks = [];
+  let byteLength = 0;
+  let timeout;
+  const deadline = new Promise((_resolve, reject) => {
+    timeout = setTimeout(() => reject(new Error("Provider error body read timed out.")), MAX_PROVIDER_ERROR_READ_MS);
+  });
+  try {
+    while (true) {
+      const { done, value } = await Promise.race([reader.read(), deadline]);
+      if (done) break;
+      byteLength += value.byteLength;
+      if (byteLength > MAX_PROVIDER_ERROR_BODY_BYTES) {
+        void reader.cancel().catch(() => void 0);
+        return void 0;
+      }
+      chunks.push(value);
+    }
+  } catch {
+    void reader.cancel().catch(() => void 0);
+    return void 0;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+    try {
+      reader.releaseLock();
+    } catch {
+    }
+  }
+  try {
+    const bytes = new Uint8Array(byteLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return providerHttpError(JSON.parse(new TextDecoder().decode(bytes)));
+  } catch {
+    return void 0;
+  }
 }
 function readUsage(value) {
   const usage = object(value);
@@ -822,6 +919,12 @@ function withProviderErrorCode(error, code) {
 function providerError(message, code) {
   return Object.assign(new Error(message), { code });
 }
+function providerHttpResponseError(status, details) {
+  return Object.assign(providerError(`ChatGPT model request returned HTTP ${status}.`, `http_${status}`), {
+    providerStatus: status,
+    ...details ? { providerError: details } : {}
+  });
+}
 function outputItemCounts(response) {
   const counts = {};
   if (!Array.isArray(response.output)) return counts;
@@ -896,15 +999,16 @@ var ChatGptResponsesAdapter = class {
     }
     const response = tracedRequest.response;
     if (!response.ok) {
-      await response.body?.cancel().catch(() => void 0);
+      const errorDetails = await readProviderHttpError(response);
       tracedRequest.settle({
         outcome: "failed",
         durationMs: Date.now() - tracedRequest.startedAt,
         terminalEvent: "http_response",
         errorCategory: "http",
-        errorCode: `http_${response.status}`
+        errorCode: `http_${response.status}`,
+        ...errorDetails ? { providerError: errorDetails } : {}
       });
-      throw providerError(`ChatGPT model request returned HTTP ${response.status}.`, `http_${response.status}`);
+      throw providerHttpResponseError(response.status, errorDetails);
     }
     if (!response.body) {
       tracedRequest.settle({

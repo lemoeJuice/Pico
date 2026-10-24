@@ -1,5 +1,6 @@
 import type { PicoPlugin, PluginContext } from './host.js';
 import type { Thread, ThreadModelSelection } from '../core/types.js';
+import { projectThreadHistoryIo } from '../contracts/canonical-projection.js';
 import type { ProjectionInput } from '../runtime/stages.js';
 
 type CollaborationServices = Pick<PluginContext, 'threads'>;
@@ -211,7 +212,7 @@ export const collaborationPlugin: PicoPlugin = {
       {
         name: 'read_thread_history',
         description:
-          'Read recent ordinary Canonical History records from another Thread in this Project. Use it to inspect a child Thread result; this does not wait for or change that Thread.',
+          'Read recent input/output records from a Thread in this Project, indexed by Canonical seq. Omit thread_id to read the current Thread. When attaching same-Thread history as a reference, use the returned seq value. Plugin records and diagnostic metadata are omitted. This does not wait for or change another Thread.',
         parameters: {
           type: 'object',
           properties: {
@@ -219,14 +220,13 @@ export const collaborationPlugin: PicoPlugin = {
             after_seq: { type: 'integer', minimum: 0 },
             limit: { type: 'integer', minimum: 1, maximum: 100 },
           },
-          required: ['thread_id'],
           additionalProperties: false,
         },
       },
       (args, toolContext) => {
         const sender = toolContext.thread;
         if (!sender) throw new Error('Thread context is missing');
-        const targetId = typeof args.thread_id === 'string' ? args.thread_id.trim() : '';
+        const targetId = typeof args.thread_id === 'string' ? args.thread_id.trim() : sender.id;
         const target = threads.get(targetId);
         if (!target || target.projectId !== sender.projectId)
           throw new Error('Target Thread must belong to the same Project');
@@ -240,17 +240,7 @@ export const collaborationPlugin: PicoPlugin = {
           ...(afterSeq === undefined ? {} : { afterSeq }),
           limit: requestedLimit,
         });
-        return {
-          threadId: target.id,
-          title: target.title,
-          state: target.state,
-          records: records.map((record) => ({
-            seq: record.seq,
-            kind: record.kind,
-            createdAt: record.createdAt,
-            payload: record.payload,
-          })),
-        };
+        return projectThreadHistoryIo(records);
       },
     );
 

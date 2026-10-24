@@ -15,6 +15,7 @@ const informationalPauseReasonPrefixes = [
   'Interrupted by user.',
   'Paused from parent collaboration panel',
   'Rolling Context was manually compacted.',
+  'Context rewound before the next Model response.',
 ];
 
 export function pauseReasonIsError(pauseReason: string | null): boolean {

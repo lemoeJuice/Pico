@@ -198,6 +198,22 @@ function isRecordPresent(records: readonly CanonicalRecord[], segment: RollingSe
   const ids = new Set(records.map((record) => record.id));
   return segment.sourceRecordIds.every((id) => ids.has(id));
 }
+function latestRewindTargetSeq(records: readonly CanonicalRecord[]): number | null {
+  for (const record of [...records].reverse()) {
+    if (record.kind !== 'plugin') continue;
+    const payload = object(record.payload);
+    if (
+      payload.pluginId === 'pico.runtime' &&
+      payload.action === 'context-rewound' &&
+      payload.version === 1 &&
+      Number.isSafeInteger(payload.targetSeq) &&
+      (payload.targetSeq as number) >= 1
+    ) {
+      return payload.targetSeq as number;
+    }
+  }
+  return null;
+}
 function allTurns(
   context: PluginContext,
   input: ProjectionInput,
@@ -206,11 +222,13 @@ function allTurns(
   const consumed = new Set<string>();
   const replacementByStart = new Map<number, RollingSegment>();
   const runtimeCompaction = runtimeContextCompaction(input.records);
+  const rewindTargetSeq = latestRewindTargetSeq(input.records);
   for (const segment of state)
     if (
       segment.tier !== 'hot' &&
       segment.summary &&
-      (!runtimeCompaction || segment.startSeq > runtimeCompaction.throughSeq)
+      (!runtimeCompaction || segment.startSeq > runtimeCompaction.contextThroughSeq) &&
+      (rewindTargetSeq === null || rewindTargetSeq < segment.startSeq || rewindTargetSeq > segment.endSeq)
     ) {
       replacementByStart.set(segment.startSeq, segment);
     }
@@ -235,7 +253,7 @@ function allTurns(
   const blocks = canonicalTurnBlocks(input.records);
   const blockByStart = new Map(blocks.map((block) => [block[0]!.seq, block]));
   for (const record of relevant) {
-    if (runtimeCompaction && record.seq <= runtimeCompaction.throughSeq) continue;
+    if (runtimeCompaction && record.seq <= runtimeCompaction.contextThroughSeq) continue;
     if (consumed.has(record.id)) continue;
     const segment = replacementByStart.get(record.seq);
     const block = blockByStart.get(record.seq);
@@ -342,7 +360,7 @@ export const rollingContextPlugin: PicoPlugin = {
       const currentStart = currentBlock?.[0]?.seq ?? Number.POSITIVE_INFINITY;
       const sealable = completedCanonicalTurnBlocks(records).filter((block) => {
         const endSeq = block.at(-1)?.seq ?? Number.POSITIVE_INFINITY;
-        if (runtimeCompaction && endSeq <= runtimeCompaction.throughSeq) return false;
+        if (runtimeCompaction && endSeq <= runtimeCompaction.contextThroughSeq) return false;
         return (
           endSeq < currentStart ||
           (includeLatestComplete && thread.state === 'idle' && endSeq === currentBlock?.at(-1)?.seq)

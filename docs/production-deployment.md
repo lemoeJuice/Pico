@@ -25,14 +25,25 @@ Set `PICO_ACCESS_TOKEN` in the process environment before starting the script. F
 
 For a routine restart, reuse the existing production `PICO_ACCESS_TOKEN` so existing clients and authenticated sessions continue to use the same credential. If a production secret manager is configured, inject that same value into the replacement process. If the Runtime was started manually and the token exists only in its process environment, transfer it directly in memory to the replacement process environment before stopping the old Runtime. Do not generate or rotate a replacement token as part of deployment. Never print the token, place it in a command line, or save it in a deployment note, script, or temporary file. Rotate it only as a separate, intentional credential change.
 
+### Required pre-stop credential handoff
+
+Before sending `SIGTERM`, prepare the replacement launcher's environment with the existing token. When it is available only from the running Runtime, read it from that process into launcher memory and keep it there until the replacement process has inherited it. Validate only that it is present and meets the 32-byte minimum; never print or persist its value. If the replacement launch context cannot safely receive the existing token, stop here and restore access to the configured secret source while the old Runtime is still running. Do not stop the old Runtime first and then search shell history, configuration files, or unrelated process environments for a copy.
+
+This is a hard gate, not a post-stop recovery step: the shell or user systemd manager may not have inherited a token that was set only for the Runtime process. Confirm the in-memory handoff is ready before continuing with the restart.
+
 `scripts/start-runtime.sh` changes to the project root and runs `npm start` in the foreground. It does not build artifacts, stop an existing Runtime, or daemonize itself. Let the host's process manager keep it running, or run it in a controlled host session. The production instance deployed for this change was started as a detached host process with output in `/tmp/pico-runtime-production.log`; that temporary log location is specific to the current launch.
 
 For a routine restart:
 
 1. Finish or pause active Thread work, then check that the current listener belongs to this project with `ss -ltnp 'sport = :4173'` and inspect its working directory.
-2. Send `SIGTERM` to the existing Runtime and wait for it to exit before starting another instance. Pico drains its HTTP/WebSocket connections and then shuts down Executors and closes SQLite.
-3. If a WebUI tab remains connected, its WebSocket can keep graceful shutdown waiting after the listener has stopped accepting new requests. Close or reload the old tab and wait for the Runtime to exit. Do not force-stop a process while durable executions are active. If shutdown remains stuck, inspect execution states first; only stop the old process after confirming no active work and understanding that forced termination bypasses the remaining cleanup.
-4. Start `./scripts/start-runtime.sh 100.64.209.124` with the production environment, reusing the existing `PICO_ACCESS_TOKEN` as described above, then verify the listener and WebUI response.
+2. Complete the required pre-stop credential handoff above. Verify the launcher has the existing token in memory without printing it.
+3. Send `SIGTERM` to the existing Runtime and wait for it to exit before starting another instance. Pico drains its HTTP/WebSocket connections and then shuts down Executors and closes SQLite.
+4. If a WebUI tab remains connected, its WebSocket can keep graceful shutdown waiting after the listener has stopped accepting new requests. Close or reload the old tab and wait for the Runtime to exit. Do not force-stop a process while durable executions are active. If shutdown remains stuck, inspect execution states first; only stop the old process after confirming no active work and understanding that forced termination bypasses the remaining cleanup.
+5. Start `./scripts/start-runtime.sh 100.64.209.124` with the prepared production environment, then verify the listener and WebUI response.
+
+### Incident note (2026-10-24)
+
+A deployment attempt stopped the old Runtime before transferring its process-only `PICO_ACCESS_TOKEN` to the replacement launcher's environment. The token was then unavailable from the shell and user systemd environment, so the replacement could not be started safely and the production listener was left down until the operator supplied the existing credential. The required pre-stop handoff above was added to prevent this ordering failure. Never include the token itself in incident notes.
 
 Basic checks:
 

@@ -177,10 +177,10 @@ describe('Collaboration plugin', () => {
       expect.objectContaining({ threadId: first.threadId, title: 'Cache check', state: 'idle' }),
     ]);
     expect(await env.tools.get('read_thread_history')!({ thread_id: first.threadId }, toolContext)).toMatchObject({
-      threadId: first.threadId,
-      records: [
-        expect.objectContaining({ seq: 1, payload: expect.objectContaining({ content: 'Result is verified.' }) }),
-      ],
+      records: [expect.objectContaining({ seq: 1, output: 'Result is verified.' })],
+    });
+    expect(await env.tools.get('read_thread_history')!({}, toolContext)).toMatchObject({
+      records: [expect.objectContaining({ seq: 1, output: 'Result is verified.' })],
     });
     await expect(spawn({ prompt: 'Different task' }, toolContext)).rejects.toThrow('already used');
   });

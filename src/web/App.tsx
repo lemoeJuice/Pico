@@ -272,6 +272,31 @@ function runtimeCompactionPayload(record: CanonicalRecord): RuntimeCompactionPay
   return { throughSeq: payload.throughSeq as number, summary: payload.summary };
 }
 
+function runtimeContextRewindPayload(record: CanonicalRecord): { targetRecordId: string; targetSeq: number } | null {
+  if (record.kind !== 'plugin') return null;
+  const payload = recordPayload<Record<string, unknown>>(record);
+  if (
+    payload.pluginId !== 'pico.runtime' ||
+    payload.action !== 'context-rewound' ||
+    payload.version !== 1 ||
+    typeof payload.targetRecordId !== 'string' ||
+    !Number.isSafeInteger(payload.targetSeq)
+  ) {
+    return null;
+  }
+  return { targetRecordId: payload.targetRecordId, targetSeq: payload.targetSeq as number };
+}
+
+function contextRewindPreview(record: CanonicalRecord): string {
+  if (record.kind === 'assistant') {
+    const assistant = recordPayload<AssistantPayload>(record);
+    if (assistant.content.trim()) return assistant.content;
+    const toolNames = assistant.toolCalls.map((call) => call.name).filter(Boolean);
+    return toolNames.length > 0 ? `Tool call round · ${toolNames.join(', ')}` : 'Empty model response';
+  }
+  return recordPayload<MessagePayload>(record).content;
+}
+
 function modelExecutionModelId(execution: Execution): string | null {
   const argumentModel = execution.arguments?.model;
   if (typeof argumentModel === 'string' && argumentModel.trim()) return argumentModel;
@@ -374,6 +399,7 @@ function ThreadStateControl({
 function Modal({
   title,
   contextLabel = 'PICO · SETTINGS',
+  className,
   onClose,
   children,
   error,
@@ -381,6 +407,7 @@ function Modal({
 }: {
   title: string;
   contextLabel?: string;
+  className?: string;
   onClose(): void;
   children: ReactNode;
   error: string;
@@ -394,7 +421,7 @@ function Modal({
         if (event.currentTarget === event.target) onClose();
       }}
     >
-      <section className="modal" role="dialog" aria-modal="true" aria-label={title}>
+      <section className={`modal${className ? ` ${className}` : ''}`} role="dialog" aria-modal="true" aria-label={title}>
         <div className="modal-heading">
           <div>
             <p className="eyebrow">{contextLabel}</p>
@@ -536,6 +563,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [threads, setThreads] = useState<Thread[]>([]);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<ThreadSnapshot | null>(null);
+  const [preservedHistoryThreadId, setPreservedHistoryThreadId] = useState<string | null>(null);
   const [bootstrapping, setBootstrapping] = useState(true);
   const [settings, setSettings] = useState<PublicSettings | null>(null);
   const [contextManagement, setContextManagement] = useState<ContextManagementSettings | null>(null);
@@ -560,9 +588,19 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [pluginActionId, setPluginActionId] = useState<string | null>(null);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [threadInfoOpen, setThreadInfoOpen] = useState(false);
+  const [threadHistoryOpen, setThreadHistoryOpen] = useState(false);
   const [threadTitleDraft, setThreadTitleDraft] = useState('');
   const [threadTitleSaving, setThreadTitleSaving] = useState(false);
+  const [threadContextRestoring, setThreadContextRestoring] = useState(false);
   const [threadInfoError, setThreadInfoError] = useState('');
+  const [pendingContextRewind, setPendingContextRewind] = useState<{
+    threadId: string;
+    record: CanonicalRecord;
+    rewound: boolean;
+    throughSeq?: number;
+    state?: Thread['state'];
+  } | null>(null);
+  const [contextRewindError, setContextRewindError] = useState('');
   const [newThreadOpen, setNewThreadOpen] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [desktopSidebarCollapsed, setDesktopSidebarCollapsed] = useState(false);
@@ -1673,6 +1711,66 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     }
   };
 
+  const requestContextRewind = (targetThreadId: string, record: CanonicalRecord): void => {
+    setContextRewindError('');
+    setPendingContextRewind({ threadId: targetThreadId, record, rewound: false });
+  };
+
+  const continueFromSelectedMessage = async (): Promise<void> => {
+    if (!pendingContextRewind || threadContextRestoring) return;
+    const { threadId: targetThreadId, record } = pendingContextRewind;
+    setContextRewindError('');
+    setThreadContextRestoring(true);
+    try {
+      if (pendingContextRewind.rewound) {
+        if (threadId === targetThreadId) {
+          try {
+            await loadSnapshot(targetThreadId);
+          } catch (caught) {
+            const reason = caught instanceof Error ? caught.message : 'Unknown error';
+            setContextRewindError(`已切换到 seq ${record.seq}，但刷新历史失败：${reason}。可以重试刷新。`);
+            return;
+          }
+        }
+        setPendingContextRewind(null);
+        return;
+      }
+
+      let result: { thread: Thread; targetRecordId: string; targetSeq: number; projectionId: string };
+      try {
+        result = await api<{ thread: Thread; targetRecordId: string; targetSeq: number; projectionId: string }>(
+          `/api/threads/${encodeURIComponent(targetThreadId)}/context/rewind`,
+          { method: 'POST', body: JSON.stringify({ targetRecordId: record.id }) },
+        );
+      } catch (caught) {
+        const reason = caught instanceof Error ? caught.message : 'Unknown error';
+        setContextRewindError(`无法从这条消息切换到新路径：${reason}`);
+        return;
+      }
+      setPendingContextRewind({
+        threadId: targetThreadId,
+        record,
+        rewound: true,
+        throughSeq: result.targetSeq,
+        state: result.thread.state,
+      });
+      setPreservedHistoryThreadId(null);
+      syncThreadLists(result.thread);
+      if (threadId === targetThreadId) {
+        try {
+          await loadSnapshot(targetThreadId);
+        } catch (caught) {
+          const reason = caught instanceof Error ? caught.message : 'Unknown error';
+          setContextRewindError(`已切换到 seq ${record.seq}，但刷新历史失败：${reason}。可以重试刷新。`);
+          return;
+        }
+      }
+      setPendingContextRewind(null);
+    } finally {
+      setThreadContextRestoring(false);
+    }
+  };
+
   const restoreArchivedThread = async (thread: Thread): Promise<void> => {
     setError('');
     setArchivedThreadActionId(thread.id);
@@ -2282,7 +2380,25 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
   const records = activeSnapshot?.records ?? [];
   const executions = activeSnapshot?.executions ?? [];
-  const { groups: executionGroups, groupedAssistantRecordIds } = modelExecutionGroups(records, executions);
+  const showPreservedHistory = preservedHistoryThreadId === threadId;
+  const activePathRecordIds = new Set(activeSnapshot?.activePathRecordIds ?? records.map((record) => record.id));
+  const hasInactiveHistory = activeSnapshot?.hasInactiveHistory ?? false;
+  const timelineRecords =
+    hasInactiveHistory && !showPreservedHistory
+      ? records.filter((record) => activePathRecordIds.has(record.id))
+      : records;
+  const { groups: allExecutionGroups, groupedAssistantRecordIds } = modelExecutionGroups(timelineRecords, executions);
+  const executionGroups =
+    hasInactiveHistory && !showPreservedHistory
+      ? allExecutionGroups.filter((group) =>
+          group.variants.some(
+            (variant) =>
+              (variant.assistantRecord && activePathRecordIds.has(variant.assistantRecord.id)) ||
+              (!variant.assistantRecord &&
+                (variant.execution.status === 'failed' || variant.execution.status === 'interrupted')),
+          ),
+        )
+      : allExecutionGroups;
   const renderProjectThreads = (project: Project): ReactNode => {
     const projectThreads = threadsByProject[project.id];
     if (projectThreads === undefined) {
@@ -2331,11 +2447,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       <div className="sidebar-empty project-thread-empty">No Threads yet. Start one with the + button.</div>
     );
   };
-  const renderedRecords = records.filter(
+  const renderedRecords = timelineRecords.filter(
     (record) =>
       record.kind === 'message' ||
       (record.kind === 'assistant' && !groupedAssistantRecordIds.has(record.id)) ||
-      runtimeCompactionPayload(record) !== null,
+      runtimeCompactionPayload(record) !== null ||
+      runtimeContextRewindPayload(record) !== null,
   );
   const timeline = conversationTimeline(renderedRecords, executionGroups);
   const currentState = selectedThread?.state ?? 'idle';
@@ -2851,6 +2968,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                           renderTool={renderToolView}
                           onRetryModelExecution={retryModelExecution}
                           retryDisabled={currentState === 'running' || currentState === 'pausing'}
+                          onContinueFromMessage={requestContextRewind}
+                          rewindDisabled={
+                            currentState === 'running' || currentState === 'pausing' || threadContextRestoring
+                          }
                         />
                       ) : item.record.kind === 'message' ? (
                         <MessageBubble
@@ -2864,8 +2985,14 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                           records={records}
                           renderTool={renderToolView}
                           onOpenThread={chooseThread}
+                          onContinueFromMessage={requestContextRewind}
                           onRetryModelExecution={retryModelExecution}
                           retryDisabled={currentState === 'running' || currentState === 'pausing'}
+                          rewindDisabled={
+                            currentState === 'running' ||
+                            currentState === 'pausing' ||
+                            threadContextRestoring
+                          }
                         />
                       ) : item.record.kind === 'assistant' ? (
                         <AssistantBubble
@@ -2875,6 +3002,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                           records={records}
                           threadId={selectedThread.id}
                           renderTool={renderToolView}
+                          onContinueFromMessage={requestContextRewind}
+                          rewindDisabled={
+                            currentState === 'running' || currentState === 'pausing' || threadContextRestoring
+                          }
+                        />
+                      ) : runtimeContextRewindPayload(item.record) ? (
+                        <ContextRewindCard
+                          key={item.record.id}
+                          record={item.record}
+                          targetSeq={runtimeContextRewindPayload(item.record)!.targetSeq}
                         />
                       ) : (
                         <ContextCompactionResultCard key={item.record.id} record={item.record} />
@@ -3762,11 +3899,36 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 <code>{selectedThread.workspacePath || 'No workspace'}</code>
               </div>
             </div>
+            {activeSnapshot?.thread.id === selectedThread.id &&
+            (activeSnapshot.hasInactiveHistory || (activeSnapshot.historyBranches?.length ?? 0) > 0) ? (
+              <div className="thread-info-history-entry">
+                <div>
+                  <strong>Conversation history</strong>
+                  <p>View the active path and preserved branches in a separate dialog.</p>
+                </div>
+                <button
+                  type="button"
+                  className="button button-quiet"
+                  onClick={() => {
+                    setThreadInfoOpen(false);
+                    setThreadHistoryOpen(true);
+                  }}
+                >
+                  <GitBranch size={13} aria-hidden="true" />
+                  View history
+                </button>
+              </div>
+            ) : null}
             <div className="thread-info-secondary-actions">
               <button
                 type="button"
                 className="button button-quiet thread-info-archive"
-                disabled={threadTitleSaving || Boolean(selectedThread.archivedAt) || Boolean(selectedThread.deletedAt)}
+                disabled={
+                  threadTitleSaving ||
+                  threadContextRestoring ||
+                  Boolean(selectedThread.archivedAt) ||
+                  Boolean(selectedThread.deletedAt)
+                }
                 onClick={() => void archiveSelectedThread()}
               >
                 <Archive size={13} aria-hidden="true" />
@@ -3775,13 +3937,76 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               <button
                 type="button"
                 className="button button-quiet"
-                disabled={threadTitleSaving}
+                disabled={threadTitleSaving || threadContextRestoring}
                 onClick={() => setThreadInfoOpen(false)}
               >
                 Cancel
               </button>
             </div>
+            <p className="field-note">
+              Choose <strong>Continue from here</strong> on a conversation message to make it the end of the active
+              path. Open <strong>Conversation history</strong> to review the active path and preserved messages.
+            </p>
           </form>
+        </Modal>
+      ) : null}
+
+      {threadHistoryOpen && selectedThread ? (
+        <ConversationHistoryDialog
+          branches={activeSnapshot?.thread.id === selectedThread.id ? (activeSnapshot.historyBranches ?? []) : []}
+          hasInactiveHistory={activeSnapshot?.thread.id === selectedThread.id && activeSnapshot.hasInactiveHistory === true}
+          showPreservedHistory={preservedHistoryThreadId === selectedThread.id}
+          onShowPreservedHistory={() => {
+            setPreservedHistoryThreadId(preservedHistoryThreadId === selectedThread.id ? null : selectedThread.id);
+            setThreadHistoryOpen(false);
+          }}
+          onClose={() => setThreadHistoryOpen(false)}
+        />
+      ) : null}
+
+      {pendingContextRewind ? (
+        <Modal
+          title="Continue from this turn?"
+          contextLabel="PICO · THREAD HISTORY"
+          onClose={() => {
+            if (!threadContextRestoring) setPendingContextRewind(null);
+          }}
+          error={contextRewindError}
+          onDismissError={() => setContextRewindError('')}
+        >
+          <div className="form-stack">
+            <p className="field-note">
+              {pendingContextRewind.rewound
+                ? `The active path now ends after seq ${pendingContextRewind.throughSeq ?? pendingContextRewind.record.seq}. Later messages remain in the Thread history. The Thread is ${pendingContextRewind.state === 'paused' ? 'paused' : 'idle'}; no new model response was started.`
+                : 'Later rounds will disappear from the active path but remain in this Thread history. If Pico had a response next in the original path, the Thread will be paused; otherwise it will be idle. No new response starts until you choose Continue.'}
+            </p>
+            <div className="context-rewind-target">
+              <span>Selected message · seq {pendingContextRewind.record.seq}</span>
+            <p>{contextRewindPreview(pendingContextRewind.record)}</p>
+            </div>
+            <div className="form-actions">
+              <button
+                type="button"
+                className="button button-quiet"
+                disabled={threadContextRestoring}
+                onClick={() => setPendingContextRewind(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="button button-primary"
+                disabled={threadContextRestoring}
+                onClick={() => void continueFromSelectedMessage()}
+              >
+                {threadContextRestoring
+                  ? 'Updating path…'
+                  : pendingContextRewind.rewound
+                    ? 'Refresh history'
+                    : 'Continue from this turn'}
+              </button>
+            </div>
+          </div>
         </Modal>
       ) : null}
 
@@ -4025,8 +4250,10 @@ function MessageBubble({
   records,
   renderTool,
   onOpenThread,
+  onContinueFromMessage,
   onRetryModelExecution,
   retryDisabled,
+  rewindDisabled,
 }: {
   record: CanonicalRecord;
   thread: Thread;
@@ -4042,8 +4269,10 @@ function MessageBubble({
     expansionKey: string,
   ): ReactNode;
   onOpenThread(id: string): void;
+  onContinueFromMessage(threadId: string, record: CanonicalRecord): void;
   onRetryModelExecution(threadId: string, executionId: string): Promise<Execution>;
   retryDisabled: boolean;
+  rewindDisabled: boolean;
 }) {
   const message = recordPayload<MessagePayload>(record);
   const incoming = message.source !== 'user';
@@ -4074,6 +4303,19 @@ function MessageBubble({
               Open Thread <ArrowUpRight size={12} aria-hidden="true" />
             </button>
           ) : null}
+          {message.role === 'user' ? (
+            <button
+              type="button"
+              className="user-message-rewind"
+              title="Continue from this turn"
+              aria-label={`Continue from this message at sequence ${record.seq}`}
+              disabled={rewindDisabled}
+              onClick={() => onContinueFromMessage(threadId, record)}
+            >
+              <RotateCcw size={11} aria-hidden="true" />
+              Continue from here
+            </button>
+          ) : null}
         </div>
         <div className="user-bubble">{message.content}</div>
         {modelExecutionGroups.map((group) => (
@@ -4087,6 +4329,8 @@ function MessageBubble({
             renderTool={renderTool}
             onRetryModelExecution={onRetryModelExecution}
             retryDisabled={retryDisabled}
+            onContinueFromMessage={onContinueFromMessage}
+            rewindDisabled={rewindDisabled}
           />
         ))}
       </div>
@@ -4223,6 +4467,8 @@ function ModelExecutionBranchGroup({
   renderTool,
   onRetryModelExecution,
   retryDisabled,
+  onContinueFromMessage,
+  rewindDisabled,
 }: {
   group: ModelExecutionGroup;
   threadId: string;
@@ -4237,6 +4483,8 @@ function ModelExecutionBranchGroup({
   ): ReactNode;
   onRetryModelExecution(threadId: string, executionId: string): Promise<Execution>;
   retryDisabled: boolean;
+  onContinueFromMessage(threadId: string, record: CanonicalRecord): void;
+  rewindDisabled: boolean;
 }) {
   const draftExecutionId = useAssistantExecutionId(threadId);
   const [attemptSelection, setAttemptSelection] = useState<{ id: string; latestId: string } | null>(null);
@@ -4336,6 +4584,8 @@ function ModelExecutionBranchGroup({
         executions={executions}
         records={records}
         renderTool={renderTool}
+        onContinueFromMessage={onContinueFromMessage}
+        rewindDisabled={rewindDisabled}
       />
     </div>
   );
@@ -4350,6 +4600,8 @@ function ModelExecutionVariantView({
   executions,
   records,
   renderTool,
+  onContinueFromMessage,
+  rewindDisabled,
 }: {
   variant: ModelExecutionVariant;
   attemptActions: ReactNode;
@@ -4364,6 +4616,8 @@ function ModelExecutionVariantView({
     result: ToolResultPayload | undefined,
     expansionKey: string,
   ): ReactNode;
+  onContinueFromMessage(threadId: string, record: CanonicalRecord): void;
+  rewindDisabled: boolean;
 }) {
   const record = variant.assistantRecord;
   if (!record) {
@@ -4383,6 +4637,8 @@ function ModelExecutionVariantView({
       records={records}
       threadId={threadId}
       renderTool={renderTool}
+      onContinueFromMessage={onContinueFromMessage}
+      rewindDisabled={rewindDisabled}
       attemptActions={attemptActions}
       emptyOutput={emptyOutput}
     />
@@ -4458,6 +4714,8 @@ function ModelInputDisclosure({
                 <ChevronRight className="detail-chevron projection-chevron" size={13} aria-hidden="true" />
                 Provider request {requestIndex + 1} · {request.outcome}
                 {request.status ? ` · HTTP ${request.status}` : ''}
+                {request.providerError?.type ? ` · ${request.providerError.type}` : ''}
+                {request.providerError?.code ? ` · ${request.providerError.code}` : ''}
               </summary>
               <pre className="projection-view">
                 {toJson({
@@ -4472,6 +4730,7 @@ function ModelInputDisclosure({
                   terminalEvent: request.terminalEvent,
                   errorCategory: request.errorCategory,
                   errorCode: request.errorCode,
+                  providerError: request.providerError,
                   eventCounts: request.eventCounts,
                   firstTextMs: request.firstTextMs,
                   deltaTextCharacters: request.deltaTextCharacters,
@@ -4595,6 +4854,8 @@ function AssistantBubble({
   renderTool,
   attemptActions,
   emptyOutput = false,
+  onContinueFromMessage,
+  rewindDisabled = false,
 }: {
   record: CanonicalRecord;
   executions: Execution[];
@@ -4608,6 +4869,8 @@ function AssistantBubble({
   ): ReactNode;
   attemptActions?: ReactNode;
   emptyOutput?: boolean;
+  onContinueFromMessage?: (threadId: string, record: CanonicalRecord) => void;
+  rewindDisabled?: boolean;
 }) {
   const [showModelDetails, setShowModelDetails] = useState(false);
   const assistant = recordPayload<AssistantPayload>(record);
@@ -4619,9 +4882,9 @@ function AssistantBubble({
       <button
         type="button"
         className="assistant-avatar assistant-avatar-toggle"
-        aria-label={showModelDetails ? 'Hide model input and attempts' : 'Show model input and attempts'}
+        aria-label={showModelDetails ? 'Hide model details and continue action' : 'Show model details and continue action'}
         aria-expanded={showModelDetails}
-        title={showModelDetails ? 'Hide model input and attempts' : 'Show model input and attempts'}
+        title={showModelDetails ? 'Hide model details and continue action' : 'Show model details and continue action'}
         onClick={() => setShowModelDetails((visible) => !visible)}
       >
         <Sparkles size={13} aria-hidden="true" />
@@ -4673,11 +4936,26 @@ function AssistantBubble({
         ) : null}
         {showModelDetails ? (
           <div className="model-input-attempt-controls">
-            <ModelInputDisclosure
-              threadId={threadId}
-              executionId={executionId}
-              executionStatus={executions.find((execution) => execution.id === executionId)?.status ?? 'completed'}
-            />
+            <div className="model-input-action-row">
+              <ModelInputDisclosure
+                threadId={threadId}
+                executionId={executionId}
+                executionStatus={executions.find((execution) => execution.id === executionId)?.status ?? 'completed'}
+              />
+              {onContinueFromMessage ? (
+                <button
+                  type="button"
+                  className="user-message-rewind"
+                  title="Continue from this model turn"
+                  aria-label={`Continue from this Pico message at sequence ${record.seq}`}
+                  disabled={rewindDisabled}
+                  onClick={() => onContinueFromMessage(threadId, record)}
+                >
+                  <RotateCcw size={11} aria-hidden="true" />
+                  Continue from here
+                </button>
+              ) : null}
+            </div>
             {attemptActions}
           </div>
         ) : null}
@@ -4729,5 +5007,122 @@ function ContextCompactionResultCard({ record }: { record: CanonicalRecord }) {
         </details>
       </div>
     </aside>
+  );
+}
+
+function ContextRewindCard({ record, targetSeq }: { record: CanonicalRecord; targetSeq: number }) {
+  return (
+    <aside className="context-compaction-card context-rewind-card" aria-label="Conversation continued from an earlier turn">
+      <div className="context-compaction-icon" aria-hidden="true">
+        <RotateCcw size={14} />
+      </div>
+      <div className="context-compaction-content">
+        <div className="context-compaction-heading">
+          <strong className="context-compaction-title">Conversation path updated</strong>
+          <time className="context-compaction-time" dateTime={record.createdAt}>
+            {new Date(record.createdAt).toLocaleTimeString()}
+          </time>
+        </div>
+        <p className="context-compaction-copy">
+          The active path ends after Canonical seq {targetSeq}. Later messages remain preserved in this Thread and can
+          be reviewed from Thread Info → Conversation history.
+        </p>
+      </div>
+    </aside>
+  );
+}
+
+type HistoryBranchSummary = NonNullable<ThreadSnapshot['historyBranches']>[number];
+
+function ConversationHistoryDialog({
+  branches,
+  hasInactiveHistory,
+  showPreservedHistory,
+  onShowPreservedHistory,
+  onClose,
+}: {
+  branches: HistoryBranchSummary[];
+  hasInactiveHistory: boolean;
+  showPreservedHistory: boolean;
+  onShowPreservedHistory(): void;
+  onClose(): void;
+}) {
+  const branchIds = new Set(branches.map((branch) => branch.id));
+  const childrenByParent = new Map<string | null, HistoryBranchSummary[]>();
+  for (const branch of branches) {
+    const parentId = branch.parentId && branchIds.has(branch.parentId) ? branch.parentId : null;
+    const children = childrenByParent.get(parentId) ?? [];
+    children.push(branch);
+    childrenByParent.set(parentId, children);
+  }
+
+  const renderBranch = (branch: HistoryBranchSummary): ReactNode => {
+    const children = childrenByParent.get(branch.id) ?? [];
+    return (
+      <div className="history-branch-item" key={branch.id} role="listitem">
+        <div className={`history-branch-node${branch.active ? ' is-active' : ''}${branch.onActivePath ? ' is-on-active-path' : ''}`}>
+          <div className="history-branch-heading">
+            <strong>Continued from seq {branch.targetSeq}</strong>
+            <span className={`history-branch-status${branch.active ? ' is-active' : ''}`}>
+              {branch.active ? 'Active path' : branch.onActivePath ? 'On active path' : 'Preserved'}
+            </span>
+          </div>
+          <p>{branch.preview || `Conversation continued from message ${branch.targetSeq}.`}</p>
+          <time dateTime={branch.createdAt}>{new Date(branch.createdAt).toLocaleString()}</time>
+        </div>
+        {children.length > 0 ? (
+          <div className="history-branch-children" role="list">
+            {children.map(renderBranch)}
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+
+  const roots = childrenByParent.get(null) ?? [];
+
+  return (
+    <Modal
+      title="Conversation history"
+      contextLabel="PICO · THREAD HISTORY"
+      className="conversation-history-modal"
+      onClose={onClose}
+      error=""
+      onDismissError={() => undefined}
+    >
+      <div className="form-stack conversation-history-dialog">
+        <p className="form-intro">
+          Each Continue from here action starts a preserved path from an earlier message. The active path is marked below.
+        </p>
+        {branches.length > 0 ? (
+          <div className="history-branch-tree" role="list" aria-label="Conversation paths">
+            <div className="history-branch-item" role="listitem">
+              <div className="history-branch-root">
+                <strong>Original conversation</strong>
+                {branches.length > 0 ? <span>Starting point</span> : null}
+              </div>
+              {roots.length > 0 ? (
+                <div className="history-branch-children" role="list">
+                  {roots.map(renderBranch)}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : (
+          <p className="field-note">This Thread has preserved history, but no Continue from here branches.</p>
+        )}
+        <div className="history-dialog-actions">
+          {hasInactiveHistory ? (
+            <button type="button" className="button button-quiet" onClick={onShowPreservedHistory}>
+              <GitBranch size={13} aria-hidden="true" />
+              {showPreservedHistory ? 'Show active path only' : 'Show preserved history'}
+            </button>
+          ) : <span />}
+          <button type="button" className="button button-quiet" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }

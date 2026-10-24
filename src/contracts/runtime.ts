@@ -1,15 +1,36 @@
 import type { CanonicalRecord, Execution, Thread, ThreadModelSelection, TokenUsage } from '../core/types.js';
-import type { ModelPrompt, ProviderRequestOutcome, ProviderRequestStart, ProviderRequestSummary } from './model.js';
+import type {
+  ModelPrompt,
+  ProviderHttpError,
+  ProviderRequestOutcome,
+  ProviderRequestStart,
+  ProviderRequestSummary,
+} from './model.js';
 
 export interface ThreadSnapshot {
   thread: Thread;
   modelSelection: ThreadModelSelection;
   contextUsage: ContextUsageEstimate;
   records: CanonicalRecord[];
+  /** Full active projection membership, present when preserved inactive branches exist. */
+  activePathRecordIds?: string[];
+  hasInactiveHistory?: boolean;
+  historyBranches?: HistoryBranchSummary[];
   executions: Execution[];
   children: Thread[];
   hasEarlierRecords: boolean;
   historyPageSize: number;
+}
+
+export interface HistoryBranchSummary {
+  id: string;
+  parentId: string | null;
+  targetRecordId: string;
+  targetSeq: number;
+  createdAt: string;
+  preview: string;
+  onActivePath: boolean;
+  active: boolean;
 }
 
 export interface ContextUsageEstimate {
@@ -110,6 +131,7 @@ export interface ProviderRequestAttempt extends ProviderRequestStart {
   terminalEvent?: string;
   errorCategory?: ProviderRequestSummary['errorCategory'];
   errorCode?: string;
+  providerError?: ProviderHttpError;
   eventCounts?: Record<string, number>;
   firstTextMs?: number;
   deltaTextCharacters?: number;

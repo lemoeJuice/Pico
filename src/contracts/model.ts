@@ -16,12 +16,28 @@ export interface ProviderRequestResponse {
   providerRequestId?: string;
 }
 
+export type ProviderHttpErrorReason =
+  | 'unsupported_parameter'
+  | 'invalid_value'
+  | 'invalid_type'
+  | 'missing_parameter'
+  | 'unknown';
+
+/** A sanitized subset of an HTTP error response from a model provider. */
+export interface ProviderHttpError {
+  reason: ProviderHttpErrorReason;
+  type?: string;
+  code?: string;
+  param?: string;
+}
+
 export interface ProviderRequestSummary {
   outcome: ProviderRequestOutcome;
   durationMs: number;
   terminalEvent?: string;
   errorCategory?: 'http' | 'transport' | 'protocol' | 'aborted';
   errorCode?: string;
+  providerError?: ProviderHttpError;
   eventCounts?: Record<string, number>;
   firstTextMs?: number;
   deltaTextCharacters?: number;
