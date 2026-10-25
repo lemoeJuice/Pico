@@ -2832,6 +2832,21 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           <>
             <div className="conversation-header">
               <div className="conversation-actions">
+                <button
+                  type="button"
+                  className="button button-quiet plugin-action"
+                  title="Thread info"
+                  aria-haspopup="dialog"
+                  onClick={() => {
+                    setThreadTitleDraft(selectedThread.title);
+                    setThreadInfoError('');
+                    setThreadInfoOpen(true);
+                    setToolsMenuOpen(false);
+                  }}
+                >
+                  <Info size={14} aria-hidden="true" />
+                  Info
+                </button>
                 <div className="native-tools-anchor" ref={toolsMenuRef}>
                   <button
                     type="button"
@@ -2906,21 +2921,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     </div>
                   ) : null}
                 </div>
-                <button
-                  type="button"
-                  className="button button-quiet plugin-action"
-                  title="Thread info"
-                  aria-haspopup="dialog"
-                  onClick={() => {
-                    setThreadTitleDraft(selectedThread.title);
-                    setThreadInfoError('');
-                    setThreadInfoOpen(true);
-                    setToolsMenuOpen(false);
-                  }}
-                >
-                  <Info size={14} aria-hidden="true" />
-                  Info
-                </button>
                 {toolbarContributions.map((item) => (
                   <PluginContributionView
                     key={pluginUiContributionKey(item)}

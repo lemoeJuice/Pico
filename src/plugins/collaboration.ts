@@ -33,7 +33,7 @@ export const collaborationPlugin: PicoPlugin = {
   name: 'Thread collaboration',
   version: '0.2.0',
   pipelinePriority: { projection: 60 },
-  activate({ tools, pipelines, commands, ui, http, state, ...context }) {
+  activate({ tools, pipelines, commands, http, state, ...context }) {
     const { threads } = context as typeof context & CollaborationServices;
     pipelines.use<ProjectionInput, ProjectionInput>('projection', async (input, next) =>
       next({
@@ -282,16 +282,6 @@ export const collaborationPlugin: PicoPlugin = {
       if (request.action === 'pause') return threads.pause(child.id, 'Paused from parent collaboration panel');
       if (request.action === 'resume') return threads.resume(child.id);
       throw new Error('Action must be pause or resume');
-    });
-
-    ui.contribute({
-      slot: 'thread.toolbar',
-      id: 'collaboration',
-      label: 'Child Threads',
-      description: 'Inspect and open collaborating child Threads.',
-      entry: 'webui',
-      component: 'CollaborationPanel',
-      supportsPopover: true,
     });
   },
 };

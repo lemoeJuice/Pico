@@ -4,7 +4,7 @@ export const workspacePlugin: PicoPlugin = {
   id: 'pico.workspace',
   name: 'Workspace companion',
   version: '0.1.0',
-  activate({ tools, pipelines, commands, ui, state, canonical }) {
+  activate({ tools, pipelines, commands, state, canonical }) {
     tools.register(
       {
         name: 'workspace_info',
@@ -46,14 +46,6 @@ export const workspacePlugin: PicoPlugin = {
         canonical.append(context.thread.id, { action: 'workspace-inspected', executor: context.thread.executorKind });
         return { text: `Workspace: ${context.thread.workspacePath}\nExecutor: ${context.thread.executorLabel}` };
       },
-    });
-
-    ui.contribute({
-      slot: 'thread.toolbar',
-      id: 'workspace',
-      label: 'Workspace',
-      description: 'Inspect the thread workspace and bound executor.',
-      command: '/workspace',
     });
   },
 };
