@@ -290,20 +290,21 @@
       paragraph('Token totals include reported values only; missing values are excluded, never estimated.'),
       {
         type: 'group',
-        layout: 'grid-compact',
+        layout: 'masonry',
+        // Masonry flows down columns, so order cards column-first to preserve the first row.
         children: [
           metricCard('Input tokens', fmt(totals.inputTokens), coverage(report?.coverage?.inputTokens)),
-          metricCard('Output tokens', fmt(totals.outputTokens), coverage(report?.coverage?.outputTokens)),
-          metricCard('Cache read', fmt(totals.cachedInputTokens), coverage(report?.coverage?.cachedInputTokens)),
           metricCard('Cache hit rate', cache.rate, cache.coverage),
+          metricCard('Main calls', fmt(report?.counts?.completedMainCalls), ''),
+          metricCard('Output tokens', fmt(totals.outputTokens), coverage(report?.coverage?.outputTokens)),
           metricCard('Reasoning', fmt(totals.reasoningTokens), coverage(report?.coverage?.reasoningTokens)),
+          metricCard('Auxiliary calls', fmt(report?.counts?.auxiliaryCalls), ''),
+          metricCard('Cache read', fmt(totals.cachedInputTokens), coverage(report?.coverage?.cachedInputTokens)),
           metricCard(
             'Estimated cost',
             money(totals.estimatedCost, rows.find((row) => row.currency)?.currency),
             'Unknown if any call or required price is unknown',
           ),
-          metricCard('Main calls', fmt(report?.counts?.completedMainCalls), ''),
-          metricCard('Auxiliary calls', fmt(report?.counts?.auxiliaryCalls), ''),
         ],
       },
       { type: 'heading', level: 2, text: 'Breakdown' },

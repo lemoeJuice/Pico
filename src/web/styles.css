@@ -2025,6 +2025,15 @@ button:disabled {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 132px), 1fr));
   gap: 9px;
 }
+.plugin-ui-group--masonry {
+  display: block;
+  column-width: 132px;
+  column-gap: 9px;
+}
+.plugin-ui-group--masonry > * {
+  break-inside: avoid;
+  margin: 0 0 9px;
+}
 .plugin-ui-group--grid-standard {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 205px), 1fr));
   gap: 12px;

@@ -14,7 +14,7 @@ export const PLUGIN_UI_PROTOCOL_VERSION = 1;
 export const PLUGIN_COMPOSER_CONTROL_HEIGHT_PX = 32;
 export type PluginUiSlot = UiContribution['slot'];
 export type PluginUiGroupLayout =
-  'row' | 'spread' | 'form-row' | 'grid-2' | 'grid-compact' | 'grid-standard' | 'stack-compact';
+  'row' | 'spread' | 'form-row' | 'grid-2' | 'grid-compact' | 'grid-standard' | 'masonry' | 'stack-compact';
 /** Serializable, host-rendered UI vocabulary. It intentionally has no HTML, CSS, URL or DOM escape hatch. */
 export type PluginUiNode =
   | { type: 'text'; text: string }
@@ -245,9 +245,16 @@ export function validatePluginUiTree(value: unknown, slot: PluginUiSlot | 'setti
       case 'group':
         if (
           item.layout !== undefined &&
-          !['row', 'spread', 'form-row', 'grid-2', 'grid-compact', 'grid-standard', 'stack-compact'].includes(
-            String(item.layout),
-          )
+          ![
+            'row',
+            'spread',
+            'form-row',
+            'grid-2',
+            'grid-compact',
+            'grid-standard',
+            'masonry',
+            'stack-compact',
+          ].includes(String(item.layout))
         )
           return false;
         return (

@@ -217,7 +217,7 @@ it('restores the Usage overview layout and keeps 300-call pages within host tree
   expect(validatePluginUiTree(h.tree, 'settings.page')).toBe(true);
   expect(groups.some((node) => node.layout === 'grid-2')).toBe(true);
   expect(groups.some((node) => node.layout === 'grid-standard')).toBe(true);
-  expect(groups.some((node) => node.layout === 'grid-compact')).toBe(true);
+  expect(groups.some((node) => node.layout === 'masonry')).toBe(true);
   expect(treeText(h.tree)).toContain('Input tokens');
   expect(treeText(h.tree)).toContain('By Thread');
   const breakdown = groups.find((node) => node.layout === 'grid-standard');
