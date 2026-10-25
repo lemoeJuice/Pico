@@ -70,6 +70,8 @@ import {
 } from './model-execution-groups.js';
 import { conversationTimeline } from './conversation-timeline.js';
 import { PluginWebView } from './plugin-web-view.js';
+import { McpSettings } from './mcp-settings.js';
+import './mcp-settings.css';
 import { PluginUiSelect } from './plugin-ui-tree.js';
 import { DeveloperSettings } from './developer-settings.js';
 import { appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from './history-pages.js';
@@ -215,6 +217,19 @@ function executorLabel(thread: Thread): string {
   if (thread.executorRemote) return 'Remote';
   if (thread.executorKind === 'runtime') return 'Chat';
   return thread.executorKind === 'container' ? 'Container' : 'Local';
+}
+
+function threadToolSourceLabel(source: ThreadToolView['source']): string {
+  switch (source) {
+    case 'runtime':
+      return 'Runtime';
+    case 'executor':
+      return 'Executor';
+    case 'mcp':
+      return 'MCP';
+  }
+  const exhaustive: never = source;
+  return exhaustive;
 }
 
 class HttpError extends Error {
@@ -582,6 +597,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [memoryManagerOpen, setMemoryManagerOpen] = useState(false);
   const [archivedThreadsOpen, setArchivedThreadsOpen] = useState(false);
   const [developerMenuOpen, setDeveloperMenuOpen] = useState(false);
+  const [mcpManagerOpen, setMcpManagerOpen] = useState(false);
+  const [mcpServerRefreshVersion, setMcpServerRefreshVersion] = useState(0);
   const [archivedThreads, setArchivedThreads] = useState<Thread[]>([]);
   const [archivedThreadsLoading, setArchivedThreadsLoading] = useState(false);
   const [archivedThreadActionId, setArchivedThreadActionId] = useState<string | null>(null);
@@ -1290,6 +1307,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           event = JSON.parse(String(message.data)) as RuntimeEvent;
         } catch {
           return;
+        }
+        if (event.type === 'mcp.server.updated' || event.type === 'mcp.server.deleted') {
+          setMcpServerRefreshVersion((version) => version + 1);
         }
         if (event.type === 'plugin.updated' && typeof event.pluginId === 'string') {
           const pluginEvent = { type: event.type, pluginId: event.pluginId } satisfies PluginUiEvent;
@@ -2862,7 +2882,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                               <div className="native-tool-copy">
                                 <div className="native-tool-title">
                                   <strong>{tool.name}</strong>
-                                  <span>{tool.source === 'runtime' ? 'Runtime' : 'Executor'}</span>
+                                  <span className={`native-tool-source source-${tool.source}`}>
+                                    {threadToolSourceLabel(tool.source)}
+                                  </span>
                                 </div>
                                 <p>{tool.description}</p>
                               </div>
@@ -3347,21 +3369,23 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       {settingsOpen ? (
         <Modal
           title={
-            developerMenuOpen
-              ? 'Developer'
-              : archivedThreadsOpen
-                ? 'Archived Threads'
-                : memoryManagerOpen
-                  ? 'Memory'
-                  : pluginManagerOpen
-                    ? 'Plugins'
-                    : contextManagerOpen
-                      ? 'Context management'
-                      : miscellaneousSettingsOpen
-                        ? 'General'
-                        : pluginPageSelection
-                          ? 'Plugin settings'
-                          : 'Model connections'
+            mcpManagerOpen
+              ? 'MCP servers'
+              : developerMenuOpen
+                ? 'Developer'
+                : archivedThreadsOpen
+                  ? 'Archived Threads'
+                  : memoryManagerOpen
+                    ? 'Memory'
+                    : pluginManagerOpen
+                      ? 'Plugins'
+                      : contextManagerOpen
+                        ? 'Context management'
+                        : miscellaneousSettingsOpen
+                          ? 'General'
+                          : pluginPageSelection
+                            ? 'Plugin settings'
+                            : 'Model connections'
           }
           onClose={() => {
             setSettingsOpen(false);
@@ -3372,6 +3396,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             setMemoryManagerOpen(false);
             setArchivedThreadsOpen(false);
             setDeveloperMenuOpen(false);
+            setMcpManagerOpen(false);
           }}
           error={error}
           onDismissError={() => setError('')}
@@ -3381,8 +3406,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               <>
                 <button
                   type="button"
-                  className={`button ${!pluginPageSelection && !contextManagerOpen && !miscellaneousSettingsOpen && !pluginManagerOpen && !memoryManagerOpen && !archivedThreadsOpen && !developerMenuOpen ? 'button-soft' : 'button-quiet'}`}
+                  className={`button ${!pluginPageSelection && !contextManagerOpen && !miscellaneousSettingsOpen && !pluginManagerOpen && !memoryManagerOpen && !archivedThreadsOpen && !developerMenuOpen && !mcpManagerOpen ? 'button-soft' : 'button-quiet'}`}
                   onClick={() => {
+                    setMcpManagerOpen(false);
                     setPluginPageSelection(null);
                     setContextManagerOpen(false);
                     setMiscellaneousSettingsOpen(false);
@@ -3398,6 +3424,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   type="button"
                   className={`button ${contextManagerOpen ? 'button-soft' : 'button-quiet'}`}
                   onClick={() => {
+                    setMcpManagerOpen(false);
                     setPluginPageSelection(null);
                     setContextManagerOpen(true);
                     setMiscellaneousSettingsOpen(false);
@@ -3413,6 +3440,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   type="button"
                   className={`button ${miscellaneousSettingsOpen ? 'button-soft' : 'button-quiet'}`}
                   onClick={() => {
+                    setMcpManagerOpen(false);
                     setPluginPageSelection(null);
                     setContextManagerOpen(false);
                     setMiscellaneousSettingsOpen(true);
@@ -3428,6 +3456,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   type="button"
                   className={`button ${pluginManagerOpen ? 'button-soft' : 'button-quiet'}`}
                   onClick={() => {
+                    setMcpManagerOpen(false);
                     setPluginPageSelection(null);
                     setContextManagerOpen(false);
                     setMiscellaneousSettingsOpen(false);
@@ -3444,6 +3473,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     type="button"
                     className={`button ${memoryManagerOpen ? 'button-soft' : 'button-quiet'}`}
                     onClick={() => {
+                      setMcpManagerOpen(false);
                       setPluginManagerOpen(false);
                       setPluginPageSelection(null);
                       setContextManagerOpen(false);
@@ -3460,6 +3490,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   type="button"
                   className={`button ${archivedThreadsOpen ? 'button-soft' : 'button-quiet'}`}
                   onClick={() => {
+                    setMcpManagerOpen(false);
                     setPluginManagerOpen(false);
                     setPluginPageSelection(null);
                     setContextManagerOpen(false);
@@ -3479,6 +3510,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       className={`button ${!contextManagerOpen && !miscellaneousSettingsOpen && !pluginManagerOpen && !memoryManagerOpen && !archivedThreadsOpen && !developerMenuOpen && pluginPageSelection?.pluginId === page.pluginId && pluginPageSelection.pageId === page.id ? 'button-soft' : 'button-quiet'}`}
                       key={`${page.pluginId}:${page.id}`}
                       onClick={() => {
+                        setMcpManagerOpen(false);
                         setPluginManagerOpen(false);
                         setContextManagerOpen(false);
                         setMiscellaneousSettingsOpen(false);
@@ -3496,6 +3528,22 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             ) : null}
             <button
               type="button"
+              className={`button ${mcpManagerOpen ? 'button-soft' : 'button-quiet'}`}
+              onClick={() => {
+                setPluginPageSelection(null);
+                setContextManagerOpen(false);
+                setMiscellaneousSettingsOpen(false);
+                setPluginManagerOpen(false);
+                setMemoryManagerOpen(false);
+                setArchivedThreadsOpen(false);
+                setDeveloperMenuOpen(false);
+                setMcpManagerOpen(true);
+              }}
+            >
+              MCP servers
+            </button>
+            <button
+              type="button"
               className={`button ${developerMenuOpen ? 'button-soft' : 'button-quiet'}`}
               onClick={() => {
                 setPluginPageSelection(null);
@@ -3504,13 +3552,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 setPluginManagerOpen(false);
                 setMemoryManagerOpen(false);
                 setArchivedThreadsOpen(false);
+                setMcpManagerOpen(false);
                 setDeveloperMenuOpen(true);
               }}
             >
               Developer
             </button>
           </nav>
-          {developerMenuOpen ? (
+          {mcpManagerOpen ? (
+            <McpSettings request={api} refreshVersion={mcpServerRefreshVersion} />
+          ) : developerMenuOpen ? (
             <DeveloperSettings
               plugins={pluginInfo?.plugins ?? []}
               catalog={pluginInfo?.catalog ?? []}

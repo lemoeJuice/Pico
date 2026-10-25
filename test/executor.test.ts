@@ -336,7 +336,11 @@ describe('Executor execution identity and recovery', () => {
         toolCalls: [{ id: 'lost-call', name: 'read_file', arguments: { path: 'input.txt' } }],
       }),
       toolCalls: [
-        { call: { id: 'lost-call', name: 'read_file', arguments: { path: 'input.txt' } }, executionId: lostToolId },
+        {
+          call: { id: 'lost-call', name: 'read_file', arguments: { path: 'input.txt' } },
+          executionId: lostToolId,
+          source: 'executor',
+        },
       ],
     });
     store.transitionExecution(lostToolId, 'running');

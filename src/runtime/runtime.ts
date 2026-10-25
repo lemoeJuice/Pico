@@ -76,6 +76,9 @@ import type {
   ToolBatchInput,
   ToolInvocationInput,
 } from './stages.js';
+import { McpManager } from './mcp-manager.js';
+import type { McpServerInput, McpServerView, StartMcpServerOptions } from '../contracts/mcp.js';
+export type { McpServerInput, McpServerView, StartMcpServerOptions } from '../contracts/mcp.js';
 import type { PicoPlugin } from '../plugins/host.js';
 import {
   canonicalBlockToPromptTurns,
@@ -96,7 +99,7 @@ export interface RuntimeEvent {
 
 interface StoredThreadToolSurface {
   tools: ToolDefinition[];
-  sources: Record<string, 'runtime' | 'executor'>;
+  sources: Record<string, 'runtime' | 'executor' | 'mcp'>;
 }
 
 interface PluginModelCallRequest {
@@ -270,7 +273,8 @@ function projectedCompactionPrefix(
     }
   } else {
     const runtimeCompaction = activeRuntimeContextCompaction(records);
-    const compactedPrefixTurns = runtimeCompaction && runtimeCompaction.contextThroughSeq <= candidateThroughSeq ? 1 : 0;
+    const compactedPrefixTurns =
+      runtimeCompaction && runtimeCompaction.contextThroughSeq <= candidateThroughSeq ? 1 : 0;
     const rawPrefix = canonicalConversationRecords(records).filter(
       (record) =>
         record.seq <= candidateThroughSeq && (!runtimeCompaction || record.seq > runtimeCompaction.contextThroughSeq),
@@ -903,20 +907,25 @@ function safeStoredModelError(value: unknown): string | undefined {
     if (!rawDetails) return `Model provider returned HTTP ${status}.`;
     const details = rawDetails.split('; ');
     const keys = new Set<string>();
-    const validDetails = details.length <= 4 && details.every((detail) => {
-      const separator = detail.indexOf('=');
-      if (separator < 1) return false;
-      const key = detail.slice(0, separator);
-      const fieldValue = detail.slice(separator + 1);
-      if (keys.has(key)) return false;
-      keys.add(key);
-      if (key === 'type' || key === 'code') return /^[a-z0-9_.:-]{1,80}$/i.test(fieldValue);
-      if (key === 'param') return fieldValue.length <= 160 && /^[a-z0-9_.:-]+(?:\[[a-z0-9_.:-]*\][a-z0-9_.:-]*)*$/i.test(fieldValue);
-      if (key === 'reason') {
-        return ['unsupported_parameter', 'invalid_value', 'invalid_type', 'missing_parameter', 'unknown'].includes(fieldValue);
-      }
-      return false;
-    });
+    const validDetails =
+      details.length <= 4 &&
+      details.every((detail) => {
+        const separator = detail.indexOf('=');
+        if (separator < 1) return false;
+        const key = detail.slice(0, separator);
+        const fieldValue = detail.slice(separator + 1);
+        if (keys.has(key)) return false;
+        keys.add(key);
+        if (key === 'type' || key === 'code') return /^[a-z0-9_.:-]{1,80}$/i.test(fieldValue);
+        if (key === 'param')
+          return fieldValue.length <= 160 && /^[a-z0-9_.:-]+(?:\[[a-z0-9_.:-]*\][a-z0-9_.:-]*)*$/i.test(fieldValue);
+        if (key === 'reason') {
+          return ['unsupported_parameter', 'invalid_value', 'invalid_type', 'missing_parameter', 'unknown'].includes(
+            fieldValue,
+          );
+        }
+        return false;
+      });
     return `Model provider returned HTTP ${status}${validDetails ? ` (${details.join('; ')})` : ''}.`;
   }
   const safeSummary = /^Model request failed \(([a-z0-9_.:-]{1,80})\)\.$/i.exec(value)?.[1];
@@ -994,6 +1003,7 @@ export class PicoRuntime {
   private readonly hostExecutor: HostExecutor;
   private readonly containerExecutor: ContainerExecutor;
   private readonly remoteHostExecutor: RemoteHostExecutor;
+  private readonly mcpManager: McpManager;
   private readonly options: RuntimeOptions;
   private readonly listeners = new Set<(event: RuntimeEvent) => void>();
   private readonly executionListeners = new Set<(execution: Execution) => void>();
@@ -1054,6 +1064,7 @@ export class PicoRuntime {
       options.executorPluginDirectory,
     );
     this.remoteHostExecutor = new RemoteHostExecutor(store, (execution) => this.executionChanged(execution));
+    this.mcpManager = new McpManager(store, this.tools, (event) => this.publish(event));
     const services: PluginServices = {
       projects: { list: () => this.listProjects() },
       threads: {
@@ -1069,7 +1080,7 @@ export class PicoRuntime {
           const surface = await this.toolSurfaceFor(thread);
           return surface.tools.map((definition) => ({
             ...definition,
-            source: (surface.sources[definition.name] ?? 'runtime') as 'runtime' | 'executor',
+            source: surface.sources[definition.name] ?? 'runtime',
           }));
         },
         binding: (threadId) => this.store.executorForThread(threadId),
@@ -1184,6 +1195,7 @@ export class PicoRuntime {
     ]);
     await this.plugins.load([...builtinPlugins, ...this.additionalPlugins], [...disabled]);
     this.pluginLoadErrors = [...this.plugins.errors()];
+    await this.mcpManager.startAutoStarted();
     // A Runtime restart confirms its own unfinished model stream was lost. Pause the
     // Thread before recording the interruption so startup recovery cannot silently
     // submit a replacement Model Execution. Tool state is left untouched until the
@@ -1235,6 +1247,7 @@ export class PicoRuntime {
       this.hostExecutor.shutdown(),
       this.containerExecutor.shutdown(),
       this.remoteHostExecutor.shutdown(),
+      this.mcpManager.shutdown(),
       Promise.allSettled([...this.runtimeToolRuns.values()].map((active) => active.promise)),
     ]);
 
@@ -1275,6 +1288,30 @@ export class PicoRuntime {
     this.publish({ type: 'execution.updated', execution: redactExecutionImages(execution) });
     this.publishThreadUpdate(execution.threadId);
     for (const listener of this.executionListeners) listener(execution);
+  }
+
+  listMcpServers(): McpServerView[] {
+    return this.mcpManager.list();
+  }
+
+  createMcpServer(input: McpServerInput): Promise<McpServerView> {
+    return this.mcpManager.create(input);
+  }
+
+  updateMcpServer(id: string, input: McpServerInput): Promise<McpServerView> {
+    return this.mcpManager.update(id, input);
+  }
+
+  deleteMcpServer(id: string): Promise<void> {
+    return this.mcpManager.delete(id);
+  }
+
+  startMcpServer(id: string, options?: StartMcpServerOptions): Promise<McpServerView> {
+    return this.mcpManager.start(id, options);
+  }
+
+  stopMcpServer(id: string): Promise<McpServerView> {
+    return this.mcpManager.stop(id);
   }
 
   private publishThreadUpdate(threadId: string): void {
@@ -1578,6 +1615,7 @@ export class PicoRuntime {
     if (!thread) throw new Error('Thread not found');
 
     const runtimeTools = this.tools.listBySource('runtime').map(({ definition }) => definition);
+    const mcpTools = this.tools.listBySource('mcp').map(({ definition }) => definition);
     const binding = requiresExternalExecutor(thread.executorKind) ? this.store.executorForThread(threadId) : null;
     let executorTools: ToolDefinition[] = [];
 
@@ -1596,8 +1634,9 @@ export class PicoRuntime {
       }
     }
 
-    const known = new Map<string, { definition: ToolDefinition; source: 'runtime' | 'executor' }>();
+    const known = new Map<string, { definition: ToolDefinition; source: 'runtime' | 'executor' | 'mcp' }>();
     for (const definition of runtimeTools) known.set(definition.name, { definition, source: 'runtime' });
+    for (const definition of mcpTools) known.set(definition.name, { definition, source: 'mcp' });
     for (const definition of executorTools) {
       if (!known.has(definition.name)) known.set(definition.name, { definition, source: 'executor' });
     }
@@ -1997,7 +2036,10 @@ export class PicoRuntime {
     };
   }
 
-  rewindContextToMessage(threadId: string, targetRecordId: string): {
+  rewindContextToMessage(
+    threadId: string,
+    targetRecordId: string,
+  ): {
     thread: Thread;
     targetRecordId: string;
     targetSeq: number;
@@ -2181,7 +2223,7 @@ export class PicoRuntime {
         if (terminalStatus(settled.status)) this.ensureToolResult(threadId, settled);
         continue;
       }
-      if (tool?.source === 'runtime' || thread.executorKind === 'runtime') {
+      if (tool?.source === 'runtime' || tool?.source === 'mcp' || thread.executorKind === 'runtime') {
         if (invocation) {
           const settled = await invocation.promise;
           if (terminalStatus(settled.status)) this.ensureToolResult(threadId, settled);
@@ -2522,23 +2564,19 @@ export class PicoRuntime {
       const anchor = projectionRecords.find(
         (candidate) => candidate.kind !== 'plugin' && candidate.seq === payload.contextThroughSeq,
       );
-      return anchor
-        ? deepFreeze({ ...record, payload: { ...payload, contextThroughRecordId: anchor.id } })
-        : record;
+      return anchor ? deepFreeze({ ...record, payload: { ...payload, contextThroughRecordId: anchor.id } }) : record;
     });
-    const modelProjectionRecords = projectionRecordsWithRestoreAnchors.filter(
-      (record) => {
-        if (activeConversationIds.has(record.id)) return true;
-        if (record.kind !== 'plugin') return false;
-        const payload = objectValue(record.payload);
-        return (
-          payload?.pluginId === 'pico.runtime' &&
-          ['context-compacted', 'context-restored', 'context-compaction-reset', 'context-rewound'].includes(
-            String(payload.action),
-          )
-        );
-      },
-    );
+    const modelProjectionRecords = projectionRecordsWithRestoreAnchors.filter((record) => {
+      if (activeConversationIds.has(record.id)) return true;
+      if (record.kind !== 'plugin') return false;
+      const payload = objectValue(record.payload);
+      return (
+        payload?.pluginId === 'pico.runtime' &&
+        ['context-compacted', 'context-restored', 'context-compaction-reset', 'context-rewound'].includes(
+          String(payload.action),
+        )
+      );
+    });
     const runtimeCompaction = activeRuntimeContextCompaction(modelProjectionRecords);
     const projectedCanonicalRecords = conversationProjection.records.filter(
       (record) => !runtimeCompaction || record.seq > runtimeCompaction.contextThroughSeq,
@@ -2639,7 +2677,9 @@ export class PicoRuntime {
     const hasProviderUsage = usage?.inputTokens !== undefined;
     const compactedSinceLastAssistant = Boolean(
       compaction &&
-      (!hasProviderUsage || !latestAssistant || (latestProjectionSeq !== null && latestProjectionSeq > latestAssistant.seq)),
+      (!hasProviderUsage ||
+        !latestAssistant ||
+        (latestProjectionSeq !== null && latestProjectionSeq > latestAssistant.seq)),
     );
     const estimatedTurns =
       compactedSinceLastAssistant && compaction
@@ -2810,14 +2850,15 @@ export class PicoRuntime {
       );
     });
     const sourceEntries = Object.entries(value.sources as Record<string, unknown>).filter(
-      (entry): entry is [string, 'runtime' | 'executor'] => entry[1] === 'runtime' || entry[1] === 'executor',
+      (entry): entry is [string, 'runtime' | 'executor' | 'mcp'] =>
+        entry[1] === 'runtime' || entry[1] === 'executor' || entry[1] === 'mcp',
     );
     return { tools, sources: Object.fromEntries(sourceEntries) };
   }
 
   private cacheThreadToolSurface(
     threadId: string,
-    surface: { tools: ToolDefinition[]; sources: Record<string, 'runtime' | 'executor'> },
+    surface: { tools: ToolDefinition[]; sources: Record<string, 'runtime' | 'executor' | 'mcp'> },
   ): void {
     const stored = this.store.getSetting<unknown>(THREAD_TOOL_SURFACES_SETTING, {});
     const cache = stored && typeof stored === 'object' && !Array.isArray(stored) ? stored : {};
@@ -3202,10 +3243,14 @@ export class PicoRuntime {
         model: response.model,
         finishReason: response.finishReason,
       };
-      const toolExecutions = calls.map((call) => ({
-        call,
-        executionId: `${thread.id}:${modelExecutionId}:${call.id}`,
-      }));
+      const toolExecutions = calls.map((call) => {
+        const source = projected.toolSources?.[call.name] ?? this.tools.get(call.name)?.source;
+        return {
+          call,
+          executionId: `${thread.id}:${modelExecutionId}:${call.id}`,
+          ...(source ? { source } : {}),
+        };
+      });
       this.store.commitModelStep({
         assistantRecordId: `${modelExecutionId}:assistant`,
         modelExecutionId,
@@ -3261,9 +3306,7 @@ export class PicoRuntime {
     const compaction = activeRuntimeContextCompaction(records);
     const conversation = runtimeConversationProjection(records).records;
     if (!compaction) return canonicalRecordsToPromptTurns(conversation, thread);
-    const remaining = conversation.filter(
-      (record) => record.seq > compaction.contextThroughSeq,
-    );
+    const remaining = conversation.filter((record) => record.seq > compaction.contextThroughSeq);
     return [runtimeCompactionTurn(compaction), ...canonicalRecordsToPromptTurns(remaining, thread)];
   }
 
@@ -3383,8 +3426,7 @@ export class PicoRuntime {
       .listPluginModelCalls({ pluginId: 'pico.runtime', threadId: thread.id })
       .filter(
         (call) =>
-          call.purpose === 'runtime-compaction-summary' &&
-          call.requestFingerprint === preparedCall.requestFingerprint,
+          call.purpose === 'runtime-compaction-summary' && call.requestFingerprint === preparedCall.requestFingerprint,
       );
     // A corrected source projection can change sourceHash without changing what
     // the summary model receives. Reuse the first completed response for that
@@ -3401,9 +3443,7 @@ export class PicoRuntime {
       );
     });
     const runningCall = matchingCalls.find(
-      (call) =>
-        call.status === 'running' &&
-        this.pluginModelCallsInFlight.has(`pico.runtime:${call.idempotencyKey}`),
+      (call) => call.status === 'running' && this.pluginModelCallsInFlight.has(`pico.runtime:${call.idempotencyKey}`),
     );
     const requestCallKey = `runtime-compact:${preparedCall.requestFingerprint}`;
     const idempotencyKey =
@@ -3457,7 +3497,9 @@ export class PicoRuntime {
       // Include the active branch and reset generation so an append-only
       // checkpoint can be recorded again after rewind/reset with the same text.
       const markerHash = createHash('sha256')
-        .update(JSON.stringify({ compactionPayload, projectionId: currentProjection.activeProjectionId, latestResetSeq }))
+        .update(
+          JSON.stringify({ compactionPayload, projectionId: currentProjection.activeProjectionId, latestResetSeq }),
+        )
         .digest('hex');
       this.store.appendCanonical(thread.id, `pico:runtime-compaction:${markerHash}`, 'plugin', compactionPayload);
       compactionSaved = true;
@@ -3477,13 +3519,20 @@ export class PicoRuntime {
 
   private async toolSurfaceFor(thread: Thread): Promise<{
     tools: ToolDefinition[];
-    sources: Record<string, 'runtime' | 'executor'>;
+    sources: Record<string, 'runtime' | 'executor' | 'mcp'>;
   }> {
     const runtimeTools = this.tools.listBySource('runtime').map((tool) => tool.definition);
     const tools = new Map(runtimeTools.map((tool) => [tool.name, tool]));
-    const sources: Record<string, 'runtime' | 'executor'> = Object.fromEntries(
+    const sources: Record<string, 'runtime' | 'executor' | 'mcp'> = Object.fromEntries(
       runtimeTools.map((tool) => [tool.name, 'runtime']),
     );
+    for (const { definition } of this.tools.listBySource('mcp')) {
+      if (tools.has(definition.name)) {
+        throw new Error(`Tool name collision: ${definition.name} is registered by multiple Runtime sources.`);
+      }
+      tools.set(definition.name, definition);
+      sources[definition.name] = 'mcp';
+    }
     if (thread.executorKind === 'runtime') {
       const surface = { tools: [...tools.values()], sources };
       this.cacheThreadToolSurface(thread.id, surface);
@@ -3518,6 +3567,19 @@ export class PicoRuntime {
       return execution;
     }
     const registered = this.tools.get(call.name);
+    const loggedSource = this.store.listExecutionLog(executionId, 'tool-source').at(-1)?.detail.source;
+    const persistedSource =
+      loggedSource === 'runtime' || loggedSource === 'executor' || loggedSource === 'mcp' ? loggedSource : null;
+    if (!persistedSource) {
+      const failed = this.store.transitionExecution(executionId, 'failed', {
+        error: `Tool source for ${call.name} is missing; refusing to dispatch it. Submit a new request to retry.`,
+        detail: { sourceUnavailable: 'unknown' },
+      });
+      this.executionChanged(failed);
+      this.ensureToolResult(thread.id, failed);
+      return failed;
+    }
+    const toolSource = persistedSource;
     const controller = new AbortController();
     const run = { promise: Promise.resolve(execution), controller, toolStarted: false };
     const input: ToolInvocationInput = {
@@ -3525,7 +3587,7 @@ export class PicoRuntime {
       call,
       executionId,
       signal: controller.signal,
-      toolSource: registered?.source ?? (thread.executorKind === 'runtime' ? 'runtime' : 'executor'),
+      toolSource,
       fail: async (reason, result) => {
         const current = this.store.getExecution(executionId);
         if (!current) throw new Error(`Tool Execution ${executionId} disappeared before it could fail.`);
@@ -3540,7 +3602,7 @@ export class PicoRuntime {
       },
       invoke: () => {
         run.toolStarted = true;
-        return this.invokeTool(thread, executionId, registered, call, controller.signal);
+        return this.invokeTool(thread, executionId, registered, call, toolSource, controller.signal);
       },
     };
     const promise = (async (): Promise<Execution> => {
@@ -3591,15 +3653,32 @@ export class PicoRuntime {
     executionId: string,
     tool: ReturnType<typeof this.tools.get>,
     call: ToolCall,
+    toolSource: ToolInvocationInput['toolSource'],
     signal: AbortSignal,
   ): Promise<Execution> {
     const current = this.store.getExecution(executionId);
     if (!current) throw new Error('Tool execution record is missing');
     if (terminalStatus(current.status)) return current;
-    if (tool?.source === 'executor' || (!tool && thread.executorKind !== 'runtime')) {
+    if (toolSource === 'mcp' && tool?.source !== 'mcp') {
+      const failed = this.store.transitionExecution(executionId, 'failed', {
+        error: `MCP server for tool ${call.name} is no longer connected. Reconnect it and ask the Model again.`,
+        detail: { sourceUnavailable: 'mcp' },
+      });
+      this.executionChanged(failed);
+      return failed;
+    }
+    if (toolSource === 'executor') {
       const binding = this.store.executorForThread(thread.id);
       if (!binding) throw new Error('Executor binding is missing');
       return this.adapterFor(binding).execute(executionId, binding);
+    }
+    if (toolSource === 'runtime' && tool?.source !== 'runtime') {
+      const failed = this.store.transitionExecution(executionId, 'failed', {
+        error: `Runtime tool is no longer available: ${call.name}`,
+        detail: { sourceUnavailable: 'runtime' },
+      });
+      this.executionChanged(failed);
+      return failed;
     }
     const inFlight = this.runtimeToolRuns.get(executionId);
     if (inFlight) return inFlight.promise;

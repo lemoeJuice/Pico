@@ -437,7 +437,7 @@ describe('Remote Host Executor', () => {
           usage: null,
           model: 'test-model',
         },
-        toolCalls: [{ call, executionId: `${thread.id}:lost-remote-model:lost-remote-call` }],
+        toolCalls: [{ call, executionId: `${thread.id}:lost-remote-model:lost-remote-call`, source: 'executor' }],
       });
       const lostExecutionId = `${thread.id}:lost-remote-model:lost-remote-call`;
       env.store.transitionExecution(lostExecutionId, 'running');

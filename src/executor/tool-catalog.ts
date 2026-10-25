@@ -15,7 +15,7 @@ export interface ExecutorToolImplementation {
   execute(args: Record<string, unknown>, context: ExecutorToolContext): Promise<unknown>;
 }
 
-export type ToolSource = 'executor' | 'runtime';
+export type ToolSource = 'executor' | 'runtime' | 'mcp';
 
 export type RegisteredTool =
   | (ExecutorToolImplementation & { owner: string; source: 'executor' })
@@ -23,6 +23,12 @@ export type RegisteredTool =
       definition: ToolDefinition;
       owner: string;
       source: 'runtime';
+      execute(args: Record<string, unknown>, context: RuntimeToolContext): Promise<unknown>;
+    }
+  | {
+      definition: ToolDefinition;
+      owner: string;
+      source: 'mcp';
       execute(args: Record<string, unknown>, context: RuntimeToolContext): Promise<unknown>;
     };
 

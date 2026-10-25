@@ -4,6 +4,12 @@ import type { ProjectionInput, ToolInvocationInput } from '../runtime/stages.js'
 import type { ModelPrompt } from '../contracts/model.js';
 
 type PermissionPolicy = 'allow' | 'deny' | 'ask';
+
+export function defaultPolicy(source: 'runtime' | 'executor' | 'mcp' | null, thread: Thread): PermissionPolicy {
+  if (source === 'mcp') return 'ask';
+  if (source === 'runtime') return 'allow';
+  return thread.executorKind === 'host' ? 'ask' : 'allow';
+}
 type ApprovalStatus = PermissionApproval['status'];
 interface PermissionApproval {
   executionId: string;
@@ -71,8 +77,7 @@ function reviewFailureResult(reason: string, reviewer: PermissionApproval['revie
     denied: false,
     reason,
     ...(reviewer ? { reviewer } : {}),
-    modelGuidance:
-      `Permission approval temporarily failed because the reviewer ${failureCause}. No approval decision was made; this is not a denial, and the tool was not executed. Do not repeat this call automatically or describe it as denied. Explain the temporary failure to the user.`,
+    modelGuidance: `Permission approval temporarily failed because the reviewer ${failureCause}. No approval decision was made; this is not a denial, and the tool was not executed. Do not repeat this call automatically or describe it as denied. Explain the temporary failure to the user.`,
   };
 }
 
@@ -154,8 +159,7 @@ export const permissionPlugin: PicoPlugin = {
     ): PermissionPolicy => {
       const configured = readRules()[threadId]?.[toolName];
       if (configured) return configured;
-      if (source === 'runtime') return 'allow';
-      return thread.executorKind === 'host' ? 'ask' : 'allow';
+      return defaultPolicy(source, thread);
     };
 
     const createApproval = (input: ToolInvocationInput): PermissionApproval => {
@@ -428,7 +432,7 @@ export const permissionPlugin: PicoPlugin = {
           : (await threads.tools(threadId)).map((tool) => ({
               name: tool.name,
               description: tool.description,
-              policy: tool.source === 'runtime' ? 'allow' : thread.executorKind === 'host' ? 'ask' : 'allow',
+              policy: defaultPolicy(tool.source, thread),
             })));
       const rules = readRules()[threadId] ?? {};
       return available.map((tool) => ({ ...tool, policy: rules[tool.name] ?? tool.policy }));
@@ -441,12 +445,10 @@ export const permissionPlugin: PicoPlugin = {
         description: tool.description,
         policy:
           rules[tool.name] ??
-          ((input.toolSources?.[tool.name] ?? (input.thread.executorKind === 'runtime' ? 'runtime' : 'executor')) ===
-          'runtime'
-            ? 'allow'
-            : input.thread.executorKind === 'host'
-              ? 'ask'
-              : 'allow'),
+          defaultPolicy(
+            input.toolSources?.[tool.name] ?? (input.thread.executorKind === 'runtime' ? 'runtime' : 'executor'),
+            input.thread,
+          ),
       }));
       const nextAvailable = {
         ...objectValue<PermissionTools>(cache.get('availableTools', {})),

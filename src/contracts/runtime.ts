@@ -41,7 +41,7 @@ export interface ContextUsageEstimate {
 export interface ThreadToolView {
   name: string;
   description: string;
-  source: 'runtime' | 'executor';
+  source: 'runtime' | 'executor' | 'mcp';
   enabled: boolean;
 }
 

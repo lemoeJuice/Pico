@@ -14,6 +14,7 @@ import {
 import express, { type ErrorRequestHandler, type Request, type Response } from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
 import { PicoRuntime } from './runtime/runtime.js';
+import type { McpServerInput } from './contracts/mcp.js';
 import { currentExecutorVersion } from './executor/bundle.js';
 import { PicoStore } from './core/store.js';
 import {
@@ -36,6 +37,69 @@ function requiredText(body: Record<string, unknown>, key: string): string {
   const value = body[key];
   if (typeof value !== 'string' || !value.trim()) throw new Error(`${key} is required`);
   return value;
+}
+
+function optionalBoolean(body: Record<string, unknown>, key: string): boolean | undefined {
+  const value = body[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'boolean') throw new Error(`${key} must be a boolean`);
+  return value;
+}
+
+function parseMcpServerInput(body: Record<string, unknown>): McpServerInput {
+  const name = requiredText(body, 'name');
+  const transport = body.transport;
+  const autoStart = optionalBoolean(body, 'autoStart');
+  if (transport === 'stdio') {
+    const args = body.args === undefined ? [] : body.args;
+    if (!Array.isArray(args) || args.some((argument) => typeof argument !== 'string')) {
+      throw new Error('args must be an array of strings');
+    }
+    const cwd = body.cwd;
+    if (cwd !== undefined && typeof cwd !== 'string') throw new Error('cwd must be a string');
+    const env = body.env;
+    if (env !== undefined && (!env || typeof env !== 'object' || Array.isArray(env))) {
+      throw new Error('env must be an object of string values');
+    }
+    if (env && typeof env === 'object' && Object.values(env).some((value) => typeof value !== 'string')) {
+      throw new Error('env must be an object of string values');
+    }
+    return {
+      name,
+      transport,
+      command: requiredText(body, 'command'),
+      args: args as string[],
+      ...(typeof cwd === 'string' && cwd.trim() ? { cwd: cwd.trim() } : {}),
+      ...(env && typeof env === 'object' ? { env: env as Record<string, string> } : {}),
+      ...(autoStart === undefined ? {} : { autoStart }),
+    };
+  }
+  if (transport === 'streamable-http') {
+    const bearerToken = body.bearerToken;
+    const clearBearerToken = optionalBoolean(body, 'clearBearerToken') ?? false;
+    const confirmPrivateNetworkAccess = optionalBoolean(body, 'confirmPrivateNetworkAccess');
+    if (bearerToken !== undefined && typeof bearerToken !== 'string') {
+      throw new Error('bearerToken must be a string');
+    }
+    if (clearBearerToken && typeof bearerToken === 'string' && bearerToken !== '') {
+      throw new Error('bearerToken cannot be set while clearBearerToken is true');
+    }
+    const url = requiredText(body, 'url');
+    return {
+      name,
+      transport,
+      url,
+      // A blank field preserves the saved value unless the user explicitly asked to clear it.
+      ...(clearBearerToken
+        ? { bearerToken: '' }
+        : typeof bearerToken === 'string' && bearerToken
+          ? { bearerToken }
+          : {}),
+      ...(confirmPrivateNetworkAccess === undefined ? {} : { confirmPrivateNetworkAccess }),
+      ...(autoStart === undefined ? {} : { autoStart }),
+    };
+  }
+  throw new Error('transport must be stdio or streamable-http');
 }
 
 function notFound(response: Response, message = 'Not found'): void {
@@ -236,6 +300,52 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
       typeof body.accessToken === 'string' ? body.accessToken : undefined,
     );
     response.json(connection);
+  });
+
+  app.get('/api/mcp/servers', (_request, response) => {
+    response.json({ servers: runtime.listMcpServers() });
+  });
+  app.post('/api/mcp/servers', async (request, response) => {
+    const server = await runtime.createMcpServer(parseMcpServerInput(bodyObject(request)));
+    response.status(201).json({ server });
+  });
+  app.put('/api/mcp/servers/:id', async (request, response) => {
+    const server = await runtime.updateMcpServer(request.params.id!, parseMcpServerInput(bodyObject(request)));
+    response.json({ server });
+  });
+  app.delete('/api/mcp/servers/:id', async (request, response) => {
+    await runtime.deleteMcpServer(request.params.id!);
+    response.json({ ok: true });
+  });
+  app.post('/api/mcp/servers/:id/start', async (request, response) => {
+    const id = request.params.id!;
+    const configured = runtime.listMcpServers().find((server) => server.id === id);
+    if (!configured) return notFound(response, 'MCP server not found');
+    const body =
+      request.body && typeof request.body === 'object' && !Array.isArray(request.body)
+        ? (request.body as Record<string, unknown>)
+        : {};
+    if (configured.transport === 'stdio' && body.confirmLocalExecution !== true) {
+      throw new Error('Starting a local MCP process requires confirmLocalExecution: true');
+    }
+    if (configured.transport === 'stdio') {
+      if (
+        typeof body.executionFingerprint !== 'string' ||
+        body.executionFingerprint !== configured.executionFingerprint
+      ) {
+        throw new Error('The local MCP configuration changed. Review the command and confirm it again.');
+      }
+    }
+    const server = await runtime.startMcpServer(
+      id,
+      configured.transport === 'stdio'
+        ? { confirmLocalExecution: true, executionFingerprint: body.executionFingerprint as string }
+        : undefined,
+    );
+    response.json({ server });
+  });
+  app.post('/api/mcp/servers/:id/stop', async (request, response) => {
+    response.json({ server: await runtime.stopMcpServer(request.params.id!) });
   });
 
   app.get('/api/threads', (request, response) => {

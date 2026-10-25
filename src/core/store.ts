@@ -65,7 +65,7 @@ export interface CommitStepInput {
   modelExecutionId: string;
   threadId: string;
   payload: AssistantPayload;
-  toolCalls: Array<{ call: ToolCall; executionId: string }>;
+  toolCalls: Array<{ call: ToolCall; executionId: string; source?: 'runtime' | 'executor' | 'mcp' }>;
   createdAt?: string;
 }
 
@@ -1252,10 +1252,25 @@ export class PicoStore {
         input.payload,
         createdAt,
       ).record;
-      for (const { call, executionId } of input.toolCalls) {
+      for (const { call, executionId, source } of input.toolCalls) {
         const existing = this.db.prepare('SELECT * FROM executions WHERE id = ?').get(executionId) as
           SqlRow | undefined;
-        if (existing) continue;
+        if (existing) {
+          if (source) {
+            const sourceRow = this.db
+              .prepare(
+                `SELECT detail_json FROM execution_log WHERE execution_id = ? AND kind = 'tool-source' ORDER BY created_at DESC, id DESC LIMIT 1`,
+              )
+              .get(executionId) as SqlRow | undefined;
+            if (sourceRow) {
+              const detail = JSON.parse(String(sourceRow.detail_json)) as { source?: unknown };
+              if (detail.source !== source) throw new Error(`Tool execution ${executionId} source changed on retry.`);
+            } else {
+              this.insertExecutionLogStrict(executionId, 'tool-source', { source }, createdAt);
+            }
+          }
+          continue;
+        }
         this.db
           .prepare(
             `
@@ -1275,6 +1290,7 @@ export class PicoStore {
             createdAt,
           );
         this.logExecution(executionId, 'created', { status: 'pending' }, createdAt);
+        if (source) this.insertExecutionLogStrict(executionId, 'tool-source', { source }, createdAt);
         const createdExecution = this.getExecution(executionId);
         if (createdExecution) this.snapshotExecution(createdExecution);
       }
@@ -1474,6 +1490,17 @@ export class PicoStore {
     } catch {
       // Diagnostics are best effort; workflow facts and views remain authoritative.
     }
+  }
+
+  private insertExecutionLogStrict(
+    executionId: string,
+    kind: string,
+    detail: Record<string, unknown>,
+    createdAt: string,
+  ): void {
+    this.db
+      .prepare(`INSERT INTO execution_log (id, execution_id, kind, detail_json, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run(randomUUID(), executionId, kind, JSON.stringify(detail), createdAt);
   }
 
   appendExecutionLog(executionId: string, kind: string, detail: Record<string, unknown>): void {

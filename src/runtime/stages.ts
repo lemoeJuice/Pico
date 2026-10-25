@@ -24,7 +24,7 @@ export interface ProjectionInput {
   systemPrompt: string;
   turns: ModelPrompt['turns'];
   tools: ToolDefinition[];
-  toolSources?: Record<string, 'runtime' | 'executor'>;
+  toolSources?: Record<string, 'runtime' | 'executor' | 'mcp'>;
   provenance?: ProjectionProvenance[];
 }
 
@@ -68,7 +68,7 @@ export interface ToolInvocationInput {
   executionId: string;
   signal: AbortSignal;
   /** Null means the Runtime no longer has this tool locally (for example, a remote tool). */
-  toolSource: 'runtime' | 'executor' | null;
+  toolSource: 'runtime' | 'executor' | 'mcp' | null;
   /** Fail the invocation and include structured guidance for the next Model Step when appropriate. */
   fail(reason: string, result?: unknown): Promise<Execution>;
   invoke(): Promise<Execution>;

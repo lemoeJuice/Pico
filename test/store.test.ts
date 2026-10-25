@@ -363,6 +363,44 @@ describe('PicoStore execution transactions', () => {
     }
   });
 
+  it('rolls back a Model Step when a tool source cannot be durably recorded', () => {
+    const store = new PicoStore(':memory:');
+    try {
+      const project = store.createProject('Atomic tool source', '/');
+      const thread = store.createThread(project.id, 'host');
+      const modelExecution = store.createModelExecution('atomic-tool-source-model', thread.id, 0);
+      store.transitionExecution(modelExecution.id, 'running');
+      store.db.exec(`CREATE TRIGGER fail_tool_source_log BEFORE INSERT ON execution_log
+        WHEN NEW.kind = 'tool-source'
+        BEGIN SELECT RAISE(ABORT, 'tool source write failed'); END;`);
+      const call = { id: 'atomic-source-call', name: 'mcp_server_tool', arguments: {} };
+
+      expect(() =>
+        store.commitModelStep({
+          assistantRecordId: 'atomic-tool-source-model:assistant',
+          modelExecutionId: modelExecution.id,
+          threadId: thread.id,
+          payload: assistantPayload({ batchId: 'atomic-tool-source-model:batch', toolCalls: [call] }),
+          toolCalls: [
+            {
+              call,
+              executionId: `${thread.id}:${modelExecution.id}:${call.id}`,
+              source: 'mcp',
+            },
+          ],
+        }),
+      ).toThrow(/tool source write failed/);
+
+      expect(store.listRecords(thread.id).some((record) => record.id === 'atomic-tool-source-model:assistant')).toBe(
+        false,
+      );
+      expect(store.getExecution(`${thread.id}:${modelExecution.id}:${call.id}`)).toBeNull();
+      expect(store.getExecution(modelExecution.id)?.status).toBe('running');
+    } finally {
+      store.close();
+    }
+  });
+
   it('persists retryable setup state when diagnostic log writes fail', () => {
     const store = new PicoStore(':memory:');
     try {

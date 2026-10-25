@@ -15,7 +15,7 @@ export interface PluginServices {
     updateModelSelection(threadId: string, selection: ThreadModelSelection): ThreadModelSelection;
     list(projectId?: string): Thread[];
     updateTitle(pluginId: string, threadId: string, title: string): Thread;
-    tools(threadId: string): Promise<Array<ToolDefinition & { source: 'runtime' | 'executor' }>>;
+    tools(threadId: string): Promise<Array<ToolDefinition & { source: 'runtime' | 'executor' | 'mcp' }>>;
     binding(threadId: string): ExecutorBinding | null;
     create(
       projectId: string,
