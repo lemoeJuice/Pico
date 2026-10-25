@@ -195,7 +195,7 @@ describe('Runtime MCP manager', () => {
       });
       expect(catalog.listBySource('mcp')).toHaveLength(1);
       const registered = catalog.listBySource('mcp')[0]!;
-      expect(registered.definition.name).toMatch(/^mcp_[a-f0-9]{8}_echo_value_[a-f0-9]{8}$/);
+      expect(registered.definition.name).toBe('local_utilities__echo_value');
       expect(registered.definition.name.length).toBeLessThanOrEqual(64);
       const result = await registered.execute({ value: 'hello' }, {
         thread: {},

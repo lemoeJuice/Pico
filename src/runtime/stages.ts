@@ -9,6 +9,7 @@ import type {
 } from '../core/types.js';
 import type { ModelPrompt, ModelRequestParameters, ModelRequestTrace, ModelStreamEvent } from '../contracts/model.js';
 import type { ProjectionProvenance } from '../contracts/runtime.js';
+import type { McpToolTarget } from '../executor/tool-catalog.js';
 
 export type { ProjectionProvenance } from '../contracts/runtime.js';
 
@@ -25,6 +26,7 @@ export interface ProjectionInput {
   turns: ModelPrompt['turns'];
   tools: ToolDefinition[];
   toolSources?: Record<string, 'runtime' | 'executor' | 'mcp'>;
+  mcpTargets?: Record<string, McpToolTarget>;
   provenance?: ProjectionProvenance[];
 }
 

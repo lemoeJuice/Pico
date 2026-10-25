@@ -17,6 +17,11 @@ export interface ExecutorToolImplementation {
 
 export type ToolSource = 'executor' | 'runtime' | 'mcp';
 
+export interface McpToolTarget {
+  serverId: string;
+  toolKey: string;
+}
+
 export type RegisteredTool =
   | (ExecutorToolImplementation & { owner: string; source: 'executor' })
   | {
@@ -29,6 +34,8 @@ export type RegisteredTool =
       definition: ToolDefinition;
       owner: string;
       source: 'mcp';
+      target: McpToolTarget;
+      legacyName: string;
       execute(args: Record<string, unknown>, context: RuntimeToolContext): Promise<unknown>;
     };
 

@@ -27,6 +27,7 @@ import type {
 const MCP_SERVERS_SETTING = 'mcp-servers';
 const MCP_SECRET_OWNER = 'pico.mcp';
 const MCP_FINGERPRINT_KEY = '__stdio_fingerprint_key__';
+const MCP_TOOL_IDENTITY_KEY = '__tool_identity_key__';
 const MCP_CONNECT_TIMEOUT_MS = 20_000;
 const MCP_STDERR_TAIL_CHARS = 8_192;
 const SENSITIVE_QUERY_KEY =
@@ -101,6 +102,7 @@ interface McpRuntimeState {
   status: McpServerStatus;
   lastError: string | null;
   tools: McpServerToolView[];
+  runtimeTools: RuntimeMcpTool[];
   generation: number;
   connection?: {
     client: McpClientLike;
@@ -149,19 +151,38 @@ function configList(store: PicoStore): StoredMcpServer[] {
   );
 }
 
-function safeNamePart(value: string): string {
+function safeNamePart(value: string, fallback = 'tool'): string {
   return (
     value
       .replace(/[^a-zA-Z0-9_-]/g, '_')
       .replace(/_+/g, '_')
-      .replace(/^_+|_+$/g, '') || 'tool'
+      .replace(/^_+|_+$/g, '') || fallback
   );
 }
 
-function namespacedToolName(serverId: string, toolName: string): string {
+function legacyNamespacedToolName(serverId: string, toolName: string): string {
   const serverSuffix = createHash('sha256').update(serverId).digest('hex').slice(0, 8);
   const toolSuffix = createHash('sha256').update(toolName).digest('hex').slice(0, 8);
   return `mcp_${serverSuffix}_${safeNamePart(toolName).slice(0, 40)}_${toolSuffix}`;
+}
+
+function readableToolName(serverName: string, toolName: string): string {
+  let serverPart = safeNamePart(serverName, 'server').toLowerCase();
+  if (!/^[a-z]/.test(serverPart)) serverPart = `server_${serverPart}`;
+  serverPart = serverPart.slice(0, 24);
+  const toolPart = safeNamePart(toolName).toLowerCase();
+  const maxToolLength = 64 - serverPart.length - 2;
+  return `${serverPart}__${toolPart.slice(0, maxToolLength)}`;
+}
+
+function disambiguatedToolName(baseName: string, serverId: string, toolKey: string, occupied: Set<string>): string {
+  const digest = createHash('sha256').update(`${serverId}\0${toolKey}`).digest('hex');
+  for (const length of [8, 12, 16, 24, 32]) {
+    const suffix = digest.slice(0, length);
+    const candidate = `${baseName.slice(0, 63 - suffix.length).replace(/[_-]+$/g, '')}_${suffix}`;
+    if (!occupied.has(candidate)) return candidate;
+  }
+  throw new Error(`MCP tool name collision could not be resolved: ${baseName}`);
 }
 
 function stringValues(secret: McpServerSecret): string[] {
@@ -190,10 +211,15 @@ function redactResult(value: unknown, secret: McpServerSecret): unknown {
   );
 }
 
-function toolDefinition(config: StoredMcpServer, tool: RuntimeMcpTool, secret: McpServerSecret): ToolDefinition {
+function toolDefinition(
+  config: StoredMcpServer,
+  tool: RuntimeMcpTool,
+  secret: McpServerSecret,
+  name = readableToolName(config.name, redactText(tool.name, secret)),
+): ToolDefinition {
   const parameters = redactResult(tool.inputSchema, secret);
   return {
-    name: namespacedToolName(config.id, redactText(tool.name, secret)),
+    name,
     description: redactText(`${config.name} · ${tool.name}: ${tool.description}`, secret).slice(0, 2_000),
     parameters: isRecord(parameters) ? parameters : { type: 'object' },
   };
@@ -750,7 +776,7 @@ export class McpManager {
       await stopPromise;
       this.saveConfigs(configList(this.store).filter((item) => item.id !== id));
       this.store.deletePrivateSecret(MCP_SECRET_OWNER, id);
-      this.tools.removeOwner(this.owner(id));
+      this.rebuildTools();
       this.onChange({ type: 'mcp.server.deleted', serverId: id });
     });
     this.states.delete(id);
@@ -805,8 +831,9 @@ export class McpManager {
     const wasConnecting = state.status === 'starting' || state.status === 'connecting';
     state.status = 'stopping';
     state.lastError = null;
-    this.tools.removeOwner(this.owner(id));
+    state.runtimeTools = [];
     state.tools = [];
+    this.rebuildTools();
     this.publish(config);
     const connection = state.connection;
     state.generation += 1;
@@ -856,7 +883,9 @@ export class McpManager {
     const generation = state.generation;
     state.status = 'starting';
     state.lastError = null;
+    state.runtimeTools = [];
     state.tools = [];
+    this.rebuildTools();
     this.publish(config);
     const secret = this.redactionSecret(config);
     let transport: McpTransportLike | undefined;
@@ -908,8 +937,9 @@ export class McpManager {
             try {
               this.applyTools(config, state, generation, tools.map(normalizeTool));
             } catch (toolError) {
-              this.tools.removeOwner(this.owner(config.id));
+              state.runtimeTools = [];
               state.tools = [];
+              this.rebuildTools();
               state.lastError = redactText(toolError instanceof Error ? toolError.message : String(toolError), secret);
               this.publish(config);
             }
@@ -947,8 +977,9 @@ export class McpManager {
       let safeMessage =
         String(state.status) === 'stopping' ? 'MCP server start was stopped.' : 'MCP server start failed.';
       if (state.generation === generation) {
-        this.tools.removeOwner(this.owner(config.id));
+        state.runtimeTools = [];
         state.tools = [];
+        this.rebuildTools();
         state.status = 'failed';
         const message = error instanceof Error ? error.message : String(error);
         state.lastError = redactText(stderrTail ? `${message}\n${stderrTail}` : message, secret);
@@ -977,38 +1008,92 @@ export class McpManager {
     tools: RuntimeMcpTool[],
   ): void {
     if (state.generation !== generation || !state.connection) return;
-    const names = new Set<string>();
-    const owner = this.owner(config.id);
     const secret = this.redactionSecret(config);
-    this.tools.removeOwner(owner);
     try {
-      for (const tool of tools) {
-        const name = namespacedToolName(config.id, redactText(tool.name, secret));
-        if (names.has(name)) throw new Error('The MCP server returned duplicate tool names.');
-        names.add(name);
-        this.tools.register({
-          source: 'mcp',
-          owner,
-          definition: toolDefinition(config, tool, secret),
-          execute: (args, context) => this.executeTool(config.id, tool.name, args, context.signal),
-        });
+      if (new Set(tools.map((tool) => tool.name)).size !== tools.length) {
+        throw new Error('The MCP server returned duplicate tool names.');
       }
+      state.runtimeTools = structuredClone(tools);
+      state.tools = tools.map(({ name, description }) => ({
+        name: redactText(name, secret),
+        description: redactText(description, secret),
+      }));
+      this.rebuildTools();
     } catch (error) {
-      this.tools.removeOwner(owner);
+      state.runtimeTools = [];
       state.tools = [];
+      this.rebuildTools();
       state.lastError = redactText(
         error instanceof Error ? error.message : String(error),
         this.redactionSecret(config),
       );
       this.publish(config);
-      return;
+      throw new Error(state.lastError, { cause: new Error(state.lastError) });
     }
-    state.tools = tools.map(({ name, description }) => ({
-      name: redactText(name, secret),
-      description: redactText(description, secret),
-    }));
     this.onChange({ type: 'mcp.tools.updated', serverId: config.id, tools: state.tools });
     this.publish(config);
+  }
+
+  private rebuildTools(): void {
+    const candidates = configList(this.store).flatMap((config) => {
+      const state = this.states.get(config.id);
+      if (!state?.connection || state.runtimeTools.length === 0) return [];
+      const secret = this.redactionSecret(config);
+      return state.runtimeTools.map((tool) => {
+        const redactedToolName = redactText(tool.name, secret);
+        return {
+          config,
+          tool,
+          secret,
+          baseName: readableToolName(config.name, redactedToolName),
+          legacyName: legacyNamespacedToolName(config.id, redactedToolName),
+          toolKey: this.toolIdentity(config.id, tool.name),
+        };
+      });
+    });
+    const baseCounts = new Map<string, number>();
+    for (const candidate of candidates) {
+      baseCounts.set(candidate.baseName, (baseCounts.get(candidate.baseName) ?? 0) + 1);
+    }
+    const runtimeNames = new Set(this.tools.listBySource('runtime').map(({ definition }) => definition.name));
+    const needsSuffix = (candidate: (typeof candidates)[number]): boolean =>
+      (baseCounts.get(candidate.baseName) ?? 0) > 1 || runtimeNames.has(candidate.baseName);
+    const occupied = new Set([
+      ...runtimeNames,
+      ...candidates.filter((candidate) => !needsSuffix(candidate)).map((candidate) => candidate.baseName),
+    ]);
+    const names = new Map<string, string>();
+    for (const candidate of [...candidates].sort((left, right) => {
+      const serverOrder = left.config.id.localeCompare(right.config.id);
+      return serverOrder || left.tool.name.localeCompare(right.tool.name);
+    })) {
+      const key = `${candidate.config.id}\0${candidate.tool.name}`;
+      const name = needsSuffix(candidate)
+        ? disambiguatedToolName(candidate.baseName, candidate.config.id, candidate.toolKey, occupied)
+        : candidate.baseName;
+      if (occupied.has(name) && needsSuffix(candidate)) {
+        throw new Error(`MCP tool name collision could not be resolved: ${name}`);
+      }
+      occupied.add(name);
+      names.set(key, name);
+    }
+    const planned = candidates.map((candidate) => ({
+      ...candidate,
+      name: names.get(`${candidate.config.id}\0${candidate.tool.name}`)!,
+    }));
+
+    const owners = new Set(this.tools.listBySource('mcp').map(({ owner }) => owner));
+    for (const owner of owners) this.tools.removeOwner(owner);
+    for (const candidate of planned) {
+      this.tools.register({
+        source: 'mcp',
+        owner: this.owner(candidate.config.id),
+        target: { serverId: candidate.config.id, toolKey: candidate.toolKey },
+        legacyName: candidate.legacyName,
+        definition: toolDefinition(candidate.config, candidate.tool, candidate.secret, candidate.name),
+        execute: (args, context) => this.executeTool(candidate.config.id, candidate.tool.name, args, context.signal),
+      });
+    }
   }
 
   private connectionClosed(
@@ -1018,8 +1103,9 @@ export class McpManager {
     stderrTail: string,
   ): void {
     if (state.generation !== generation || state.status === 'stopping' || state.status === 'stopped') return;
-    this.tools.removeOwner(this.owner(config.id));
+    state.runtimeTools = [];
     state.tools = [];
+    this.rebuildTools();
     state.connection?.stopController.abort();
     delete state.connection;
     state.status = 'failed';
@@ -1103,6 +1189,7 @@ export class McpManager {
         status: 'stopped',
         lastError: null,
         tools: [],
+        runtimeTools: [],
         generation: 0,
         transitionQueue: Promise.resolve(),
         activeCalls: new Set(),
@@ -1191,6 +1278,20 @@ export class McpManager {
       resolvedExecutableIdentity(config, Object.fromEntries(env)),
     ]);
     return createHmac('sha256', Buffer.from(key, 'hex')).update(content).digest('hex');
+  }
+
+  private toolIdentity(serverId: string, toolName: string): string {
+    const stored = this.store.getPrivateSecret<unknown>(MCP_SECRET_OWNER, MCP_TOOL_IDENTITY_KEY, {});
+    let key: string;
+    if (isRecord(stored) && typeof stored.key === 'string' && /^[a-f0-9]{64}$/i.test(stored.key)) {
+      key = stored.key;
+    } else {
+      key = randomBytes(32).toString('hex');
+      this.store.setPrivateSecret(MCP_SECRET_OWNER, MCP_TOOL_IDENTITY_KEY, { key });
+    }
+    return createHmac('sha256', Buffer.from(key, 'hex'))
+      .update(JSON.stringify(['mcp-tool-identity-v1', serverId, toolName]))
+      .digest('hex');
   }
 
   private owner(id: string): string {

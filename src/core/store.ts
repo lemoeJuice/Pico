@@ -25,6 +25,7 @@ import type {
   ToolResultPayload,
 } from './types.js';
 import type { PluginModelCallRecord } from '../contracts/store.js';
+import type { McpToolTarget } from '../executor/tool-catalog.js';
 export type { PluginModelCallRecord } from '../contracts/store.js';
 
 type SqlRow = Record<string, unknown>;
@@ -65,7 +66,12 @@ export interface CommitStepInput {
   modelExecutionId: string;
   threadId: string;
   payload: AssistantPayload;
-  toolCalls: Array<{ call: ToolCall; executionId: string; source?: 'runtime' | 'executor' | 'mcp' }>;
+  toolCalls: Array<{
+    call: ToolCall;
+    executionId: string;
+    source?: 'runtime' | 'executor' | 'mcp';
+    mcpTarget?: McpToolTarget;
+  }>;
   createdAt?: string;
 }
 
@@ -1252,7 +1258,7 @@ export class PicoStore {
         input.payload,
         createdAt,
       ).record;
-      for (const { call, executionId, source } of input.toolCalls) {
+      for (const { call, executionId, source, mcpTarget } of input.toolCalls) {
         const existing = this.db.prepare('SELECT * FROM executions WHERE id = ?').get(executionId) as
           SqlRow | undefined;
         if (existing) {
@@ -1263,10 +1269,24 @@ export class PicoStore {
               )
               .get(executionId) as SqlRow | undefined;
             if (sourceRow) {
-              const detail = JSON.parse(String(sourceRow.detail_json)) as { source?: unknown };
+              const detail = JSON.parse(String(sourceRow.detail_json)) as {
+                source?: unknown;
+                mcpTarget?: McpToolTarget;
+              };
               if (detail.source !== source) throw new Error(`Tool execution ${executionId} source changed on retry.`);
+              if (
+                JSON.stringify(detail.mcpTarget ?? null) !== JSON.stringify(mcpTarget ?? null) &&
+                (detail.mcpTarget !== undefined || mcpTarget !== undefined)
+              ) {
+                throw new Error(`Tool execution ${executionId} MCP target changed on retry.`);
+              }
             } else {
-              this.insertExecutionLogStrict(executionId, 'tool-source', { source }, createdAt);
+              this.insertExecutionLogStrict(
+                executionId,
+                'tool-source',
+                { source, ...(mcpTarget ? { mcpTarget } : {}) },
+                createdAt,
+              );
             }
           }
           continue;
@@ -1290,7 +1310,14 @@ export class PicoStore {
             createdAt,
           );
         this.logExecution(executionId, 'created', { status: 'pending' }, createdAt);
-        if (source) this.insertExecutionLogStrict(executionId, 'tool-source', { source }, createdAt);
+        if (source) {
+          this.insertExecutionLogStrict(
+            executionId,
+            'tool-source',
+            { source, ...(mcpTarget ? { mcpTarget } : {}) },
+            createdAt,
+          );
+        }
         const createdExecution = this.getExecution(executionId);
         if (createdExecution) this.snapshotExecution(createdExecution);
       }
