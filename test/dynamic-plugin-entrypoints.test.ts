@@ -37,7 +37,19 @@ describe('dynamic first-party plugin entries', () => {
       expect(runtime.pluginInfo().ui).toContainEqual(
         expect.objectContaining({ pluginId: 'pico.project-context', slot: 'thread.toolbar' }),
       );
-      expect(runtime.pluginInfo().ui).not.toContainEqual(expect.objectContaining({ pluginId: 'pico.todo' }));
+      expect(runtime.pluginInfo().ui).toContainEqual(
+        expect.objectContaining({ pluginId: 'pico.todo', slot: 'thread.toolbar', supportsPopover: true }),
+      );
+      expect(
+        runtime.tools
+          .listBySource('runtime')
+          .filter((tool) => tool.owner === 'pico.todo')
+          .map((tool) => tool.definition.name)
+          .sort(),
+      ).toEqual(['todo_add', 'todo_complete', 'todo_delete', 'todo_list', 'todo_reopen', 'todo_update']);
+      expect(runtime.pluginHttpRoute('pico.todo', 'GET', '/threads')).toBeDefined();
+      expect(runtime.pluginHttpRoute('pico.todo', 'PATCH', '/items')).toBeDefined();
+      expect(runtime.plugins.webUiAssetLocation('pico.todo', 'webui')).toBeDefined();
       expect(runtime.pluginInfo().ui).toContainEqual(
         expect.objectContaining({ pluginId: 'pico.chatgpt-plan', externalAuthOrigins: ['https://auth.openai.com'] }),
       );
@@ -49,7 +61,8 @@ describe('dynamic first-party plugin entries', () => {
         }),
       );
       expect(runtime.pluginInfo().pages).not.toContainEqual(expect.objectContaining({ pluginId: 'pico.todo' }));
-      expect(existsSync(resolve(process.cwd(), 'plugins/pico.todo/webui/index.html'))).toBe(false);
+      expect(existsSync(resolve(process.cwd(), 'plugins/pico.todo/webui/index.html'))).toBe(true);
+      expect(existsSync(resolve(process.cwd(), 'plugins/pico.todo/webui/todo.js'))).toBe(true);
       expect(catalog).toContainEqual(
         expect.objectContaining({ id: 'pico.model-parameters', required: false, enabled: true, loaded: true }),
       );
@@ -85,6 +98,14 @@ describe('dynamic first-party plugin entries', () => {
         'pico.permissions',
         'pico.vision',
       ]);
+      for (const dependencyCandidate of ['pico.goal', 'pico.project-context', 'pico.global-memory']) {
+        await runtime.plugins.setEnabled(dependencyCandidate, false);
+      }
+      expect(runtime.pluginInfo().catalog).toContainEqual(
+        expect.objectContaining({ id: 'pico.todo', enabled: true, loaded: true }),
+      );
+      expect(runtime.tools.listBySource('runtime').filter((tool) => tool.owner === 'pico.todo')).toHaveLength(6);
+      expect(runtime.pluginHttpRoute('pico.todo', 'GET', '/threads')).toBeDefined();
     } finally {
       await runtime.shutdown();
       store.close();

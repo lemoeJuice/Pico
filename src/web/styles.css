@@ -1994,6 +1994,19 @@ button:disabled {
 .plugin-ui-group--row {
   gap: 8px;
 }
+.plugin-ui-group--form-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+.plugin-ui-group--form-row > .plugin-ui-field {
+  min-width: 0;
+}
+.plugin-ui-group--form-row > .plugin-ui-button {
+  height: 36px;
+  min-height: 36px;
+}
 .plugin-ui-group--spread {
   justify-content: space-between;
   gap: 12px;

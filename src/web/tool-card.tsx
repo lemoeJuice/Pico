@@ -52,6 +52,8 @@ const toolTitles: Record<string, string> = {
   todo_add: 'Todo · Add',
   todo_update: 'Todo · Update',
   todo_complete: 'Todo · Complete',
+  todo_reopen: 'Todo · Reopen',
+  todo_delete: 'Todo · Delete',
   goal_checkpoint: 'Goal · Checkpoint',
   rolling_segments: 'Rolling Context · Segments',
   rolling_recall: 'Rolling Context · Recall',
@@ -76,9 +78,7 @@ const argumentLabels: Record<string, string> = {
   pattern: 'Search pattern',
   patch: 'Patch',
   title: 'Title',
-  next_action: 'Next action',
-  priority: 'Priority',
-  goal_id: 'Goal',
+  parent_id: 'Parent Todo',
   id: 'Item ID',
   status: 'Status',
   progress: 'Progress',
@@ -282,7 +282,6 @@ function previewArguments(call: ToolCall, preview?: { argumentsText: string }): 
         'pattern',
         'patch',
         'title',
-        'next_action',
         'query',
         'text',
         'prompt',
@@ -315,9 +314,11 @@ function collapsedArgumentSummary(name: string, args: JsonRecord, preview?: { ar
     read_file: ['path'],
     search_files: ['pattern', 'path'],
     apply_patch: ['patch'],
-    todo_add: ['title', 'next_action'],
+    todo_add: ['title', 'parent_id'],
     todo_update: ['id', 'title'],
     todo_complete: ['id'],
+    todo_reopen: ['id'],
+    todo_delete: ['id'],
     goal_checkpoint: ['progress', 'status', 'blocker'],
     rolling_recall: ['segment_id'],
     rolling_pin: ['segment_id'],
@@ -368,9 +369,11 @@ function readableArguments(name: string, args: JsonRecord, preview?: { arguments
     apply_patch: ['patch'],
     workspace_info: [],
     todo_list: [],
-    todo_add: ['title', 'next_action', 'priority', 'goal_id'],
-    todo_update: ['id', 'title', 'next_action', 'priority'],
+    todo_add: ['title', 'parent_id'],
+    todo_update: ['id', 'title'],
     todo_complete: ['id'],
+    todo_reopen: ['id'],
+    todo_delete: ['id'],
     goal_checkpoint: [
       'progress',
       'status',
@@ -462,6 +465,11 @@ function resultSummary(name: string, value: unknown): string | null {
   }
   if (name === 'todo_list' && isRecord(value) && Array.isArray(value.items))
     return `Listed ${value.items.length} Todo item${value.items.length === 1 ? '' : 's'}.`;
+  if (name === 'todo_delete' && isRecord(value)) {
+    if (value.deleted !== true) return 'No Todo item was deleted.';
+    const kept = Number.isSafeInteger(value.keptSubitemCount) ? Number(value.keptSubitemCount) : 0;
+    return kept > 0 ? `Todo item deleted; kept ${kept} subitem${kept === 1 ? '' : 's'}.` : 'Todo item deleted.';
+  }
   if (name === 'goal_checkpoint' && isRecord(value))
     return `Checkpoint recorded${typeof value.status === 'string' ? ` · ${value.status}` : ''}.`;
   if (name === 'rolling_segments' && Array.isArray(value))
