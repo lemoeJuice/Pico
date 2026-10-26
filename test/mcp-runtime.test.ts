@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { PicoStore } from '../src/core/store.js';
 import type { Execution, Thread, ToolCall } from '../src/core/types.js';
 import { ToolCatalog } from '../src/executor/tool-catalog.js';
-import { defaultPolicy } from '../src/plugins/permissions.js';
 import { isPublicNetworkAddress, McpManager, resolveMcpTarget } from '../src/runtime/mcp-manager.js';
 import { assistantPayload, FakeModel, response, setupRuntime } from './helpers.js';
 
@@ -588,13 +587,5 @@ describe('Runtime MCP manager', () => {
       await manager.shutdown();
       store.close();
     }
-  });
-
-  it('defaults MCP tools to ask in the Runtime permission catalog', async () => {
-    const hostThread = { executorKind: 'host' } as Thread;
-    const runtimeThread = { executorKind: 'runtime' } as Thread;
-    expect(defaultPolicy('mcp', hostThread)).toBe('ask');
-    expect(defaultPolicy('mcp', runtimeThread)).toBe('ask');
-    expect(defaultPolicy('runtime', runtimeThread)).toBe('allow');
   });
 });

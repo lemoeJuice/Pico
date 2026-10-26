@@ -538,15 +538,15 @@ describe('dynamic plugin UI boundary', () => {
     };
     port.onmessage?.({ data: { type: 'pico:plugin-ui:context', context: nextContext } } as MessageEvent<unknown>);
     port.onmessage?.({
-      data: { type: 'pico:plugin-ui:event', event: { type: 'plugin.updated', pluginId: 'pico.permissions' } },
+      data: { type: 'pico:plugin-ui:event', event: { type: 'plugin.updated', pluginId: 'pico.example' } },
     } as MessageEvent<unknown>);
     expect(contexts).toEqual([nextContext]);
-    expect(events).toEqual([{ type: 'plugin.updated', pluginId: 'pico.permissions' }]);
+    expect(events).toEqual([{ type: 'plugin.updated', pluginId: 'pico.example' }]);
     const props = client.props({ baseUrl: '', model: '', temperature: 0.2, provider: '', hasApiKey: false });
     expect(props.context).toBe(nextContext);
-    const response = props.executeCommand('/permissions');
+    const response = props.executeCommand('/example');
     const request = messages[0] as { id: string; action: string; command: string };
-    expect(request).toMatchObject({ type: 'pico:plugin-ui:request', action: 'command', command: '/permissions' });
+    expect(request).toMatchObject({ type: 'pico:plugin-ui:request', action: 'command', command: '/example' });
     port.onmessage?.({
       data: { type: 'pico:plugin-ui:response', id: request.id, ok: true, value: { text: 'opened' } },
     } as MessageEvent<unknown>);
@@ -571,15 +571,13 @@ describe('dynamic plugin UI boundary', () => {
         { thread: threadA, modelSelection: { ...selection, model: 'second' } },
       ),
     ).toBe(false);
-    expect(
-      pluginUiEventMatchesPlugin({ type: 'plugin.updated', pluginId: 'pico.permissions' }, 'pico.permissions'),
-    ).toBe(true);
-    expect(pluginUiEventMatchesPlugin({ type: 'plugin.updated', pluginId: 'other.plugin' }, 'pico.permissions')).toBe(
+    expect(pluginUiEventMatchesPlugin({ type: 'plugin.updated', pluginId: 'pico.example' }, 'pico.example')).toBe(true);
+    expect(pluginUiEventMatchesPlugin({ type: 'plugin.updated', pluginId: 'other.plugin' }, 'pico.example')).toBe(
       false,
     );
-    expect(
-      pluginUiEventMatchesPlugin({ type: 'execution.updated', pluginId: 'pico.permissions' }, 'pico.permissions'),
-    ).toBe(false);
+    expect(pluginUiEventMatchesPlugin({ type: 'execution.updated', pluginId: 'pico.example' }, 'pico.example')).toBe(
+      false,
+    );
   });
 });
 

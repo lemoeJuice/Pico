@@ -94,19 +94,8 @@ describe('Pico server access boundary', () => {
       const wsUrl = `ws://127.0.0.1:${server.port}/api/events`;
       const origin = base;
 
-      const pluginPage = await fetch(`${base}/_pico/plugin-ui/pico.chatgpt-plan/webui/index.html`);
-      expect(pluginPage.status).toBe(200);
-      const pluginCsp = pluginPage.headers.get('content-security-policy') ?? '';
-      expect(pluginCsp).toContain(`script-src 'self' ${origin}`);
-      expect(pluginCsp).toContain(`style-src 'self' ${origin} 'unsafe-inline'`);
-      expect(pluginCsp).toContain("connect-src 'none'");
-      expect(pluginCsp).toContain("frame-ancestors 'self'");
-      expect(await pluginPage.text()).toContain('./build/webui.js');
-      const pluginBundle = await fetch(`${base}/_pico/plugin-ui/pico.chatgpt-plan/webui/build/webui.js`);
-      expect(pluginBundle.status).toBe(200);
-      expect(pluginBundle.headers.get('content-type')).toContain('javascript');
       expect((await fetch(`${base}/_pico/plugin-ui/unknown.plugin/webui/index.html`)).status).toBe(404);
-      expect((await fetch(`${base}/_pico/plugin-ui/pico.chatgpt-plan/runtime.mjs/index.html`)).status).toBe(404);
+      expect((await fetch(`${base}/_pico/plugin-ui/pico.example/runtime.mjs/index.html`)).status).toBe(404);
 
       const status = await fetch(`${base}/api/auth/status`).then((response) => response.json());
       expect(status).toEqual({ authRequired: true, authenticated: false });
@@ -237,27 +226,6 @@ describe('Pico server access boundary', () => {
           { headers: cookieHeaders },
         ).then((response) => response.status),
       ).toBe(404);
-      server.runtime.store.setPluginState('pico.permissions', 'approvals', {
-        [toolExecutionId]: {
-          executionId: toolExecutionId,
-          threadId: thread.id,
-          toolName: call.name,
-          arguments: call.arguments,
-          status: 'pending',
-          createdAt: new Date().toISOString(),
-        },
-      });
-      const rememberResponse = await fetch(`${base}/api/plugins/pico.permissions/approvals`, {
-        method: 'POST',
-        headers: { ...cookieHeaders, 'content-type': 'application/json' },
-        body: JSON.stringify({ executionId: toolExecutionId, allow: true, rememberForThread: true }),
-      });
-      expect(rememberResponse.status).toBe(200);
-      expect(
-        server.runtime.store.getPluginState<Record<string, Record<string, string>>>('pico.permissions', 'rules', {})[
-          thread.id
-        ],
-      ).toMatchObject({ read_file: 'allow' });
       const commandRequest = {
         pluginId: 'pico.workspace',
         threadId: thread.id,
@@ -272,9 +240,7 @@ describe('Pico server access boundary', () => {
         });
       expect((await executeCommand(commandRequest)).status).toBe(200);
       expect(await (await executeCommand(commandRequest)).json()).toMatchObject({ duplicate: true });
-      expect(
-        (await executeCommand({ ...commandRequest, pluginId: 'pico.permissions', id: 'wrong-owner' })).status,
-      ).toBe(403);
+      expect((await executeCommand({ ...commandRequest, pluginId: 'pico.other', id: 'wrong-owner' })).status).toBe(403);
 
       const logout = await fetch(`${base}/api/auth/session`, { method: 'DELETE', headers: { cookie } });
       expect(logout.status).toBe(200);
@@ -338,60 +304,6 @@ describe('Pico server access boundary', () => {
       expect(await savedSelectionResponse.json()).toMatchObject({ model: 'thread-pinned-model' });
       server.runtime.updateModelSettings({ model: 'future-thread-default' });
       expect(server.runtime.threadModelSelection(thread.id).model).toBe('thread-pinned-model');
-    } finally {
-      await server?.close();
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  it('only starts ChatGPT authorization for an authenticated same-origin UI and returns to a loopback callback', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'pico-chatgpt-oauth-'));
-    let server: Awaited<ReturnType<typeof startServer>> | undefined;
-    try {
-      process.env.PICO_HOST = '127.0.0.1';
-      process.env.PICO_PORT = '0';
-      process.env.PICO_DB_PATH = join(directory, 'pico.sqlite');
-      process.env.PICO_ACCESS_TOKEN = 'pico-test-token-'.repeat(3);
-      server = await startServer();
-      const base = `http://127.0.0.1:${server.port}`;
-      const origin = base;
-      const login = await fetch(`${base}/api/auth/session`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ token: process.env.PICO_ACCESS_TOKEN }),
-      });
-      const cookie = (login.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
-      const unauthorized = await fetch(`${base}/api/plugins/pico.chatgpt-plan/sign-in`, {
-        method: 'POST',
-        headers: { origin, 'content-type': 'application/json' },
-        body: '{}',
-      });
-      expect(unauthorized.status).toBe(401);
-
-      const start = await fetch(`${base}/api/plugins/pico.chatgpt-plan/sign-in`, {
-        method: 'POST',
-        headers: { origin, cookie, 'content-type': 'application/json' },
-        body: '{}',
-      });
-      expect(start.status).toBe(200);
-      const result = (await start.json()) as {
-        authorizationUrl: string;
-        callbackOrigin: string;
-        operationId: string;
-      };
-      const authorization = new URL(result.authorizationUrl);
-      const redirect = new URL(authorization.searchParams.get('redirect_uri')!);
-      expect(authorization.origin).toBe('https://auth.openai.com');
-      expect(redirect.origin).toBe(result.callbackOrigin);
-      expect(redirect.hostname).toBe('127.0.0.1');
-      expect(redirect.pathname).toBe('/auth/callback');
-      expect(result.operationId).toBeTruthy();
-
-      const callback = await fetch(
-        `${redirect.origin}${redirect.pathname}?state=not-the-issued-state&error=access_denied`,
-      );
-      expect(callback.status).toBe(200);
-      expect(await callback.text()).toContain('expired or did not match');
     } finally {
       await server?.close();
       await rm(directory, { recursive: true, force: true });
