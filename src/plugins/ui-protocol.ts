@@ -43,7 +43,7 @@ export type PluginUiNode =
       value?: string;
       placeholder?: string;
       actionId: string;
-      inputType?: 'text' | 'date' | 'number';
+      inputType?: 'text' | 'date' | 'number' | 'password';
       min?: number;
       step?: number | 'any';
       maxLength?: number;
@@ -343,7 +343,8 @@ export function validatePluginUiTree(value: unknown, slot: PluginUiSlot | 'setti
           (item.value === undefined || textOk(item.value)) &&
           (item.placeholder === undefined || textOk(item.placeholder)) &&
           (item.type !== 'textInput' ||
-            ((item.inputType === undefined || ['text', 'date', 'number'].includes(String(item.inputType))) &&
+            ((item.inputType === undefined ||
+              ['text', 'date', 'number', 'password'].includes(String(item.inputType))) &&
               (item.min === undefined || (item.inputType === 'number' && Number.isFinite(item.min))) &&
               (item.step === undefined ||
                 (item.inputType === 'number' &&

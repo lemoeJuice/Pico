@@ -1104,6 +1104,7 @@ export class McpManager {
         source: 'mcp',
         owner: this.owner(candidate.config.id),
         target: { serverId: candidate.config.id, toolKey: candidate.toolKey },
+        mcpToolName: candidate.tool.name,
         legacyName: candidate.legacyName,
         definition: toolDefinition(candidate.config, candidate.tool, candidate.secret, candidate.name),
         execute: (args, context) => this.executeTool(candidate.config.id, candidate.tool.name, args, context.signal),

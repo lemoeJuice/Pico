@@ -36,6 +36,8 @@ export type RegisteredTool =
       owner: string;
       source: 'mcp';
       target: McpToolTarget;
+      /** Original MCP tool name, retained for Runtime policy metadata despite public name disambiguation. */
+      mcpToolName?: string;
       legacyName: string;
       execute(args: Record<string, unknown>, context: RuntimeToolContext): Promise<unknown>;
     };

@@ -493,8 +493,8 @@ export function McpSettings({ request, refreshVersion = 0 }: { request: Request;
                 </small>
                 <small>
                   {server.visibleByDefault
-                    ? 'Tools are visible in Threads by default'
-                    : 'Tools are hidden in Threads by default'}
+                    ? 'Tools auto-enable in new Threads by default'
+                    : 'Tools stay disabled in new Threads unless enabled per Thread'}
                 </small>
               </div>
               {server.lastError ? <p className="mcp-server-error">{server.lastError}</p> : null}
@@ -752,7 +752,7 @@ export function McpSettings({ request, refreshVersion = 0 }: { request: Request;
               checked={draft.visibleByDefault}
               onChange={(event) => updateDraft({ visibleByDefault: event.target.checked })}
             />
-            Show this server's tools in Threads by default
+            Automatically enable this server's tools in new Threads
           </label>
           <div className="form-actions">
             <button type="button" className="button button-quiet" disabled={saving} onClick={() => setDraft(null)}>

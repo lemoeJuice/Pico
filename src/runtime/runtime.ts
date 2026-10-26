@@ -74,6 +74,7 @@ import type {
   ProviderRequestStart,
   ProviderRequestSummary,
 } from '../contracts/model.js';
+import { DEFAULT_SYSTEM_PROMPT } from '../contracts/system-prompt.js';
 import type {
   ModelStageInput,
   ProjectionInput,
@@ -977,7 +978,7 @@ const defaultModelSettings: ModelSettings = {
   provider: 'openai-compatible',
 };
 
-const baseSystemPrompt = `You are Pico, an agent working in one durable Thread. Use the available tools when they help you inspect or change the selected workspace.\n\nTools in one model step may run concurrently. Their results arrive together before the next step. A tool result marked interrupted means its real-world side effects may be partial or unknown: inspect the environment before deciding whether to retry.\n\nA Thread stays bound to its displayed Executor for its lifetime.\n\nNew user messages can arrive while you work. They will appear at the next model step; finish the current tool batch first.`;
+const baseSystemPrompt = DEFAULT_SYSTEM_PROMPT;
 
 function deepFreeze<T>(value: T): T {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
@@ -1106,19 +1107,7 @@ export class PicoRuntime {
         list: (projectId) => this.listThreads(projectId),
         updateTitle: (pluginId, threadId, title) => this.updateThreadTitleFromPlugin(pluginId, threadId, title),
         tools: async (threadId) => {
-          const thread = this.store.getThread(threadId);
-          if (!thread) throw new Error('Thread not found');
-          const surface = await this.toolSurfaceFor(thread);
-          return surface.tools.map((definition) => ({
-            ...definition,
-            source: surface.sources[definition.name] ?? 'runtime',
-            enabled: this.threadToolEnabled(
-              threadId,
-              definition.name,
-              surface.sources[definition.name],
-              surface.mcpTargets[definition.name],
-            ),
-          }));
+          return this.listThreadTools(threadId);
         },
         setToolEnabled: async (threadId, toolName, enabled) => {
           await this.setThreadToolEnabled(threadId, toolName, enabled);
@@ -1139,7 +1128,8 @@ export class PicoRuntime {
           if (options.parentThreadId) {
             this.inheritThreadToolSettings(options.parentThreadId, thread.id);
           } else if (!hadToolSettings) this.initializeThreadToolSettings(thread.id);
-          if (!hadToolSettings && options.toolOverrides) this.applyThreadToolOverrides(thread.id, options.toolOverrides);
+          if (!hadToolSettings && options.toolOverrides)
+            this.applyThreadToolOverrides(thread.id, options.toolOverrides);
           this.publish({ type: 'thread.created', thread });
           return thread;
         },
@@ -1160,8 +1150,20 @@ export class PicoRuntime {
           const result = this.postMessage(target, messageId, payload);
           return { delivered: result.inserted, threadId: target.id, messageId: result.record.id };
         },
+        submitUserMessage: (threadId, messageId, content) => this.submitUserMessage(threadId, messageId, content),
         pause: (threadId, reason) => this.pauseForPlugin(threadId, reason),
         resume: (threadId) => this.resumeForPlugin(threadId),
+      },
+      mcp: {
+        list: () =>
+          this.listMcpServers().map(({ id, name, transport, status, visibleByDefault, tools }) => ({
+            id,
+            name,
+            transport,
+            status,
+            visibleByDefault,
+            toolCount: tools.length,
+          })),
       },
       executions: {
         get: (executionId) => this.store.getExecution(executionId),
@@ -1671,7 +1673,11 @@ export class PicoRuntime {
           cachedSurface.sources[tool.name] === 'mcp' && target !== undefined && sameMcpTarget(target, registered.target)
         );
       });
-      return cachedName ?? registered.definition;
+      return {
+        definition: cachedName ?? registered.definition,
+        target: registered.target,
+        mcpIsInvokeAction: registered.mcpToolName === 'invoke_action',
+      };
     });
     const binding = requiresExternalExecutor(thread.executorKind) ? this.store.executorForThread(threadId) : null;
     let executorTools: ToolDefinition[] = [];
@@ -1690,17 +1696,36 @@ export class PicoRuntime {
       }
     }
 
-    const known = new Map<string, { definition: ToolDefinition; source: 'runtime' | 'executor' | 'mcp' }>();
+    const known = new Map<
+      string,
+      {
+        definition: ToolDefinition;
+        source: 'runtime' | 'executor' | 'mcp';
+        mcpServerId?: string;
+        mcpIsInvokeAction?: boolean;
+        mcpTarget?: McpToolTarget;
+      }
+    >();
     for (const definition of runtimeTools) known.set(definition.name, { definition, source: 'runtime' });
-    for (const definition of mcpTools) known.set(definition.name, { definition, source: 'mcp' });
+    for (const { definition, target, mcpIsInvokeAction } of mcpTools) {
+      known.set(definition.name, {
+        definition,
+        source: 'mcp',
+        mcpServerId: target.serverId,
+        mcpIsInvokeAction,
+        mcpTarget: target,
+      });
+    }
     for (const definition of executorTools) {
       if (!known.has(definition.name)) known.set(definition.name, { definition, source: 'executor' });
     }
-    return [...known.values()].map(({ definition, source }) => ({
+    return [...known.values()].map(({ definition, source, mcpServerId, mcpIsInvokeAction, mcpTarget }) => ({
       name: definition.name,
       description: definition.description,
       source,
-      enabled: this.threadToolEnabled(threadId, definition.name, source),
+      ...(mcpServerId ? { mcpServerId } : {}),
+      ...(mcpServerId ? { mcpIsInvokeAction: mcpIsInvokeAction === true } : {}),
+      enabled: this.threadToolEnabled(threadId, definition.name, source, mcpTarget),
     }));
   }
 
@@ -1959,60 +1984,73 @@ export class PicoRuntime {
 
   async submit(threadId: string, id: string, content: string): Promise<SubmitResult> {
     const thread = this.requireUnarchivedThread(threadId);
-    if (content.trimStart().startsWith('/')) {
-      const commandText = content.trim();
-      const requestHash = createHash('sha256').update(`${threadId}\0${id}`).digest('hex');
-      const commandHash = createHash('sha256').update(commandText).digest('hex');
-      const receiptId = `pico:command:${requestHash}`;
-      const completedId = `${receiptId}:completed`;
-      const receipt = this.store.appendCanonical(threadId, receiptId, 'plugin', {
-        pluginId: 'pico.commands',
-        action: 'invocation-accepted',
-        requestHash,
-        commandHash,
-      });
-      if (!receipt.inserted) {
-        const completedCommand = commandResultFromRecord(
-          this.store.getCanonicalRecordById(completedId),
-          threadId,
-          requestHash,
-          commandHash,
-        );
-        if (completedCommand) return { accepted: true, duplicate: true, command: completedCommand };
-        return {
-          accepted: true,
-          duplicate: true,
-          command: {
-            text: 'This command ID was already accepted. Its original handler may still be running or may have finished; it was not started again.',
-          },
-        };
-      }
-      const endOperation = this.beginThreadOperation(threadId);
-      try {
-        const command = await this.commands.execute(commandText, {
-          thread: this.getThread(threadId),
-          projectId: thread.projectId,
-        });
-        if (command) {
-          this.store.appendCanonical(threadId, completedId, 'plugin', {
-            pluginId: 'pico.commands',
-            action: 'invocation-completed',
-            requestHash,
-            commandHash,
-            result: command,
-          });
-          return { accepted: true, duplicate: false, command };
-        }
-      } finally {
-        endOperation();
-      }
-    }
     const result = this.postMessage(thread, id, {
       role: 'user',
       content,
       source: 'user',
     });
     return { accepted: true, duplicate: !result.inserted };
+  }
+
+  submitUserMessage(threadId: string, id: string, content: string): { accepted: true; duplicate: boolean } {
+    const result = this.postMessage(this.requireUnarchivedThread(threadId), id, {
+      role: 'user',
+      content,
+      source: 'user',
+    });
+    return { accepted: true, duplicate: !result.inserted };
+  }
+
+  async executeCommand(threadId: string, id: string, commandText: string): Promise<SubmitResult> {
+    const thread = this.requireUnarchivedThread(threadId);
+    if (!commandText.trimStart().startsWith('/')) throw new Error('Command text must start with /.');
+    const normalizedCommand = commandText.trim();
+    const requestHash = createHash('sha256').update(`${threadId}\0${id}`).digest('hex');
+    const commandHash = createHash('sha256').update(normalizedCommand).digest('hex');
+    const receiptId = `pico:command:${requestHash}`;
+    const completedId = `${receiptId}:completed`;
+    const receipt = this.store.appendCanonical(threadId, receiptId, 'plugin', {
+      pluginId: 'pico.commands',
+      action: 'invocation-accepted',
+      requestHash,
+      commandHash,
+    });
+    if (!receipt.inserted) {
+      const completedCommand = commandResultFromRecord(
+        this.store.getCanonicalRecordById(completedId),
+        threadId,
+        requestHash,
+        commandHash,
+      );
+      if (completedCommand) return { accepted: true, duplicate: true, command: completedCommand };
+      return {
+        accepted: true,
+        duplicate: true,
+        command: {
+          text: 'This command ID was already accepted. Its original handler may still be running or may have finished; it was not started again.',
+        },
+      };
+    }
+    const endOperation = this.beginThreadOperation(threadId);
+    try {
+      const command = await this.commands.execute(normalizedCommand, {
+        thread: this.getThread(threadId),
+        projectId: thread.projectId,
+      });
+      if (command) {
+        this.store.appendCanonical(threadId, completedId, 'plugin', {
+          pluginId: 'pico.commands',
+          action: 'invocation-completed',
+          requestHash,
+          commandHash,
+          result: command,
+        });
+        return { accepted: true, duplicate: false, command };
+      }
+      throw new Error('No command handler accepted this command.');
+    } finally {
+      endOperation();
+    }
   }
 
   private postMessage(
@@ -2879,11 +2917,8 @@ export class PicoRuntime {
     const registeredMcp = this.registeredMcpTools().find(
       (tool) => tool.definition.name === toolName || tool.legacyName === toolName,
     );
-    const target =
-      persistedMcpTarget ?? cached?.mcpTargets?.[toolName] ?? registeredMcp?.target ?? undefined;
-    const names = target
-      ? [...new Set([toolName, ...this.threadMcpToolNamesForTarget(threadId, target)])]
-      : [toolName];
+    const target = persistedMcpTarget ?? cached?.mcpTargets?.[toolName] ?? registeredMcp?.target ?? undefined;
+    const names = target ? [...new Set([toolName, ...this.threadMcpToolNamesForTarget(threadId, target)])] : [toolName];
     const explicitName = names.find((name) => Object.prototype.hasOwnProperty.call(overrides, name));
     if (explicitName !== undefined) return overrides[explicitName]!;
     if (target) {
@@ -3852,10 +3887,9 @@ export class PicoRuntime {
     };
     const promise = (async (): Promise<Execution> => {
       try {
-        execution =
-          !this.threadToolEnabled(thread.id, call.name, toolSource, persistedMcpTarget)
-            ? await input.fail(`Tool “${call.name}” is disabled in this Thread.`, { disabled: true })
-            : await this.pipelines.run('toolInvocation', input, async (value) => value.invoke());
+        execution = !this.threadToolEnabled(thread.id, call.name, toolSource, persistedMcpTarget)
+          ? await input.fail(`Tool “${call.name}” is disabled in this Thread.`, { disabled: true })
+          : await this.pipelines.run('toolInvocation', input, async (value) => value.invoke());
       } catch (error) {
         const latest = this.store.getExecution(executionId);
         if (!latest) throw error;
@@ -4431,7 +4465,7 @@ export class PicoRuntime {
     return next;
   }
 
-  availableCommands(): Array<{ name: string; description: string }> {
+  availableCommands(): Array<{ name: string; description: string; pluginId: string }> {
     return this.commands.list();
   }
 

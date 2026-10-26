@@ -630,7 +630,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
   const [savingToolName, setSavingToolName] = useState<string | null>(null);
   const [pluginEvents, setPluginEvents] = useState<Array<{ sequence: number; event: PluginUiEvent }>>([]);
-  const [commands, setCommands] = useState<Array<{ name: string; description: string }>>([]);
+  const [commands, setCommands] = useState<Array<{ name: string; description: string; pluginId: string }>>([]);
+  const [selectedSlashCommand, setSelectedSlashCommand] = useState<{ threadId: string; name: string } | null>(null);
   const [executorConnected, setExecutorConnected] = useState<boolean | null>(null);
   const [executorError, setExecutorError] = useState<string | null>(null);
   const [executorDetails, setExecutorDetails] = useState<ExecutorStatusDetails>({});
@@ -714,6 +715,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   activeThreadId.current = threadId;
   draftRef.current = { threadId, value: draft };
 
+  useEffect(() => setSelectedSlashCommand(null), [threadId]);
+
   const toggleThinking = useCallback(
     (expanded: boolean, summary: HTMLElement): void => {
       if (expanded === thinkingExpanded) return;
@@ -778,11 +781,22 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const updateDraft = (value: string): void => {
     const targetThreadId = activeThreadId.current;
     if (!targetThreadId) return;
+    const commandName = value.match(/^\/([a-z0-9][a-z0-9_-]*)(?:\s|$)/i)?.[1]?.toLowerCase() ?? null;
+    setSelectedSlashCommand((current) =>
+      current && current.threadId === targetThreadId && commandName !== current.name ? null : current,
+    );
     draftRef.current = { threadId: targetThreadId, value };
     const state = composerState.current!;
     state.draftsByThread = { ...state.draftsByThread, [targetThreadId]: value };
     setDraftsByThread(state.draftsByThread);
     persistComposerState(state);
+  };
+
+  const selectSlashCommand = (name: string): void => {
+    const targetThreadId = activeThreadId.current;
+    if (!targetThreadId) return;
+    updateDraft(`/${name} `);
+    setSelectedSlashCommand({ threadId: targetThreadId, name });
   };
 
   const acceptMessage = useCallback((targetThreadId: string, id: string, content: string): boolean => {
@@ -910,7 +924,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     activeThreadNotice && activeThreadNoticeSeverity === 'error' ? 'error' : 'notice';
   const filteredCommands = useMemo(() => {
     if (!draft.startsWith('/')) return [];
-    const token = draft.slice(1).split(/\s/)[0]?.toLowerCase() ?? '';
+    const commandInput = draft.slice(1);
+    if (/\s/.test(commandInput)) return [];
+    const token = commandInput.toLowerCase();
     return commands.filter((command) => command.name.startsWith(token)).slice(0, 7);
   }, [commands, draft]);
   const uiContributions = pluginInfo?.ui ?? [];
@@ -1104,7 +1120,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           api<PublicSettings>('/api/settings/model'),
           api<ContextManagementSettings>('/api/settings/context-management'),
           api<MiscellaneousSettings>('/api/settings/miscellaneous'),
-          api<Array<{ name: string; description: string }>>('/api/commands'),
+          api<Array<{ name: string; description: string; pluginId: string }>>('/api/commands'),
           api<PluginInfo>('/api/plugins'),
           api<{ defaultWorkspace: string }>('/api/info'),
           api<RemoteExecutorConnectionView[]>('/api/executor-connections'),
@@ -1565,7 +1581,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     const clean = content.trim();
     const sentThreadId = threadId;
     if (!sentThreadId || !clean || busy || pendingSubmissionThreads.current.has(sentThreadId)) return;
-    if (selectedThread?.executorKind !== 'runtime' && executorConnected !== true) return;
+    const selectedName =
+      selectedSlashCommand?.threadId === sentThreadId &&
+      clean.match(/^\/([a-z0-9][a-z0-9_-]*)(?:\s|$)/i)?.[1]?.toLowerCase() === selectedSlashCommand.name
+        ? selectedSlashCommand.name
+        : null;
+    const selectedCommand = selectedName ? commands.find((command) => command.name === selectedName) : null;
+    if (!selectedCommand && selectedThread?.executorKind !== 'runtime' && executorConnected !== true) return;
     let id: string | undefined;
     try {
       followLatest.current = true;
@@ -1583,8 +1605,23 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           severity?: 'notice' | 'error';
           presentation?: 'timeline';
         };
-      }>(`/api/threads/${sentThreadId}/messages`, messageSubmissionRequestInit(id, clean));
+      }>(
+        selectedCommand ? '/api/commands/execute' : `/api/threads/${sentThreadId}/messages`,
+        selectedCommand
+          ? {
+              method: 'POST',
+              body: JSON.stringify({
+                pluginId: selectedCommand.pluginId,
+                threadId: sentThreadId,
+                id,
+                command: clean,
+              }),
+              signal: AbortSignal.timeout(20_000),
+            }
+          : messageSubmissionRequestInit(id, clean),
+      );
       acceptMessage(sentThreadId, id, clean);
+      if (selectedCommand) setSelectedSlashCommand(null);
       const commandText = result.command?.text;
       if (commandText && result.command?.presentation !== 'timeline') {
         const severity = result.command?.severity ?? 'notice';
@@ -2316,7 +2353,21 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   };
 
   const executeContribution = (item: UiContribution): void => {
-    if (item.command) void sendMessage(item.command);
+    if (!item.command || !item.pluginId || !selectedThreadId) return;
+    void runPluginCommand(item.pluginId, selectedThreadId, item.command)
+      .then((value) => {
+        const command = (value as { command?: { text?: string; openThreadId?: string; severity?: 'notice' | 'error' } })
+          ?.command;
+        if (command?.text) {
+          setThreadNotices((current) => withThreadNotice(current, selectedThreadId, command.text!));
+          setThreadNoticeSeverities((current) => ({
+            ...current,
+            [selectedThreadId]: command.severity ?? 'notice',
+          }));
+        }
+        if (command?.openThreadId) setThreadId(command.openThreadId);
+      })
+      .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : String(caught)));
   };
 
   const chooseThread = (id: string, targetProjectId = projectId): void => {
@@ -3145,7 +3196,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               {filteredCommands.length > 0 ? (
                 <div className="command-menu">
                   {filteredCommands.map((command) => (
-                    <button key={command.name} onClick={() => updateDraft(`/${command.name} `)}>
+                    <button key={command.name} onClick={() => selectSlashCommand(command.name)}>
                       <strong>/{command.name}</strong>
                       <span>{command.description}</span>
                     </button>
@@ -3168,9 +3219,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     onKeyDown={(event) => {
                       if (shouldSubmitOnEnter(event.nativeEvent)) {
                         event.preventDefault();
-                        if (filteredCommands.length > 0 && draft.trim() === '/')
-                          updateDraft(`/${filteredCommands[0]!.name} `);
-                        else void sendMessage();
+                        void sendMessage();
                       }
                     }}
                     placeholder="Write a message… use / for commands"

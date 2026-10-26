@@ -9,6 +9,7 @@ const plugins = [
   ['pico.model-parameters', 'src/plugins/model-parameters/index.ts', 'modelParametersPlugin'],
   ['pico.permissions', 'src/plugins/permissions.ts', 'permissionPlugin'],
   ['pico.project-context', 'src/plugins/project-context.ts', 'projectContextPlugin'],
+  ['pico.qq-adapter', 'src/plugins/qq-adapter.ts', 'qqAdapterPlugin'],
   ['pico.rolling-context', 'src/plugins/rolling-context.ts', 'rollingContextPlugin'],
   ['pico.todo', 'src/plugins/todo.ts', 'todoPlugin'],
   ['pico.usage', 'src/plugins/usage.ts', 'usagePlugin'],

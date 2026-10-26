@@ -42,6 +42,10 @@ export interface ThreadToolView {
   name: string;
   description: string;
   source: 'runtime' | 'executor' | 'mcp';
+  /** Present for MCP tools and identifies the configured server that owns the tool. */
+  mcpServerId?: string;
+  /** True only when the upstream MCP tool is named invoke_action. */
+  mcpIsInvokeAction?: boolean;
   enabled: boolean;
 }
 

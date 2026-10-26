@@ -1,7 +1,9 @@
-import type { Execution, ExecutorBinding, ExecutorKind, Project, Thread, ToolDefinition } from '../core/types.js';
+import type { Execution, ExecutorBinding, ExecutorKind, Project, Thread } from '../core/types.js';
 import type { ModelPrompt, ModelResponse, ModelStreamEvent } from '../contracts/model.js';
 import type { PluginModelCallRecord } from '../contracts/store.js';
 import type { ThreadModelSelection } from '../core/types.js';
+import type { McpServerStatus } from '../contracts/mcp.js';
+import type { ThreadToolView } from '../contracts/runtime.js';
 
 /** Domain operations available to workflow plugins, independent of Runtime implementation. */
 export interface PluginServices {
@@ -15,9 +17,7 @@ export interface PluginServices {
     updateModelSelection(threadId: string, selection: ThreadModelSelection): ThreadModelSelection;
     list(projectId?: string): Thread[];
     updateTitle(pluginId: string, threadId: string, title: string): Thread;
-    tools(
-      threadId: string,
-    ): Promise<Array<ToolDefinition & { source: 'runtime' | 'executor' | 'mcp'; enabled: boolean }>>;
+    tools(threadId: string): Promise<ThreadToolView[]>;
     /** Change whether a tool is included in future model projections for this Thread. Permission remains invocation-scoped. */
     setToolEnabled(threadId: string, toolName: string, enabled: boolean): Promise<void>;
     binding(threadId: string): ExecutorBinding | null;
@@ -46,8 +46,24 @@ export interface PluginServices {
       threadId: string;
       messageId: string;
     };
+    /** Append an ordinary user Message and start the normal Thread loop without slash-command dispatch. */
+    submitUserMessage(
+      threadId: string,
+      messageId: string,
+      content: string,
+    ): { accepted: true; duplicate: boolean };
     pause(threadId: string, reason: string): Thread;
     resume(threadId: string): Thread;
+  };
+  mcp: {
+    list(): Array<{
+      id: string;
+      name: string;
+      transport: 'stdio' | 'streamable-http';
+      status: McpServerStatus;
+      visibleByDefault: boolean;
+      toolCount: number;
+    }>;
   };
   executions: {
     get(executionId: string): Execution | null;
@@ -94,9 +110,11 @@ export const unavailablePluginServices: PluginServices = {
     binding: unavailable,
     create: unavailable,
     send: unavailable,
+    submitUserMessage: unavailable,
     pause: unavailable,
     resume: unavailable,
   },
+  mcp: { list: unavailable },
   executions: { get: unavailable, subscribe: unavailable },
   models: { complete: unavailable, history: unavailable, subscribe: unavailable },
   continuations: { register: unavailable, hasPendingWork: unavailable },

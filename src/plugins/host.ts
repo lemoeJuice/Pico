@@ -204,8 +204,12 @@ export class CommandRegistry {
     for (const [name, item] of this.commands) if (item.owner === owner) this.commands.delete(name);
   }
 
-  list(): Array<{ name: string; description: string }> {
-    return [...this.commands.values()].map(({ command }) => ({ name: command.name, description: command.description }));
+  list(): Array<{ name: string; description: string; pluginId: string }> {
+    return [...this.commands.values()].map(({ owner, command }) => ({
+      name: command.name,
+      description: command.description,
+      pluginId: owner,
+    }));
   }
 
   owns(owner: string, text: string): boolean {
@@ -222,7 +226,8 @@ export class CommandRegistry {
     const args = rawArgs.trim() ? rawArgs.trim().split(/\s+/) : [];
     const name = (rawName ?? '').toLowerCase();
     const entry = this.commands.get(name);
-    if (!entry) return { text: `Unknown command /${name || '?'}; use /help to see available commands.`, severity: 'error' };
+    if (!entry)
+      return { text: `Unknown command /${name || '?'}; use /help to see available commands.`, severity: 'error' };
     return (await entry.command.execute(args, { ...context, rawArgs })) ?? {};
   }
 }
@@ -582,6 +587,7 @@ export class PluginHost {
     const subscriptions: Array<() => void> = [];
     const context: PluginContext = {
       projects: { ...this.services.projects },
+      mcp: { ...this.services.mcp },
       threads: {
         ...this.services.threads,
         updateTitle: (threadId, title) => this.services.threads.updateTitle(plugin.id, threadId, title),

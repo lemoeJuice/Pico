@@ -503,7 +503,7 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     if (!runtime.commands.owns(pluginId, command)) {
       return response.status(403).json({ error: 'Command is not owned by the requested plugin.' });
     }
-    return response.json(await runtime.submit(threadId, id, command));
+    return response.json(await runtime.executeCommand(threadId, id, command));
   });
   app.get('/api/plugins', (_request, response) => response.json(runtime.pluginInfo()));
   app.put('/api/plugins/:pluginId', async (request, response) => {
