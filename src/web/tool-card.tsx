@@ -1,7 +1,19 @@
 import type { Execution, ToolCall, ToolResultPayload } from '../core/types.js';
 import { isMultimodalToolResultEnvelope, redactMultimodalToolResult } from '../contracts/multimodal.js';
 import { ChevronRight } from 'lucide-react';
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+  type UIEvent,
+} from 'react';
 import './tool-card.css';
 
 type JsonRecord = Record<string, unknown>;
@@ -352,11 +364,21 @@ function collapsedArgumentSummary(name: string, args: JsonRecord, preview?: { ar
   return text ? `${label}: ${text}` : `${label}: (empty)`;
 }
 
-function readableArguments(name: string, args: JsonRecord, preview?: { argumentsText: string }): ReactNode {
+function readableArguments(
+  name: string,
+  args: JsonRecord,
+  preview?: { argumentsText: string },
+  previewScrollRef?: RefObject<HTMLPreElement | null>,
+  onPreviewScroll?: (event: UIEvent<HTMLPreElement>) => void,
+): ReactNode {
   if (name === 'shell') {
     const command = typeof args.command === 'string' ? args.command : '';
     return (
-      <pre className="tool-command-preview">
+      <pre
+        ref={preview ? previewScrollRef : undefined}
+        onScroll={preview ? onPreviewScroll : undefined}
+        className="tool-command-preview"
+      >
         {command || (preview ? 'Generating command…' : 'No command provided')}
         {preview ? <span className="tool-command-caret" aria-hidden="true" /> : null}
       </pre>
@@ -412,7 +434,9 @@ function readableArguments(name: string, args: JsonRecord, preview?: { arguments
           key={key}
         >
           <span className="tool-field-label">{argumentLabels[key] ?? key}</span>
-          <pre>{displayValue(args[key])}</pre>
+          <pre onScroll={preview ? onPreviewScroll : undefined}>
+            {displayValue(args[key])}
+          </pre>
         </div>
       ))}
     </div>
@@ -664,6 +688,16 @@ export function ToolCard({
   defaultExpanded?: boolean;
 }) {
   const [view, setView] = useState<'readable' | 'raw'>('readable');
+  const argumentPreviewRef = useRef<HTMLPreElement>(null);
+  const argumentFieldsRef = useRef<HTMLElement>(null);
+  const argumentPreviewFollowLatest = useRef(new WeakMap<HTMLPreElement, boolean>());
+  const onArgumentPreviewScroll = useCallback((event: UIEvent<HTMLPreElement>): void => {
+    const element = event.currentTarget;
+    argumentPreviewFollowLatest.current.set(
+      element,
+      element.scrollHeight - element.scrollTop - element.clientHeight <= 24,
+    );
+  }, []);
   const expansion = useContext(ToolCardExpansionContext);
   const initialExpanded = useRef(
     expansion?.getExpanded(expansionKey) ?? expansion?.defaultExpanded ?? defaultExpanded,
@@ -693,6 +727,18 @@ export function ToolCard({
         : null;
   const outcomeUnconfirmed = execution?.error?.includes('The Executor did not confirm an outcome.') ?? false;
   const args = previewArguments(call, preview);
+  useLayoutEffect(() => {
+    if (!preview || !expanded) return;
+    const elements =
+      view === 'readable' && call.name !== 'shell'
+        ? [...(argumentFieldsRef.current?.querySelectorAll('pre') ?? [])]
+        : argumentPreviewRef.current
+          ? [argumentPreviewRef.current]
+          : [];
+    for (const element of elements) {
+      if (argumentPreviewFollowLatest.current.get(element) !== false) element.scrollTop = element.scrollHeight;
+    }
+  }, [call.name, expanded, preview?.argumentsText, view]);
   const structuredResult = isRecord(result?.result)
     ? redactToolResultValue(result.result) as JsonRecord
     : isRecord(execution?.result)
@@ -801,11 +847,15 @@ export function ToolCard({
         <div className={`tool-card-body tool-shell-body${view === 'readable' ? ' tool-shell-body-readable' : ''}`}>
           <div className="tool-shell-command">
             {view === 'raw' ? (
-              <pre className="pico-ui-preview">
+              <pre
+                ref={preview ? argumentPreviewRef : undefined}
+                onScroll={preview ? onArgumentPreviewScroll : undefined}
+                className="pico-ui-preview"
+              >
                 {preview ? preview.argumentsText || 'Waiting for arguments…' : toJson(call.arguments)}
               </pre>
             ) : (
-              readableArguments(call.name, args, preview)
+              readableArguments(call.name, args, preview, argumentPreviewRef, onArgumentPreviewScroll)
             )}
           </div>
           <section className={`tool-shell-output tool-shell-output-${shellOutcome}`}>
@@ -841,16 +891,23 @@ export function ToolCard({
         </div>
       ) : (
         <div className="tool-card-body">
-          <section className="conversation-detail-row tool-detail">
+          <section
+            ref={preview && view === 'readable' ? argumentFieldsRef : undefined}
+            className="conversation-detail-row tool-detail"
+          >
             <div className="tool-detail-toolbar">
               <div className="tool-detail-heading">Arguments</div>
             </div>
             {view === 'raw' ? (
-              <pre className="pico-ui-preview">
+              <pre
+                ref={preview ? argumentPreviewRef : undefined}
+                onScroll={preview ? onArgumentPreviewScroll : undefined}
+                className="pico-ui-preview"
+              >
                 {preview ? preview.argumentsText || 'Waiting for arguments…' : toJson(call.arguments)}
               </pre>
             ) : (
-              readableArguments(call.name, args, preview)
+              readableArguments(call.name, args, preview, argumentPreviewRef, onArgumentPreviewScroll)
             )}
           </section>
           <section className="conversation-detail-row tool-detail">

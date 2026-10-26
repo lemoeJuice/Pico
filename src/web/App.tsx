@@ -12,6 +12,7 @@ import {
   type CSSProperties,
   type FormEvent,
   type ReactNode,
+  type RefObject,
 } from 'react';
 import type {
   AssistantPayload,
@@ -675,15 +676,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     hasApiKey: false,
   });
   const listRef = useRef<HTMLDivElement>(null);
-  const threadScrollbarRef = useRef<HTMLDivElement>(null);
-  const threadScrollbarThumbRef = useRef<HTMLDivElement>(null);
-  const threadScrollbarDrag = useRef<{ pointerId: number; pointerOffset: number } | null>(null);
-  const [threadScrollbar, setThreadScrollbar] = useState({
-    maxScroll: 0,
-    scrollTop: 0,
-    thumbHeight: 0,
-    thumbTop: 0,
-  });
   const pendingThinkingScrollAdjustment = useRef<{
     summary: HTMLElement;
     summaryTop: number;
@@ -850,68 +842,18 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     threads.find((thread) => thread.id === threadId && thread.projectId === projectId) ??
     null;
   const selectedThreadId = selectedThread?.id ?? null;
-  const syncThreadScrollbar = useCallback(() => {
-    const scroll = listRef.current;
-    const track = threadScrollbarRef.current;
-    if (!scroll || !track) {
-      setThreadScrollbar((current) =>
-        current.maxScroll === 0 && current.scrollTop === 0 && current.thumbHeight === 0 && current.thumbTop === 0
-          ? current
-          : { maxScroll: 0, scrollTop: 0, thumbHeight: 0, thumbTop: 0 },
-      );
-      return;
-    }
-
-    const trackHeight = track.clientHeight;
-    const maxScroll = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
-    const scrollTop = Math.max(0, Math.min(maxScroll, scroll.scrollTop));
-    const thumbHeight =
-      maxScroll > 0 && trackHeight > 0
-        ? Math.min(
-            trackHeight,
-            Math.max(Math.min(36, trackHeight), (trackHeight * scroll.clientHeight) / scroll.scrollHeight),
-          )
-        : trackHeight;
-    const maxThumbTop = Math.max(0, trackHeight - thumbHeight);
-    const thumbTop = maxScroll > 0 ? (scrollTop / maxScroll) * maxThumbTop : 0;
-
-    setThreadScrollbar((current) =>
-      current.maxScroll === maxScroll &&
-      current.scrollTop === scrollTop &&
-      current.thumbHeight === thumbHeight &&
-      current.thumbTop === thumbTop
-        ? current
-        : { maxScroll, scrollTop, thumbHeight, thumbTop },
-    );
-  }, []);
   useLayoutEffect(() => {
     const scroll = listRef.current;
-    const track = threadScrollbarRef.current;
-    if (!scroll || !track) {
-      syncThreadScrollbar();
-      return undefined;
-    }
-
-    syncThreadScrollbar();
-    const observer = new ResizeObserver(syncThreadScrollbar);
+    if (!scroll) return undefined;
+    const keepLatestVisible = (): void => {
+      if (followLatest.current) scroll.scrollTop = scroll.scrollHeight;
+    };
+    keepLatestVisible();
+    const observer = new ResizeObserver(keepLatestVisible);
     observer.observe(scroll);
-    observer.observe(track);
     if (scroll.firstElementChild instanceof HTMLElement) observer.observe(scroll.firstElementChild);
     return () => observer.disconnect();
-  }, [selectedThreadId, syncThreadScrollbar]);
-  const scrollThreadFromPointer = (clientY: number, pointerOffset: number): void => {
-    const scroll = listRef.current;
-    const track = threadScrollbarRef.current;
-    if (!scroll || !track) return;
-    const trackHeight = track.clientHeight;
-    const thumbHeight = threadScrollbarThumbRef.current?.clientHeight ?? threadScrollbar.thumbHeight;
-    const maxThumbTop = Math.max(0, trackHeight - thumbHeight);
-    const maxScroll = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
-    if (maxThumbTop === 0 || maxScroll === 0) return;
-    const trackTop = track.getBoundingClientRect().top;
-    const thumbTop = Math.max(0, Math.min(maxThumbTop, clientY - trackTop - pointerOffset));
-    scroll.scrollTop = (thumbTop / maxThumbTop) * maxScroll;
-  };
+  }, [selectedThreadId]);
   const selectedThreadSending = selectedThread ? sendingThreadIds.has(selectedThread.id) : false;
   const selectedThreadCompacting = selectedThread ? compactingThreadIds.has(selectedThread.id) : false;
   const activeThreadNotice = threadId ? (threadNotices[threadId] ?? '') : '';
@@ -3018,7 +2960,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   const follow = isNearScrollEnd(event.currentTarget);
                   followLatest.current = follow;
                   event.currentTarget.classList.toggle('conversation-scroll-follow-latest', follow);
-                  syncThreadScrollbar();
                 }}
               >
                 <ThinkingDisclosureContext.Provider value={thinkingDisclosure}>
@@ -3107,89 +3048,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   </div>
                 </ThinkingDisclosureContext.Provider>
               </div>
-              <div
-                ref={threadScrollbarRef}
-                className="thread-scrollbar"
-                role="scrollbar"
-                aria-label="Thread scroll position"
-                aria-controls="thread-message-scroll"
-                aria-orientation="vertical"
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={
-                  threadScrollbar.maxScroll > 0
-                    ? Math.round((threadScrollbar.scrollTop / threadScrollbar.maxScroll) * 100)
-                    : 0
-                }
-                aria-valuetext={`${threadScrollbar.maxScroll > 0 ? Math.round((threadScrollbar.scrollTop / threadScrollbar.maxScroll) * 100) : 0}%`}
-                aria-hidden={threadScrollbar.maxScroll === 0}
-                tabIndex={threadScrollbar.maxScroll > 0 ? 0 : -1}
-                onPointerDown={(event) => {
-                  if (threadScrollbar.maxScroll === 0) return;
-                  const thumb = threadScrollbarThumbRef.current;
-                  const onThumb = thumb?.contains(event.target as Node) ?? false;
-                  const pointerOffset = onThumb
-                    ? event.clientY - thumb!.getBoundingClientRect().top
-                    : (thumb?.clientHeight ?? 0) / 2;
-                  threadScrollbarDrag.current = { pointerId: event.pointerId, pointerOffset };
-                  event.currentTarget.setPointerCapture(event.pointerId);
-                  if (!onThumb) scrollThreadFromPointer(event.clientY, pointerOffset);
-                  event.preventDefault();
-                }}
-                onPointerMove={(event) => {
-                  const drag = threadScrollbarDrag.current;
-                  if (drag?.pointerId === event.pointerId) {
-                    scrollThreadFromPointer(event.clientY, drag.pointerOffset);
-                  }
-                }}
-                onPointerUp={(event) => {
-                  if (threadScrollbarDrag.current?.pointerId === event.pointerId) {
-                    threadScrollbarDrag.current = null;
-                  }
-                }}
-                onPointerCancel={() => {
-                  threadScrollbarDrag.current = null;
-                }}
-                onKeyDown={(event) => {
-                  const scroll = listRef.current;
-                  if (!scroll) return;
-                  const page = Math.max(40, scroll.clientHeight);
-                  let nextScrollTop: number;
-                  switch (event.key) {
-                    case 'ArrowDown':
-                      nextScrollTop = scroll.scrollTop + 40;
-                      break;
-                    case 'ArrowUp':
-                      nextScrollTop = scroll.scrollTop - 40;
-                      break;
-                    case 'PageDown':
-                      nextScrollTop = scroll.scrollTop + page;
-                      break;
-                    case 'PageUp':
-                      nextScrollTop = scroll.scrollTop - page;
-                      break;
-                    case 'Home':
-                      nextScrollTop = 0;
-                      break;
-                    case 'End':
-                      nextScrollTop = threadScrollbar.maxScroll;
-                      break;
-                    default:
-                      return;
-                  }
-                  event.preventDefault();
-                  scroll.scrollTop = nextScrollTop;
-                }}
-              >
-                <div
-                  ref={threadScrollbarThumbRef}
-                  className="thread-scrollbar-thumb"
-                  style={{
-                    height: `${threadScrollbar.thumbHeight}px`,
-                    transform: `translateY(${threadScrollbar.thumbTop}px)`,
-                  }}
-                />
-              </div>
+              <ThreadScrollbar scrollRef={listRef} threadId={selectedThreadId} />
             </div>
 
             <div className="composer-wrap">
@@ -4343,6 +4202,165 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       ) : null}
       </div>
     </ToolCardExpansionProvider>
+  );
+}
+
+function ThreadScrollbar({
+  scrollRef,
+  threadId,
+}: {
+  scrollRef: RefObject<HTMLDivElement | null>;
+  threadId: string | null;
+}) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const thumbRef = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ pointerId: number; pointerOffset: number } | null>(null);
+  const [metrics, setMetrics] = useState({ maxScroll: 0, scrollTop: 0, thumbHeight: 0, thumbTop: 0 });
+
+  const sync = useCallback((): void => {
+    const scroll = scrollRef.current;
+    const track = trackRef.current;
+    if (!scroll || !track) {
+      setMetrics((current) =>
+        current.maxScroll === 0 && current.scrollTop === 0 && current.thumbHeight === 0 && current.thumbTop === 0
+          ? current
+          : { maxScroll: 0, scrollTop: 0, thumbHeight: 0, thumbTop: 0 },
+      );
+      return;
+    }
+
+    const trackHeight = track.clientHeight;
+    const maxScroll = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+    const scrollTop = Math.max(0, Math.min(maxScroll, scroll.scrollTop));
+    const thumbHeight =
+      maxScroll > 0 && trackHeight > 0
+        ? Math.min(
+            trackHeight,
+            Math.max(Math.min(36, trackHeight), (trackHeight * scroll.clientHeight) / scroll.scrollHeight),
+          )
+        : trackHeight;
+    const maxThumbTop = Math.max(0, trackHeight - thumbHeight);
+    const thumbTop = maxScroll > 0 ? (scrollTop / maxScroll) * maxThumbTop : 0;
+
+    setMetrics((current) =>
+      current.maxScroll === maxScroll &&
+      current.scrollTop === scrollTop &&
+      current.thumbHeight === thumbHeight &&
+      current.thumbTop === thumbTop
+        ? current
+        : { maxScroll, scrollTop, thumbHeight, thumbTop },
+    );
+  }, [scrollRef]);
+
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current;
+    const track = trackRef.current;
+    if (!scroll || !track) {
+      sync();
+      return undefined;
+    }
+
+    sync();
+    scroll.addEventListener('scroll', sync);
+    const observer = new ResizeObserver(sync);
+    observer.observe(scroll);
+    observer.observe(track);
+    if (scroll.firstElementChild instanceof HTMLElement) observer.observe(scroll.firstElementChild);
+    return () => {
+      scroll.removeEventListener('scroll', sync);
+      observer.disconnect();
+    };
+  }, [scrollRef, sync, threadId]);
+
+  const scrollFromPointer = (clientY: number, pointerOffset: number): void => {
+    const scroll = scrollRef.current;
+    const track = trackRef.current;
+    if (!scroll || !track) return;
+    const trackHeight = track.clientHeight;
+    const thumbHeight = thumbRef.current?.clientHeight ?? metrics.thumbHeight;
+    const maxThumbTop = Math.max(0, trackHeight - thumbHeight);
+    const maxScroll = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+    if (maxThumbTop === 0 || maxScroll === 0) return;
+    const trackTop = track.getBoundingClientRect().top;
+    const thumbTop = Math.max(0, Math.min(maxThumbTop, clientY - trackTop - pointerOffset));
+    scroll.scrollTop = (thumbTop / maxThumbTop) * maxScroll;
+  };
+
+  return (
+    <div
+      ref={trackRef}
+      className="thread-scrollbar"
+      role="scrollbar"
+      aria-label="Thread scroll position"
+      aria-controls="thread-message-scroll"
+      aria-orientation="vertical"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={metrics.maxScroll > 0 ? Math.round((metrics.scrollTop / metrics.maxScroll) * 100) : 0}
+      aria-valuetext={`${metrics.maxScroll > 0 ? Math.round((metrics.scrollTop / metrics.maxScroll) * 100) : 0}%`}
+      aria-hidden={metrics.maxScroll === 0}
+      tabIndex={metrics.maxScroll > 0 ? 0 : -1}
+      onPointerDown={(event) => {
+        if (metrics.maxScroll === 0) return;
+        const thumb = thumbRef.current;
+        const onThumb = thumb?.contains(event.target as Node) ?? false;
+        const pointerOffset = onThumb
+          ? event.clientY - thumb!.getBoundingClientRect().top
+          : (thumb?.clientHeight ?? 0) / 2;
+        drag.current = { pointerId: event.pointerId, pointerOffset };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        if (!onThumb) scrollFromPointer(event.clientY, pointerOffset);
+        event.preventDefault();
+      }}
+      onPointerMove={(event) => {
+        const activeDrag = drag.current;
+        if (activeDrag?.pointerId === event.pointerId) {
+          scrollFromPointer(event.clientY, activeDrag.pointerOffset);
+        }
+      }}
+      onPointerUp={(event) => {
+        if (drag.current?.pointerId === event.pointerId) drag.current = null;
+      }}
+      onPointerCancel={() => {
+        drag.current = null;
+      }}
+      onKeyDown={(event) => {
+        const scroll = scrollRef.current;
+        if (!scroll) return;
+        const page = Math.max(40, scroll.clientHeight);
+        let nextScrollTop: number;
+        switch (event.key) {
+          case 'ArrowDown':
+            nextScrollTop = scroll.scrollTop + 40;
+            break;
+          case 'ArrowUp':
+            nextScrollTop = scroll.scrollTop - 40;
+            break;
+          case 'PageDown':
+            nextScrollTop = scroll.scrollTop + page;
+            break;
+          case 'PageUp':
+            nextScrollTop = scroll.scrollTop - page;
+            break;
+          case 'Home':
+            nextScrollTop = 0;
+            break;
+          case 'End':
+            nextScrollTop = metrics.maxScroll;
+            break;
+          default:
+            return;
+        }
+        event.preventDefault();
+        scroll.scrollTop = nextScrollTop;
+      }}
+    >
+      <div
+        ref={thumbRef}
+        className="thread-scrollbar-thumb"
+        style={{ height: `${metrics.thumbHeight}px`, transform: `translateY(${metrics.thumbTop}px)` }}
+      />
+    </div>
   );
 }
 
