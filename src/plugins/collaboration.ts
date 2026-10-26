@@ -6,7 +6,13 @@ import type { ProjectionInput } from '../runtime/stages.js';
 type CollaborationServices = Pick<PluginContext, 'threads'>;
 type SpawnIndex = Record<
   string,
-  { threadId: string; prompt: string; createdAt: string; modelSelection?: ThreadModelSelection }
+  {
+    threadId: string;
+    prompt: string;
+    createdAt: string;
+    modelSelection?: ThreadModelSelection;
+    toolOverrides?: Record<string, boolean>;
+  }
 >;
 
 function readSpawnIndex(get: PluginContext['state']['get']): SpawnIndex {
@@ -32,6 +38,7 @@ export const collaborationPlugin: PicoPlugin = {
   id: 'pico.collaboration',
   name: 'Thread collaboration',
   version: '0.2.0',
+  defaultToolsEnabled: true,
   pipelinePriority: { projection: 60 },
   activate({ tools, pipelines, commands, http, state, ...context }) {
     const { threads } = context as typeof context & CollaborationServices;
@@ -70,6 +77,20 @@ export const collaborationPlugin: PicoPlugin = {
               required: ['provider', 'model'],
               additionalProperties: false,
             },
+            tool_settings: {
+              type: 'array',
+              description:
+                'Optional per-tool visibility overrides for the child Thread. Unlisted tools inherit the parent Thread settings.',
+              items: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string', minLength: 1 },
+                  enabled: { type: 'boolean' },
+                },
+                required: ['name', 'enabled'],
+                additionalProperties: false,
+              },
+            },
           },
           required: ['prompt'],
           additionalProperties: false,
@@ -87,12 +108,47 @@ export const collaborationPlugin: PicoPlugin = {
           'Child Thread';
         if (title.length > 120) throw new Error('Child Thread title must be at most 120 characters');
 
+        const requestedToolOverrides: Record<string, boolean> = {};
+        if (args.tool_settings !== undefined) {
+          if (!Array.isArray(args.tool_settings) || args.tool_settings.length > 100) {
+            throw new Error('tool_settings must be an array with at most 100 entries');
+          }
+          for (const entry of args.tool_settings) {
+            if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+              throw new Error('Each tool_settings entry must contain a tool name and enabled state');
+            }
+            const setting = entry as Record<string, unknown>;
+            const name = typeof setting.name === 'string' ? setting.name.trim() : '';
+            if (!name || name.length > 200 || typeof setting.enabled !== 'boolean') {
+              throw new Error('Each tool_settings entry needs a valid name and boolean enabled value');
+            }
+            if (Object.prototype.hasOwnProperty.call(requestedToolOverrides, name)) {
+              throw new Error(`tool_settings contains duplicate entries for ${name}`);
+            }
+            requestedToolOverrides[name] = setting.enabled;
+          }
+        }
+        const normalizedToolOverrides = Object.keys(requestedToolOverrides).length
+          ? Object.fromEntries(Object.entries(requestedToolOverrides).sort(([left], [right]) => left.localeCompare(right)))
+          : undefined;
+        if (normalizedToolOverrides) {
+          const availableToolNames = new Set((await threads.tools(parent.id)).map((tool) => tool.name));
+          const unknownTool = Object.keys(normalizedToolOverrides).find((name) => !availableToolNames.has(name));
+          if (unknownTool) throw new Error(`Tool is not available in the parent Thread: ${unknownTool}`);
+        }
+
         const stableKey = toolContext.executionId;
         const index = readSpawnIndex(state.get);
         const previous = index[stableKey];
         let child = previous ? threads.get(previous.threadId) : null;
         if (previous && previous.prompt !== prompt) {
           throw new Error('This tool execution ID was already used to spawn a different task');
+        }
+        if (
+          previous &&
+          JSON.stringify(previous.toolOverrides ?? {}) !== JSON.stringify(normalizedToolOverrides ?? {})
+        ) {
+          throw new Error('This tool execution ID was already used with different Child Thread tool settings');
         }
         if (!child) {
           let modelSelection = previous?.modelSelection;
@@ -134,11 +190,18 @@ export const collaborationPlugin: PicoPlugin = {
               ...(binding?.remoteConnectionId ? { remoteConnectionId: binding.remoteConnectionId } : {}),
               ...(parent.executorRemote ? { workspacePath: parent.workspacePath } : {}),
               modelSelection,
+              ...(normalizedToolOverrides ? { toolOverrides: normalizedToolOverrides } : {}),
             });
             const current = readSpawnIndex(state.get);
             state.set('spawn-index', {
               ...current,
-              [stableKey]: { threadId: child!.id, prompt, createdAt: new Date().toISOString(), modelSelection },
+              [stableKey]: {
+                threadId: child!.id,
+                prompt,
+                createdAt: new Date().toISOString(),
+                modelSelection,
+                ...(normalizedToolOverrides ? { toolOverrides: normalizedToolOverrides } : {}),
+              },
             });
           });
         }

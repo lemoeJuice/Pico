@@ -1348,6 +1348,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             noteSnapshotChange(updated.parentThreadId);
             syncThreadLists(updated);
           }
+        } else if (
+          event.type === 'thread.tools.updated' &&
+          typeof event.threadId === 'string' &&
+          event.threadId === activeThreadId.current
+        ) {
+          void loadThreadTools(event.threadId);
         } else if (event.type === 'thread.hidden') {
           const hidden = event.thread as Thread | undefined;
           if (hidden) {
@@ -1533,7 +1539,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       if (timer) window.clearTimeout(timer);
       socket?.close();
     };
-  }, [acceptMessage, noteSnapshotChange, observeModelExecutions, settleModelExecution, syncThreadLists]);
+  }, [acceptMessage, loadThreadTools, noteSnapshotChange, observeModelExecutions, settleModelExecution, syncThreadLists]);
 
   useEffect(() => {
     followLatest.current = true;

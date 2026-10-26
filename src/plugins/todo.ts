@@ -196,6 +196,7 @@ export const todoPlugin: PicoPlugin = {
   id: 'pico.todo',
   name: 'Todo',
   version: '0.2.0',
+  defaultToolsEnabled: true,
   pipelinePriority: { projection: 30 },
   activate(context) {
     const { state, tools, pipelines, http, threads, ui } = context;

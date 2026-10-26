@@ -4,6 +4,14 @@ Pico loads `.mjs` Runtime entries from this directory when the Runtime starts. E
 
 A plugin package can contain several contributions together. ChatGPT, Model Parameters, Auto Thread Title, and Vision are shipped as independent packages and are loaded from their `.mjs` entries; each can be disabled or reloaded through Plugin settings. Run `npm run plugins:build` to build Runtime entries and the ChatGPT and Model Parameters browser bundles in sequence. `npm run plugins:build:chatgpt` is retained as an alias for the full first-party package build. Pico's normal server and main Web UI bundles do not compile plugin business implementations. Tests that need optional first-party plugins inject their fixtures explicitly.
 
+## Tool visibility
+
+Tools are enabled per Thread for model projection. This controls whether a tool is offered to the model; the Permissions plugin still makes invocation-level authorization decisions. Framework Executor tools are enabled by default. Runtime plugin tools default to disabled unless their plugin opts in with `defaultToolsEnabled: true`; that default is applied when a new root Thread is created. Other Executor tools default to disabled and can be enabled per Thread through the plugin service or Tools panel. Existing Threads keep their saved settings.
+
+Workflow plugins can read the current Thread's tool state with `threads.tools(threadId)`, which returns each tool's `source` and `enabled` value, and change it with `threads.setToolEnabled(threadId, toolName, enabled)`. Child Threads inherit their parent's settings. `threads.create(..., { parentThreadId, toolOverrides })` can apply sparse per-tool overrides to the child. The collaboration plugin exposes the same option as `tool_settings` on `spawn_thread`.
+
+MCP servers have a `visibleByDefault` setting, which defaults to `false`. Pico captures it when a root Thread is created, even if that server has not started yet. A Thread's explicit per-tool setting takes precedence, and later server setting changes affect newly created Threads only. Child Threads inherit the parent's captured defaults and explicit settings.
+
 The Runtime serves a plugin's registered UI entry from its own package directory. The entry runs in a sandboxed iframe as a logic controller. It sends a bounded, serializable component tree over the transferred `MessagePort`; the Pico Web UI validates the tree for the active slot and renders all visible controls itself. The iframe's pixels are hidden. There is no HTML, Markdown, URL, image, CSS, class, raw dimension, DOM, or React-tree channel. Invalid or unrecognized descriptions fail closed with a host-owned unavailable message. Plugin UI assets are public static files; credentials and mutable plugin state remain behind authenticated Runtime APIs.
 
 Third-party package layout:

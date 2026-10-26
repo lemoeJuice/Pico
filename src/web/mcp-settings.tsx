@@ -11,6 +11,7 @@ type McpServerView = {
   transport: McpTransport;
   status: string;
   autoStart: boolean;
+  visibleByDefault: boolean;
   hasToken: boolean;
   privateNetworkConfirmed: boolean;
   executionFingerprint?: string;
@@ -34,6 +35,7 @@ type McpServerInput = {
   bearerToken?: string;
   confirmPrivateNetworkAccess?: boolean;
   autoStart: boolean;
+  visibleByDefault: boolean;
 };
 
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>;
@@ -51,6 +53,7 @@ type FormDraft = {
   clearToken: boolean;
   confirmPrivateNetworkAccess: boolean;
   autoStart: boolean;
+  visibleByDefault: boolean;
   replaceEnv: boolean;
   envText: string;
 };
@@ -69,6 +72,7 @@ function emptyForm(): FormDraft {
     clearToken: false,
     confirmPrivateNetworkAccess: false,
     autoStart: false,
+    visibleByDefault: false,
     replaceEnv: false,
     envText: '',
   };
@@ -86,6 +90,7 @@ function draftFor(server: McpServerView): FormDraft {
     url: server.url ?? '',
     lastKnownUrlOrigin: getHttpOrigin(server.url ?? ''),
     autoStart: server.autoStart,
+    visibleByDefault: server.visibleByDefault,
     confirmPrivateNetworkAccess: server.privateNetworkConfirmed,
   };
 }
@@ -104,7 +109,12 @@ function environmentFromText(value: string): Record<string, string> {
 }
 
 function inputFromDraft(draft: FormDraft): McpServerInput {
-  const base = { name: draft.name.trim(), transport: draft.transport, autoStart: draft.autoStart };
+  const base = {
+    name: draft.name.trim(),
+    transport: draft.transport,
+    autoStart: draft.autoStart,
+    visibleByDefault: draft.visibleByDefault,
+  };
   if (draft.transport === 'stdio') {
     return {
       ...base,
@@ -481,6 +491,11 @@ export function McpSettings({ request, refreshVersion = 0 }: { request: Request;
                       : 'Starts automatically with Pico'
                     : 'Manual start'}
                 </small>
+                <small>
+                  {server.visibleByDefault
+                    ? 'Tools are visible in Threads by default'
+                    : 'Tools are hidden in Threads by default'}
+                </small>
               </div>
               {server.lastError ? <p className="mcp-server-error">{server.lastError}</p> : null}
               <details className="mcp-tools-details">
@@ -730,6 +745,14 @@ export function McpSettings({ request, refreshVersion = 0 }: { request: Request;
               onChange={(event) => updateDraft({ autoStart: event.target.checked })}
             />
             Start automatically when Pico Runtime starts
+          </label>
+          <label className="mcp-checkbox-label">
+            <input
+              type="checkbox"
+              checked={draft.visibleByDefault}
+              onChange={(event) => updateDraft({ visibleByDefault: event.target.checked })}
+            />
+            Show this server's tools in Threads by default
           </label>
           <div className="form-actions">
             <button type="button" className="button button-quiet" disabled={saving} onClick={() => setDraft(null)}>

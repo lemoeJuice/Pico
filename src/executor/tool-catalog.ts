@@ -28,6 +28,7 @@ export type RegisteredTool =
       definition: ToolDefinition;
       owner: string;
       source: 'runtime';
+      enabledByDefault?: boolean;
       execute(args: Record<string, unknown>, context: RuntimeToolContext): Promise<unknown>;
     }
   | {

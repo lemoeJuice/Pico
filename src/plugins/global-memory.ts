@@ -170,6 +170,7 @@ export const globalMemoryPlugin: PicoPlugin = {
   id: 'pico.global-memory',
   name: 'Global Memory',
   version: '0.1.0',
+  defaultToolsEnabled: true,
   pipelinePriority: { projection: 50 },
   activate(context) {
     const { state, canonical, threads, tools, pipelines, ui, http } = context;

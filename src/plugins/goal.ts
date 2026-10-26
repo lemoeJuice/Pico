@@ -91,6 +91,7 @@ export const goalPlugin: PicoPlugin = {
   id: 'pico.goal',
   name: 'Goal',
   version: '0.1.0',
+  defaultToolsEnabled: true,
   pipelinePriority: { projection: 20 },
   activate(pluginContext) {
     const context = pluginContext as PluginContext & GoalServices;

@@ -129,6 +129,10 @@ interface PreparedPluginModelCall {
 
 const THREAD_TOOL_SURFACES_SETTING = 'thread-tool-surfaces';
 const DISABLED_THREAD_TOOLS_SETTING = 'disabled-thread-tools';
+const THREAD_TOOL_OVERRIDES_SETTING = 'thread-tool-overrides';
+const THREAD_TOOL_DEFAULTS_MARKER = '__defaults_initialized__';
+const THREAD_MCP_DEFAULT_PREFIX = '__mcp_server_default__:';
+const FRAMEWORK_EXECUTOR_TOOL_NAMES = new Set(builtinExecutorToolDefinitions().map((tool) => tool.name));
 const RUNTIME_COMPACTION_MIN_RECENT_TURNS = 2;
 const RUNTIME_COMPACTION_MAX_SUMMARY_CHARS = 12_000;
 const DEFAULT_CONTEXT_MANAGEMENT_SETTINGS: ContextManagementSettings = {
@@ -1108,7 +1112,16 @@ export class PicoRuntime {
           return surface.tools.map((definition) => ({
             ...definition,
             source: surface.sources[definition.name] ?? 'runtime',
+            enabled: this.threadToolEnabled(
+              threadId,
+              definition.name,
+              surface.sources[definition.name],
+              surface.mcpTargets[definition.name],
+            ),
           }));
+        },
+        setToolEnabled: async (threadId, toolName, enabled) => {
+          await this.setThreadToolEnabled(threadId, toolName, enabled);
         },
         binding: (threadId) => this.store.executorForThread(threadId),
         create: (projectId, executorKind, title, options = {}) => {
@@ -1122,6 +1135,11 @@ export class PicoRuntime {
               ? this.threadModelSelection(options.parentThreadId)
               : this.defaultThreadModelSelection());
           const thread = this.store.createThread(projectId, executorKind, title, { ...options, modelSelection });
+          const hadToolSettings = this.hasStoredThreadToolSettings(thread.id);
+          if (options.parentThreadId) {
+            this.inheritThreadToolSettings(options.parentThreadId, thread.id);
+          } else if (!hadToolSettings) this.initializeThreadToolSettings(thread.id);
+          if (!hadToolSettings && options.toolOverrides) this.applyThreadToolOverrides(thread.id, options.toolOverrides);
           this.publish({ type: 'thread.created', thread });
           return thread;
         },
@@ -1366,6 +1384,7 @@ export class PicoRuntime {
     const thread = this.store.createThread(projectId, executorKind, title.trim() || DEFAULT_THREAD_TITLE, {
       modelSelection: this.defaultThreadModelSelection(),
     });
+    if (!this.hasStoredThreadToolSettings(thread.id)) this.initializeThreadToolSettings(thread.id);
     this.publish({ type: 'thread.created', thread });
     return thread;
   }
@@ -1471,6 +1490,7 @@ export class PicoRuntime {
       workspacePath,
       modelSelection: this.defaultThreadModelSelection(),
     });
+    if (!this.hasStoredThreadToolSettings(thread.id)) this.initializeThreadToolSettings(thread.id);
     this.publish({ type: 'thread.created', thread });
     return thread;
   }
@@ -1676,12 +1696,11 @@ export class PicoRuntime {
     for (const definition of executorTools) {
       if (!known.has(definition.name)) known.set(definition.name, { definition, source: 'executor' });
     }
-    const disabled = new Set(this.disabledThreadToolNames(threadId));
     return [...known.values()].map(({ definition, source }) => ({
       name: definition.name,
       description: definition.description,
       source,
-      enabled: !disabled.has(definition.name),
+      enabled: this.threadToolEnabled(threadId, definition.name, source),
     }));
   }
 
@@ -1691,23 +1710,10 @@ export class PicoRuntime {
     const tools = await this.listThreadTools(threadId);
     if (!tools.some((tool) => tool.name === toolName)) throw new Error('Tool is not available in this Thread');
 
-    const disabled = new Set(this.disabledThreadToolNames(threadId));
-    if (enabled) {
-      const cached = this.readCachedThreadToolSurface(threadId);
-      const tool = this.tools.get(toolName);
-      const target = cached?.mcpTargets?.[toolName] ?? (tool?.source === 'mcp' ? tool.target : undefined);
-      if (target) {
-        for (const name of this.threadMcpToolNamesForTarget(threadId, target)) disabled.delete(name);
-      } else {
-        disabled.delete(toolName);
-      }
-    } else disabled.add(toolName);
-    const allDisabled = this.allDisabledThreadTools();
-    this.store.setSetting(DISABLED_THREAD_TOOLS_SETTING, {
-      ...allDisabled,
-      [threadId]: [...disabled],
-    });
-    return this.listThreadTools(threadId);
+    this.applyThreadToolOverrides(threadId, { [toolName]: enabled });
+    const updated = await this.listThreadTools(threadId);
+    this.publish({ type: 'thread.tools.updated', threadId });
+    return updated;
   }
 
   private appendExecutionDiagnostic(executionId: string, kind: string, detail: Record<string, unknown>): void {
@@ -2587,8 +2593,9 @@ export class PicoRuntime {
   ): Promise<ProjectionInput> {
     const projectionRecords = records.filter((record) => record.seq <= through).map((record) => deepFreeze(record));
     const toolSurface = await this.toolSurfaceFor(thread);
-    const disabledTools = new Set(this.disabledThreadToolNames(thread.id));
-    const enabledTools = toolSurface.tools.filter((tool) => !disabledTools.has(tool.name));
+    const enabledTools = toolSurface.tools.filter((tool) =>
+      this.threadToolEnabled(thread.id, tool.name, toolSurface.sources[tool.name], toolSurface.mcpTargets[tool.name]),
+    );
     const enabledToolSources = Object.fromEntries(
       enabledTools.map((tool) => [tool.name, toolSurface.sources[tool.name]!]),
     );
@@ -2860,32 +2867,42 @@ export class PicoRuntime {
     return needsRepair || active ? { batchId: payload.batchId, calls: payload.toolCalls } : null;
   }
 
-  private disabledThreadToolNames(threadId: string): string[] {
-    const storedNames = this.allDisabledThreadTools()[threadId] ?? [];
+  private threadToolEnabled(
+    threadId: string,
+    toolName: string,
+    source?: 'runtime' | 'executor' | 'mcp' | null,
+    persistedMcpTarget?: McpToolTarget | null,
+  ): boolean {
+    this.initializeThreadToolSettings(threadId);
+    const overrides = this.allThreadToolOverrides()[threadId] ?? {};
     const cached = this.readCachedThreadToolSurface(threadId);
-    const registered = this.registeredMcpTools();
-    const targetByName = new Map<string, McpToolTarget>();
-    for (const tool of registered) {
-      targetByName.set(tool.definition.name, tool.target);
-      targetByName.set(tool.legacyName, tool.target);
+    const registeredMcp = this.registeredMcpTools().find(
+      (tool) => tool.definition.name === toolName || tool.legacyName === toolName,
+    );
+    const target =
+      persistedMcpTarget ?? cached?.mcpTargets?.[toolName] ?? registeredMcp?.target ?? undefined;
+    const names = target
+      ? [...new Set([toolName, ...this.threadMcpToolNamesForTarget(threadId, target)])]
+      : [toolName];
+    const explicitName = names.find((name) => Object.prototype.hasOwnProperty.call(overrides, name));
+    if (explicitName !== undefined) return overrides[explicitName]!;
+    if (target) {
+      // A tool can be discovered after Thread creation; use the per-server
+      // default captured at creation instead of reading mutable server config.
+      const serverDefault = overrides[`${THREAD_MCP_DEFAULT_PREFIX}${target.serverId}`];
+      if (typeof serverDefault === 'boolean') return serverDefault;
+      if (overrides[THREAD_TOOL_DEFAULTS_MARKER] === true) return false;
+      return this.mcpManager.isToolVisibleByDefault(target.serverId);
     }
-    for (const [name, target] of Object.entries(cached?.mcpTargets ?? {})) targetByName.set(name, target);
+    if (overrides[THREAD_TOOL_DEFAULTS_MARKER] === true) return false;
 
-    const disabled = new Set<string>();
-    for (const name of storedNames) {
-      const target = targetByName.get(name);
-      if (!target) {
-        disabled.add(name);
-        continue;
-      }
-      const current = registered.find((tool) => sameMcpTarget(tool.target, target));
-      if (!current) {
-        disabled.add(name);
-        continue;
-      }
-      for (const relatedName of this.threadMcpToolNamesForTarget(threadId, target)) disabled.add(relatedName);
-    }
-    return [...disabled];
+    const registered = this.tools.get(toolName);
+    const actualSource = source ?? cached?.sources[toolName] ?? registered?.source;
+    if (actualSource === 'runtime') return registered?.source === 'runtime' && registered.enabledByDefault === true;
+    if (actualSource === 'executor') return FRAMEWORK_EXECUTOR_TOOL_NAMES.has(toolName);
+    // MCP and unknown tool sources are opt-in unless their server or Thread
+    // settings explicitly expose them.
+    return false;
   }
 
   private threadMcpToolNamesForTarget(threadId: string, target: McpToolTarget): string[] {
@@ -2909,6 +2926,89 @@ export class PicoRuntime {
           : [],
       ),
     );
+  }
+
+  private allThreadToolOverrides(): Record<string, Record<string, boolean>> {
+    const stored = this.store.getSetting<unknown>(THREAD_TOOL_OVERRIDES_SETTING, {});
+    const overrides: Record<string, Record<string, boolean>> = {};
+    if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+      for (const [threadId, value] of Object.entries(stored as Record<string, unknown>)) {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+        overrides[threadId] = Object.fromEntries(
+          Object.entries(value as Record<string, unknown>).filter(
+            (entry): entry is [string, boolean] => typeof entry[1] === 'boolean',
+          ),
+        );
+      }
+    }
+    // Read old disabled-only state as explicit false overrides. Existing
+    // threads keep their choices while the new setting also supports re-enable.
+    for (const [threadId, names] of Object.entries(this.allDisabledThreadTools())) {
+      const threadOverrides = (overrides[threadId] ??= {});
+      for (const name of names) {
+        if (!Object.prototype.hasOwnProperty.call(threadOverrides, name)) threadOverrides[name] = false;
+      }
+    }
+    return overrides;
+  }
+
+  private hasStoredThreadToolSettings(threadId: string): boolean {
+    for (const key of [THREAD_TOOL_OVERRIDES_SETTING, DISABLED_THREAD_TOOLS_SETTING]) {
+      const stored = this.store.getSetting<unknown>(key, {});
+      if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+        if (Object.prototype.hasOwnProperty.call(stored, threadId)) return true;
+      }
+    }
+    return false;
+  }
+
+  private initializeThreadToolSettings(threadId: string): void {
+    const all = this.allThreadToolOverrides();
+    const existing = all[threadId] ?? {};
+    if (existing[THREAD_TOOL_DEFAULTS_MARKER] === true) return;
+    const defaults: Record<string, boolean> = { [THREAD_TOOL_DEFAULTS_MARKER]: true };
+    for (const tool of this.tools.listBySource('runtime')) {
+      if (tool.source !== 'runtime') continue;
+      defaults[tool.definition.name] = tool.enabledByDefault === true;
+    }
+    for (const server of this.mcpManager.list()) {
+      defaults[`${THREAD_MCP_DEFAULT_PREFIX}${server.id}`] = server.visibleByDefault;
+    }
+    for (const name of FRAMEWORK_EXECUTOR_TOOL_NAMES) defaults[name] = true;
+    all[threadId] = { ...defaults, ...existing, [THREAD_TOOL_DEFAULTS_MARKER]: true };
+    this.store.setSetting(THREAD_TOOL_OVERRIDES_SETTING, all);
+  }
+
+  private applyThreadToolOverrides(threadId: string, updates: Record<string, boolean>): void {
+    const all = this.allThreadToolOverrides();
+    const overrides = { ...(all[threadId] ?? {}) };
+    const cached = this.readCachedThreadToolSurface(threadId);
+    for (const [toolName, enabled] of Object.entries(updates)) {
+      if (!toolName.trim() || typeof enabled !== 'boolean') continue;
+      const registered = this.registeredMcpTools().find(
+        (tool) => tool.definition.name === toolName || tool.legacyName === toolName,
+      );
+      const target = cached?.mcpTargets?.[toolName] ?? registered?.target;
+      const relatedNames = target ? this.threadMcpToolNamesForTarget(threadId, target) : [];
+      for (const name of new Set([toolName, ...relatedNames])) overrides[name] = enabled;
+    }
+    all[threadId] = overrides;
+    this.store.setSetting(THREAD_TOOL_OVERRIDES_SETTING, all);
+  }
+
+  private inheritThreadToolSettings(parentThreadId: string, childThreadId: string): void {
+    this.initializeThreadToolSettings(parentThreadId);
+    const overrides = this.allThreadToolOverrides();
+    // An idempotent creation request may return a child with saved choices.
+    // Merge the parent's defaults once while keeping the child's own values.
+    const childOverrides = overrides[childThreadId] ?? {};
+    if (childOverrides[THREAD_TOOL_DEFAULTS_MARKER] === true) return;
+    overrides[childThreadId] = {
+      ...(overrides[parentThreadId] ?? {}),
+      ...childOverrides,
+      [THREAD_TOOL_DEFAULTS_MARKER]: true,
+    };
+    this.store.setSetting(THREAD_TOOL_OVERRIDES_SETTING, overrides);
   }
 
   private readCachedThreadToolSurface(threadId: string): StoredThreadToolSurface | null {
@@ -3752,9 +3852,10 @@ export class PicoRuntime {
     };
     const promise = (async (): Promise<Execution> => {
       try {
-        execution = this.disabledThreadToolNames(thread.id).includes(call.name)
-          ? await input.fail(`Tool “${call.name}” is disabled in this Thread.`, { disabled: true })
-          : await this.pipelines.run('toolInvocation', input, async (value) => value.invoke());
+        execution =
+          !this.threadToolEnabled(thread.id, call.name, toolSource, persistedMcpTarget)
+            ? await input.fail(`Tool “${call.name}” is disabled in this Thread.`, { disabled: true })
+            : await this.pipelines.run('toolInvocation', input, async (value) => value.invoke());
       } catch (error) {
         const latest = this.store.getExecution(executionId);
         if (!latest) throw error;

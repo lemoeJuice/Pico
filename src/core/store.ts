@@ -611,6 +611,7 @@ export class PicoStore {
       workspacePath?: string;
       idempotencyKey?: string;
       modelSelection?: ThreadModelSelection;
+      toolOverrides?: Record<string, boolean>;
     } = {},
   ): Thread {
     const project = this.getProject(projectId);
@@ -636,6 +637,9 @@ export class PicoStore {
               remoteConnectionId: remoteConnection?.id ?? null,
               workspacePath,
               modelSelection: options.modelSelection ?? null,
+              toolOverrides: options.toolOverrides
+                ? Object.fromEntries(Object.entries(options.toolOverrides).sort(([left], [right]) => left.localeCompare(right)))
+                : null,
             }),
           )
           .digest('hex')

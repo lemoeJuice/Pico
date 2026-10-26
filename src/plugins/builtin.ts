@@ -4,6 +4,7 @@ export const workspacePlugin: PicoPlugin = {
   id: 'pico.workspace',
   name: 'Workspace companion',
   version: '0.1.0',
+  defaultToolsEnabled: true,
   activate({ tools, pipelines, commands, state, canonical }) {
     tools.register(
       {

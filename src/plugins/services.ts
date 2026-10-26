@@ -15,7 +15,11 @@ export interface PluginServices {
     updateModelSelection(threadId: string, selection: ThreadModelSelection): ThreadModelSelection;
     list(projectId?: string): Thread[];
     updateTitle(pluginId: string, threadId: string, title: string): Thread;
-    tools(threadId: string): Promise<Array<ToolDefinition & { source: 'runtime' | 'executor' | 'mcp' }>>;
+    tools(
+      threadId: string,
+    ): Promise<Array<ToolDefinition & { source: 'runtime' | 'executor' | 'mcp'; enabled: boolean }>>;
+    /** Change whether a tool is included in future model projections for this Thread. Permission remains invocation-scoped. */
+    setToolEnabled(threadId: string, toolName: string, enabled: boolean): Promise<void>;
     binding(threadId: string): ExecutorBinding | null;
     create(
       projectId: string,
@@ -28,6 +32,8 @@ export interface PluginServices {
         workspacePath?: string;
         idempotencyKey?: string;
         modelSelection?: ThreadModelSelection;
+        /** Sparse per-tool visibility overrides applied when this Thread is first created. */
+        toolOverrides?: Record<string, boolean>;
       },
     ): Thread;
     send(
@@ -84,6 +90,7 @@ export const unavailablePluginServices: PluginServices = {
     list: unavailable,
     updateTitle: unavailable,
     tools: unavailable,
+    setToolEnabled: unavailable,
     binding: unavailable,
     create: unavailable,
     send: unavailable,

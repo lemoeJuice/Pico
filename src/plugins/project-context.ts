@@ -260,6 +260,7 @@ export const projectContextPlugin: PicoPlugin = {
   id: 'pico.project-context',
   name: 'Project Context',
   version: '0.2.0',
+  defaultToolsEnabled: true,
   pipelinePriority: { projection: 40 },
   activate(context) {
     const { tools, pipelines, commands, ui, http, threads } = context;

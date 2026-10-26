@@ -64,6 +64,8 @@ export interface PicoPlugin {
   id: string;
   name: string;
   version: string;
+  /** Runtime tools registered by this plugin are enabled in new Thread defaults only when opted in. */
+  defaultToolsEnabled?: boolean;
   pipelinePriority?: Partial<Record<PipelineStage, number>>;
   activate?(context: PluginContext): Promise<void> | void;
   activateExecutor?(context: ExecutorPluginContext): Promise<void> | void;
@@ -602,6 +604,7 @@ export class PluginHost {
           this.tools.register({
             owner: plugin.id,
             source: 'runtime',
+            enabledByDefault: plugin.defaultToolsEnabled === true,
             definition,
             execute: async (args, toolContext) => await execute(args, toolContext),
           }),

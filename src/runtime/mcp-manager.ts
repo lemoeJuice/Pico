@@ -41,6 +41,7 @@ type StdioConfig = {
   args: string[];
   cwd?: string;
   autoStart: boolean;
+  visibleByDefault: boolean;
   localExecutionFingerprint?: string;
 };
 
@@ -50,6 +51,7 @@ type HttpConfig = {
   transport: 'streamable-http';
   url: string;
   autoStart: boolean;
+  visibleByDefault: boolean;
   confirmPrivateNetworkAccess: boolean;
   confirmedPrivateNetworkOrigin?: string;
 };
@@ -138,17 +140,18 @@ function configList(store: PicoStore): StoredMcpServer[] {
     }
     return item.transport === 'streamable-http' && typeof item.url === 'string';
   });
-  return configs.map((config) =>
-    config.transport === 'streamable-http'
+  return configs.map((config) => ({
+    ...config,
+    visibleByDefault: config.visibleByDefault === true,
+    ...(config.transport === 'streamable-http'
       ? {
-          ...config,
           confirmPrivateNetworkAccess: config.confirmPrivateNetworkAccess === true,
           ...(typeof config.confirmedPrivateNetworkOrigin === 'string'
             ? { confirmedPrivateNetworkOrigin: config.confirmedPrivateNetworkOrigin }
             : {}),
         }
-      : config,
-  );
+      : {}),
+  }));
 }
 
 function safeNamePart(value: string, fallback = 'tool'): string {
@@ -510,6 +513,9 @@ function validateInput(input: McpServerInput): McpServerInput {
   if (input.autoStart !== undefined && typeof input.autoStart !== 'boolean') {
     throw new Error('autoStart must be a boolean.');
   }
+  if (input.visibleByDefault !== undefined && typeof input.visibleByDefault !== 'boolean') {
+    throw new Error('visibleByDefault must be a boolean.');
+  }
   if (input.transport === 'stdio') {
     const command = input.command.trim();
     if (!command || command.includes('\0')) throw new Error('MCP server command is required.');
@@ -649,11 +655,16 @@ export class McpManager {
     return configList(this.store).map((config) => this.view(config));
   }
 
+  isToolVisibleByDefault(serverId: string): boolean {
+    return configList(this.store).find((config) => config.id === serverId)?.visibleByDefault ?? false;
+  }
+
   async create(input: McpServerInput): Promise<McpServerView> {
     const validated = validateInput(input);
     const id = randomUUID();
     let secret: McpServerSecret = {};
     const autoStart = validated.autoStart ?? false;
+    const visibleByDefault = validated.visibleByDefault ?? false;
     const config: StoredMcpServer =
       validated.transport === 'stdio'
         ? {
@@ -664,6 +675,7 @@ export class McpManager {
             args: validated.args ?? [],
             ...(validated.cwd === undefined ? {} : { cwd: validated.cwd }),
             autoStart,
+            visibleByDefault,
           }
         : {
             id,
@@ -671,6 +683,7 @@ export class McpManager {
             transport: 'streamable-http',
             url: validated.url,
             autoStart,
+            visibleByDefault,
             confirmPrivateNetworkAccess: validated.confirmPrivateNetworkAccess === true,
             ...(validated.confirmPrivateNetworkAccess === true
               ? { confirmedPrivateNetworkOrigin: new URL(validated.url).origin }
@@ -749,6 +762,7 @@ export class McpManager {
               args: validated.args ?? [],
               ...(validated.cwd === undefined ? {} : { cwd: validated.cwd }),
               autoStart: validated.autoStart ?? current.autoStart,
+              visibleByDefault: validated.visibleByDefault ?? current.visibleByDefault,
             }
           : {
               id,
@@ -756,6 +770,7 @@ export class McpManager {
               transport: 'streamable-http',
               url: validated.url,
               autoStart: validated.autoStart ?? current.autoStart,
+              visibleByDefault: validated.visibleByDefault ?? current.visibleByDefault,
               confirmPrivateNetworkAccess: privateNetworkConfirmed,
               ...(privateNetworkConfirmed ? { confirmedPrivateNetworkOrigin: new URL(validated.url).origin } : {}),
             };
@@ -1156,6 +1171,7 @@ export class McpManager {
       transport: config.transport,
       status: state.status,
       autoStart: config.autoStart,
+      visibleByDefault: config.visibleByDefault,
       hasToken: Boolean(secret.bearerToken),
       localExecutionConfirmed:
         config.transport === 'stdio' && config.localExecutionFingerprint === this.executionFingerprint(config),
