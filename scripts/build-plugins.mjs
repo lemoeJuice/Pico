@@ -24,7 +24,9 @@ for (const [pluginId, source, exportName] of plugins) {
     platform: 'node',
     format: 'esm',
     target: 'node22',
-    external: ['node:*'],
+    // ws uses CommonJS internals such as EventEmitter. Keep it external so Node
+    // loads its package entry instead of an ESM bundle with dynamic require().
+    external: ['node:*', ...(pluginId === 'pico.qq-adapter' ? ['ws'] : [])],
     minify: false,
     footer: { js: `export { ${exportName} as default };` },
   });
