@@ -630,10 +630,39 @@ export class ChatGptPlanAuth {
         'refresh_token_invalidated',
         'refresh_token_reused',
       ]);
+      const safeOAuthErrorCodes = new Set([
+        'access_denied',
+        'invalid_client',
+        'invalid_grant',
+        'invalid_request',
+        'invalid_scope',
+        'invalid_token_response',
+        'invalid_refresh_token',
+        'refresh_token_expired',
+        'refresh_token_invalidated',
+        'refresh_token_reused',
+        'server_error',
+        'temporarily_unavailable',
+        'token_expired',
+        'unauthorized_client',
+        'unsupported_grant_type',
+      ]);
+      const providerErrorCode = typeof error === 'string' && safeOAuthErrorCodes.has(error) ? error : undefined;
       if (unusableRefreshCodes.has(error)) {
-        throw new UnusableChatGptRefreshToken('ChatGPT authorization expired. Reconnect your account in Settings.');
+        throw Object.assign(
+          new UnusableChatGptRefreshToken('ChatGPT authorization expired. Reconnect your account in Settings.'),
+          {
+            providerStatus: response.status,
+            providerPhase: 'oauth_token',
+            ...(providerErrorCode ? { providerError: { reason: 'unknown', code: providerErrorCode } } : {}),
+          },
+        );
       }
-      throw new Error(`ChatGPT token exchange failed (HTTP ${response.status}).`);
+      throw Object.assign(new Error(`ChatGPT token exchange failed (HTTP ${response.status}).`), {
+        providerStatus: response.status,
+        providerPhase: 'oauth_token',
+        ...(providerErrorCode ? { providerError: { reason: 'unknown', code: providerErrorCode } } : {}),
+      });
     }
     if (!isObject(payload)) {
       settle({
@@ -643,7 +672,10 @@ export class ChatGptPlanAuth {
         errorCategory: 'protocol',
         errorCode: 'invalid_token_response',
       });
-      throw new Error('ChatGPT returned an invalid token response.');
+      throw Object.assign(new Error('ChatGPT returned an invalid token response.'), {
+        code: 'invalid_token_response',
+        providerPhase: 'oauth_token',
+      });
     }
     settle({
       outcome: 'completed',

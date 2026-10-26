@@ -487,10 +487,39 @@ var ChatGptPlanAuth = class {
         "refresh_token_invalidated",
         "refresh_token_reused"
       ]);
+      const safeOAuthErrorCodes = /* @__PURE__ */ new Set([
+        "access_denied",
+        "invalid_client",
+        "invalid_grant",
+        "invalid_request",
+        "invalid_scope",
+        "invalid_token_response",
+        "invalid_refresh_token",
+        "refresh_token_expired",
+        "refresh_token_invalidated",
+        "refresh_token_reused",
+        "server_error",
+        "temporarily_unavailable",
+        "token_expired",
+        "unauthorized_client",
+        "unsupported_grant_type"
+      ]);
+      const providerErrorCode = typeof error === "string" && safeOAuthErrorCodes.has(error) ? error : void 0;
       if (unusableRefreshCodes.has(error)) {
-        throw new UnusableChatGptRefreshToken("ChatGPT authorization expired. Reconnect your account in Settings.");
+        throw Object.assign(
+          new UnusableChatGptRefreshToken("ChatGPT authorization expired. Reconnect your account in Settings."),
+          {
+            providerStatus: response.status,
+            providerPhase: "oauth_token",
+            ...providerErrorCode ? { providerError: { reason: "unknown", code: providerErrorCode } } : {}
+          }
+        );
       }
-      throw new Error(`ChatGPT token exchange failed (HTTP ${response.status}).`);
+      throw Object.assign(new Error(`ChatGPT token exchange failed (HTTP ${response.status}).`), {
+        providerStatus: response.status,
+        providerPhase: "oauth_token",
+        ...providerErrorCode ? { providerError: { reason: "unknown", code: providerErrorCode } } : {}
+      });
     }
     if (!isObject(payload)) {
       settle({
@@ -500,7 +529,10 @@ var ChatGptPlanAuth = class {
         errorCategory: "protocol",
         errorCode: "invalid_token_response"
       });
-      throw new Error("ChatGPT returned an invalid token response.");
+      throw Object.assign(new Error("ChatGPT returned an invalid token response."), {
+        code: "invalid_token_response",
+        providerPhase: "oauth_token"
+      });
     }
     settle({
       outcome: "completed",
@@ -580,6 +612,57 @@ var ChatGptPlanAuth = class {
     this.secrets.set(authStateKey, credentials);
   }
 };
+
+// src/contracts/model-error.ts
+var SAFE_PROVIDER_FAILURE_CODES = /* @__PURE__ */ new Set([
+  "aborted",
+  "auth",
+  "empty_output",
+  "empty_stream",
+  "fetch_failed",
+  "invalid_client",
+  "invalid_grant",
+  "incomplete_function_call",
+  "invalid_json",
+  "invalid_stream",
+  "invalid_scope",
+  "invalid_token_response",
+  "missing_completion",
+  "missing_function_name",
+  "protocol",
+  "provider_error",
+  "response_failed",
+  "server_error",
+  "temporarily_unavailable",
+  "timeout",
+  "transport",
+  "unauthorized_client",
+  "unsupported_grant_type"
+]);
+var SAFE_PROVIDER_NETWORK_CODES = /* @__PURE__ */ new Set([
+  "EACCES",
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_SOCKET"
+]);
+function sanitizeProviderFailureCode(value) {
+  if (typeof value !== "string" || value.length > 80 || !/^[a-z0-9_.:-]+$/i.test(value)) return void 0;
+  if (/^http_[1-5][0-9]{2}$/i.test(value)) return value.toLowerCase();
+  const lower = value.toLowerCase();
+  if (SAFE_PROVIDER_FAILURE_CODES.has(lower)) return lower;
+  const upper = value.toUpperCase();
+  return SAFE_PROVIDER_NETWORK_CODES.has(upper) ? upper : void 0;
+}
 
 // src/plugins/chatgpt-plan/model.ts
 var responsesUrl = "https://api.openai.com/v1/responses";
@@ -693,7 +776,9 @@ function providerErrorReason(error) {
   )) {
     return "unsupported_parameter";
   }
-  if (/missing\s+(?:required\s+)?parameter|required\s+(?:parameter|field)|(?:parameter|field)\s+is\s+required/i.test(diagnostic)) {
+  if (/missing\s+(?:required\s+)?parameter|required\s+(?:parameter|field)|(?:parameter|field)\s+is\s+required/i.test(
+    diagnostic
+  )) {
     return "missing_parameter";
   }
   if (/invalid\s+type|expected\s+(?:a\s+|an\s+)?(?:string|number|integer|boolean|array|object)|must\s+be\s+(?:a\s+|an\s+)?(?:string|number|integer|boolean|array|object)/i.test(
@@ -906,22 +991,30 @@ function waitForFetchRetry(signal) {
     signal.addEventListener("abort", onAbort, { once: true });
   });
 }
-function withProviderErrorCode(error, code) {
+function withProviderErrorCode(error, code, phase) {
   if (error instanceof Error && error.name === "AbortError") return error;
-  const resolvedCode = errorCodeFrom(error) ?? (code && /^[a-z0-9_.:-]{1,80}$/i.test(code) ? code : void 0);
+  const resolvedCode = sanitizeProviderFailureCode(errorCodeFrom(error)) ?? sanitizeProviderFailureCode(code);
   if (!resolvedCode) return error;
-  if (object(error)?.code === resolvedCode) return error;
+  const source = object(error);
+  if (source?.code === resolvedCode && source.providerPhase === phase) return error;
   const message = error instanceof Error ? error.message : "ChatGPT model request failed.";
-  const tagged = Object.assign(new Error(message), { cause: error, code: resolvedCode });
+  const tagged = Object.assign(new Error(message), {
+    cause: error,
+    code: resolvedCode,
+    providerPhase: phase,
+    ...source?.providerStatus !== void 0 ? { providerStatus: source.providerStatus } : {},
+    ...source?.providerError !== void 0 ? { providerError: source.providerError } : {}
+  });
   if (error instanceof Error) tagged.name = error.name;
   return tagged;
 }
-function providerError(message, code) {
-  return Object.assign(new Error(message), { code });
+function providerError(message, code, providerPhase) {
+  return Object.assign(new Error(message), { code, ...providerPhase ? { providerPhase } : {} });
 }
 function providerHttpResponseError(status, details) {
   return Object.assign(providerError(`ChatGPT model request returned HTTP ${status}.`, `http_${status}`), {
     providerStatus: status,
+    providerPhase: "responses_request",
     ...details ? { providerError: details } : {}
   });
 }
@@ -962,7 +1055,7 @@ var ChatGptResponsesAdapter = class {
     try {
       accessToken = await this.auth.accessToken(false, requestTrace);
     } catch (error) {
-      throw withProviderErrorCode(error, "auth");
+      throw withProviderErrorCode(error, "auth", "oauth_token");
     }
     const retryState = { attempt: 0, retries: 0 };
     let tracedRequest = await this.requestTraced(
@@ -986,7 +1079,7 @@ var ChatGptResponsesAdapter = class {
           errorCategory: "http",
           errorCode: "http_401"
         });
-        throw withProviderErrorCode(error, "http_401");
+        throw withProviderErrorCode(error, "http_401", "oauth_token");
       }
       tracedRequest.settle({
         outcome: "retrying",
@@ -1018,7 +1111,7 @@ var ChatGptResponsesAdapter = class {
         errorCategory: "protocol",
         errorCode: "empty_stream"
       });
-      throw providerError("ChatGPT returned an empty Responses stream.", "empty_stream");
+      throw providerError("ChatGPT returned an empty Responses stream.", "empty_stream", "responses_stream");
     }
     let reader;
     try {
@@ -1031,7 +1124,7 @@ var ChatGptResponsesAdapter = class {
         errorCategory: interrupted ? "aborted" : "protocol",
         errorCode: interrupted ? "aborted" : "invalid_stream"
       });
-      throw withProviderErrorCode(error, interrupted ? void 0 : "invalid_stream");
+      throw withProviderErrorCode(error, interrupted ? void 0 : "invalid_stream", "responses_stream");
     }
     const decoder = new TextDecoder();
     let buffer = "";
@@ -1250,7 +1343,8 @@ var ChatGptResponsesAdapter = class {
       });
       throw withProviderErrorCode(
         error,
-        interrupted ? void 0 : failureCode ?? errorCodeFrom(error) ?? "transport"
+        interrupted ? void 0 : sanitizeProviderFailureCode(failureCode) ?? "transport",
+        "responses_stream"
       );
     }
     await reader.cancel().catch(() => void 0);
@@ -1354,7 +1448,8 @@ var ChatGptResponsesAdapter = class {
       });
       throw withProviderErrorCode(
         error,
-        interrupted ? void 0 : failureCode ?? errorCodeFrom(error) ?? "response_failed"
+        interrupted ? void 0 : sanitizeProviderFailureCode(failureCode) ?? "response_failed",
+        terminalEvent === "response.failed" || terminalEvent === "error" ? "responses_stream" : "response_validation"
       );
     }
   }
@@ -1397,7 +1492,11 @@ var ChatGptResponsesAdapter = class {
           ...errorCode ? { errorCode } : {}
         });
         if (interrupted || !shouldRetry) {
-          throw withProviderErrorCode(error, interrupted ? void 0 : errorCode ?? "transport");
+          throw withProviderErrorCode(
+            error,
+            interrupted ? void 0 : sanitizeProviderFailureCode(errorCode) ?? "transport",
+            "responses_request"
+          );
         }
         retryState.retries += 1;
         await waitForFetchRetry(signal);

@@ -1,5 +1,6 @@
 import type { TokenUsage, ToolCall, ToolDefinition } from '../../core/types.js';
 import type { ChatGptPlanAuth } from './auth.js';
+import { sanitizeProviderFailureCode, type ProviderFailurePhase } from '../../contracts/model-error.js';
 import type {
   ModelPrompt,
   ModelRequestParameters,
@@ -108,7 +109,10 @@ function object(value: unknown): Record<string, unknown> | null {
 
 function boundedString(value: unknown, maxLength: number): string | undefined {
   if (typeof value !== 'string' || value.length > maxLength) return undefined;
-  const result = value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
+  const result = value
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   return result || undefined;
 }
 
@@ -123,9 +127,10 @@ function providerErrorParam(value: unknown): string | undefined {
 }
 
 function providerErrorReason(error: Record<string, unknown>): ProviderHttpError['reason'] {
-  const diagnostic = `${typeof error.code === 'string' ? error.code : ''} ${typeof error.message === 'string' ? error.message : ''}`
-    .replace(/[_-]+/g, ' ')
-    .toLowerCase();
+  const diagnostic =
+    `${typeof error.code === 'string' ? error.code : ''} ${typeof error.message === 'string' ? error.message : ''}`
+      .replace(/[_-]+/g, ' ')
+      .toLowerCase();
   if (
     /unsupported\s+(?:request\s+)?parameter|parameter\s+(?:is\s+)?not\s+supported|unrecognized\s+(?:request\s+)?(?:parameter|argument)|unknown\s+parameter/i.test(
       diagnostic,
@@ -133,7 +138,11 @@ function providerErrorReason(error: Record<string, unknown>): ProviderHttpError[
   ) {
     return 'unsupported_parameter';
   }
-  if (/missing\s+(?:required\s+)?parameter|required\s+(?:parameter|field)|(?:parameter|field)\s+is\s+required/i.test(diagnostic)) {
+  if (
+    /missing\s+(?:required\s+)?parameter|required\s+(?:parameter|field)|(?:parameter|field)\s+is\s+required/i.test(
+      diagnostic,
+    )
+  ) {
     return 'missing_parameter';
   }
   if (
@@ -401,28 +410,40 @@ function waitForFetchRetry(signal: AbortSignal): Promise<void> {
   });
 }
 
-function withProviderErrorCode(error: unknown, code: string | undefined): unknown {
+function withProviderErrorCode(error: unknown, code: string | undefined, phase: ProviderFailurePhase): unknown {
   if (error instanceof Error && error.name === 'AbortError') return error;
-  const resolvedCode = errorCodeFrom(error) ?? (code && /^[a-z0-9_.:-]{1,80}$/i.test(code) ? code : undefined);
+  const resolvedCode = sanitizeProviderFailureCode(errorCodeFrom(error)) ?? sanitizeProviderFailureCode(code);
   if (!resolvedCode) return error;
-  if (object(error)?.code === resolvedCode) return error;
+  const source = object(error);
+  if (source?.code === resolvedCode && source.providerPhase === phase) return error;
   const message = error instanceof Error ? error.message : 'ChatGPT model request failed.';
-  const tagged = Object.assign(new Error(message), { cause: error, code: resolvedCode });
+  const tagged = Object.assign(new Error(message), {
+    cause: error,
+    code: resolvedCode,
+    providerPhase: phase,
+    ...(source?.providerStatus !== undefined ? { providerStatus: source.providerStatus } : {}),
+    ...(source?.providerError !== undefined ? { providerError: source.providerError } : {}),
+  });
   if (error instanceof Error) tagged.name = error.name;
   return tagged;
 }
 
-function providerError(message: string, code: string): Error & { code: string } {
-  return Object.assign(new Error(message), { code });
+function providerError(message: string, code: string, providerPhase?: ProviderFailurePhase): Error & { code: string } {
+  return Object.assign(new Error(message), { code, ...(providerPhase ? { providerPhase } : {}) });
 }
 
-function providerHttpResponseError(status: number, details: ProviderHttpError | undefined): Error & {
+function providerHttpResponseError(
+  status: number,
+  details: ProviderHttpError | undefined,
+): Error & {
   code: string;
   providerStatus: number;
+  providerPhase: ProviderFailurePhase;
   providerError?: ProviderHttpError;
 } {
   return Object.assign(providerError(`ChatGPT model request returned HTTP ${status}.`, `http_${status}`), {
     providerStatus: status,
+    providerPhase: 'responses_request' as const,
     ...(details ? { providerError: details } : {}),
   });
 }
@@ -484,7 +505,7 @@ export class ChatGptResponsesAdapter {
     try {
       accessToken = await this.auth.accessToken(false, requestTrace);
     } catch (error) {
-      throw withProviderErrorCode(error, 'auth');
+      throw withProviderErrorCode(error, 'auth', 'oauth_token');
     }
     const retryState: ProviderRequestRetryState = { attempt: 0, retries: 0 };
     let tracedRequest = await this.requestTraced(
@@ -509,7 +530,7 @@ export class ChatGptResponsesAdapter {
           errorCategory: 'http',
           errorCode: 'http_401',
         });
-        throw withProviderErrorCode(error, 'http_401');
+        throw withProviderErrorCode(error, 'http_401', 'oauth_token');
       }
       tracedRequest.settle({
         outcome: 'retrying',
@@ -541,7 +562,7 @@ export class ChatGptResponsesAdapter {
         errorCategory: 'protocol',
         errorCode: 'empty_stream',
       });
-      throw providerError('ChatGPT returned an empty Responses stream.', 'empty_stream');
+      throw providerError('ChatGPT returned an empty Responses stream.', 'empty_stream', 'responses_stream');
     }
 
     let reader: ReadableStreamDefaultReader<Uint8Array>;
@@ -555,7 +576,7 @@ export class ChatGptResponsesAdapter {
         errorCategory: interrupted ? 'aborted' : 'protocol',
         errorCode: interrupted ? 'aborted' : 'invalid_stream',
       });
-      throw withProviderErrorCode(error, interrupted ? undefined : 'invalid_stream');
+      throw withProviderErrorCode(error, interrupted ? undefined : 'invalid_stream', 'responses_stream');
     }
     const decoder = new TextDecoder();
     let buffer = '';
@@ -805,7 +826,8 @@ export class ChatGptResponsesAdapter {
       });
       throw withProviderErrorCode(
         error,
-        interrupted ? undefined : (failureCode ?? errorCodeFrom(error) ?? 'transport'),
+        interrupted ? undefined : (sanitizeProviderFailureCode(failureCode) ?? 'transport'),
+        'responses_stream',
       );
     }
     await reader.cancel().catch(() => undefined);
@@ -922,7 +944,8 @@ export class ChatGptResponsesAdapter {
       });
       throw withProviderErrorCode(
         error,
-        interrupted ? undefined : (failureCode ?? errorCodeFrom(error) ?? 'response_failed'),
+        interrupted ? undefined : (sanitizeProviderFailureCode(failureCode) ?? 'response_failed'),
+        terminalEvent === 'response.failed' || terminalEvent === 'error' ? 'responses_stream' : 'response_validation',
       );
     }
   }
@@ -977,7 +1000,11 @@ export class ChatGptResponsesAdapter {
           ...(errorCode ? { errorCode } : {}),
         });
         if (interrupted || !shouldRetry) {
-          throw withProviderErrorCode(error, interrupted ? undefined : (errorCode ?? 'transport'));
+          throw withProviderErrorCode(
+            error,
+            interrupted ? undefined : (sanitizeProviderFailureCode(errorCode) ?? 'transport'),
+            'responses_request',
+          );
         }
         retryState.retries += 1;
         await waitForFetchRetry(signal);

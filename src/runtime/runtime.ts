@@ -55,7 +55,13 @@ import {
   type RuntimeToolContext,
 } from '../executor/tool-catalog.js';
 import { builtinExecutorToolDefinitions } from '../contracts/executor-tool-definitions.js';
-import { ModelCallError, sanitizeModelCallError } from '../contracts/model-error.js';
+import {
+  ModelCallError,
+  modelRequestFailureMessage,
+  sanitizeModelCallError,
+  sanitizeProviderFailureCode,
+  sanitizeProviderFailurePhase,
+} from '../contracts/model-error.js';
 import { builtinPlugins } from '../plugins/builtin.js';
 import { CommandRegistry, PluginHost, type CommandResult, type PluginCatalogEntry } from '../plugins/host.js';
 import type { PluginServices } from '../plugins/services.js';
@@ -807,27 +813,10 @@ function sanitizeRequestResponse(details: ProviderRequestResponse): ProviderRequ
   };
 }
 
-const SAFE_PROVIDER_ERROR_CODES = new Set([
-  'aborted',
-  'auth',
-  'empty_output',
-  'empty_stream',
-  'fetch_failed',
-  'incomplete_function_call',
-  'invalid_json',
-  'invalid_stream',
-  'missing_completion',
-  'missing_function_name',
-  'protocol',
-  'response_failed',
-  'transport',
-]);
-
 function safeProviderErrorCode(value: unknown): string | undefined {
   const label = diagnosticLabel(value, 80);
   if (!label) return undefined;
-  if (/^http_[1-5][0-9]{2}$/i.test(label)) return label.toLowerCase();
-  return SAFE_PROVIDER_ERROR_CODES.has(label) ? label : undefined;
+  return sanitizeProviderFailureCode(label);
 }
 
 function safeProviderHttpError(value: unknown): ProviderHttpError | undefined {
@@ -915,19 +904,40 @@ function safeModelError(error: unknown, interrupted = false): string {
 }
 
 function providerFailureSummary(attempt: ProviderRequestAttempt): string | undefined {
-  if (attempt.errorCategory !== 'http' || !Number.isInteger(attempt.status) || !attempt.status) return undefined;
-  const providerError = safeProviderHttpError(attempt.providerError);
-  const details = providerError
-    ? [
-        providerError.type ? `type=${providerError.type}` : undefined,
-        providerError.code ? `code=${providerError.code}` : undefined,
-        providerError.param ? `param=${providerError.param}` : undefined,
-        `reason=${providerError.reason}`,
-      ]
-        .filter((value): value is string => Boolean(value))
-        .join('; ')
-    : '';
-  return `Model provider returned HTTP ${attempt.status}${details ? ` (${details})` : ''}.`;
+  const phase =
+    attempt.protocol === 'https+oauth-token'
+      ? 'oauth_token'
+      : attempt.protocol === 'https+sse'
+        ? attempt.errorCategory === 'http' || attempt.terminalEvent === 'http_response'
+          ? 'responses_request'
+          : attempt.errorCode === 'empty_output' || attempt.terminalEvent === 'response.completed'
+            ? 'response_validation'
+            : attempt.status
+              ? 'responses_stream'
+              : 'responses_request'
+        : undefined;
+  const safePhase = sanitizeProviderFailurePhase(phase);
+  if (attempt.errorCategory === 'http' && Number.isInteger(attempt.status) && attempt.status) {
+    const providerError = safeProviderHttpError(attempt.providerError);
+    const details = providerError
+      ? [
+          providerError.type ? `type=${providerError.type}` : undefined,
+          providerError.code ? `code=${providerError.code}` : undefined,
+          providerError.param ? `param=${providerError.param}` : undefined,
+          `reason=${providerError.reason}`,
+        ]
+          .filter((value): value is string => Boolean(value))
+          .join('; ')
+      : '';
+    const httpDetails = [details || undefined, safePhase ? `phase=${safePhase}` : undefined]
+      .filter((value): value is string => Boolean(value))
+      .join('; ');
+    return `Model provider returned HTTP ${attempt.status}${httpDetails ? ` (${httpDetails})` : ''}.`;
+  }
+  const errorCode =
+    safeProviderErrorCode(attempt.errorCode) ??
+    (attempt.errorCategory === 'transport' || attempt.errorCategory === 'protocol' ? attempt.errorCategory : undefined);
+  return errorCode ? modelRequestFailureMessage(errorCode, safePhase) : undefined;
 }
 
 function safeStoredModelError(value: unknown): string | undefined {
@@ -940,7 +950,7 @@ function safeStoredModelError(value: unknown): string | undefined {
     const details = rawDetails.split('; ');
     const keys = new Set<string>();
     const validDetails =
-      details.length <= 4 &&
+      details.length <= 5 &&
       details.every((detail) => {
         const separator = detail.indexOf('=');
         if (separator < 1) return false;
@@ -956,15 +966,22 @@ function safeStoredModelError(value: unknown): string | undefined {
             fieldValue,
           );
         }
+        if (key === 'phase') return sanitizeProviderFailurePhase(fieldValue) !== undefined;
         return false;
       });
     return `Model provider returned HTTP ${status}${validDetails ? ` (${details.join('; ')})` : ''}.`;
   }
-  const safeSummary = /^Model request failed \(([a-z0-9_.:-]{1,80})\)\.$/i.exec(value)?.[1];
-  if (safeSummary && ['AbortError', 'provider_error', 'UnknownError'].includes(safeSummary)) {
-    return `Model request failed (${safeSummary}).`;
+  const safeSummary = /^Model request failed \(([a-z0-9_.:-]{1,80})(?:; phase=([a-z0-9_]{1,40}))?\)\.$/i.exec(value);
+  if (safeSummary) {
+    const safeCode = sanitizeProviderFailureCode(safeSummary[1]);
+    const safePhase = sanitizeProviderFailurePhase(safeSummary[2]);
+    const providerFailureMessage = modelRequestFailureMessage(safeCode, safePhase);
+    if (providerFailureMessage) return providerFailureMessage;
+    if (['AbortError', 'UnknownError'].includes(safeSummary[1]!)) {
+      return `Model request failed (${safeSummary[1]}).`;
+    }
   }
-  const safeHttpSummary = /^http_([1-5][0-9]{2})$/i.exec(safeSummary ?? '')?.[1];
+  const safeHttpSummary = /^http_([1-5][0-9]{2})$/i.exec(safeSummary?.[1] ?? '')?.[1];
   if (safeHttpSummary) return `Model request failed (http_${safeHttpSummary}).`;
   const httpStatus = /\bHTTP ([1-5][0-9]{2})\b/i.exec(value)?.[1];
   return httpStatus ? `Model request failed (http_${httpStatus}).` : 'Model request failed (previous detail redacted).';
