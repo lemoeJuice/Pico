@@ -1,0 +1,42 @@
+.plugin-ui-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--muted);
+  font-size: 12px;
+}
+.plugin-ui-field-label {
+  min-width: 0;
+}
+.plugin-ui-field--action > .plugin-ui-field-label {
+  display: block;
+  min-height: 1.2em;
+}
+.plugin-ui-field--action > .plugin-ui-button {
+  align-self: stretch;
+  width: 100%;
+  height: 36px;
+  min-height: 36px;
+  padding: 8px 10px;
+}
+.plugin-ui-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.plugin-ui-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  color: var(--muted);
+  font-size: 12px;
+}

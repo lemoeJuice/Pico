@@ -1,0 +1,16 @@
+.plugin-ui-range {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px 12px;
+  width: 100%;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.plugin-ui-range-value {
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}

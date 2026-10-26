@@ -1,0 +1,44 @@
+.plugin-ui-list {
+  margin: 0;
+  padding-inline-start: 20px;
+  min-width: 0;
+}
+.plugin-ui-table-scroll {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.plugin-ui-table {
+  width: 100%;
+  min-width: 520px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 12px;
+}
+.plugin-ui-table :where(th, td) {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}
+.plugin-ui-table th {
+  color: var(--muted);
+  font-weight: 600;
+}
+.plugin-ui-disclosure {
+  min-width: 0;
+  max-width: 100%;
+}
+.plugin-ui-disclosure > summary {
+  cursor: pointer;
+  color: var(--sage-dark);
+}
+.plugin-ui-unavailable,
+.plugin-ui-loading {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}

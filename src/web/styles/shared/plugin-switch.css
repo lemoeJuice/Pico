@@ -1,0 +1,58 @@
+.plugin-ui-switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 32px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.plugin-ui-switch--compact {
+  height: 32px;
+  min-height: 32px;
+  gap: 8px;
+  padding: 0 9px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+}
+.plugin-ui-switch-control {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 30px;
+  height: 18px;
+  flex: 0 0 auto;
+  padding: 2px;
+  border: 0;
+  border-radius: 999px;
+  background: #e5e9e5;
+  cursor: pointer;
+  transition: background 150ms ease;
+}
+.plugin-ui-switch-control:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.plugin-ui-switch-control.is-checked {
+  background: #77937d;
+}
+.plugin-ui-switch-thumb {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 1px 2px rgb(35 48 38 / 18%);
+  transition: transform 150ms ease;
+}
+.plugin-ui-switch-control.is-checked > .plugin-ui-switch-thumb {
+  transform: translateX(12px);
+}
+.plugin-ui-switch-control:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--sage) 34%, transparent);
+  outline-offset: 2px;
+}

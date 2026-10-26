@@ -1,0 +1,130 @@
+.modal-backdrop {
+  position: fixed;
+  z-index: 30;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(49, 61, 51, 0.22);
+  backdrop-filter: blur(5px);
+  animation: fade-in 0.16s ease-out;
+}
+.modal {
+  width: min(490px, 100%);
+  max-height: min(90dvh, 790px);
+  overflow-y: auto;
+  padding: 22px;
+  background: #fcfdfb;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  border-radius: 20px;
+  box-shadow: 0 24px 80px rgba(42, 56, 44, 0.19);
+}
+.modal.conversation-history-modal {
+  width: min(640px, 100%);
+}
+.modal-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 20px;
+}
+.modal-heading .eyebrow {
+  margin-bottom: 6px;
+}
+.modal-heading h2 {
+  margin: 0;
+  color: #3d4e42;
+  font-family: 'DM Serif Display', Georgia, serif;
+  font-size: 25px;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+}
+.modal-heading .icon-button {
+  margin: -4px -4px 0 0;
+}
+.modal-error {
+  margin: 0 0 15px;
+}
+.form-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.form-intro {
+  margin: -8px 0 3px;
+  color: #8e9a90;
+  font-size: 11px;
+  line-height: 1.7;
+}
+.form-stack label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #627066;
+  font-size: 10px;
+  font-weight: 600;
+}
+.form-stack input:not([type='range']) {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 11px;
+  color: #46564b;
+  background: white;
+  border: 1px solid #e4eae2;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 400;
+}
+.form-stack select {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 11px;
+  color: #46564b;
+  background: white;
+  border: 1px solid #e4eae2;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 400;
+}
+.form-stack input::placeholder {
+  color: #b3bcb4;
+}
+.field-note {
+  color: #a0aaa1;
+  font-size: 9px;
+  font-weight: 400;
+}
+.form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 5px;
+}
+.form-actions .field-note {
+  max-width: 220px;
+  line-height: 1.6;
+}
+.path-suggestion {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 9px 10px;
+  color: #688071;
+  background: #f4f7f2;
+  border: 1px solid #e8eee6;
+  border-radius: 9px;
+  text-align: left;
+  cursor: pointer;
+}
+.path-suggestion span {
+  font-size: 10px;
+  font-weight: 600;
+}
+.path-suggestion code {
+  color: #9aa69b;
+  font-size: 9px;
+  overflow-wrap: anywhere;
+}

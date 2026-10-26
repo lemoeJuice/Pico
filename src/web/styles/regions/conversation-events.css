@@ -1,0 +1,115 @@
+/* Consecutive model steps form one assistant response. */
+.timeline > .assistant-message,
+.timeline > .model-execution-branch-group,
+.timeline > .context-compaction-card {
+  width: 100%;
+  max-width: none;
+}
+.context-compaction-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  width: 100%;
+  padding: 12px 15px;
+  color: #53695a;
+  background: linear-gradient(135deg, #f2f7f2, #fbfcfa);
+  border: 1px solid #dce8de;
+  border-radius: 12px;
+  box-shadow: 0 3px 12px rgba(52, 69, 58, 0.035);
+}
+.context-compaction-icon {
+  display: grid;
+  flex: 0 0 29px;
+  width: 29px;
+  height: 29px;
+  place-items: center;
+  color: #567460;
+  background: #e6efe7;
+  border: 1px solid #d9e6db;
+  border-radius: 9px;
+}
+.context-compaction-icon > .tiny-spinner {
+  display: block;
+  width: 13px;
+  height: 13px;
+}
+.context-compaction-content {
+  flex: 1;
+  min-width: 0;
+}
+.context-compaction-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.context-compaction-title {
+  color: #40594a;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.context-compaction-time {
+  flex: 0 0 auto;
+  color: #8a978d;
+  font-size: 10px;
+}
+.context-compaction-copy {
+  margin: 4px 0 0;
+  color: #69776d;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.context-compaction-details {
+  margin-top: 8px;
+  color: #57715e;
+  font-size: 11px;
+}
+.context-compaction-details > summary {
+  width: fit-content;
+  cursor: pointer;
+  font-weight: 600;
+}
+.context-compaction-summary {
+  max-height: 320px;
+  margin-top: 8px;
+  padding: 11px 12px;
+  overflow: auto;
+  color: #4b5850;
+  background: rgba(255, 255, 255, 0.76);
+  border: 1px solid #e2ebe3;
+  border-radius: 9px;
+}
+.context-compaction-summary .markdown-body {
+  font-size: 12px;
+  line-height: 1.65;
+}
+.timeline > .model-execution-branch-group {
+  align-items: stretch;
+  margin-top: 0;
+}
+.timeline > .assistant-message > .message-body,
+.timeline > .model-execution-branch-group .assistant-message > .message-body {
+  flex: 1;
+  max-width: calc(100% - 36px);
+}
+.timeline > .assistant-message + .assistant-message,
+.timeline > .model-execution-branch-group + .assistant-message,
+.timeline > .assistant-message + .model-execution-branch-group,
+.timeline > .model-execution-branch-group + .model-execution-branch-group {
+  margin-top: -14px;
+}
+.timeline > .assistant-message + .assistant-message > .assistant-avatar,
+.timeline > .model-execution-branch-group + .assistant-message > .assistant-avatar,
+.timeline > .assistant-message + .model-execution-branch-group .assistant-avatar,
+.timeline > .model-execution-branch-group + .model-execution-branch-group .assistant-avatar {
+  opacity: 0;
+  background: transparent;
+  color: #6d8d73;
+}
+.timeline > .assistant-message + .assistant-message > .message-body > .message-author,
+.timeline > .model-execution-branch-group + .assistant-message > .message-body > .message-author,
+.timeline > .assistant-message + .model-execution-branch-group .message-author,
+.timeline > .model-execution-branch-group + .model-execution-branch-group .message-author {
+  display: none;
+}

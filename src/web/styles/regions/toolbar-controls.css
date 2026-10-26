@@ -1,0 +1,42 @@
+.plugin-toolbar-badge {
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  color: #758279;
+  background: #edf1ed;
+  border-radius: 50%;
+  font-size: 9px;
+  line-height: 1;
+}
+.toolbar-count-badge {
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  color: #758279;
+  background: #edf1ed;
+  border-radius: 50%;
+  font-size: 9px;
+  line-height: 1;
+}
+.native-tools-anchor {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+.native-tools-button {
+  gap: 6px;
+}
+.native-tools-popover {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 9px);
+  left: 0;
+  display: flex;
+  width: min(360px, calc(100vw - 28px));
+  max-height: min(460px, calc(100vh - 100px));
+  flex-direction: column;
+  overflow: hidden;
+}

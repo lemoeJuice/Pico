@@ -1,0 +1,51 @@
+.mcp-editor {
+  gap: 12px;
+  padding: 15px;
+  background: #f4f7f2;
+}
+.mcp-editor label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #627066;
+  font-size: 10px;
+  font-weight: 600;
+}
+.mcp-editor input:not([type='checkbox']),
+.mcp-editor select,
+.mcp-editor textarea {
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 10px;
+  color: #46564b;
+  background: #fff;
+  border: 1px solid #e4eae2;
+  border-radius: 9px;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.mcp-editor textarea {
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.mcp-editor input::placeholder,
+.mcp-editor textarea::placeholder {
+  color: #a3aea5;
+}
+.mcp-editor .mcp-checkbox-label {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+.mcp-editor .mcp-checkbox-label input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+.mcp-editor .form-actions {
+  justify-content: flex-end;
+  margin-top: 0;
+}

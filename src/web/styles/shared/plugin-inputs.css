@@ -1,0 +1,52 @@
+.plugin-ui-text-input {
+  white-space: nowrap;
+  overflow-x: auto;
+}
+.plugin-ui-date-input {
+  min-height: 36px;
+  padding: 6px 10px;
+  color-scheme: light;
+  line-height: 1.35;
+  text-align: left;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.plugin-ui-date-input::-webkit-date-and-time-value {
+  display: block;
+  min-height: 1.35em;
+  padding: 0;
+  text-align: left;
+}
+.plugin-ui-date-input::-webkit-datetime-edit,
+.plugin-ui-date-input::-webkit-datetime-edit-fields-wrapper,
+.plugin-ui-date-input::-webkit-datetime-edit-text,
+.plugin-ui-date-input::-webkit-datetime-edit-month-field,
+.plugin-ui-date-input::-webkit-datetime-edit-day-field,
+.plugin-ui-date-input::-webkit-datetime-edit-year-field {
+  padding: 0;
+  color: inherit;
+  font: inherit;
+}
+.plugin-ui-date-input::-webkit-calendar-picker-indicator {
+  margin: 0 0 0 8px;
+  opacity: 0.68;
+  cursor: pointer;
+}
+.plugin-ui-text-area {
+  display: block;
+  line-height: 1.5;
+  min-height: 0;
+  resize: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: hidden;
+}
+.plugin-ui-text-area--compact {
+  min-height: calc(2 * 1.5em + 18px);
+}
+.plugin-ui-text-area--standard {
+  min-height: calc(4 * 1.5em + 18px);
+}
+.plugin-ui-text-area--large {
+  min-height: calc(6 * 1.5em + 18px);
+}

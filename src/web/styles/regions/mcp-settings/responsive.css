@@ -1,0 +1,9 @@
+@media (max-width: 680px) {
+  .mcp-server-card-header {
+    display: grid;
+  }
+  .mcp-confirm-dialog dl > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+}

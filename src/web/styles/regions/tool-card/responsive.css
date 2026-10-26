@@ -1,0 +1,10 @@
+@media (max-width: 520px) {
+  .tool-card .tool-detail-toolbar {
+    align-items: flex-start;
+  }
+
+  .tool-card .tool-view-toggle button {
+    padding-right: 5px;
+    padding-left: 5px;
+  }
+}

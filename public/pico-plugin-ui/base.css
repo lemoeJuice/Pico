@@ -1,0 +1,46 @@
+:root {
+  --pico-ui-bg: #f4f6f2;
+  --pico-ui-panel: #fbfcfa;
+  --pico-ui-text: #28332e;
+  --pico-ui-muted: #7a867f;
+  --pico-ui-border: #e6eae4;
+  --pico-ui-accent: #4d745f;
+  --pico-ui-success: #688570;
+  --pico-ui-error: #946b5d;
+  --pico-ui-warning: #745a20;
+  --pico-ui-warning-subtle: #f8edcf;
+  --pico-ui-info: #4d6079;
+  --pico-ui-info-subtle: #e8edf4;
+  --pico-ui-focus: #587a60;
+  --pico-ui-control-track: #e5e9e5;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body.pico-ui-root {
+  margin: 0;
+  color: var(--pico-ui-text);
+  background: transparent;
+  font:
+    14px/1.5 'DM Sans',
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+body.pico-ui-root button,
+body.pico-ui-root select,
+body.pico-ui-root input {
+  font: inherit;
+}
+

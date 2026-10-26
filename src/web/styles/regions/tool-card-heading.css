@@ -1,0 +1,12 @@
+.tool-card-heading,
+.tool-detail-heading {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #819084;
+  font-size: 10px;
+  font-weight: 600;
+}
+.tool-has-error .tool-detail-heading {
+  color: #946b5d;
+}

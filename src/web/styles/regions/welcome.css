@@ -1,0 +1,65 @@
+.welcome-screen {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  width: min(560px, 100%);
+  margin: 0 auto;
+  padding: 60px 40px 80px;
+}
+.welcome-mark {
+  width: 46px;
+  height: 46px;
+  margin-bottom: 28px;
+  border-radius: 16px 16px 16px 6px;
+}
+.welcome-mark span {
+  font-size: 30px;
+}
+.welcome-mark i {
+  width: 11px;
+  height: 11px;
+  border-width: 2px;
+  border-color: #fbfcfa;
+}
+.welcome-screen .eyebrow {
+  color: #9aaa9d;
+  font-size: 10px;
+}
+.welcome-screen h1 {
+  margin: 15px 0 11px;
+  color: #35453a;
+  font-family: 'DM Serif Display', Georgia, serif;
+  font-size: clamp(40px, 4.5vw, 56px);
+  font-weight: 400;
+  letter-spacing: -0.045em;
+  line-height: 0.99;
+}
+.welcome-screen h1 em {
+  color: #75917a;
+  font-weight: 400;
+}
+.welcome-copy {
+  max-width: 320px;
+  margin: 7px 0 22px;
+  color: #8d9990;
+  font-size: 12px;
+  line-height: 1.8;
+}
+.welcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.welcome-actions .button {
+  min-height: 39px;
+  padding: 0 16px;
+  font-size: 11px;
+}
+.welcome-settings {
+  margin-top: 22px;
+  font-size: 11px;
+}
+

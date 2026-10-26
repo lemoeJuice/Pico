@@ -1,0 +1,51 @@
+.pico-ui-panel {
+  display: grid;
+  gap: 9px;
+  padding: 10px 12px;
+  color: var(--pico-ui-text);
+  background: var(--pico-ui-panel);
+  border: 1px solid var(--pico-ui-border);
+  border-radius: 10px;
+}
+
+.pico-ui-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--pico-ui-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pico-ui-card,
+.pico-ui-list-item,
+.pico-ui-metric-card {
+  min-width: 0;
+  padding: 9px 11px;
+  color: var(--pico-ui-text);
+  background: color-mix(in srgb, var(--pico-ui-bg) 88%, white);
+  border: 1px solid var(--pico-ui-border);
+  border-radius: 9px;
+}
+
+.pico-ui-list-item,
+.pico-ui-metric-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pico-ui-metric-card {
+  display: grid;
+  align-content: start;
+  justify-content: initial;
+}
+
+.pico-ui-section {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+

@@ -1,0 +1,56 @@
+.tool-card .tool-detail-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 24px;
+}
+
+.tool-card .tool-view-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  padding: 2px;
+  background: #edf1eb;
+  border-radius: 7px;
+}
+
+.tool-card .tool-view-toggle button {
+  min-height: 22px;
+  padding: 2px 7px;
+  color: #7c897e;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.tool-card .tool-view-toggle button[aria-pressed='true'] {
+  color: #405447;
+  background: #fff;
+  box-shadow: 0 1px 2px #24332414;
+}
+
+.tool-card .tool-readable-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 7px;
+}
+
+.tool-card .tool-readable-field {
+  min-width: 0;
+}
+
+.tool-card .tool-field-label {
+  display: block;
+  margin-bottom: 4px;
+  color: #89958b;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
+}
+

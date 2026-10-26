@@ -1,0 +1,110 @@
+.plugin-ui-range-control {
+  grid-column: 1 / -1;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  accent-color: #698e70;
+}
+.plugin-ui-control {
+  width: 100%;
+  min-height: 36px;
+  padding: 8px 10px;
+}
+.plugin-ui-select-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 36px;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.35;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    background 120ms ease;
+}
+.plugin-ui-select-trigger:hover:not(:disabled),
+.plugin-ui-select-trigger[aria-expanded='true'] {
+  border-color: #cddace;
+  background: #fcfdfb;
+}
+.plugin-ui-select-trigger:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--sage) 32%, transparent);
+  outline-offset: 2px;
+}
+.plugin-ui-select-trigger:disabled {
+  color: var(--muted);
+  cursor: default;
+  opacity: 0.65;
+}
+.plugin-ui-select-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plugin-ui-select-chevron {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  margin: -3px 3px 0 0;
+  border-right: 1.5px solid #87948a;
+  border-bottom: 1.5px solid #87948a;
+  transform: rotate(45deg);
+  transition: transform 120ms ease;
+}
+.plugin-ui-select-chevron.is-open {
+  margin-top: 4px;
+  transform: rotate(225deg);
+}
+.plugin-ui-select-menu {
+  position: fixed;
+  z-index: 10020;
+  box-sizing: border-box;
+  max-width: calc(100vw - 24px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid #dce5dc;
+  border-radius: 11px;
+  box-shadow: 0 10px 26px rgb(38 53 42 / 16%);
+  -webkit-overflow-scrolling: touch;
+}
+.plugin-ui-select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  color: #65736a;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  user-select: none;
+}
+.plugin-ui-select-option.is-active,
+.plugin-ui-select-option:hover {
+  color: #40584a;
+  background: #f0f5ef;
+}
+.plugin-ui-select-option.is-selected {
+  color: #48644f;
+  font-weight: 650;
+}
+.plugin-ui-select-check {
+  flex: 0 0 auto;
+  color: #62816a;
+  font-size: 12px;
+  font-weight: 700;
+}

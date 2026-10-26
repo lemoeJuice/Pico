@@ -1,0 +1,118 @@
+.tool-shell-body {
+  gap: 8px;
+}
+
+.tool-card.tool-shell-card .tool-shell-body-readable {
+  gap: 12px;
+}
+
+.tool-shell-command {
+  min-width: 0;
+}
+
+.tool-shell-command > .pico-ui-preview {
+  margin-top: 6px;
+}
+
+.tool-shell-command > .tool-command-preview {
+  max-height: 240px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.tool-shell-output {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid #e9eee8;
+  border-radius: 8px;
+  background: #f6f8f5;
+}
+
+.tool-shell-output-success {
+  background: #f0f6ef;
+  border-color: #dce9db;
+}
+
+.tool-shell-output-failure {
+  background: #fcf2ef;
+  border-color: #f0dcd5;
+}
+
+.tool-shell-output-running {
+  background: #f2f5f1;
+  border-color: #e4ebe3;
+}
+
+.tool-shell-output-pending {
+  background: #f7f5ef;
+  border-color: #eee8dc;
+}
+
+.tool-shell-output .tool-shell-streams,
+.tool-shell-output > .tool-shell-state,
+.tool-shell-output > .tool-output {
+  margin-top: 0;
+}
+
+.tool-shell-output > .tool-shell-state {
+  color: #768379;
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.tool-shell-streams {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tool-shell-stream {
+  min-width: 0;
+}
+
+.tool-shell-stream-text {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  color: #556258;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font:
+    10px/1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-shell-stream-text.tool-shell-stream-stderr {
+  color: #735a51;
+}
+
+.tool-shell-output .tool-shell-stream .tool-field-label {
+  margin-bottom: 3px;
+}
+
+.tool-shell-output > .tool-output {
+  max-height: 280px;
+}
+
+.tool-shell-output > .tool-output.pico-ui-preview {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.tool-shell-output > .tool-output.tool-output-error {
+  background: transparent;
+}
+

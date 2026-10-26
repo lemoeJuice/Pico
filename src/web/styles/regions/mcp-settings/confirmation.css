@@ -1,0 +1,64 @@
+.mcp-confirm-backdrop {
+  position: fixed;
+  z-index: 60;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(39, 48, 40, 0.42);
+  backdrop-filter: blur(4px);
+}
+.mcp-confirm-dialog {
+  display: grid;
+  gap: 12px;
+  width: min(500px, 100%);
+  max-height: min(88dvh, 680px);
+  overflow-y: auto;
+  padding: 20px;
+  background: #fcfdfb;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  border-radius: 17px;
+  box-shadow: 0 24px 80px rgba(42, 56, 44, 0.24);
+}
+.mcp-confirm-dialog h3 {
+  margin: 0;
+  color: #3f5044;
+  font-size: 16px;
+}
+.mcp-confirm-dialog p {
+  margin: 0;
+  color: #7b887d;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.mcp-confirm-dialog dl {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 12px;
+  background: #f5f8f4;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.mcp-confirm-dialog dl > div {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr);
+  gap: 10px;
+}
+.mcp-confirm-dialog dt {
+  color: #869187;
+  font-size: 10px;
+}
+.mcp-confirm-dialog dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+  margin: 0;
+  color: #536459;
+  font-size: 10px;
+}
+.mcp-confirm-dialog .form-actions {
+  justify-content: flex-end;
+}
+

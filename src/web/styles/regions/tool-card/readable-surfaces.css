@@ -1,0 +1,63 @@
+.tool-card .tool-readable-field > pre,
+.tool-card .tool-command-preview,
+.tool-card .tool-result-content,
+.tool-card .tool-search-match,
+.tool-card .tool-result-list pre {
+  max-height: 240px;
+  overflow: auto;
+  margin: 0;
+  padding: 9px 10px;
+  color: #556258;
+  background: #f2f5f1;
+  border: 1px solid #e9eee8;
+  border-radius: 7px;
+  font:
+    11px/1.55 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-card .tool-search-match {
+  max-height: none;
+  overflow: visible;
+}
+
+.tool-card .tool-long-field > pre {
+  max-height: 300px;
+}
+
+.tool-card .tool-inline-field {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.tool-card .tool-inline-field .tool-field-label {
+  margin: 0;
+}
+
+.tool-card .tool-command-preview {
+  color: #405447;
+  background: #f0f4ef;
+}
+
+.tool-card .tool-command-caret {
+  display: inline-block;
+  width: 1.5px;
+  height: 1.1em;
+  margin-left: 1px;
+  vertical-align: -0.17em;
+  background: #607b65;
+  animation: tool-caret-blink 1s steps(2, start) infinite;
+}
+
+@keyframes tool-caret-blink {
+  to {
+    visibility: hidden;
+  }
+}
+

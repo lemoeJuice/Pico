@@ -1,0 +1,92 @@
+.plugin-ui-host-rendered {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.plugin-ui-host-rendered--component {
+  min-width: 0;
+}
+.plugin-ui-tree,
+.plugin-ui-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+}
+.plugin-ui-group--row,
+.plugin-ui-group--spread {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.plugin-ui-group--row {
+  gap: 8px;
+}
+.plugin-ui-group--form-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+.plugin-ui-group--form-row > .plugin-ui-field {
+  min-width: 0;
+}
+.plugin-ui-group--form-row > .plugin-ui-button {
+  height: 36px;
+  min-height: 36px;
+}
+.plugin-ui-group--spread {
+  justify-content: space-between;
+  gap: 12px;
+}
+.plugin-ui-group--grid-2,
+.plugin-ui-group--grid-compact,
+.plugin-ui-group--grid-standard {
+  display: grid;
+  align-items: start;
+}
+.plugin-ui-group--grid-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.plugin-ui-group--grid-compact {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 132px), 1fr));
+  gap: 9px;
+}
+.plugin-ui-group--masonry {
+  display: block;
+  column-width: 132px;
+  column-gap: 9px;
+}
+.plugin-ui-group--masonry > * {
+  break-inside: avoid;
+  margin: 0 0 9px;
+}
+.plugin-ui-group--grid-standard {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 205px), 1fr));
+  gap: 12px;
+}
+.plugin-ui-group--stack-compact {
+  gap: 5px;
+}
+@media (max-width: 420px) {
+  .plugin-ui-group--grid-2 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.plugin-ui-tree :where(p, h2, h3, h4) {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.plugin-ui-tree p {
+  white-space: pre-wrap;
+}
+.plugin-ui-tree h2,
+.plugin-ui-tree h3,
+.plugin-ui-tree h4 {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 650;
+}

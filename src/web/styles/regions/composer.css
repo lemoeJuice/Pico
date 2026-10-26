@@ -1,0 +1,240 @@
+.composer-box {
+  flex: 1 1 auto;
+  min-width: 170px;
+  padding: 10px 14px 8px 14px;
+  background: white;
+  border: 1px solid #e4eae2;
+  border-radius: 15px;
+  box-shadow: 0 6px 19px rgba(52, 69, 58, 0.035);
+  transition:
+    border 0.15s,
+    box-shadow 0.15s;
+}
+.composer-box:focus-within {
+  border-color: #c8d8c9;
+  box-shadow: 0 7px 20px rgba(65, 100, 74, 0.08);
+}
+.composer-box textarea {
+  display: block;
+  width: 100%;
+  min-height: 1.65em;
+  max-height: calc(1.65em * 5 + 4px);
+  overflow-y: hidden;
+  resize: none;
+  padding: 2px 0;
+  color: #46564b;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.composer-box textarea::placeholder {
+  color: #aab4ac;
+}
+.composer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: nowrap;
+  padding-top: 6px;
+}
+.composer-footer-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  transform: translateX(3px);
+  max-width: 100%;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.composer-state-control,
+.interrupt-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--pico-composer-control-height, 32px);
+  min-height: var(--pico-composer-control-height, 32px);
+  gap: 7px;
+  padding: 0 10px;
+  color: #718078;
+  background: #f3f6f2;
+  border: 1px solid #e5ebe4;
+  border-radius: 9px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.composer-state-control:not(:disabled),
+.interrupt-icon-button {
+  cursor: pointer;
+}
+.composer-state-control.state-running {
+  color: #557b60;
+  background: #f0f6f0;
+  border-color: #e0eadf;
+}
+.composer-state-control.state-pausing {
+  color: #9a744b;
+  background: #faf5ec;
+  border-color: #f1e7d7;
+}
+.composer-state-control.state-paused {
+  color: #806d5a;
+  background: #f6f2ec;
+  border-color: #eee6dc;
+}
+.composer-state-control.state-idle .state-dot {
+  background: #9baa9d;
+}
+.composer-state-control .state-dot {
+  flex: 0 0 6px;
+  border-radius: 50%;
+}
+.composer-state-control:disabled {
+  opacity: 1;
+  cursor: default;
+}
+.state-spinner {
+  animation: spin 0.9s linear infinite;
+}
+.interrupt-icon-button {
+  width: var(--pico-composer-control-height, 32px);
+  padding: 0;
+  color: #a36d5d;
+  background: #fbf2ee;
+  border-color: #f0e0d8;
+}
+.interrupt-icon-button:hover {
+  background: #f7e8e1;
+}
+.composer-plugin-action {
+  height: var(--pico-composer-control-height, 32px);
+  min-height: var(--pico-composer-control-height, 32px);
+  padding: 0 9px;
+  color: #627c67;
+  background: #f0f5f0;
+  border: 1px solid #e0e9df;
+  border-radius: 9px;
+  font-size: 10px;
+  cursor: pointer;
+}
+.composer-plugin-action:hover:not(:disabled) {
+  background: #e6efe6;
+}
+.composer-plugin-action:disabled {
+  color: #a4aea5;
+  cursor: default;
+}
+.send-button {
+  -webkit-appearance: none;
+  appearance: none;
+  display: grid;
+  place-items: center;
+  width: var(--pico-composer-control-height, 32px);
+  height: var(--pico-composer-control-height, 32px);
+  padding: 0;
+  color: white;
+  background: #64866b;
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    transform 0.15s;
+}
+.send-button:hover:not(:disabled) {
+  background: #4f7458;
+}
+.send-button:disabled {
+  color: #a8b5aa;
+  background: #edf2ed;
+}
+.composer-caption {
+  display: block;
+  width: 100%;
+  margin: 7px 0 0;
+  color: #adb6ae;
+  font-size: 9px;
+  text-align: center;
+}
+.composer-caption.composer-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  text-align: left;
+}
+.composer-caption span {
+  margin: 0 3px;
+  color: #c8d0c8;
+}
+.composer-status-info {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  margin-left: auto;
+}
+.composer-meta .composer-context-usage {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  color: #819184;
+  background: #eef2ed;
+  border-radius: 5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: help;
+}
+.setup-caption {
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.setup-caption:hover {
+  color: #618168;
+}
+.command-menu {
+  position: absolute;
+  z-index: 3;
+  right: 40px;
+  bottom: calc(100% - 3px);
+  left: 40px;
+  overflow: hidden;
+  padding: 5px;
+  background: white;
+  border: 1px solid #e4eae2;
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+.command-menu button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 10px;
+  padding: 9px;
+  color: #76837a;
+  background: white;
+  border: 0;
+  border-radius: 7px;
+  text-align: left;
+  cursor: pointer;
+}
+.command-menu button:hover {
+  background: #f2f6f1;
+}
+.command-menu strong {
+  min-width: 75px;
+  color: #56745d;
+  font-size: 10px;
+}
+.command-menu span {
+  overflow: hidden;
+  color: #9aa59c;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+

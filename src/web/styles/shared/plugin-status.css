@@ -1,0 +1,21 @@
+.plugin-ui-status {
+  width: fit-content;
+  max-width: 100%;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-soft);
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  overflow-wrap: anywhere;
+}
+.plugin-ui-status--success {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
+  color: var(--accent-strong, #426a50);
+  background: color-mix(in srgb, var(--accent) 8%, white);
+}
+.plugin-ui-status--danger {
+  border-color: color-mix(in srgb, #a23c35 28%, var(--line));
+  color: #8a3939;
+  background: #fff8f7;
+}

@@ -1,0 +1,164 @@
+.composer-usage {
+  display: flex;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin: 0;
+  color: #8a978b;
+  font-size: 10px;
+}
+.composer-usage strong {
+  color: #647967;
+  font-weight: 500;
+}
+.timeline .assistant-message:hover > .assistant-avatar,
+.timeline .assistant-message > .assistant-avatar:focus-visible {
+  opacity: 1;
+}
+
+.live-attempt-controls:has(.model-attempt-actions:empty) {
+  display: none;
+}
+
+.composer-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  color: #8a978b;
+  font-family:
+    'DM Sans',
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.35;
+  text-align: left;
+  flex-wrap: nowrap;
+}
+.composer-meta > .plugin-web-view-composer-status {
+  flex: 1 1 0;
+  width: auto;
+  max-width: 100%;
+  min-width: 0;
+  height: 0;
+}
+.composer-meta > .plugin-ui-host-rendered {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  color: inherit;
+  font: inherit;
+}
+.composer-meta > .plugin-ui-host-rendered .plugin-ui-tree {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.composer-plugin-controls .plugin-ui-host-rendered--component {
+  width: max-content;
+  max-width: none;
+  min-width: 0;
+  height: 32px;
+  min-height: 32px;
+  display: block;
+  flex: 0 0 auto;
+  overflow: visible;
+}
+.composer-plugin-controls .plugin-ui-host-rendered--component .plugin-ui-tree--composer-scroll {
+  display: block;
+  width: max-content;
+  min-width: 0;
+  max-width: none;
+  height: 32px;
+  overflow: visible;
+}
+.composer-plugin-controls .plugin-ui-host-rendered--component .plugin-ui-tree--composer-content {
+  display: flex;
+  width: max-content;
+  min-width: 100%;
+  max-width: none;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  overflow: visible;
+}
+.composer-plugin-controls .plugin-ui-host-rendered--component .plugin-ui-tree--composer-content > * {
+  flex: 0 0 auto;
+}
+.composer-plugin-controls .plugin-ui-host-rendered--component .plugin-ui-field {
+  width: auto;
+  max-width: none;
+  flex: 0 0 auto;
+  flex-direction: row;
+  align-items: center;
+  gap: 0;
+}
+.composer-plugin-controls .plugin-ui-host-rendered--component .plugin-ui-control,
+.composer-plugin-controls .plugin-ui-host-rendered--component .plugin-ui-button {
+  width: auto;
+  max-width: none;
+  height: 32px;
+  min-height: 32px;
+  flex: 0 0 auto;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.composer-plugin-controls .plugin-ui-host-rendered--component .plugin-ui-select-trigger,
+.composer-plugin-controls .plugin-ui-host-rendered--component .plugin-ui-text-input {
+  min-width: 78px;
+  max-width: none;
+  padding-right: 8px;
+  padding-left: 8px;
+}
+.composer-plugin-controls .plugin-ui-host-rendered--component .plugin-ui-switch {
+  min-height: 32px;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+.composer-plugin-controls .plugin-ui-host-rendered--component .plugin-ui-range {
+  width: 150px;
+  height: 32px;
+  flex: 0 0 150px;
+  grid-template-rows: 12px 16px;
+  gap: 0 6px;
+  font-size: 9px;
+}
+.composer-plugin-controls .plugin-ui-host-rendered--component .plugin-ui-range-value {
+  font-size: 9px;
+}
+.composer-plugin-controls .plugin-ui-host-rendered--component .plugin-ui-range-control {
+  height: 16px;
+}
+.composer-plugin-controls .plugin-ui-host-rendered--composer-model .plugin-ui-group {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+.plugin-toolbar-popover .plugin-ui-host-rendered--composer-model .plugin-ui-tree,
+.plugin-toolbar-popover .plugin-ui-host-rendered--composer-model .plugin-ui-group {
+  flex-direction: column;
+  align-items: stretch;
+}
+.composer-meta span {
+  margin: 0;
+  color: inherit;
+}
+.composer-meta .composer-model-name {
+  flex: 0 0 auto;
+  max-width: min(45vw, 240px);
+  overflow: hidden;
+  margin-left: 0 !important;
+  color: inherit;
+  font: inherit;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

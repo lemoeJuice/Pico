@@ -1,0 +1,24 @@
+.reasoning-summary {
+  margin-bottom: 12px;
+  color: #7a887b;
+}
+.reasoning-summary > summary {
+  cursor: pointer;
+  font-size: 11px;
+  margin-bottom: 5px;
+}
+.reasoning-summary .markdown-body {
+  color: #7a887b;
+  font-size: 12px;
+}
+.reasoning-summary .markdown-body p {
+  margin: 0;
+}
+.tool-model-guidance-heading {
+  margin-top: 8px;
+}
+.tool-model-guidance {
+  color: #68766d;
+  background: #f3f6f2;
+  border-left: 2px solid #9eac9f;
+}

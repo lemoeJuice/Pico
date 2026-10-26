@@ -1,0 +1,58 @@
+.pico-ui-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.pico-ui-button {
+  min-height: 30px;
+  padding: 6px 10px;
+  color: var(--pico-ui-text);
+  background: var(--pico-ui-panel);
+  border: 1px solid var(--pico-ui-border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.pico-ui-button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--pico-ui-accent) 55%, var(--pico-ui-border));
+}
+
+.pico-ui-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.pico-ui-button--primary {
+  color: #fff;
+  background: var(--pico-ui-accent);
+  border-color: var(--pico-ui-accent);
+}
+
+.pico-ui-button--danger {
+  color: var(--pico-ui-error);
+  background: color-mix(in srgb, var(--pico-ui-error) 8%, white);
+  border-color: color-mix(in srgb, var(--pico-ui-error) 35%, var(--pico-ui-border));
+}
+
+.pico-ui-control {
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 8px;
+  color: var(--pico-ui-text);
+  background: var(--pico-ui-panel);
+  border: 1px solid var(--pico-ui-border);
+  border-radius: 7px;
+}
+
+.pico-ui-control:is(input, textarea) {
+  width: 100%;
+}
+
+.pico-ui-control:focus-visible,
+.pico-ui-button:focus-visible {
+  outline: 2px solid var(--pico-ui-focus);
+  outline-offset: 2px;
+}
+

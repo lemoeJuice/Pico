@@ -1,0 +1,20 @@
+.conversation-actions > .plugin-web-view-component,
+.composer-footer-actions > .plugin-web-view-component {
+  flex: 0 0 auto;
+  width: auto;
+  height: var(--pico-composer-control-height, 32px);
+}
+.plugin-tool-result {
+  width: 100%;
+  max-width: 100%;
+}
+.plugin-tool-result > .plugin-web-view-component {
+  width: 100%;
+  min-height: 0;
+}
+.composer-plugin-controls .plugin-web-view-component {
+  flex: 0 1 160px;
+  width: auto;
+  min-width: 120px;
+  height: var(--pico-composer-control-height, 32px);
+}

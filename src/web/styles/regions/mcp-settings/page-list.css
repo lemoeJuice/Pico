@@ -1,0 +1,182 @@
+.mcp-settings-page {
+  display: grid;
+  gap: 13px;
+}
+.mcp-security-note {
+  margin: 0;
+  padding: 10px 12px;
+  color: #80694e;
+  background: #fbf7ef;
+  border: 1px solid #eee5d5;
+  border-radius: 10px;
+  line-height: 1.6;
+}
+.mcp-private-network-note,
+.mcp-private-network-warning {
+  margin: 0;
+  line-height: 1.55;
+}
+.mcp-private-network-warning {
+  padding: 8px 10px;
+  color: #965b4d;
+  background: #fbefeb;
+  border-radius: 8px;
+}
+.mcp-private-network-status.is-authorized {
+  color: #965b4d;
+  font-weight: 600;
+}
+.mcp-inline-message {
+  margin: 0;
+  padding: 9px 11px;
+  color: #55745e;
+  background: #edf5ed;
+  border-radius: 9px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.mcp-inline-message.is-error,
+.mcp-server-error {
+  color: #965b4d;
+  background: #fbefeb;
+}
+.mcp-list-heading,
+.mcp-server-card-header,
+.mcp-server-title,
+.mcp-editor-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.mcp-list-heading h2,
+.mcp-editor-heading h3 {
+  margin: 0;
+  color: #536459;
+  font-size: 13px;
+  font-weight: 650;
+}
+.mcp-server-list {
+  display: grid;
+  gap: 10px;
+}
+.mcp-server-card,
+.mcp-editor {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 13px;
+  background: #f8faf7;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.mcp-server-card-header {
+  align-items: flex-start;
+}
+.mcp-server-card-header > small {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 9px;
+}
+.mcp-server-title {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.mcp-server-title h3 {
+  overflow-wrap: anywhere;
+  margin: 0;
+  color: #3f5044;
+  font-size: 12px;
+  font-weight: 650;
+}
+.mcp-server-status {
+  padding: 3px 7px;
+  color: #7a867d;
+  background: #ebefea;
+  border-radius: 99px;
+  font-size: 9px;
+  line-height: 1.3;
+}
+.mcp-server-status.status-ready {
+  color: #3d6c50;
+  background: #e5f0e6;
+}
+.mcp-server-status.status-failed,
+.mcp-server-status.status-error {
+  color: #965b4d;
+  background: #f8eae5;
+}
+.mcp-server-summary {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: #7e8a80;
+  font-size: 10px;
+}
+.mcp-server-summary code,
+.mcp-confirm-dialog code {
+  overflow-wrap: anywhere;
+  color: #536459;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+.mcp-server-error {
+  overflow-wrap: anywhere;
+  margin: 0;
+  padding: 8px 9px;
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.mcp-tools-details {
+  padding-top: 8px;
+  border-top: 1px solid #e7ece6;
+  color: #67766b;
+  font-size: 10px;
+}
+.mcp-tools-details summary {
+  width: fit-content;
+  cursor: pointer;
+  color: #627568;
+  font-weight: 600;
+}
+.mcp-tools-details ul {
+  display: grid;
+  gap: 7px;
+  margin: 9px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.mcp-tools-details li {
+  display: grid;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+.mcp-tools-details li strong {
+  color: #46594b;
+  font-size: 10px;
+}
+.mcp-tools-details li span {
+  color: var(--muted);
+  line-height: 1.5;
+}
+.mcp-server-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 2px;
+}
+.mcp-server-actions .button,
+.mcp-list-heading .button,
+.mcp-confirm-dialog .button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.mcp-server-actions .mcp-delete-button {
+  color: #98685b;
+}
+.native-tool-title > .native-tool-source.source-mcp {
+  color: #7b6b9a;
+}
