@@ -13,9 +13,11 @@ The plugin connects to the OneBot WebSocket service. SnowLuma MCP uses the corre
 
 ## Threads and messages
 
-Group chats route by `group:<group_id>` to a Thread named `群聊_<group_id>_<groupname>`. Private chats route by `private:<user_id>` to `私聊_<user_id>_<nickname>`. User messages contain a human-readable QQ chat and sender label followed by text. Non-text OneBot segments are represented by labels such as `[图片]`, `[文件]`, `[语音]`, and `[视频]`, plus available message/file IDs and URLs. Binary media is not embedded in the Pico message.
+Group chats route by `group:<group_id>` to a Thread named `群聊_<group_id>_<groupname>`. Private chats route by `private:<user_id>` to `私聊_<user_id>_<nickname>`. The Thread binding supplies the QQ destination to the model; each user message contains the sender label and message body, without repeating the group or private-chat ID/name. Non-text OneBot segments are represented by labels such as `[图片]`, `[文件]`, `[语音]`, and `[视频]`, plus available message/file IDs and URLs. Binary media is not embedded in the Pico message.
 
 QQ events use Pico's ordinary user-message service. A leading slash in a QQ message stays message text and is never submitted as a Pico slash command. In Pico's Web UI, command routing occurs only after the user chooses a command suggestion.
+
+The QQ Project prompt tells Pico not to answer conversationally in the Pico Thread. Every accepted message is evaluated, but Pico sends a QQ reply only when it decides one is useful and calls the selected SnowLuma MCP send action. If no response is needed, it does not call a send action or emit an acknowledgement. The adapter does not forward model final responses to QQ automatically.
 
 ## Tools and permissions
 
