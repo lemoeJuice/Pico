@@ -41,6 +41,7 @@ export interface ProviderRequestSummary {
   errorCode?: string;
   providerError?: ProviderHttpError;
   eventCounts?: Record<string, number>;
+  /** For streaming requests, milliseconds from fetch dispatch to the first non-empty user-facing text delta; reasoning and tool-call deltas do not count. */
   firstTextMs?: number;
   deltaTextCharacters?: number;
   outputTextCharacters?: number;

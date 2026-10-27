@@ -1,7 +1,9 @@
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { afterEach, describe, expect, it } from 'vitest';
+import { performance } from 'node:perf_hooks';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAiCompatibleAdapter, type ModelPrompt } from '../src/runtime/model.js';
+import type { ModelRequestTrace, ProviderRequestSummary } from '../src/contracts/model.js';
 
 describe('OpenAI-compatible streaming adapter', () => {
   const servers: Array<ReturnType<typeof createServer>> = [];
@@ -13,6 +15,7 @@ describe('OpenAI-compatible streaming adapter', () => {
         await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
       }),
     );
+    vi.restoreAllMocks();
   });
 
   it('parses streamed text and fragmented parallel tool-call arguments without exposing wire details', async () => {
@@ -26,7 +29,10 @@ describe('OpenAI-compatible streaming adapter', () => {
         const frames = [
           {
             model: 'actual-model',
-            choices: [{ delta: { content: 'Hel', reasoning_summary_text: 'Checking ' }, finish_reason: null }],
+            choices: [{ delta: { reasoning_summary_text: 'Checking ' }, finish_reason: null }],
+          },
+          {
+            choices: [{ delta: { content: 'Hel' }, finish_reason: null }],
           },
           {
             choices: [
@@ -71,6 +77,16 @@ describe('OpenAI-compatible streaming adapter', () => {
     };
     const deltas: string[] = [];
     const events: Array<Record<string, unknown>> = [];
+    const requestSummaries: ProviderRequestSummary[] = [];
+    let now = 1_000;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const requestTrace: ModelRequestTrace = {
+      started: () => 'attempt-1',
+      response: () => {
+        now = 1_060;
+      },
+      settled: (_providerAttemptId, summary) => requestSummaries.push(summary),
+    };
     const result = await new OpenAiCompatibleAdapter().complete(
       prompt,
       {
@@ -81,9 +97,15 @@ describe('OpenAI-compatible streaming adapter', () => {
         provider: 'openai-compatible',
       },
       new AbortController().signal,
-      (delta) => deltas.push(delta),
-      undefined,
-      (event) => events.push(event),
+      (delta) => {
+        deltas.push(delta);
+        if (delta === 'Hel') now = 1_400;
+      },
+      requestTrace,
+      (event) => {
+        events.push(event);
+        if (event.type === 'reasoning_summary.delta') now = 1_125;
+      },
     );
 
     expect(requestBody?.stream).toBe(true);
@@ -107,6 +129,8 @@ describe('OpenAI-compatible streaming adapter', () => {
       usage: { inputTokens: 12, outputTokens: 3, totalTokens: 15 },
       toolCalls: [{ id: 'call_1', name: 'read_file', arguments: { path: 'note.txt' } }],
     });
+    expect(requestSummaries).toHaveLength(1);
+    expect(requestSummaries[0]).toMatchObject({ outcome: 'completed', firstTextMs: 125, durationMs: 400 });
   });
 
   it('closes a provider stream after the done marker even when the server keeps the connection open', async () => {

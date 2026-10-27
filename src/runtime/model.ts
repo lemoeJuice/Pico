@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import type { ModelSettings, TokenUsage } from '../core/types.js';
 import { ModelCallError } from '../contracts/model-error.js';
 import type {
@@ -184,32 +185,33 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
     };
     if (settings.apiKey.trim()) headers.authorization = `Bearer ${settings.apiKey.trim()}`;
     const endpoint = endpointFor(settings.baseUrl);
-    const startedAt = Date.now();
+    const body = JSON.stringify({
+      model: prompt.model,
+      ...(requestParameters?.temperature === null
+        ? {}
+        : { temperature: requestParameters?.temperature ?? prompt.temperature }),
+      stream: true,
+      stream_options: { include_usage: true },
+      messages: toWireMessages(prompt),
+      tools: prompt.tools.map((tool) => ({
+        type: 'function',
+        function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+      })),
+      parallel_tool_calls: true,
+      ...requestParameters?.fields,
+    });
     const providerAttemptId = requestTrace?.started({
       provider: settings.provider,
       protocol: 'chat-completions',
       endpoint,
       attempt: 1,
     });
+    const startedAt = performance.now();
     const response = await fetch(endpoint, {
       method: 'POST',
       headers,
       signal,
-      body: JSON.stringify({
-        model: prompt.model,
-        ...(requestParameters?.temperature === null
-          ? {}
-          : { temperature: requestParameters?.temperature ?? prompt.temperature }),
-        stream: true,
-        stream_options: { include_usage: true },
-        messages: toWireMessages(prompt),
-        tools: prompt.tools.map((tool) => ({
-          type: 'function',
-          function: { name: tool.name, description: tool.description, parameters: tool.parameters },
-        })),
-        parallel_tool_calls: true,
-        ...requestParameters?.fields,
-      }),
+      body,
     });
     if (providerAttemptId) {
       requestTrace?.response(providerAttemptId, {
@@ -264,7 +266,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
       if (providerAttemptId) {
         requestTrace?.settled(providerAttemptId, {
           outcome: 'completed',
-          durationMs: Date.now() - startedAt,
+          durationMs: performance.now() - startedAt,
           toolCallCount: result.toolCalls.length,
           finishReason: result.finishReason,
           usage: result.usage,
@@ -273,6 +275,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
       return result;
     }
 
+    let firstTextMs: number | undefined;
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -307,6 +310,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
       const delta = choice.delta as Record<string, unknown> | undefined;
       if (!delta) return;
       if (typeof delta.content === 'string' && delta.content) {
+        firstTextMs ??= performance.now() - startedAt;
         content += delta.content;
         onText(delta.content);
       }
@@ -389,7 +393,8 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
     if (providerAttemptId) {
       requestTrace?.settled(providerAttemptId, {
         outcome: 'completed',
-        durationMs: Date.now() - startedAt,
+        durationMs: performance.now() - startedAt,
+        ...(firstTextMs === undefined ? {} : { firstTextMs }),
         toolCallCount: result.toolCalls.length,
         finishReason: result.finishReason,
         usage: result.usage,
