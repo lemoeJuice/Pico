@@ -184,12 +184,12 @@ export interface ModelProviderContribution {
   supportsImages?: boolean;
 }
 
-/** Non-secret model choice fixed to a Thread. provider identifies the adapter; connectionId identifies its configuration. */
+/** Effective model selection; provider/model follow global Runtime settings while parameters may be Thread-specific. */
 export interface ThreadModelSelection {
   provider: ModelProvider;
   connectionId: string;
   model: string;
-  /** Semantic, non-wire settings fixed to this Thread. */
+  /** Semantic, non-wire parameter overrides for this Thread. */
   parameters: { temperature?: number | null; options: Record<string, string | number | boolean> };
 }
 

@@ -4331,15 +4331,39 @@ export class PicoRuntime {
 
   threadModelSelection(threadId: string): ThreadModelSelection {
     if (!this.store.getThread(threadId)) throw new Error('Thread not found');
-    return (
-      this.store.getThreadModelSelection(threadId) ??
-      this.store.setThreadModelSelection(threadId, this.defaultThreadModelSelection())
+    const globalSelection = this.defaultThreadModelSelection();
+    const storedSelection = this.store.getThreadModelSelection(threadId);
+    if (!storedSelection) return this.store.setThreadModelSelection(threadId, globalSelection);
+
+    const storedParameters = validateThreadSelectionParameters(storedSelection.parameters);
+    const sameTarget =
+      storedSelection.provider === globalSelection.provider && storedSelection.model === globalSelection.model;
+    return this.validateThreadModelSelection(
+      {
+        ...globalSelection,
+        parameters: {
+          ...globalSelection.parameters,
+          ...storedParameters,
+          options: sameTarget ? storedParameters.options : globalSelection.parameters.options,
+        },
+      },
+      true,
     );
   }
 
   updateThreadModelSelection(threadId: string, selection: ThreadModelSelection): ThreadModelSelection {
     if (!this.store.getThread(threadId)) throw new Error('Thread not found');
-    const validated = this.validateThreadModelSelection(selection);
+    const current = this.threadModelSelection(threadId);
+    const sameTarget = selection.provider === current.provider && selection.model === current.model;
+    const parameters = validateThreadSelectionParameters(selection.parameters);
+    const validated = this.validateThreadModelSelection({
+      ...current,
+      parameters: {
+        ...current.parameters,
+        ...parameters,
+        options: sameTarget ? parameters.options : current.parameters.options,
+      },
+    });
     const saved = this.store.setThreadModelSelection(threadId, validated);
     this.publish({ type: 'thread.model-selection.updated', threadId, selection: saved });
     return saved;

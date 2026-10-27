@@ -874,7 +874,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const uiContributions = pluginInfo?.ui ?? [];
   const toolbarContributions = uiContributionsAt(uiContributions, 'thread.toolbar');
   const composerActions = uiContributionsAt(uiContributions, 'composer.action');
-  const composerModelContributions = uiContributionsAt(uiContributions, 'composer.model', settings?.provider);
+  const composerModelProvider = settings?.provider ?? activeSnapshot?.modelSelection.provider;
+  const composerModelContributions = uiContributionsAt(uiContributions, 'composer.model', composerModelProvider);
   const composerStatusContributions = uiContributionsAt(uiContributions, 'composer.status');
   const sidebarPanels = uiContributionsAt(uiContributions, 'sidebar.panel');
   const toolResultContributions = uiContributionsAt(uiContributions, 'tool.result');
@@ -1988,7 +1989,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     }
     if (modelForm.apiKey) body.apiKey = modelForm.apiKey;
     try {
-      const saved = await api<PublicSettings>('/api/settings/model', { method: 'PUT', body: JSON.stringify(body) });
+      const saved = await api<PublicSettings>('/api/settings/model', {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      });
       setSettings(saved);
       setModelForm({ ...saved, apiKey: '' });
       setNotice('Model settings saved on this Pico Runtime.');
@@ -2062,7 +2066,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   };
 
   const updateModelSettingsFromPlugin: PluginUiProps['updateModelSettings'] = async (update, targetThreadId) => {
-    if (targetThreadId) {
+    const updatesGlobalTarget = update.provider !== undefined || update.model !== undefined || update.baseUrl !== undefined;
+    if (targetThreadId && !updatesGlobalTarget) {
       const current = await api<ThreadModelSelection>(
         `/api/threads/${encodeURIComponent(targetThreadId)}/model-selection`,
       );
@@ -2183,11 +2188,25 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     }
   };
 
+  const activeModelSelection =
+    activeSnapshot && selectedThread && activeSnapshot.thread.id === selectedThread.id
+      ? (() => {
+          const selection = activeSnapshot.modelSelection;
+          const targetMatchesGlobal =
+            !settings || (selection.provider === settings.provider && selection.model === settings.model);
+          return {
+            ...selection,
+            ...(settings ? { provider: settings.provider, connectionId: 'default', model: settings.model } : {}),
+            parameters: {
+              ...selection.parameters,
+              ...(targetMatchesGlobal ? {} : { options: {} }),
+            },
+          };
+        })()
+      : undefined;
   const viewContext: PluginUiContext = {
     thread: selectedThread,
-    ...(activeSnapshot && selectedThread && activeSnapshot.thread.id === selectedThread.id
-      ? { modelSelection: activeSnapshot.modelSelection }
-      : {}),
+    ...(activeModelSelection ? { modelSelection: activeModelSelection } : {}),
   };
 
   const runPluginCommand = async (
@@ -3176,9 +3195,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     ) : null,
                   )}
                 <div className="composer-status-info">
-                  {activeSnapshot?.thread.id === selectedThread.id && activeSnapshot.modelSelection.model ? (
-                    <span className="composer-model-name">{activeSnapshot.modelSelection.model}</span>
-                  ) : settings?.model ? (
+                  {settings?.model ? (
                     <span className="composer-model-name">{settings.model}</span>
                   ) : (
                     <button className="setup-caption composer-model-name" onClick={() => setSettingsOpen(true)}>

@@ -41,7 +41,11 @@ function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiCl
       try {
         const next = await api<{ connected: boolean; accountLabel?: string | null }>('/status');
         setStatus(next);
-        setModels(next.connected ? await api(force ? '/models/refresh' : '/models') : []);
+        setModels(
+          next.connected
+            ? await api(force ? '/models/refresh' : '/models', force ? { method: 'POST' } : undefined)
+            : [],
+        );
       } catch (reason) {
         const message = errorText(reason);
         setError(message);
@@ -241,7 +245,7 @@ function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiCl
           if (model)
             void client
               .props(settings, context)
-              .updateModelSettings({ provider: 'chatgpt-plan', model }, context.thread?.id)
+              .updateModelSettings({ provider: 'chatgpt-plan', model })
               .catch((reason: unknown) => {
                 setError(errorText(reason));
                 client.props(settings, context).onError(errorText(reason));
