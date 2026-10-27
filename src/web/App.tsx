@@ -4838,6 +4838,9 @@ function ModelInputDisclosure({
                 <ChevronRight className="detail-chevron projection-chevron" size={13} aria-hidden="true" />
                 Provider request {requestIndex + 1} · {request.outcome}
                 {request.status ? ` · HTTP ${request.status}` : ''}
+                {request.providerMetadata?.['pico.chatgpt-plan.fastMode'] === undefined
+                  ? ''
+                  : ` · Fast mode ${request.providerMetadata['pico.chatgpt-plan.fastMode'] ? 'on' : 'off'}`}
                 {request.providerError?.type ? ` · ${request.providerError.type}` : ''}
                 {request.providerError?.code ? ` · ${request.providerError.code}` : ''}
               </summary>
@@ -4847,6 +4850,7 @@ function ModelInputDisclosure({
                   protocol: request.protocol,
                   endpoint: request.endpoint,
                   attempt: request.attempt,
+                  providerMetadata: request.providerMetadata,
                   status: request.status,
                   contentType: request.contentType,
                   providerRequestId: request.providerRequestId,

@@ -144,6 +144,7 @@ export interface ChatGptPluginState {
 export interface ChatGptPluginSecrets {
   get<T>(key: string, fallback: T): T;
   set<T>(key: string, value: T): void;
+  withLock?<T>(operation: () => Promise<T>): Promise<T>;
 }
 
 export interface ChatGptPluginCache {
@@ -384,18 +385,43 @@ export class ChatGptPlanAuth {
 
   async accessToken(forceRefresh = false, requestTrace?: ModelRequestTrace): Promise<string> {
     const credentials = this.readCredentials();
+    this.assertUsableCredentials(credentials);
+    if (!forceRefresh && credentials.expiresAt! > this.now() + refreshAheadMs) return credentials.accessToken!;
+    if (this.refreshInFlight) return this.refreshInFlight;
+    this.refreshInFlight = this.refreshWithCoordination(credentials, forceRefresh, requestTrace).finally(() => {
+      this.refreshInFlight = null;
+    });
+    return this.refreshInFlight;
+  }
+
+  private assertUsableCredentials(credentials: StoredCredentials | null): asserts credentials is StoredCredentials {
     if (!credentials?.clientId || !credentials.refreshToken || !credentials.accessToken || !credentials.expiresAt) {
       throw new Error('Connect a ChatGPT account in Settings before using this model provider.');
     }
     if (!credentials.scopes.includes(planScope)) {
       throw new Error('The connected ChatGPT account has not granted plan usage to Pico. Reconnect it in Settings.');
     }
-    if (!forceRefresh && credentials.expiresAt > this.now() + refreshAheadMs) return credentials.accessToken;
-    if (this.refreshInFlight) return this.refreshInFlight;
-    this.refreshInFlight = this.refresh(credentials, requestTrace).finally(() => {
-      this.refreshInFlight = null;
-    });
-    return this.refreshInFlight;
+  }
+
+  private async refreshWithCoordination(
+    observed: StoredCredentials,
+    forceRefresh: boolean,
+    requestTrace?: ModelRequestTrace,
+  ): Promise<string> {
+    const refresh = async (): Promise<string> => {
+      const latest = this.readCredentials();
+      this.assertUsableCredentials(latest);
+      if (!forceRefresh && latest.expiresAt! > this.now() + refreshAheadMs) return latest.accessToken!;
+      if (
+        forceRefresh &&
+        latest.refreshToken !== observed.refreshToken &&
+        latest.expiresAt! > this.now()
+      ) {
+        return latest.accessToken!;
+      }
+      return this.refresh(latest, requestTrace);
+    };
+    return this.secrets.withLock ? this.secrets.withLock(refresh) : refresh();
   }
 
   async listModels(forceRefresh = false): Promise<ChatGptModelChoice[]> {

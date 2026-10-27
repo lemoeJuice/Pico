@@ -963,6 +963,7 @@ export class ChatGptResponsesAdapter {
           protocol: 'https+sse',
           endpoint: responsesUrl,
           attempt,
+          providerMetadata: { 'pico.chatgpt-plan.fastMode': body.service_tier === 'priority' },
         }) ?? '';
       let settled = false;
       const settle = (summary: ProviderRequestSummary): void => {

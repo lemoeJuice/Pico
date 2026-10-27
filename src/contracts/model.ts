@@ -8,6 +8,8 @@ export interface ProviderRequestStart {
   protocol: string;
   endpoint: string;
   attempt: number;
+  /** Namespaced provider-only boolean diagnostics. */
+  providerMetadata?: Record<string, boolean>;
 }
 
 export interface ProviderRequestResponse {

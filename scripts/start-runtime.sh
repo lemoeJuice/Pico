@@ -16,5 +16,6 @@ fi
 
 project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_root"
+export PICO_CHATGPT_OAUTH_DB_PATH="${PICO_CHATGPT_OAUTH_DB_PATH:-$project_root/data/chatgpt-oauth.sqlite}"
 
 exec npm start

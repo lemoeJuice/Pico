@@ -81,7 +81,7 @@ describe('ChatGPT Responses adapter', () => {
       (delta) => deltas.push(delta),
       requestTrace,
       (event) => events.push(event),
-      { fields: { reasoning: { summary: 'auto', effort: 'high' }, service_tier: 'fast' } },
+      { fields: { reasoning: { summary: 'auto', effort: 'high' }, service_tier: 'priority' } },
       'pico-thread-123',
     );
 
@@ -91,6 +91,7 @@ describe('ChatGPT Responses adapter', () => {
       protocol: 'https+sse',
       endpoint: 'https://api.openai.com/v1/responses',
       attempt: 1,
+      providerMetadata: { 'pico.chatgpt-plan.fastMode': true },
     });
     expect(authorization).toBe('Bearer oauth-access-token');
     expect(sessionIdHeader).toBe('pico-thread-123');
@@ -104,7 +105,7 @@ describe('ChatGPT Responses adapter', () => {
       prompt_cache_key: 'pico-thread-123',
       reasoning: { effort: 'high', summary: 'auto' },
       include: ['reasoning.encrypted_content'],
-      service_tier: 'fast',
+      service_tier: 'priority',
     });
     expect(requestBody?.input).toEqual([
       { role: 'user', content: 'Read this file.' },

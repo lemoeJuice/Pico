@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
+import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
+import { createSharedChatGptOAuthSecrets, type SharedChatGptOAuthSecrets } from './chatgpt-plan/oauth-store.js';
 import type { ModelStageInput } from '../runtime/stages.js';
 import { ChatGptPlanAuth, RetryableChatGptAuthorizationExchange } from './chatgpt-plan/auth.js';
 import { ChatGptResponsesAdapter } from './chatgpt-plan/model.js';
@@ -91,6 +93,7 @@ export function createChatGptPlanPlugin(): PicoPlugin {
   const callbackTimeouts = new Map<Server, NodeJS.Timeout>();
   const callbackOperations = new Map<string, CallbackOperation>();
   let auth: ChatGptPlanAuth | null = null;
+  let sharedOAuthSecrets: SharedChatGptOAuthSecrets | null = null;
 
   const closeCallbackServer = (server: Server): Promise<void> => {
     const timeout = callbackTimeouts.get(server);
@@ -168,7 +171,19 @@ export function createChatGptPlanPlugin(): PicoPlugin {
     name: 'ChatGPT plan provider',
     version: '0.1.0',
     activate(context) {
-      auth = new ChatGptPlanAuth(context.state, fetch, Date.now, context.secrets, context.cache);
+      const sharedOAuthPath =
+        process.env.PICO_CHATGPT_OAUTH_DB_PATH?.trim() ||
+        (process.env.NODE_ENV === 'production' ? join(process.cwd(), 'data', 'chatgpt-oauth.sqlite') : null);
+      sharedOAuthSecrets = sharedOAuthPath
+        ? createSharedChatGptOAuthSecrets(sharedOAuthPath, 'pico.chatgpt-plan')
+        : null;
+      auth = new ChatGptPlanAuth(
+        context.state,
+        fetch,
+        Date.now,
+        sharedOAuthSecrets ?? context.secrets ?? context.state,
+        context.cache,
+      );
       const model = new ChatGptResponsesAdapter(auth);
 
       context.models.registerProvider(
@@ -362,6 +377,8 @@ export function createChatGptPlanPlugin(): PicoPlugin {
     async deactivate() {
       await Promise.all([...callbackServers].map((server) => closeCallbackServer(server)));
       auth = null;
+      sharedOAuthSecrets?.close();
+      sharedOAuthSecrets = null;
     },
   };
 }

@@ -1,6 +1,88 @@
 // src/plugins/chatgpt-plan.ts
 import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
 import { createServer } from "node:http";
+import { join as join2 } from "node:path";
+
+// src/plugins/chatgpt-plan/oauth-store.ts
+import { chmodSync, mkdirSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+function secureSidecars(databasePath) {
+  for (const suffix of ["-wal", "-shm"]) {
+    try {
+      chmodSync(`${databasePath}${suffix}`, 384);
+    } catch {
+    }
+  }
+}
+function createSharedChatGptOAuthSecrets(filename, owner) {
+  const databasePath = resolve(filename);
+  const runtimeDatabasePath = resolve(
+    process.env.PICO_DB_PATH?.trim() || join(process.cwd(), "data", "pico.sqlite")
+  );
+  if (databasePath === runtimeDatabasePath) {
+    throw new Error("PICO_CHATGPT_OAUTH_DB_PATH must point to a dedicated OAuth database.");
+  }
+  mkdirSync(dirname(databasePath), { recursive: true, mode: 448 });
+  const db = new DatabaseSync(databasePath);
+  db.exec(`
+    PRAGMA busy_timeout = 30000;
+    PRAGMA journal_mode = WAL;
+    CREATE TABLE IF NOT EXISTS private_secrets (
+      owner TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(owner, key)
+    );
+  `);
+  chmodSync(databasePath, 384);
+  secureSidecars(databasePath);
+  return {
+    get(key, fallback) {
+      const row = db.prepare("SELECT value_json FROM private_secrets WHERE owner = ? AND key = ?").get(owner, key);
+      if (!row || typeof row.value_json !== "string") return fallback;
+      try {
+        return JSON.parse(row.value_json);
+      } catch {
+        return fallback;
+      }
+    },
+    set(key, value) {
+      const serialized = JSON.stringify(value);
+      if (serialized === void 0) throw new Error("Private secret must be JSON serializable");
+      db.prepare(
+        `INSERT INTO private_secrets (owner, key, value_json, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(owner, key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`
+      ).run(owner, key, serialized, (/* @__PURE__ */ new Date()).toISOString());
+      secureSidecars(databasePath);
+    },
+    delete(key) {
+      db.prepare("DELETE FROM private_secrets WHERE owner = ? AND key = ?").run(owner, key);
+    },
+    async withLock(operation) {
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const result = await operation();
+        db.exec("COMMIT");
+        return result;
+      } catch (error) {
+        try {
+          db.exec("COMMIT");
+        } catch {
+          try {
+            db.exec("ROLLBACK");
+          } catch {
+          }
+        }
+        throw error;
+      }
+    },
+    close() {
+      db.close();
+    }
+  };
+}
 
 // src/plugins/chatgpt-plan/auth.ts
 import { createHash, createPublicKey, randomBytes, randomUUID, verify } from "node:crypto";
@@ -256,18 +338,33 @@ var ChatGptPlanAuth = class {
   }
   async accessToken(forceRefresh = false, requestTrace) {
     const credentials = this.readCredentials();
+    this.assertUsableCredentials(credentials);
+    if (!forceRefresh && credentials.expiresAt > this.now() + refreshAheadMs) return credentials.accessToken;
+    if (this.refreshInFlight) return this.refreshInFlight;
+    this.refreshInFlight = this.refreshWithCoordination(credentials, forceRefresh, requestTrace).finally(() => {
+      this.refreshInFlight = null;
+    });
+    return this.refreshInFlight;
+  }
+  assertUsableCredentials(credentials) {
     if (!credentials?.clientId || !credentials.refreshToken || !credentials.accessToken || !credentials.expiresAt) {
       throw new Error("Connect a ChatGPT account in Settings before using this model provider.");
     }
     if (!credentials.scopes.includes(planScope)) {
       throw new Error("The connected ChatGPT account has not granted plan usage to Pico. Reconnect it in Settings.");
     }
-    if (!forceRefresh && credentials.expiresAt > this.now() + refreshAheadMs) return credentials.accessToken;
-    if (this.refreshInFlight) return this.refreshInFlight;
-    this.refreshInFlight = this.refresh(credentials, requestTrace).finally(() => {
-      this.refreshInFlight = null;
-    });
-    return this.refreshInFlight;
+  }
+  async refreshWithCoordination(observed, forceRefresh, requestTrace) {
+    const refresh = async () => {
+      const latest = this.readCredentials();
+      this.assertUsableCredentials(latest);
+      if (!forceRefresh && latest.expiresAt > this.now() + refreshAheadMs) return latest.accessToken;
+      if (forceRefresh && latest.refreshToken !== observed.refreshToken && latest.expiresAt > this.now()) {
+        return latest.accessToken;
+      }
+      return this.refresh(latest, requestTrace);
+    };
+    return this.secrets.withLock ? this.secrets.withLock(refresh) : refresh();
   }
   async listModels(forceRefresh = false) {
     const cached = this.readModelCatalog();
@@ -356,7 +453,7 @@ var ChatGptPlanAuth = class {
             });
             remoteRevoked = response.status === 200;
             if (remoteRevoked || response.status < 500 && response.status !== 429) break;
-            await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 200 : 700));
+            await new Promise((resolve2) => setTimeout(resolve2, attempt === 0 ? 200 : 700));
           }
         }
       } catch {
@@ -978,7 +1075,7 @@ function isRetryableFetchFailure(error) {
 }
 function waitForFetchRetry(signal) {
   if (signal.aborted) return Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve2, reject) => {
     let timeout;
     const onAbort = () => {
       clearTimeout(timeout);
@@ -986,7 +1083,7 @@ function waitForFetchRetry(signal) {
     };
     timeout = setTimeout(() => {
       signal.removeEventListener("abort", onAbort);
-      resolve();
+      resolve2();
     }, FETCH_FAILED_RETRY_INTERVAL_MS);
     signal.addEventListener("abort", onAbort, { once: true });
   });
@@ -1456,7 +1553,8 @@ var ChatGptResponsesAdapter = class {
         provider: "chatgpt-plan",
         protocol: "https+sse",
         endpoint: responsesUrl,
-        attempt
+        attempt,
+        providerMetadata: { "pico.chatgpt-plan.fastMode": body.service_tier === "priority" }
       }) ?? "";
       let settled = false;
       const settle = (summary) => {
@@ -1564,6 +1662,7 @@ function createChatGptPlanPlugin() {
   const callbackTimeouts = /* @__PURE__ */ new Map();
   const callbackOperations = /* @__PURE__ */ new Map();
   let auth = null;
+  let sharedOAuthSecrets = null;
   const closeCallbackServer = (server) => {
     const timeout = callbackTimeouts.get(server);
     if (timeout) clearTimeout(timeout);
@@ -1573,7 +1672,7 @@ function createChatGptPlanPlugin() {
       if (operation.server === server) callbackOperations.delete(operationId);
     }
     if (!server.listening) return Promise.resolve();
-    return new Promise((resolve) => server.close(() => resolve()));
+    return new Promise((resolve2) => server.close(() => resolve2()));
   };
   const completeCallback = async (operation, callback, retryExchange = false) => {
     if (operation.handlingCallback) {
@@ -1623,7 +1722,15 @@ function createChatGptPlanPlugin() {
     name: "ChatGPT plan provider",
     version: "0.1.0",
     activate(context) {
-      auth = new ChatGptPlanAuth(context.state, fetch, Date.now, context.secrets, context.cache);
+      const sharedOAuthPath = process.env.PICO_CHATGPT_OAUTH_DB_PATH?.trim() || (process.env.NODE_ENV === "production" ? join2(process.cwd(), "data", "chatgpt-oauth.sqlite") : null);
+      sharedOAuthSecrets = sharedOAuthPath ? createSharedChatGptOAuthSecrets(sharedOAuthPath, "pico.chatgpt-plan") : null;
+      auth = new ChatGptPlanAuth(
+        context.state,
+        fetch,
+        Date.now,
+        sharedOAuthSecrets ?? context.secrets ?? context.state,
+        context.cache
+      );
       const model = new ChatGptResponsesAdapter(auth);
       context.models.registerProvider(
         {
@@ -1718,12 +1825,12 @@ function createChatGptPlanPlugin() {
           });
         });
         callbackServers.add(server);
-        await new Promise((resolve, reject) => {
+        await new Promise((resolve2, reject) => {
           const onError = (error) => reject(error);
           server.once("error", onError);
           server.listen(0, "127.0.0.1", () => {
             server.removeListener("error", onError);
-            resolve();
+            resolve2();
           });
         });
         const address = server.address();
@@ -1802,6 +1909,8 @@ function createChatGptPlanPlugin() {
     async deactivate() {
       await Promise.all([...callbackServers].map((server) => closeCallbackServer(server)));
       auth = null;
+      sharedOAuthSecrets?.close();
+      sharedOAuthSecrets = null;
     }
   };
 }

@@ -796,11 +796,22 @@ function estimatePromptCharacters(turns: readonly PromptTurn[], limit: number): 
 function sanitizeRequestStart(details: ProviderRequestStart): ProviderRequestStart {
   const provider = diagnosticText(details.provider, 64);
   const protocol = diagnosticText(details.protocol, 64);
+  const providerMetadata = details.providerMetadata
+    ? Object.fromEntries(
+        Object.entries(details.providerMetadata)
+          .slice(0, 32)
+          .filter(
+            ([key, value]) =>
+              key.length <= 128 && /^[a-z0-9_-]+(?:\.[a-z0-9_-]+)+$/i.test(key) && typeof value === 'boolean',
+          ),
+      )
+    : undefined;
   return {
     provider: provider && /^[a-z0-9_.:-]+$/i.test(provider) ? provider : 'unknown',
     protocol: protocol && /^[a-z0-9_.:+-]+$/i.test(protocol) ? protocol : 'unknown',
     endpoint: diagnosticEndpoint(details.endpoint),
     attempt: Number.isSafeInteger(details.attempt) && details.attempt > 0 ? Math.min(details.attempt, 1000) : 1,
+    ...(providerMetadata && Object.keys(providerMetadata).length ? { providerMetadata } : {}),
   };
 }
 
@@ -1834,6 +1845,9 @@ export class PicoRuntime {
         protocol: typeof entry.detail.protocol === 'string' ? entry.detail.protocol : 'unknown',
         endpoint: typeof entry.detail.endpoint === 'string' ? entry.detail.endpoint : '',
         attempt: typeof entry.detail.attempt === 'number' ? entry.detail.attempt : 1,
+        ...(objectValue(entry.detail.providerMetadata)
+          ? { providerMetadata: objectValue(entry.detail.providerMetadata) as Record<string, boolean> }
+          : {}),
       });
       providerRequestsById.set(id, {
         id,

@@ -33,6 +33,8 @@ This is a hard gate, not a post-stop recovery step: the shell or user systemd ma
 
 `scripts/start-runtime.sh` changes to the project root and runs `npm start` in the foreground. It does not build artifacts, stop an existing Runtime, or daemonize itself. Let the host's process manager keep it running, or run it in a controlled host session. The production instance deployed for this change was started as a detached host process with output in `/tmp/pico-runtime-production.log`; that temporary log location is specific to the current launch.
 
+The ChatGPT plugin stores its OAuth secret in the dedicated `data/chatgpt-oauth.sqlite` database by default. Independent Runtimes that intentionally share this account must set `PICO_CHATGPT_OAUTH_DB_PATH` to the same file. The plugin serializes refreshes with a SQLite write lock, so only one Runtime rotates the shared refresh token at a time. Keep this database private and back it up like the Runtime database.
+
 For a routine restart:
 
 1. Finish or pause active Thread work, then check that the current listener belongs to this project with `ss -ltnp 'sport = :4173'` and inspect its working directory.
