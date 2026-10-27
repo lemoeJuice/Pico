@@ -638,7 +638,9 @@ export class PicoStore {
               workspacePath,
               modelSelection: options.modelSelection ?? null,
               toolOverrides: options.toolOverrides
-                ? Object.fromEntries(Object.entries(options.toolOverrides).sort(([left], [right]) => left.localeCompare(right)))
+                ? Object.fromEntries(
+                    Object.entries(options.toolOverrides).sort(([left], [right]) => left.localeCompare(right)),
+                  )
                 : null,
             }),
           )
@@ -1702,6 +1704,28 @@ export class PicoStore {
         )
         .all(threadId) as SqlRow[]
     ).map((row) => this.executionFromRow(row));
+  }
+
+  listRunningContainerExecutorWorkspacePaths(): string[] {
+    const rows = this.db
+      .prepare(
+        `
+      SELECT DISTINCT e.workspace_path, l.detail_json
+      FROM executions x
+      JOIN threads t ON t.id = x.thread_id
+      JOIN executors e ON e.id = t.executor_id
+      JOIN execution_log l ON l.execution_id = x.id AND l.kind = 'tool-source'
+      WHERE e.kind = 'container' AND x.kind = 'tool' AND x.status = 'running'
+    `,
+      )
+      .all() as SqlRow[];
+    return [
+      ...new Set(
+        rows
+          .filter((row) => json<Record<string, unknown>>(row.detail_json, {}).source === 'executor')
+          .map((row) => String(row.workspace_path)),
+      ),
+    ];
   }
 
   private executionFromRow(row: SqlRow): Execution {

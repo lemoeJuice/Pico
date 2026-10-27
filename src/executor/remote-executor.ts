@@ -300,6 +300,10 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     await Promise.allSettled(active.map((execution) => execution.promise));
   }
 
+  hasInFlightExecutionAt(endpointUrl: string): boolean {
+    return [...this.inFlight.values()].some((execution) => execution.address?.endpointUrl === endpointUrl);
+  }
+
   private async drive(
     executionId: string,
     binding: ExecutorBinding,

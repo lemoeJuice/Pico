@@ -18,6 +18,7 @@ const CONTAINER_NAME_PREFIX = process.env.PICO_CONTAINER_NAME?.trim() || 'pico-e
 const CONTAINER_PORT = 4174;
 const EXECUTOR_PATH = '/opt/pico/executor-agent.mjs';
 const DEFAULT_CONTAINER_IMAGE = 'docker.io/library/node:22-bookworm-slim';
+const CONTAINER_RESTART_COOLDOWN_MS = 30_000;
 
 interface SavedContainerConnection {
   port: number;
@@ -29,6 +30,12 @@ interface ContainerSetup {
   promise: Promise<void>;
   waiters: number;
   settled: boolean;
+}
+
+interface ContainerProbe {
+  reachable: boolean;
+  responded: boolean;
+  status?: number;
 }
 
 function abortError(): DOMException {
@@ -168,6 +175,7 @@ export class ContainerExecutor implements ExecutorAdapter {
   private readonly pluginDirectory: string;
   private readonly connectionPromises = new Map<string, Promise<SavedContainerConnection>>();
   private readonly setupPromises = new Map<string, ContainerSetup>();
+  private readonly restartAttempts = new Map<string, number>();
   private storageArgs: string[] | null = null;
 
   constructor(
@@ -323,6 +331,16 @@ export class ContainerExecutor implements ExecutorAdapter {
     await mkdir(this.pluginDirectory, { recursive: true });
     const saved = await this.connection(workspaceKey);
     const running = await this.inspectContainer(containerName, signal);
+    if (running.exists && running.running) {
+      const probe = await this.probeConnection(saved.port, saved.accessToken, signal);
+      if (!probe.reachable) {
+        if (probe.responded) {
+          throw new Error(`Container Executor endpoint returned HTTP ${probe.status ?? 'an error'}; restart skipped.`);
+        }
+        await this.restartAndRecover(workspace, workspaceKey, containerName, saved, signal);
+        return;
+      }
+    }
     if (!running.exists) {
       await this.callPodman(
         [
@@ -390,28 +408,114 @@ export class ContainerExecutor implements ExecutorAdapter {
     }
     if (!(await this.isReachable(saved.port, saved.accessToken, signal))) {
       await this.callPodman(
-        [
-          'exec',
-          '-d',
-          containerName,
-          'env',
-          'PICO_EXECUTOR_HOST=0.0.0.0',
-          `PICO_EXECUTOR_PORT=${CONTAINER_PORT}`,
-          `PICO_EXECUTOR_TOKEN=${saved.accessToken}`,
-          'PICO_EXECUTOR_WORKSPACE_ROOT=/workspace',
-          'PICO_EXECUTOR_DB_PATH=/opt/pico/data/executor.sqlite',
-          'PICO_EXECUTOR_PLUGIN_DIR=/opt/pico/executor-plugins',
-          `PICO_EXECUTOR_INSTALL_PATH=${EXECUTOR_PATH}`,
-          `PICO_EXECUTOR_VERSION_FILE=${versionPath}`,
-          `PICO_EXECUTOR_VERSION=${installedVersion}`,
-          'node',
-          EXECUTOR_PATH,
-        ],
+        this.agentLaunchArgs(containerName, saved.accessToken, versionPath, installedVersion),
         undefined,
         signal,
       );
       await this.waitUntilReachable(saved.port, saved.accessToken, signal);
     }
+  }
+
+  private async restartAndRecover(
+    workspace: string,
+    workspaceKey: string,
+    containerName: string,
+    saved: SavedContainerConnection,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const endpointUrl = `http://127.0.0.1:${saved.port}`;
+    if (await this.hasActiveExecutorTransaction(workspace, endpointUrl)) {
+      throw new Error(
+        'Container Executor connection timed out; restart skipped because an Executor transaction is active.',
+      );
+    }
+
+    const now = Date.now();
+    const previousAttempt = this.restartAttempts.get(workspaceKey);
+    if (previousAttempt !== undefined && now - previousAttempt < CONTAINER_RESTART_COOLDOWN_MS) {
+      const remainingSeconds = Math.ceil((CONTAINER_RESTART_COOLDOWN_MS - (now - previousAttempt)) / 1_000);
+      throw new Error(`Container Executor restart was attempted recently; retry in ${remainingSeconds} seconds.`);
+    }
+    this.restartAttempts.set(workspaceKey, now);
+
+    let restartError: unknown;
+    try {
+      await this.callPodman(['restart', containerName], undefined, signal);
+    } catch (error) {
+      if (signal.aborted) throw abortError();
+      restartError = error;
+    }
+
+    const state = await this.inspectContainer(containerName, signal);
+    if (!state.exists || !state.running) {
+      throw new Error(
+        `Container Executor restart did not leave the container running.${restartError ? ` ${message(restartError)}` : ''}`,
+      );
+    }
+
+    const afterRestart = await this.probeConnection(saved.port, saved.accessToken, signal);
+    if (afterRestart.reachable) {
+      this.restartAttempts.delete(workspaceKey);
+      return;
+    }
+    if (afterRestart.responded) {
+      throw new Error(`Container Executor returned HTTP ${afterRestart.status ?? 'an error'} after restart.`);
+    }
+
+    const versionPath = `${EXECUTOR_PATH}.version`;
+    if (!(await this.containerFileExists(containerName, EXECUTOR_PATH, signal))) {
+      throw new Error(
+        'Container restarted, but its existing Executor agent file is missing; automatic recovery stopped.',
+      );
+    }
+    const installedVersion = (await this.containerFileExists(containerName, versionPath, signal))
+      ? (await this.callPodman(['exec', containerName, 'cat', versionPath], undefined, signal)).stdout.trim() ||
+        'unknown'
+      : 'unknown';
+    await this.callPodman(
+      this.agentLaunchArgs(containerName, saved.accessToken, versionPath, installedVersion),
+      undefined,
+      signal,
+    );
+    await this.waitUntilReachable(saved.port, saved.accessToken, signal);
+    this.restartAttempts.delete(workspaceKey);
+  }
+
+  private async hasActiveExecutorTransaction(workspace: string, endpointUrl: string): Promise<boolean> {
+    if (this.client.hasInFlightExecutionAt(endpointUrl)) return true;
+    for (const workspacePath of this.store.listRunningContainerExecutorWorkspacePaths()) {
+      try {
+        if ((await realpath(workspacePath)) === workspace) return true;
+      } catch {
+        // A removed workspace cannot identify the live canonical container path.
+      }
+    }
+    return false;
+  }
+
+  private agentLaunchArgs(
+    containerName: string,
+    accessToken: string,
+    versionPath: string,
+    installedVersion: string,
+  ): string[] {
+    return [
+      'exec',
+      '-d',
+      containerName,
+      'env',
+      'PICO_EXECUTOR_HOST=0.0.0.0',
+      `PICO_EXECUTOR_PORT=${CONTAINER_PORT}`,
+      `PICO_EXECUTOR_TOKEN=${accessToken}`,
+      'PICO_EXECUTOR_WORKSPACE_ROOT=/workspace',
+      'PICO_EXECUTOR_DB_PATH=/opt/pico/data/executor.sqlite',
+      'PICO_EXECUTOR_PLUGIN_DIR=/opt/pico/executor-plugins',
+      `PICO_EXECUTOR_INSTALL_PATH=${EXECUTOR_PATH}`,
+      `PICO_EXECUTOR_VERSION_FILE=${versionPath}`,
+      `PICO_EXECUTOR_VERSION=${installedVersion}`,
+      'node',
+      EXECUTOR_PATH,
+    ];
   }
 
   private async inspectContainer(
@@ -445,15 +549,19 @@ export class ContainerExecutor implements ExecutorAdapter {
   }
 
   private async isReachable(port: number, accessToken: string, signal?: AbortSignal): Promise<boolean> {
+    return (await this.probeConnection(port, accessToken, signal)).reachable;
+  }
+
+  private async probeConnection(port: number, accessToken: string, signal?: AbortSignal): Promise<ContainerProbe> {
     try {
       const response = await fetch(`http://127.0.0.1:${port}/api/info`, {
         headers: { authorization: `Bearer ${accessToken}` },
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(500)]) : AbortSignal.timeout(500),
       });
-      return response.ok;
+      return { reachable: response.ok, responded: true, status: response.status };
     } catch {
       if (signal?.aborted) throw abortError();
-      return false;
+      return { reachable: false, responded: false };
     }
   }
 
