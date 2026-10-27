@@ -1043,10 +1043,16 @@ function modelExecutionProjectionThrough(execution: Execution): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) ? value : null;
 }
 
+function activePathRewindId(records: readonly CanonicalRecord[]): string | null {
+  const projection = runtimeConversationProjection(records);
+  return projection.historyBranches.find((branch) => branch.active)?.id ?? null;
+}
+
 function activePathModelExecutionIds(
   executions: readonly Execution[],
   records: readonly CanonicalRecord[],
   activePathRecordIds: ReadonlySet<string>,
+  activeRewindId: string | null,
 ): string[] {
   const recordsThrough = new Map<number, CanonicalRecord[]>();
   const recordsById = new Map(records.map((record) => [record.id, record]));
@@ -1055,12 +1061,13 @@ function activePathModelExecutionIds(
   for (const execution of executions) {
     if (execution.kind !== 'model') continue;
 
-    const assistantRecord =
-      execution.status === 'completed' ? recordsById.get(`${execution.id}:assistant`) : undefined;
+    const assistantRecord = execution.status === 'completed' ? recordsById.get(`${execution.id}:assistant`) : undefined;
     if (assistantRecord) {
       if (activePathRecordIds.has(assistantRecord.id)) activeExecutionIds.push(execution.id);
       continue;
     }
+
+    if (activeRewindId !== null && execution.arguments?.activePathRewindId !== activeRewindId) continue;
 
     const through = modelExecutionProjectionThrough(execution);
     if (through === null) continue;
@@ -1692,9 +1699,10 @@ export class PicoRuntime {
     const projection = runtimeConversationProjection(allRecords);
     const activePathRecords = projection.records;
     const activePathRecordIds = new Set(activePathRecords.map((record) => record.id));
-    const hasInactiveHistory = allRecords.some(
-      (record) => record.kind !== 'plugin' && !activePathRecordIds.has(record.id),
-    );
+    const activeRewindId = projection.historyBranches.find((branch) => branch.active)?.id ?? null;
+    const hasInactiveHistory =
+      activeRewindId !== null ||
+      allRecords.some((record) => record.kind !== 'plugin' && !activePathRecordIds.has(record.id));
     const page = this.store.listRecordPage(threadId, beforeSeq, THREAD_HISTORY_PAGE_SIZE);
     const executions = this.store.listSnapshotExecutions(threadId, page.records).map((execution) => {
       if (execution.kind !== 'model' || typeof execution.arguments?.model === 'string') return execution;
@@ -1705,7 +1713,7 @@ export class PicoRuntime {
         : execution;
     });
     const activePathExecutionIds = hasInactiveHistory
-      ? activePathModelExecutionIds(executions, allRecords, activePathRecordIds)
+      ? activePathModelExecutionIds(executions, allRecords, activePathRecordIds, activeRewindId)
       : null;
     return {
       thread: snapshotThread,
@@ -2314,6 +2322,7 @@ export class PicoRuntime {
     const projectionThrough = modelExecutionProjectionThrough(source);
     if (projectionThrough === null) throw new Error('This Model Execution has no saved projection boundary.');
     const records = this.store.listRecords(threadId);
+    const activeRewindId = activePathRewindId(records);
     if (!records.some((record) => record.kind === 'message' && record.seq <= projectionThrough)) {
       throw new Error('This Model Execution is not attached to a user message.');
     }
@@ -2349,6 +2358,7 @@ export class PicoRuntime {
       projectionThrough,
       source.id,
       this.threadModelSelection(threadId).model,
+      activeRewindId,
     );
     this.store.setPause(threadId, false);
     this.executionChanged(execution);
@@ -3372,6 +3382,7 @@ export class PicoRuntime {
       return;
     }
     const through = preparedProjection?.through ?? retryThrough ?? allRecords.at(-1)?.seq ?? 0;
+    const activeRewindId = activePathRewindId(allRecords);
     const projectionRecords =
       preparedProjection?.records ??
       allRecords.filter((record) => record.seq <= through).map((record) => deepFreeze(record));
@@ -3379,7 +3390,14 @@ export class PicoRuntime {
     const modelSelection = this.threadModelSelection(thread.id);
     const modelSettings = this.resolveModelSettings(modelSelection);
     if (!retryExecution) {
-      this.store.createModelExecution(modelExecutionId, thread.id, through, undefined, modelSettings.model);
+      this.store.createModelExecution(
+        modelExecutionId,
+        thread.id,
+        through,
+        undefined,
+        modelSettings.model,
+        activeRewindId,
+      );
     }
     const identified = this.store.setModelExecutionModel(modelExecutionId, modelSettings.model);
     this.executionChanged(identified);

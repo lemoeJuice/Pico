@@ -1367,6 +1367,7 @@ export class PicoStore {
     projectionThrough: number,
     retryOf?: string,
     model?: string,
+    activePathRewindId?: string | null,
   ): Execution {
     const now = isoNow();
     return this.transaction(() => {
@@ -1388,6 +1389,7 @@ export class PicoStore {
             projectionThrough,
             ...(retryOf ? { retryOf } : {}),
             ...(model?.trim() ? { model: model.trim() } : {}),
+            ...(activePathRewindId === undefined ? {} : { activePathRewindId }),
           }),
           now,
           now,
@@ -1400,6 +1402,7 @@ export class PicoStore {
           projectionThrough,
           ...(retryOf ? { retryOf } : {}),
           ...(model?.trim() ? { model: model.trim() } : {}),
+          ...(activePathRewindId === undefined ? {} : { activePathRewindId }),
         },
         now,
       );
