@@ -907,11 +907,6 @@ export class ChatGptResponsesAdapter {
       if (completedResponse.status !== 'incomplete' && result.toolCalls.length > 0) {
         result.finishReason = 'tool_calls';
       }
-      if (!result.content.trim() && result.toolCalls.length === 0) {
-        failureCategory = 'protocol';
-        failureCode = 'empty_output';
-        throw new Error('ChatGPT completed a response without text or tool calls.');
-      }
       // Deltas are transient until this complete result is returned to the Runtime.
       tracedRequest.settle({
         outcome: 'completed',

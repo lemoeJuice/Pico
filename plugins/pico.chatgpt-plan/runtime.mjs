@@ -1414,11 +1414,6 @@ var ChatGptResponsesAdapter = class {
       if (completedResponse.status !== "incomplete" && result.toolCalls.length > 0) {
         result.finishReason = "tool_calls";
       }
-      if (!result.content.trim() && result.toolCalls.length === 0) {
-        failureCategory = "protocol";
-        failureCode = "empty_output";
-        throw new Error("ChatGPT completed a response without text or tool calls.");
-      }
       tracedRequest.settle({
         outcome: "completed",
         durationMs: Date.now() - tracedRequest.startedAt,

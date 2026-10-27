@@ -360,7 +360,7 @@ describe('ChatGPT Responses adapter', () => {
     });
   });
 
-  it('rejects empty completed responses and function calls with unfinished arguments', async () => {
+  it('accepts empty completed responses and rejects function calls with unfinished arguments', async () => {
     const prompt: ModelPrompt = { system: '', model: 'selected-model', temperature: 0.2, turns: [], tools: [] };
     const auth = {
       accessToken: async () => 'oauth-access-token',
@@ -377,9 +377,11 @@ describe('ChatGPT Responses adapter', () => {
         ),
     );
     const emptyAdapter = new ChatGptResponsesAdapter(auth);
-    await expect(emptyAdapter.complete(prompt, new AbortController().signal, () => undefined)).rejects.toThrow(
-      'without text or tool calls',
-    );
+    await expect(emptyAdapter.complete(prompt, new AbortController().signal, () => undefined)).resolves.toMatchObject({
+      content: '',
+      toolCalls: [],
+      finishReason: 'stop',
+    });
 
     vi.stubGlobal(
       'fetch',
