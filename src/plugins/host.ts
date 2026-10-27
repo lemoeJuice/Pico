@@ -102,6 +102,8 @@ interface RegisteredPluginPage extends PluginPageContribution {
 export interface PluginContext extends Omit<PluginServices, 'models' | 'continuations' | 'threads'> {
   threads: Omit<PluginServices['threads'], 'updateTitle'> & {
     updateTitle(threadId: string, title: string): Thread;
+    /** Subscribe to Thread creation after initialization and before the created event is published. */
+    onCreated(listener: (thread: Thread) => void): () => void;
   };
   tools: {
     register(
@@ -239,6 +241,7 @@ export class PluginHost {
   private readonly routes: RegisteredPluginHttpRoute[] = [];
   private readonly activePlugins: PicoPlugin[] = [];
   private readonly subscriptions = new Map<string, Array<() => void>>();
+  private readonly threadCreatedListeners = new Map<string, Set<(thread: Thread) => void>>();
   private readonly continuations = new Map<string, (threadId: string) => boolean>();
   private readonly loadErrors: string[] = [];
   private readonly candidates = new Map<string, PluginCandidate>();
@@ -263,6 +266,12 @@ export class PluginHost {
 
   list(): LoadedPlugin[] {
     return [...this.loaded];
+  }
+
+  threadCreated(thread: Thread): void {
+    for (const listeners of this.threadCreatedListeners.values()) {
+      for (const listener of listeners) listener(thread);
+    }
   }
 
   catalog(): PluginCatalogEntry[] {
@@ -591,6 +600,20 @@ export class PluginHost {
       threads: {
         ...this.services.threads,
         updateTitle: (threadId, title) => this.services.threads.updateTitle(plugin.id, threadId, title),
+        onCreated: (listener) => {
+          let listeners = this.threadCreatedListeners.get(plugin.id);
+          if (!listeners) {
+            listeners = new Set();
+            this.threadCreatedListeners.set(plugin.id, listeners);
+          }
+          listeners.add(listener);
+          const unsubscribe = () => {
+            listeners?.delete(listener);
+            if (listeners?.size === 0) this.threadCreatedListeners.delete(plugin.id);
+          };
+          subscriptions.push(unsubscribe);
+          return unsubscribe;
+        },
         create: (projectId, executorKind, title, options = {}) =>
           this.services.threads.create(projectId, executorKind, title, {
             ...options,

@@ -21,6 +21,7 @@ describe('ChatGPT provider plugin', () => {
       ...unavailablePluginServices,
       threads: {
         ...unavailablePluginServices.threads,
+        onCreated: () => () => undefined,
         updateTitle: () => {
           throw new Error('not used by this test');
         },

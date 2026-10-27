@@ -97,6 +97,27 @@ export const permissionPlugin: PicoPlugin = {
 
     const readRules = (): PermissionRules => objectValue<PermissionRules>(state.get('rules', {}));
     const readApprovals = (): PermissionApprovals => objectValue<PermissionApprovals>(state.get('approvals', {}));
+    threads.onCreated((thread) => {
+      const parentThreadId = thread.parentThreadId;
+      if (!parentThreadId) return;
+      state.transaction(() => {
+        const rules = readRules();
+        if (!Object.hasOwn(rules, thread.id) && Object.hasOwn(rules, parentThreadId)) {
+          state.set('rules', { ...rules, [thread.id]: { ...rules[parentThreadId] } });
+        }
+        const autoReview = readAutoReview();
+        if (!Object.hasOwn(autoReview, thread.id) && Object.hasOwn(autoReview, parentThreadId)) {
+          state.set('autoReview', { ...autoReview, [thread.id]: autoReview[parentThreadId] });
+        }
+        const autoReviewDenials = readAutoReviewDenials();
+        if (!Object.hasOwn(autoReviewDenials, thread.id) && Object.hasOwn(autoReviewDenials, parentThreadId)) {
+          state.set('autoReviewDenials', {
+            ...autoReviewDenials,
+            [thread.id]: autoReviewDenials[parentThreadId],
+          });
+        }
+      });
+    });
     const writeDecision = (
       approval: PermissionApproval,
       status: Exclude<ApprovalStatus, 'pending'>,

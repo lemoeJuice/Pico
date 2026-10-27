@@ -1198,6 +1198,7 @@ export class PicoRuntime {
           } else if (!hadToolSettings) this.initializeThreadToolSettings(thread.id);
           if (!hadToolSettings && options.toolOverrides)
             this.applyThreadToolOverrides(thread.id, options.toolOverrides);
+          this.plugins.threadCreated(thread);
           this.publish({ type: 'thread.created', thread });
           return thread;
         },
@@ -1455,6 +1456,7 @@ export class PicoRuntime {
       modelSelection: this.defaultThreadModelSelection(),
     });
     if (!this.hasStoredThreadToolSettings(thread.id)) this.initializeThreadToolSettings(thread.id);
+    this.plugins.threadCreated(thread);
     this.publish({ type: 'thread.created', thread });
     return thread;
   }
@@ -1561,6 +1563,7 @@ export class PicoRuntime {
       modelSelection: this.defaultThreadModelSelection(),
     });
     if (!this.hasStoredThreadToolSettings(thread.id)) this.initializeThreadToolSettings(thread.id);
+    this.plugins.threadCreated(thread);
     this.publish({ type: 'thread.created', thread });
     return thread;
   }
