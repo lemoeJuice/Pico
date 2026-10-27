@@ -4514,29 +4514,32 @@ function estimateStreamTokenCount(text: string): number {
 
 function ComposerTps({ threadId, executionId }: { threadId: string; executionId: string | null }) {
   const draft = useAssistantDraftContent(threadId);
-  const activeText = executionId && draft?.executionId === executionId ? draft.text : '';
+  // The streamed draft carries the execution ID even if the latest snapshot has not caught up yet.
+  const liveExecutionId = executionId ?? (draft?.text ? draft.executionId : null);
+  const activeText = liveExecutionId && draft?.executionId === liveExecutionId ? draft.text : '';
   const hasActiveText = activeText.length > 0;
   const startedAt = useRef<{ executionId: string; time: number } | null>(null);
   const previousExecutionId = useRef<string | null>(null);
   const [now, setNow] = useState(() => performance.now());
   const [lastTps, setLastTps] = useState<number | null>(null);
 
-  if (previousExecutionId.current !== executionId) {
-    previousExecutionId.current = executionId;
+  if (previousExecutionId.current !== liveExecutionId) {
+    previousExecutionId.current = liveExecutionId;
     startedAt.current = null;
   }
-  if (executionId && hasActiveText && startedAt.current?.executionId !== executionId) {
-    startedAt.current = { executionId, time: performance.now() };
+  if (liveExecutionId && hasActiveText && startedAt.current?.executionId !== liveExecutionId) {
+    startedAt.current = { executionId: liveExecutionId, time: performance.now() };
   }
 
   useEffect(() => {
-    if (!executionId || !hasActiveText) return undefined;
+    if (!liveExecutionId || !hasActiveText) return undefined;
     setNow(performance.now());
     const timer = window.setInterval(() => setNow(performance.now()), 500);
     return () => window.clearInterval(timer);
-  }, [executionId, hasActiveText]);
+  }, [liveExecutionId, hasActiveText]);
 
-  const start = executionId && startedAt.current?.executionId === executionId ? startedAt.current.time : null;
+  const start =
+    liveExecutionId && startedAt.current?.executionId === liveExecutionId ? startedAt.current.time : null;
   const elapsedSeconds = start === null ? 0 : Math.max(0, (now - start) / 1_000);
   const currentTps =
     hasActiveText && elapsedSeconds > 0
@@ -4547,7 +4550,7 @@ function ComposerTps({ threadId, executionId }: { threadId: string; executionId:
     if (currentTps !== null && Number.isFinite(currentTps)) setLastTps(currentTps);
   }, [currentTps]);
 
-  const tps = executionId ? currentTps : lastTps;
+  const tps = liveExecutionId ? currentTps : lastTps;
   const label = tps === null ? 'TPS —' : `TPS ~${Math.round(tps)}`;
   return (
     <span
