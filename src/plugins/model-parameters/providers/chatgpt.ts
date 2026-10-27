@@ -8,7 +8,7 @@ function reasoningOptions(model: string): NonNullable<ModelParameterControl['opt
   const slug = model.toLowerCase();
   let values: readonly string[] = basicEfforts;
   if (/^gpt-6-astra(?:-|$)/.test(slug) || /^gpt-6\.1-sol(?:-|$)/.test(slug)) values = flagshipEfforts;
-  else if (/^gpt-6-(?:sol|luna)(?:-|$)/.test(slug) || /^gpt-5\.6-(?:sol|terra|luna)(?:-|$)/.test(slug)) {
+  else if (/^gpt-6-(?:sol|luna)(?:-|$)/.test(slug) || /^gpt-6\.1-terra(?:-|$)/.test(slug) || /^gpt-5\.6-(?:sol|terra|luna)(?:-|$)/.test(slug)) {
     values = fullEfforts;
   }
   return values.map((value) => ({ value, label: value === 'auto' ? 'Auto' : value.replace(/^./, (letter) => letter.toUpperCase()) }));
