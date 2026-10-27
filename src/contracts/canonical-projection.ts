@@ -426,7 +426,7 @@ export function runtimeConversationProjection(records: readonly CanonicalRecord[
         }
 
         const ownRecords: CanonicalRecord[] = [];
-        nodes.set(record.id, { parentProjectionId, throughSeq: targetSeq, ownRecords });
+        nodes.set(record.id, { parentProjectionId, targetRecordId, throughSeq: targetSeq, ownRecords });
         recordsByProjection.set(record.id, ownRecords);
         ownerByRecordId.set(record.id, record.id);
         ownRecords.push(record);
