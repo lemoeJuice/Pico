@@ -2432,18 +2432,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     hasInactiveHistory && !showPreservedHistory
       ? records.filter((record) => activePathRecordIds.has(record.id))
       : records;
-  const { groups: allExecutionGroups, groupedAssistantRecordIds } = modelExecutionGroups(timelineRecords, executions);
-  const executionGroups =
-    hasInactiveHistory && !showPreservedHistory
-      ? allExecutionGroups.filter((group) =>
-          group.variants.some(
-            (variant) =>
-              (variant.assistantRecord && activePathRecordIds.has(variant.assistantRecord.id)) ||
-              (!variant.assistantRecord &&
-                (variant.execution.status === 'failed' || variant.execution.status === 'interrupted')),
-          ),
-        )
-      : allExecutionGroups;
+  const activePathExecutionIds = new Set(activeSnapshot?.activePathExecutionIds ?? []);
+  const timelineExecutions =
+    hasInactiveHistory && !showPreservedHistory && activeSnapshot?.activePathExecutionIds
+      ? executions.filter((execution) => activePathExecutionIds.has(execution.id))
+      : executions;
+  const { groups: executionGroups, groupedAssistantRecordIds } = modelExecutionGroups(
+    timelineRecords,
+    timelineExecutions,
+  );
   const renderProjectThreads = (project: Project): ReactNode => {
     const projectThreads = threadsByProject[project.id];
     if (projectThreads === undefined) {

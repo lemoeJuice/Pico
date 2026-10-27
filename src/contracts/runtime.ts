@@ -14,6 +14,8 @@ export interface ThreadSnapshot {
   records: CanonicalRecord[];
   /** Full active projection membership, present when preserved inactive branches exist. */
   activePathRecordIds?: string[];
+  /** Model executions whose committed reply or input boundary belongs to the active path. */
+  activePathExecutionIds?: string[];
   hasInactiveHistory?: boolean;
   historyBranches?: HistoryBranchSummary[];
   executions: Execution[];

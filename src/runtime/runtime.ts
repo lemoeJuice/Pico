@@ -1043,6 +1043,39 @@ function modelExecutionProjectionThrough(execution: Execution): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) ? value : null;
 }
 
+function activePathModelExecutionIds(
+  executions: readonly Execution[],
+  records: readonly CanonicalRecord[],
+  activePathRecordIds: ReadonlySet<string>,
+): string[] {
+  const recordsThrough = new Map<number, CanonicalRecord[]>();
+  const recordsById = new Map(records.map((record) => [record.id, record]));
+  const activeExecutionIds: string[] = [];
+
+  for (const execution of executions) {
+    if (execution.kind !== 'model') continue;
+
+    const assistantRecord =
+      execution.status === 'completed' ? recordsById.get(`${execution.id}:assistant`) : undefined;
+    if (assistantRecord) {
+      if (activePathRecordIds.has(assistantRecord.id)) activeExecutionIds.push(execution.id);
+      continue;
+    }
+
+    const through = modelExecutionProjectionThrough(execution);
+    if (through === null) continue;
+    let projectedRecords = recordsThrough.get(through);
+    if (!projectedRecords) {
+      projectedRecords = runtimeConversationProjection(records.filter((record) => record.seq <= through)).records;
+      recordsThrough.set(through, projectedRecords);
+    }
+    const boundary = projectedRecords.filter((record) => record.kind !== 'plugin').at(-1);
+    if (boundary && activePathRecordIds.has(boundary.id)) activeExecutionIds.push(execution.id);
+  }
+
+  return activeExecutionIds;
+}
+
 export interface RuntimeOptions {
   model?: ModelAdapter;
   plugins?: PicoPlugin[];
@@ -1671,13 +1704,20 @@ export class PicoRuntime {
         ? { ...execution, arguments: { ...(execution.arguments ?? {}), model } }
         : execution;
     });
+    const activePathExecutionIds = hasInactiveHistory
+      ? activePathModelExecutionIds(executions, allRecords, activePathRecordIds)
+      : null;
     return {
       thread: snapshotThread,
       modelSelection: this.threadModelSelection(threadId),
       contextUsage,
       records: page.records.map(redactReasoningReplay),
       ...(hasInactiveHistory
-        ? { activePathRecordIds: [...activePathRecordIds], hasInactiveHistory: true }
+        ? {
+            activePathRecordIds: [...activePathRecordIds],
+            ...(activePathExecutionIds === null ? {} : { activePathExecutionIds }),
+            hasInactiveHistory: true,
+          }
         : { hasInactiveHistory: false }),
       historyBranches: projection.historyBranches,
       executions: executions.map(redactExecutionImages),
