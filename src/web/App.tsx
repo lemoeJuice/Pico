@@ -877,6 +877,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const composerModelProvider = settings?.provider ?? activeSnapshot?.modelSelection.provider;
   const composerModelContributions = uiContributionsAt(uiContributions, 'composer.model', composerModelProvider);
   const composerStatusContributions = uiContributionsAt(uiContributions, 'composer.status');
+  const activeModelExecutionId =
+    selectedThread && activeSnapshot?.thread.id === selectedThread.id
+      ? (activeSnapshot.executions.find(
+          (execution) =>
+            execution.kind === 'model' && (execution.status === 'pending' || execution.status === 'running'),
+        )?.id ?? null)
+      : null;
   const sidebarPanels = uiContributionsAt(uiContributions, 'sidebar.panel');
   const toolResultContributions = uiContributionsAt(uiContributions, 'tool.result');
   const newProjectWorkspacePath = newProjectPath || defaultWorkspace;
@@ -3202,6 +3209,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       Choose a model <ArrowRight size={12} aria-hidden="true" />
                     </button>
                   )}
+                  <ComposerTps
+                    key={selectedThread.id}
+                    threadId={selectedThread.id}
+                    executionId={activeModelExecutionId}
+                  />
                   {activeSnapshot?.thread.id === selectedThread.id && contextManagement ? (
                     <span
                       className="composer-context-usage"
@@ -4489,6 +4501,68 @@ function useAssistantDraftContent(threadId: string) {
   );
   const getSnapshot = useCallback(() => assistantDraftStore.getContent(threadId), [threadId]);
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+function estimateStreamTokenCount(text: string): number {
+  const pieces =
+    text.match(
+      /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]|[\p{L}\p{M}\p{N}]+|[^\s\p{L}\p{M}\p{N}]/gu,
+    ) ?? [];
+  return pieces.reduce((tokens, piece) => {
+    if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(piece)) return tokens + 1;
+    if (/[\p{L}\p{M}\p{N}]/u.test(piece)) return tokens + Math.max(1, Math.ceil([...piece].length / 4));
+    return tokens + 1;
+  }, 0);
+}
+
+function ComposerTps({ threadId, executionId }: { threadId: string; executionId: string | null }) {
+  const draft = useAssistantDraftContent(threadId);
+  const activeText = executionId && draft?.executionId === executionId ? draft.text : '';
+  const hasActiveText = activeText.length > 0;
+  const startedAt = useRef<{ executionId: string; time: number } | null>(null);
+  const previousExecutionId = useRef<string | null>(null);
+  const [now, setNow] = useState(() => performance.now());
+  const [lastTps, setLastTps] = useState<number | null>(null);
+
+  if (previousExecutionId.current !== executionId) {
+    previousExecutionId.current = executionId;
+    startedAt.current = null;
+  }
+  if (executionId && hasActiveText && startedAt.current?.executionId !== executionId) {
+    startedAt.current = { executionId, time: performance.now() };
+  }
+
+  useEffect(() => {
+    if (!executionId || !hasActiveText) return undefined;
+    setNow(performance.now());
+    const timer = window.setInterval(() => setNow(performance.now()), 500);
+    return () => window.clearInterval(timer);
+  }, [executionId, hasActiveText]);
+
+  const start = executionId && startedAt.current?.executionId === executionId ? startedAt.current.time : null;
+  const elapsedSeconds = start === null ? 0 : Math.max(0, (now - start) / 1_000);
+  const currentTps =
+    hasActiveText && elapsedSeconds > 0
+      ? estimateStreamTokenCount(activeText) / Math.max(0.5, elapsedSeconds)
+      : null;
+
+  useEffect(() => {
+    if (currentTps !== null && Number.isFinite(currentTps)) setLastTps(currentTps);
+  }, [currentTps]);
+
+  const tps = executionId ? currentTps : lastTps;
+  const label = tps === null ? 'TPS —' : `TPS ~${Math.round(tps)}`;
+  return (
+    <span
+      className="composer-tps"
+      title="Estimated output tokens per second from streamed text. The tokenizer varies by model; timing starts at the first visible text."
+      aria-label={
+        tps === null ? 'Estimated output speed unavailable' : `Estimated output speed ${Math.round(tps)} tokens per second`
+      }
+    >
+      {label}
+    </span>
+  );
 }
 
 function useAssistantExecutionId(threadId: string) {

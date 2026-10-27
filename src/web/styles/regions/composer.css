@@ -188,6 +188,13 @@
   white-space: nowrap;
   cursor: help;
 }
+.composer-meta .composer-tps {
+  flex: 0 0 auto;
+  color: #819184;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: help;
+}
 .setup-caption {
   background: none;
   border: 0;
