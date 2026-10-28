@@ -71,6 +71,32 @@ describe('snapshot refresh consistency', () => {
     expect(isRetryableSnapshotError(Object.assign(new Error('unauthorized'), { status: 401 }))).toBe(false);
   });
 
+  it('retries timeout errors and reports the triggering error, attempt, and delay', async () => {
+    const timeout = new DOMException('request timed out', 'TimeoutError');
+    const progress: Array<{ error: unknown; attempt: number; delayMs: number }> = [];
+    let requests = 0;
+    const snapshot = await fetchStableSnapshot(
+      async () => {
+        requests += 1;
+        if (requests === 1) throw timeout;
+        return { records: ['recovered'] };
+      },
+      () => 0,
+      () => true,
+      {
+        initialDelayMs: 17,
+        wait: async () => undefined,
+        onRetry: (event) => progress.push(event),
+      },
+    );
+
+    expect(isRetryableSnapshotError(timeout)).toBe(true);
+    expect(isRetryableSnapshotError(new DOMException('cancelled', 'AbortError'))).toBe(false);
+    expect(snapshot).toEqual({ records: ['recovered'] });
+    expect(requests).toBe(2);
+    expect(progress).toEqual([{ error: timeout, attempt: 1, delayMs: 17 }]);
+  });
+
   it('refreshes a Project thread list when creation races the request', async () => {
     let version = 0;
     let requests = 0;

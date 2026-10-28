@@ -40,6 +40,8 @@ import { upsertProjectThread } from './project-threads.js';
 import { updateProjectThreadList, updateThreadList, updateThreadSnapshot } from './thread-state.js';
 import { ThreadToolRequestGuard } from './thread-tool-requests.js';
 import { fetchStableSnapshot, snapshotForSelection, snapshotThreadIsSelected } from './snapshot-consistency.js';
+import { loadBootstrapResource } from './bootstrap-load.js';
+import { fetchWithGetTimeout } from './fetch-with-get-timeout.js';
 import { isNearScrollEnd } from './scroll-follow.js';
 import { threadCanBeInterrupted } from './thread-controls.js';
 import { executorStatusFromProbe } from './executor-status.js';
@@ -263,7 +265,7 @@ class HttpError extends Error {
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetchWithGetTimeout(path, {
     ...init,
     headers: { 'content-type': 'application/json', ...init?.headers },
   });
@@ -696,8 +698,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [threads, setThreads] = useState<Thread[]>([]);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<ThreadSnapshot | null>(null);
+  const [snapshotError, setSnapshotError] = useState<{ threadId: string; message: string } | null>(null);
+  const [snapshotRetry, setSnapshotRetry] = useState<{ threadId: string; attempt: number } | null>(null);
+  const [snapshotRefreshingThreadId, setSnapshotRefreshingThreadId] = useState<string | null>(null);
   const [preservedHistoryThreadId, setPreservedHistoryThreadId] = useState<string | null>(null);
   const [bootstrapping, setBootstrapping] = useState(true);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
+  const [modelCatalogLoaded, setModelCatalogLoaded] = useState(false);
+  const [bootstrapIssues, setBootstrapIssues] = useState<Record<string, { retrying: boolean; message: string }>>({});
+  const bootstrapRetryActions = useRef(new Map<string, () => void>());
   const [settings, setSettings] = useState<PublicSettings | null>(null);
   const [contextManagement, setContextManagement] = useState<ContextManagementSettings | null>(null);
   const [modelSelectionRightTarget, setModelSelectionRightTarget] = useState<HTMLSpanElement | null>(null);
@@ -1121,12 +1130,37 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     async (id: string) => {
       if (!snapshotThreadIsSelected(id, activeThreadId.current)) return;
       const requestNumber = ++snapshotRequest.current;
-      const value = await fetchStableSnapshot(
-        () => api<ThreadSnapshot>(`/api/threads/${encodeURIComponent(id)}`),
-        () => snapshotVersions.current.get(id) ?? 0,
-        () => requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current),
-      );
+      setSnapshotError(null);
+      setSnapshotRetry(null);
+      const refreshTimer = window.setTimeout(() => {
+        if (requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current)) {
+          setSnapshotRefreshingThreadId(id);
+        }
+      }, 600);
+      let value: ThreadSnapshot | null;
+      try {
+        value = await fetchStableSnapshot(
+          () => api<ThreadSnapshot>(`/api/threads/${encodeURIComponent(id)}`),
+          () => snapshotVersions.current.get(id) ?? 0,
+          () => requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current),
+          {
+            onRetry: ({ attempt }) => setSnapshotRetry({ threadId: id, attempt }),
+          },
+        );
+      } catch (caught) {
+        if (requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current)) {
+          setSnapshotRetry(null);
+          setSnapshotError({ threadId: id, message: caught instanceof Error ? caught.message : String(caught) });
+        }
+        throw caught;
+      } finally {
+        window.clearTimeout(refreshTimer);
+        if (requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current)) {
+          setSnapshotRefreshingThreadId(null);
+        }
+      }
       if (value && requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current)) {
+        setSnapshotRetry(null);
         observeModelExecutions(value.executions);
         for (const record of value.records) {
           if (
@@ -1213,67 +1247,88 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
   useEffect(() => {
     let alive = true;
-    void fetchStableSnapshot(
-      () =>
-        Promise.all([
-          api<Project[]>('/api/projects'),
-          api<PublicSettings>('/api/settings/model'),
-          api<ContextManagementSettings>('/api/settings/context-management'),
-          api<MiscellaneousSettings>('/api/settings/miscellaneous'),
-          api<Array<{ name: string; description: string; pluginId: string }>>('/api/commands'),
-          api<PluginInfo>('/api/plugins'),
-          api<{ defaultWorkspace: string }>('/api/info'),
-          api<RemoteExecutorConnectionView[]>('/api/executor-connections'),
-          api<ModelCatalogView>('/api/model-catalog'),
-          api<Record<string, PluginModelSelection>>('/api/plugins/model-selections'),
-        ]),
-      () => 0,
-      () => alive,
-    )
-      .then((bootstrap) => {
-        if (!alive || !bootstrap) return;
-        setBootstrapping(false);
-        const [
-          projectList,
-          modelSettings,
-          contextSettings,
-          miscellaneous,
-          commandList,
-          pluginResult,
-          info,
-          connections,
-          catalog,
-          pluginSelections,
-        ] = bootstrap;
-        setProjects(projectList);
-        setSettings(modelSettings);
-        setContextManagement(contextSettings);
-        setMiscellaneousSettings(miscellaneous);
-        setContextManagementForm({
-          contextWindowTokens: String(contextSettings.contextWindowTokens),
-          compactionThresholdTokens: String(contextSettings.compactionThresholdTokens),
-          keepRecentTokens: String(contextSettings.keepRecentTokens),
+    const load = <T,>(name: string, request: () => Promise<T>, apply: (result: T) => void, core = false): void => {
+      let generation = 0;
+      const run = (): void => {
+        const requestGeneration = ++generation;
+        if (core) setBootstrapping(true);
+        setBootstrapIssues((current) => {
+          const next = { ...current };
+          delete next[name];
+          return next;
         });
-        setModelCatalog(catalog);
-        setPluginModelSelections(pluginSelections);
-        setCommands(commandList);
-        setPluginInfo(pluginResult);
-        setDefaultWorkspace(info.defaultWorkspace);
-        setRemoteConnections(connections);
+        void loadBootstrapResource(
+          request,
+          () => alive && requestGeneration === generation,
+          (result) => {
+            apply(result);
+            if (core) setBootstrapping(false);
+            setBootstrapIssues((current) => {
+              const next = { ...current };
+              delete next[name];
+              return next;
+            });
+          },
+          (caught) => {
+            if (core) setBootstrapping(false);
+            setBootstrapIssues((current) => ({
+              ...current,
+              [name]: { retrying: false, message: caught instanceof Error ? caught.message : String(caught) },
+            }));
+          },
+          ({ error: caught }) => {
+            setBootstrapIssues((current) => ({
+              ...current,
+              [name]: { retrying: true, message: caught instanceof Error ? caught.message : String(caught) },
+            }));
+          },
+        );
+      };
+      bootstrapRetryActions.current.set(name, run);
+      run();
+    };
+    load(
+      'Projects',
+      () => api<Project[]>('/api/projects'),
+      (projectList) => {
+        setProjects(projectList);
+        setProjectsLoaded(true);
         const remembered = localStorage.getItem('pico.project');
         const initial = projectList.find((project) => project.id === remembered)?.id ?? projectList[0]?.id ?? null;
         setProjectId(initial);
         setExpandedProjectIds(new Set(initial ? [initial] : []));
         if (initial) localStorage.setItem('pico.project', initial);
-      })
-      .catch((caught: unknown) => {
-        if (alive) {
-          setBootstrapping(false);
-          setError(caught instanceof Error ? caught.message : String(caught));
-        }
-      });
+      },
+      true,
+    );
+    load('model settings', () => api<PublicSettings>('/api/settings/model'), setSettings);
+    load('context settings', () => api<ContextManagementSettings>('/api/settings/context-management'), (contextSettings) => {
+        setContextManagement(contextSettings);
+        setContextManagementForm({
+          contextWindowTokens: String(contextSettings.contextWindowTokens),
+          compactionThresholdTokens: String(contextSettings.compactionThresholdTokens),
+          keepRecentTokens: String(contextSettings.keepRecentTokens),
+        });
+    });
+    load('general settings', () => api<MiscellaneousSettings>('/api/settings/miscellaneous'), setMiscellaneousSettings);
+    load(
+      'commands',
+      () => api<Array<{ name: string; description: string; pluginId: string }>>('/api/commands'),
+      setCommands,
+    );
+    load('plugins', () => api<PluginInfo>('/api/plugins'), setPluginInfo);
+    load('workspace information', () => api<{ defaultWorkspace: string }>('/api/info'), (info) =>
+      setDefaultWorkspace(info.defaultWorkspace),
+    );
+    load('Executor connections', () => api<RemoteExecutorConnectionView[]>('/api/executor-connections'), setRemoteConnections);
+    load('model catalog', () => api<ModelCatalogView>('/api/model-catalog'), (catalog) => {
+      setModelCatalog(catalog);
+      setModelCatalogLoaded(true);
+    });
+    load('plugin model settings', () => api<Record<string, PluginModelSelection>>('/api/plugins/model-selections'), setPluginModelSelections);
     return () => {
       alive = false;
+      bootstrapRetryActions.current.clear();
     };
   }, []);
 
@@ -2653,7 +2708,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           <button
             className="icon-button small"
             aria-label="Create Project"
-            disabled={bootstrapping}
+            disabled={!projectsLoaded}
             title="Create Project"
             onClick={() => setNewProjectOpen(true)}
           >
@@ -2662,7 +2717,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         </div>
         <div className="thread-list">
           {projects.length === 0 ? (
-            <div className="sidebar-empty">No Projects yet. Create one to get started.</div>
+            <div className="sidebar-empty">
+              {bootstrapping ? 'Loading Projects…' : projectsLoaded ? 'No Projects yet. Create one to get started.' : 'Projects are unavailable.'}
+            </div>
           ) : null}
           {projects.map((project) => {
             const expanded = expandedProjectIds.has(project.id);
@@ -2799,6 +2856,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           </div>
           {selectedThread ? (
             <div className="topbar-status">
+              {activeSnapshot && snapshotRefreshingThreadId === selectedThread.id ? (
+                <span className="snapshot-refresh-status" role="status">
+                  <i className="tiny-spinner" aria-hidden="true" />
+                  {snapshotRetry?.threadId === selectedThread.id ? 'Retrying' : 'Updating'}
+                </span>
+              ) : null}
               <ExecutorPill thread={selectedThread} connected={executorConnected} error={executorError} />
             </div>
           ) : (
@@ -2871,6 +2934,20 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             <button onClick={() => setError('')}>Dismiss</button>
           </div>
         ) : null}
+        {Object.keys(bootstrapIssues).length ? (
+          <div className="banner banner-notice" role="status">
+            <span>
+              {Object.entries(bootstrapIssues)
+                .map(([name, issue]) => `${name}: ${issue.retrying ? 'retrying' : issue.message}`)
+                .join(' · ')}
+            </span>
+            <button type="button" className="bootstrap-retry" onClick={() => {
+              for (const name of Object.keys(bootstrapIssues)) bootstrapRetryActions.current.get(name)?.();
+            }}>
+              Retry now
+            </button>
+          </div>
+        ) : null}
         {activeNotice ? (
           <div
             className={`banner ${activeNoticeSeverity === 'error' ? 'banner-error' : 'banner-notice'}`}
@@ -2899,7 +2976,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             </p>
               {modelCatalog.instances.length > 0 || selectedProject ? (
               <div className="welcome-actions">
-                  {modelCatalog.instances.length > 0 && !selectedProject ? (
+                  {modelCatalog.instances.length > 0 && projectsLoaded && !selectedProject ? (
                   <button
                     className="button button-primary"
                     disabled={bootstrapping}
@@ -2919,7 +2996,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 ) : null}
               </div>
             ) : null}
-              {modelCatalog.instances.length === 0 ? (
+              {modelCatalogLoaded && modelCatalog.instances.length === 0 ? (
               <button className="welcome-settings button button-primary" onClick={() => setSettingsOpen(true)}>
                 <Settings size={14} aria-hidden="true" /> Configure a model connection
               </button>
@@ -3135,7 +3212,40 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     )}
                     {selectedThreadCompacting ? <ContextCompactionProgressCard /> : null}
                     <AssistantDraftMessage threadId={selectedThread.id} />
-                    {renderedRecords.length === 0 ? (
+                    {!activeSnapshot ? (
+                      <div className="empty-thread" role="status">
+                        {snapshotError?.threadId === selectedThread.id ? (
+                          <>
+                            <h2>Could not load this Thread</h2>
+                            <p>{snapshotError.message}</p>
+                            <button
+                              type="button"
+                              className="button button-soft"
+                              onClick={() => void loadSnapshot(selectedThread.id).catch(() => undefined)}
+                            >
+                              Retry
+                            </button>
+                          </>
+                        ) : snapshotRetry?.threadId === selectedThread.id ? (
+                          <>
+                            <h2>Still loading Thread history</h2>
+                            <p>Connection interrupted or slow. Retrying automatically (attempt {snapshotRetry.attempt}).</p>
+                            <button
+                              type="button"
+                              className="button button-soft"
+                              onClick={() => void loadSnapshot(selectedThread.id).catch(() => undefined)}
+                            >
+                              Retry now
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <i className="tiny-spinner thread-history-spinner" aria-hidden="true" />
+                            <h2>Loading Thread history…</h2>
+                          </>
+                        )}
+                      </div>
+                    ) : timeline.length === 0 ? (
                       <EmptyThreadPlaceholder
                         threadId={selectedThread.id}
                         executorName={executorLabel(selectedThread)}

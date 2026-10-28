@@ -626,6 +626,13 @@
   color: #88958a;
   text-align: center;
 }
+.tiny-spinner.thread-history-spinner {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  margin-bottom: 13px;
+  border-width: 2px;
+}
 .empty-orbit {
   display: grid;
   place-items: center;
