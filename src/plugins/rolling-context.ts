@@ -602,9 +602,10 @@ export const rollingContextPlugin: PicoPlugin = {
           throw new Error('Pause or wait for the Thread to reach an idle safe boundary before compacting.');
         await reconcile(thread, canonical.list(threadId), true);
         const segments = list(threadId);
+        const records = canonical.list(threadId);
         let warmed = 0;
         for (const item of segments) {
-          if (!item.summary || item.summaryStatus !== 'completed' || !canManualCompact(canonical.list(threadId), item))
+          if (!item.summary || item.summaryStatus !== 'completed' || !canManualCompact(records, item))
             continue;
           const updated = transition(item, 'warm', 'Explicit user fallback compact.');
           saveSegments(

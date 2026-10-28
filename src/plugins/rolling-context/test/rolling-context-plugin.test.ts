@@ -81,6 +81,23 @@ function sampleSegment(records = fullTurn): RollingSegment {
   };
 }
 
+function repeatedCompleteTurns(count: number): CanonicalRecord[] {
+  const records: CanonicalRecord[] = [];
+  for (let turnIndex = 0; turnIndex < count; turnIndex += 1) {
+    for (const item of fullTurn) {
+      const seq = turnIndex * fullTurn.length + item.seq;
+      records.push({
+        ...item,
+        id: `record-${seq}`,
+        seq,
+        createdAt: `2026-10-15T00:00:${String(seq).padStart(2, '0')}.000Z`,
+      });
+    }
+  }
+  records.push(record(count * fullTurn.length + 1, 'message', { role: 'user', source: 'user', content: 'Next turn.' }));
+  return records;
+}
+
 describe('Rolling Context plugin', () => {
   it('seals only complete full-turn blocks and keeps incomplete tool batches hot', () => {
     const incomplete = [
@@ -313,13 +330,12 @@ describe('Rolling Context plugin', () => {
     expect(contributions).toContain('rolling-context');
   });
 
-  it('keeps a segment hot automatically, then uses the panel action to warm its saved summary', async () => {
+  it('uses one canonical snapshot to check every segment during compact-all', async () => {
     const values = new Map<string, unknown>();
     const modelPurposes: string[] = [];
-    const records = [
-      ...fullTurn,
-      record(5, 'message', { role: 'user', source: 'user', content: 'Continue with the next request.' }),
-    ];
+    const segmentCount = 4;
+    const records = repeatedCompleteTurns(segmentCount);
+    let canonicalListReads = 0;
     const thread = { id: 'thread-1', projectId: 'project-1', state: 'idle' } as Thread;
     let projection:
       | ((
@@ -331,7 +347,10 @@ describe('Rolling Context plugin', () => {
     const context = {
       threads: { get: () => thread, pause: () => thread },
       canonical: {
-        list: () => records,
+        list: () => {
+          canonicalListReads += 1;
+          return [...records];
+        },
         append: (_threadId: string, payload: Record<string, unknown>) => {
           const audit = record(records.length + 1, 'plugin', payload);
           records.push(audit);
@@ -398,8 +417,11 @@ describe('Rolling Context plugin', () => {
     expect(automatic.provenance).toContainEqual(
       expect.objectContaining({ disposition: 'raw', canonicalStartSeq: 1, canonicalEndSeq: 4 }),
     );
+    expect(modelPurposes).toHaveLength(segmentCount);
     const action = compactAll as unknown as (request: { body: unknown }) => Promise<unknown>;
+    canonicalListReads = 0;
     await action({ body: { action: 'compact-all', threadId: thread.id } });
+    expect(canonicalListReads).toBe(2);
     const manual = await runProjection();
     expect(manual.turns[0]).toMatchObject({ kind: 'message', role: 'user' });
     expect(manual.turns[0]?.kind === 'message' && manual.turns[0].content).toContain(
@@ -408,7 +430,7 @@ describe('Rolling Context plugin', () => {
     expect(manual.provenance).toContainEqual(
       expect.objectContaining({ disposition: 'summary', canonicalStartSeq: 1, canonicalEndSeq: 4 }),
     );
-    expect(modelPurposes).toEqual(['rolling-summary']);
+    expect(modelPurposes).toHaveLength(segmentCount);
   });
 
   it('preserves the Runtime compaction prefix when projecting later turns', async () => {

@@ -1700,8 +1700,8 @@ export class PicoRuntime {
         }
       }
     }
-    const contextUsage = this.estimateContextUsage(thread);
     const allRecords = this.store.listRecords(threadId);
+    const contextUsage = this.estimateContextUsage(thread, allRecords);
     const projection = runtimeConversationProjection(allRecords);
     const activePathRecords = projection.records;
     const activePathRecordIds = new Set(activePathRecords.map((record) => record.id));
