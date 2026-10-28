@@ -288,6 +288,69 @@ describe('Runtime MCP manager', () => {
     }
   });
 
+  it('rolls back MCP config and secret changes together when any persistence step fails', async () => {
+    const store = new PicoStore(':memory:');
+    const { manager, events } = managerFor(store);
+    const originalSetPrivateSecret = store.setPrivateSecret.bind(store);
+    const originalSetSetting = store.setSetting.bind(store);
+    const originalDeletePrivateSecret = store.deletePrivateSecret.bind(store);
+    let failedCreateSecretKey: string | undefined;
+    try {
+      vi.spyOn(store, 'setPrivateSecret').mockImplementation(((owner: string, key: string, value: unknown) => {
+        failedCreateSecretKey = key;
+        originalSetPrivateSecret(owner, key, value);
+        throw new Error('injected private secret write failure');
+      }) as typeof store.setPrivateSecret);
+      await expect(
+        manager.create({
+          name: 'Create rollback',
+          transport: 'streamable-http',
+          url: 'https://mcp.example.test/create',
+          bearerToken: 'create-secret',
+        }),
+      ).rejects.toThrow('injected private secret write failure');
+      expect(store.getSetting('mcp-servers', [])).toEqual([]);
+      expect(failedCreateSecretKey).toEqual(expect.any(String));
+      expect(store.getPrivateSecret('pico.mcp', failedCreateSecretKey!, {})).toEqual({});
+      expect(events).toEqual([]);
+
+      vi.restoreAllMocks();
+      const existing = await manager.create({
+        name: 'Update rollback',
+        transport: 'streamable-http',
+        url: 'https://mcp.example.test/update',
+        bearerToken: 'old-secret',
+      });
+      vi.spyOn(store, 'setSetting').mockImplementation(((key: string, value: unknown) => {
+        originalSetSetting(key, value);
+        throw new Error('injected config write failure');
+      }) as typeof store.setSetting);
+      await expect(
+        manager.update(existing.id, {
+          name: 'Updated name',
+          transport: 'streamable-http',
+          url: existing.url!,
+          bearerToken: 'new-secret',
+        }),
+      ).rejects.toThrow('injected config write failure');
+      expect(store.getSetting('mcp-servers', [])).toMatchObject([{ id: existing.id, name: 'Update rollback' }]);
+      expect(store.getPrivateSecret('pico.mcp', existing.id, {})).toEqual({ bearerToken: 'old-secret' });
+
+      vi.restoreAllMocks();
+      vi.spyOn(store, 'deletePrivateSecret').mockImplementation(((owner: string, key: string) => {
+        originalDeletePrivateSecret(owner, key);
+        throw new Error('injected private secret delete failure');
+      }) as typeof store.deletePrivateSecret);
+      await expect(manager.delete(existing.id)).rejects.toThrow('injected private secret delete failure');
+      expect(store.getSetting('mcp-servers', [])).toMatchObject([{ id: existing.id, name: 'Update rollback' }]);
+      expect(store.getPrivateSecret('pico.mcp', existing.id, {})).toEqual({ bearerToken: 'old-secret' });
+    } finally {
+      vi.restoreAllMocks();
+      await manager.shutdown();
+      store.close();
+    }
+  });
+
   it('rejects credentials in URLs and removes tools when a managed connection closes', async () => {
     const store = new PicoStore(':memory:');
     const { manager, catalog, transports } = managerFor(store);

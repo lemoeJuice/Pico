@@ -695,8 +695,10 @@ export class McpManager {
       secret = { bearerToken: validated.bearerToken };
     }
     const configs = configList(this.store);
-    this.saveConfigs([...configs, config]);
-    this.saveSecret(id, secret);
+    this.store.transaction(() => {
+      this.saveConfigs([...configs, config]);
+      this.saveSecret(id, secret);
+    });
     const state = this.ensureState(id);
     state.status = 'stopped';
     state.lastError = null;
@@ -774,11 +776,13 @@ export class McpManager {
               confirmPrivateNetworkAccess: privateNetworkConfirmed,
               ...(privateNetworkConfirmed ? { confirmedPrivateNetworkOrigin: new URL(validated.url).origin } : {}),
             };
-      this.saveSecret(id, nextSecret);
       if (config.transport === 'stdio' && previousConsent === this.executionFingerprint(config)) {
         config.localExecutionFingerprint = previousConsent;
       }
-      this.saveConfigs(configList(this.store).map((item) => (item.id === id ? config : item)));
+      this.store.transaction(() => {
+        this.saveSecret(id, nextSecret);
+        this.saveConfigs(configList(this.store).map((item) => (item.id === id ? config : item)));
+      });
       this.publish(config);
       return this.view(config);
     });
@@ -789,8 +793,10 @@ export class McpManager {
     const stopPromise = this.stop(id);
     await this.enqueueTransition(id, async () => {
       await stopPromise;
-      this.saveConfigs(configList(this.store).filter((item) => item.id !== id));
-      this.store.deletePrivateSecret(MCP_SECRET_OWNER, id);
+      this.store.transaction(() => {
+        this.saveConfigs(configList(this.store).filter((item) => item.id !== id));
+        this.store.deletePrivateSecret(MCP_SECRET_OWNER, id);
+      });
       this.rebuildTools();
       this.onChange({ type: 'mcp.server.deleted', serverId: id });
     });
