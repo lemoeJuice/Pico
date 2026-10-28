@@ -1,6 +1,11 @@
 import { build } from 'esbuild';
 import { build as buildWebUi } from 'vite';
 
+const target = process.argv[2] ?? 'all';
+if (!['all', 'runtime', 'ui', 'chatgpt'].includes(target)) {
+  throw new Error(`Unknown plugin build target: ${target}`);
+}
+
 const plugins = [
   ['pico.auto-thread-title', 'src/plugins/auto-thread-title.ts', 'autoThreadTitlePlugin'],
   ['pico.collaboration', 'src/plugins/collaboration.ts', 'collaborationPlugin'],
@@ -17,7 +22,7 @@ const plugins = [
   ['pico.vision', 'src/plugins/vision.ts', 'visionPlugin'],
 ];
 
-for (const [pluginId, source, exportName] of plugins) {
+async function buildPluginRuntime(pluginId, source, exportName) {
   await build({
     entryPoints: [source],
     outfile: `plugins/${pluginId}/runtime.mjs`,
@@ -25,25 +30,42 @@ for (const [pluginId, source, exportName] of plugins) {
     platform: 'node',
     format: 'esm',
     target: 'node22',
-    // ws uses CommonJS internals such as EventEmitter. Keep it external so Node
-    // loads its package entry instead of an ESM bundle with dynamic require().
+    // Keep ws external because its CommonJS internals use EventEmitter.
     external: ['node:*', ...(pluginId === 'pico.qq-adapter' ? ['ws'] : [])],
     minify: false,
     footer: { js: `export { ${exportName} as default };` },
   });
 }
 
-await build({
-  entryPoints: ['src/plugins/chatgpt-plan.ts'],
-  outfile: 'plugins/pico.chatgpt-plan/runtime.mjs',
-  bundle: true,
-  platform: 'node',
-  format: 'esm',
-  target: 'node22',
-  external: ['node:*'],
-  minify: false,
-  footer: { js: 'export default createChatGptPlanPlugin();' },
-});
-await buildWebUi({ configFile: 'plugins/pico.chatgpt-plan/vite.config.ts' });
+async function buildChatgptRuntime() {
+  await build({
+    entryPoints: ['src/plugins/chatgpt-plan.ts'],
+    outfile: 'plugins/pico.chatgpt-plan/runtime.mjs',
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    target: 'node22',
+    external: ['node:*'],
+    minify: false,
+    footer: { js: 'export default createChatGptPlanPlugin();' },
+  });
+}
 
-await buildWebUi({ configFile: 'plugins/pico.openai-provider/vite.config.ts' });
+if (target === 'chatgpt') {
+  await buildChatgptRuntime();
+}
+
+if (target === 'all' || target === 'runtime') {
+  for (const [pluginId, source, exportName] of plugins) {
+    await buildPluginRuntime(pluginId, source, exportName);
+  }
+  await buildChatgptRuntime();
+}
+
+if (target === 'all' || target === 'ui' || target === 'chatgpt') {
+  await buildWebUi({ configFile: 'plugins/pico.chatgpt-plan/vite.config.ts' });
+}
+
+if (target === 'all' || target === 'ui') {
+  await buildWebUi({ configFile: 'plugins/pico.openai-provider/vite.config.ts' });
+}

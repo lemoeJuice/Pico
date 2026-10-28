@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from 'node:child_process';
+import { constants } from 'node:fs';
+import { cp } from 'node:fs/promises';
 import {
   chmodSync,
   closeSync,
@@ -26,6 +28,14 @@ import { networkInterfaces } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import { buildReleaseManifest, diagnoseChanges, readReleaseBaseline, writeReleaseBaseline } from './deploy/manifest.mjs';
+import { createSourceSnapshot, removeSourceSnapshot } from './deploy/snapshot.mjs';
+import { prepareWebPublication } from './deploy/publish-web.mjs';
+import { compareInstalledLock } from './deploy/dependencies.mjs';
+import { runtimeArtifactHashes } from './deploy/artifacts.mjs';
+import { selectDeploymentScope } from './deploy/selection.mjs';
 
 const projectRoot = realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
 const runtimeLauncher = path.join(projectRoot, 'scripts/start-runtime.sh');
@@ -33,6 +43,7 @@ const defaultLogPath = '/tmp/pico-runtime-production.log';
 const lockPath = path.join(projectRoot, '.pico-deploy.lock');
 const backupPrefix = '.pico-deploy-backup-';
 const manifestName = 'manifest.json';
+const releaseBaselinePath = path.join(projectRoot, '.pico-deploy-state.json');
 let receivedSignal;
 let shutdownStarted = false;
 
@@ -102,9 +113,9 @@ function acquireDeploymentLock() {
       closeSync(fd);
     }
     if (error?.code === 'EEXIST') {
-      throw new Error('Another deployment may be running, or .pico-deploy.lock is stale. Verify its PID before removing it.');
+      throw new Error('Another deployment may be running, or .pico-deploy.lock is stale. Verify its PID before removing it.', { cause: error });
     }
-    throw new Error('Could not create the deployment lock in the project root.');
+    throw new Error('Could not create the deployment lock in the project root.', { cause: error });
   }
 }
 
@@ -167,7 +178,7 @@ function isPicoProcess(pid, expectedStartTime) {
     );
   } catch (error) {
     if (error?.code === 'ENOENT' || error?.code === 'ESRCH') return false;
-    throw new Error(`Cannot verify process ${pid}; run as the Runtime owner and retry.`);
+    throw new Error(`Cannot verify process ${pid}; run as the Runtime owner and retry.`, { cause: error });
   }
 }
 
@@ -191,7 +202,7 @@ function normalizedAddress(address) {
 
 async function apiBaseUrl(runtimeEnvironment) {
   const bindHost = runtimeEnvironment.PICO_HOST || '127.0.0.1';
-  let connectHost = bindHost;
+  let connectHost;
   if (bindHost === '0.0.0.0') connectHost = '127.0.0.1';
   else if (bindHost === '::') connectHost = '::1';
   else if (bindHost.toLowerCase() === 'localhost') connectHost = '127.0.0.1';
@@ -272,16 +283,17 @@ function verifySystemdTokenSource(context, token) {
   }
 }
 
-async function restartSystemdUnit(context) {
+async function controlSystemdUnit(context, operation) {
+  if (!['stop', 'start'].includes(operation)) throw new Error('Unsupported systemd operation.');
   await new Promise((resolve, reject) => {
-    const child = spawn('systemctl', [...context.args, 'restart', context.unit], {
+    const child = spawn('systemctl', [...context.args, operation, context.unit], {
       detached: true,
       stdio: 'ignore',
     });
-    child.once('error', () => reject(new Error(`Could not start the systemd restart for ${context.unit}.`)));
+    child.once('error', () => reject(new Error(`Could not ${operation} systemd unit ${context.unit}.`)));
     child.once('exit', (code) => {
       if (code === 0) resolve();
-      else reject(new Error(`systemd could not restart ${context.unit}; inspect the unit and deployment state.`));
+      else reject(new Error(`systemd could not ${operation} ${context.unit}; inspect the unit and deployment state.`));
     });
   });
 }
@@ -430,18 +442,96 @@ async function confirmNoInFlightCommands() {
   }
 }
 
-function runBuild(scriptName) {
-  console.log(`开始构建：npm run ${scriptName}`);
-  const buildEnvironment = { ...process.env };
-  delete buildEnvironment.PICO_ACCESS_TOKEN;
-  const result = spawnSync('npm', ['run', scriptName], {
-    cwd: projectRoot,
-    env: buildEnvironment,
-    stdio: 'inherit',
+async function runNpm(args, sourceRoot, { quiet = false } = {}) {
+  const environment = { ...process.env };
+  // Tests and builds must never inherit a production DB, plugin directory,
+  // listener, credential, or production-only dependency installation mode.
+  for (const key of Object.keys(environment)) if (key.startsWith('PICO_')) delete environment[key];
+  delete environment.NODE_ENV;
+  await new Promise((resolve, reject) => {
+    const child = spawn('npm', args, { cwd: sourceRoot, env: environment, stdio: quiet ? ['ignore', 'ignore', 'inherit'] : 'inherit' });
+    child.once('error', () => reject(new Error(`Could not start npm ${args.join(' ')}.`)));
+    child.once('exit', (code, signal) => {
+      if (code === 0 && !signal) resolve();
+      else reject(new Error(`npm ${args.join(' ')} failed; production artifacts were not changed.`));
+    });
   });
   throwIfInterrupted();
-  if (result.error) throw new Error(`Could not start npm run ${scriptName}.`);
-  if (result.status !== 0) throw new Error(`npm run ${scriptName} failed; the existing Runtime was left running.`);
+}
+
+async function installSnapshotDependencies(sourceRoot) {
+  const comparison = compareInstalledLock(sourceRoot, projectRoot);
+  // Never let npm ci remove the production workspace's linked dependencies.
+  unlinkSync(path.join(sourceRoot, 'node_modules'));
+  if (comparison.matches) {
+    console.log('已安装依赖与锁文件一致；复制到隔离快照并校验依赖树。');
+    try {
+      await cp(path.join(projectRoot, 'node_modules'), path.join(sourceRoot, 'node_modules'), {
+        recursive: true,
+        verbatimSymlinks: true,
+        mode: constants.COPYFILE_FICLONE,
+        filter: (source) => {
+          const relativePath = path.relative(path.join(projectRoot, 'node_modules'), source);
+          return !['.cache', '.vite', '.vitest-cache'].includes(relativePath.split(path.sep)[0]);
+        },
+      });
+      const copied = compareInstalledLock(sourceRoot, sourceRoot);
+      if (!copied.matches) throw new Error(`Copied dependency inventory does not match the lock: ${copied.reason}`);
+      await runNpm(['ls', '--all', '--parseable'], sourceRoot, { quiet: true });
+      return;
+    } catch (error) {
+      throwIfInterrupted();
+      console.warn(`现有依赖树无法用于隔离构建，将尝试按锁文件安装：${error instanceof Error ? error.message : 'unknown error'}`);
+      rmSync(path.join(sourceRoot, 'node_modules'), { recursive: true, force: true });
+    }
+  } else {
+    console.log(`已安装依赖与锁文件不一致，将尝试在快照中安装：${comparison.reason}`);
+  }
+  console.log('按锁文件在快照中安装依赖。');
+  await runNpm(['ci', '--prefer-offline', '--no-audit', '--no-fund'], sourceRoot);
+}
+
+async function runBuild(scriptName, sourceRoot = projectRoot) {
+  console.log(`开始构建：npm run ${scriptName}`);
+  await runNpm(['run', scriptName], sourceRoot);
+}
+
+async function runTests(sourceRoot, { runtime = false, changedChecks = [] } = {}) {
+  const args = ['exec', '--', 'vitest', 'run'];
+  const tests = new Set(runtime
+    ? ['test/deploy-plan.test.ts', 'test/deploy-selection.test.ts', 'test/deploy-cli.test.ts', 'test/deploy-dependencies.test.ts', 'test/deploy-artifacts.test.ts', 'test/deploy-publish-web.test.ts', 'test/deploy-server.test.ts',
+      'test/server.test.ts', 'test/server-auth.test.ts', 'test/server-errors.test.ts',
+      'test/store.test.ts', 'test/plugin-host-lifecycle.test.ts']
+    : ['test/plugin-ui.test.ts', 'test/ui-contributions.test.ts', 'test/model-selection-ui.test.tsx']);
+  let fullSuite = false;
+  for (const check of changedChecks) {
+    if (check.action !== 'run-tests') continue;
+    if (/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(check.path) && existsSync(path.join(sourceRoot, check.path))) tests.add(check.path);
+    else fullSuite = true; // A changed helper, configuration, or deleted test can affect any suite.
+  }
+  if (!fullSuite) args.push(...tests);
+  console.log(fullSuite ? '测试辅助文件发生变化，运行完整测试。' : runtime ? '运行 Runtime 与部署相关测试。' : '运行前端相关测试。');
+  await runNpm(args, sourceRoot);
+}
+
+function installRuntimeArtifacts(sourceRoot) {
+  const required = ['dist/server/server.js', 'dist/executor-agent.mjs'];
+  for (const relativePath of required) {
+    if (!existsSync(path.join(sourceRoot, relativePath))) throw new Error(`Missing built artifact: ${relativePath}`);
+  }
+  const serverTarget = path.join(projectRoot, 'dist/server');
+  rmSync(serverTarget, { recursive: true, force: true });
+  cpSync(path.join(sourceRoot, 'dist/server'), serverTarget, { recursive: true });
+  cpSync(path.join(sourceRoot, 'dist/executor-agent.mjs'), path.join(projectRoot, 'dist/executor-agent.mjs'));
+  const plugins = path.join(sourceRoot, 'plugins');
+  for (const entry of readdirSync(plugins, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const built = path.join(plugins, entry.name, 'runtime.mjs');
+    if (!existsSync(built)) continue;
+    const target = path.join(projectRoot, 'plugins', entry.name, 'runtime.mjs');
+    mkdirSync(path.dirname(target), { recursive: true });
+    cpSync(built, target);
+  }
 }
 
 function buildArtifactPaths() {
@@ -639,7 +729,143 @@ async function verifyWebUi(baseUrl) {
   await response.body?.cancel();
 }
 
-async function deploy() {
+function availablePluginIds(root) {
+  return readdirSync(path.join(root, 'plugins'), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && existsSync(path.join(root, 'plugins', entry.name, 'webui', 'index.html')))
+    .map((entry) => entry.name).sort();
+}
+
+function parseOptions(args) {
+  const options = { plan: false, full: false, web: false, pluginIds: [], allPluginUis: false, checks: false, acceptWarnings: false };
+  const seen = new Set();
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--plugin-ui' || arg.startsWith('--plugin-ui=')) {
+      const id = arg === '--plugin-ui' ? args[++i] : arg.slice('--plugin-ui='.length);
+      if (!id || id.startsWith('--') || options.pluginIds.includes(id)) throw new Error('Provide a unique plugin ID after --plugin-ui.');
+      options.pluginIds.push(id);
+      continue;
+    }
+    const names = { '--plan': 'plan', '--full': 'full', '--web': 'web', '--all-plugin-uis': 'allPluginUis', '--checks': 'checks', '--accept-warnings': 'acceptWarnings' };
+    const name = names[arg];
+    if (!name || seen.has(arg)) throw new Error(`Unknown or repeated deployment option: ${arg}`);
+    seen.add(arg);
+    options[name] = true;
+  }
+  if (options.allPluginUis && options.pluginIds.length) throw new Error('Choose --all-plugin-uis or individual --plugin-ui options, not both.');
+  return options;
+}
+
+function showDiagnostics(diagnostic, baseline) {
+  if (!baseline) console.log('尚无可信发布清单，无法比较源码与已发布版本。');
+  else {
+    if (!diagnostic.targets.length) console.log('清单中没有已识别的发布源文件变化。');
+    for (const target of diagnostic.targets) {
+      console.log(`  差异 ${target.target}:`);
+      for (const file of target.paths) console.log(`    ${file}`);
+    }
+    for (const check of diagnostic.changedChecks ?? []) console.log(`  检查文件变化 ${check.path}: ${check.action}`);
+  }
+  for (const item of diagnostic.unknownPaths ?? []) console.log(`  未分类 ${item.path}: ${item.reason}`);
+  console.log('差异仅供核对；发布范围由调用者指定。');
+}
+
+function selectedPlan(selection, diagnostic, currentManifest, baseline) {
+  const scope = selection.scope;
+  const targetNames = scope.full ? Object.keys(currentManifest.targets).sort() : [
+    ...(scope.mainWeb ? ['web'] : []), ...scope.pluginIds.map((id) => `plugin-ui:${id}`),
+  ];
+  return {
+    scope,
+    initialRelease: scope.full && !baseline,
+    targets: targetNames.map((target) => ({ target })),
+    changedChecks: diagnostic.changedChecks ?? [],
+  };
+}
+
+function showSelection(selection) {
+  const scope = selection.scope;
+  if (scope.full) console.log('已选择：完整部署，需要等待任务空闲并确认停服。');
+  else if (scope.checks) console.log('已选择：仅运行检查。');
+  else console.log(`已选择：${[...(scope.mainWeb ? ['主 WebUI'] : []), ...scope.pluginIds.map((id) => `插件 UI ${id}`)].join('、')}；不重启 Runtime。`);
+  for (const warning of selection.warnings) console.warn(`范围提示：${warning}`);
+  for (const error of selection.errors) console.error(`无法执行：${error}`);
+  if (selection.blocked && selection.warnings.length) console.warn('审查以上提示后，可显式加 --accept-warnings 继续；脚本不会改变所选范围。');
+  else if (selection.warnings.length) console.warn('已按 --accept-warnings 接受范围提示，仍只执行明确选择的范围。');
+}
+
+function frontendPluginIds(sourceRoot, plan, full) {
+  if (full) {
+    return readdirSync(path.join(sourceRoot, 'plugins'), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && existsSync(path.join(sourceRoot, 'plugins', entry.name, 'webui', 'index.html')))
+      .map((entry) => entry.name).sort();
+  }
+  return plan.targets.filter((target) => target.target.startsWith('plugin-ui:'))
+    .map((target) => target.target.slice('plugin-ui:'.length));
+}
+
+function requireUnchangedPluginEntrypoints(snapshotManifest) {
+  const liveManifest = buildReleaseManifest(projectRoot);
+  const snapshotFiles = snapshotManifest.targets.runtime.files;
+  const liveFiles = liveManifest.targets.runtime.files;
+  const entries = new Set([...Object.keys(snapshotFiles), ...Object.keys(liveFiles)]
+    .filter((file) => /^plugins\/[^/]+\.mjs$/.test(file)));
+  if ([...entries].some((file) => snapshotFiles[file] !== liveFiles[file])) {
+    throw new Error('A live plugin entrypoint changed after the source snapshot; retry the deployment.');
+  }
+}
+
+async function verifyPublication(baseUrl, cookie, publication, pluginInfo) {
+  const registrations = [...(pluginInfo?.pages ?? []), ...(pluginInfo?.ui ?? [])];
+  const registered = new Set(registrations.filter((entry) => entry.entry === 'webui').map((entry) => entry.pluginId));
+  for (const url of publication.urls) {
+    const plugin = /^\/_pico\/plugin-ui\/([^/]+)\//.exec(url)?.[1];
+    if (plugin && !registered.has(plugin)) continue; // Disabled plugins have no accessible route.
+    const response = await fetchWithTimeout(`${baseUrl}${url}`, { headers: { cookie } });
+    if (!response.ok) throw new Error(`Published resource ${url} returned HTTP ${response.status}.`);
+    const contentType = response.headers.get('content-type') ?? '';
+    if ((url === '/' || url.endsWith('.html')) && !contentType.includes('text/html')) {
+      throw new Error(`Published resource ${url} has the wrong content type.`);
+    }
+    if (url.endsWith('.js') && !/(?:javascript|ecmascript)/i.test(contentType)) {
+      throw new Error(`Published resource ${url} has the wrong content type.`);
+    }
+    if (url.endsWith('.css') && !contentType.includes('text/css')) {
+      throw new Error(`Published resource ${url} has the wrong content type.`);
+    }
+    const digest = createHash('sha256').update(Buffer.from(await response.arrayBuffer())).digest('hex');
+    if (digest !== publication.hashes[url]) throw new Error(`Published resource ${url} does not match its build.`);
+  }
+}
+
+function updateBaseline(current, previous, plan, full, identity, publication) {
+  const targets = full ? current.targets : { ...previous.targets };
+  if (!full) for (const target of plan.targets) targets[target.target] = current.targets[target.target];
+  const publishedAssets = full ? {} : { ...(previous.publishedAssets ?? {}) };
+  if (plan.targets.some((target) => target.target === 'web') || full) publishedAssets.web = {};
+  for (const pluginId of publication.pluginIds) publishedAssets[`plugin-ui:${pluginId}`] = {};
+  for (const url of publication.urls) {
+    const plugin = /^\/_pico\/plugin-ui\/([^/]+)\//.exec(url)?.[1];
+    const group = plugin ? `plugin-ui:${plugin}` : 'web';
+    publishedAssets[group] ??= {};
+    publishedAssets[group][url] = publication.hashes[url];
+  }
+  return {
+    ...current,
+    targets,
+    publishedAssets,
+    runtimeArtifacts: full ? runtimeArtifactHashes(projectRoot) : previous.runtimeArtifacts,
+    runtimeIdentity: identity,
+    webReleaseId: publication.sharedReleaseId,
+    publishedAt: new Date().toISOString(),
+  };
+}
+
+async function deploy(plan, currentManifest, baseline, sourceRoot) {
+  const full = plan.scope.full;
+  const mainWeb = full || plan.scope.mainWeb;
+  const pluginIds = frontendPluginIds(sourceRoot, plan, full);
+  const releaseId = `${Date.now()}-${randomUUID()}`;
   const currentPids = listenerPids();
   if (currentPids.length !== 1) {
     throw new Error(`Expected one visible listener on port ${port}, found ${currentPids.length}; no process was changed.`);
@@ -662,14 +888,29 @@ async function deploy() {
   if (Number(runtimePort) !== port) {
     throw new Error(`The live Runtime uses port ${runtimePort}; set PICO_DEPLOY_PORT to that port and retry.`);
   }
-  if (!runtimeEnvironment.PATH) throw new Error('The live Runtime environment has no PATH; refusing to replace it.');
+  if (!runtimeEnvironment.PATH) throw new Error('The live Runtime environment has no PATH; refusing to deploy.');
   const systemdContext = getSystemdContext(oldPid, runtimeEnvironment);
-  if (systemdContext) verifySystemdTokenSource(systemdContext, token);
+  if (full && systemdContext) verifySystemdTokenSource(systemdContext, token);
+  if (runtimeEnvironment.PICO_PLUGIN_DIR && path.resolve(projectRoot, runtimeEnvironment.PICO_PLUGIN_DIR) !== path.join(projectRoot, 'plugins') && (full || pluginIds.length)) {
+    throw new Error('This Runtime uses a custom plugin directory; automatic plugin deployment does not manage that directory.');
+  }
+  if (!full && (baseline?.runtimeIdentity?.pid !== oldPid || baseline?.runtimeIdentity?.startTime !== oldStartTime)) {
+    throw new Error('The running Runtime does not match the verified deployment baseline; perform a complete deployment to establish it again.');
+  }
+  if (!full && (!baseline.runtimeArtifacts || !isDeepStrictEqual(runtimeArtifactHashes(projectRoot), baseline.runtimeArtifacts))) {
+    throw new Error('Runtime artifacts differ from the verified deployment baseline; perform a complete deployment to establish it again.');
+  }
+  if (!full && !mainWeb && !baseline?.webReleaseId) {
+    throw new Error('The deployed WebUI release is unknown; a complete deployment is required.');
+  }
 
   const baseUrl = await apiBaseUrl(runtimeEnvironment);
   let oldSession;
   let newSession;
   let artifactBackup;
+  let publication;
+  let publicationCommitted = false;
+  let publicationSucceeded = false;
   let oldProcessStopped = false;
   try {
     oldSession = await createSession(baseUrl, token);
@@ -677,7 +918,59 @@ async function deploy() {
     await verifyWebUi(baseUrl);
     const initialHealth = await getJson(baseUrl, oldSession, '/api/health');
     if (initialHealth?.ok !== true) throw new Error('The current Runtime health check did not return ok.');
+    if (full) {
+      const currentPlugins = await getJson(baseUrl, oldSession, '/api/plugins');
+      if (!Array.isArray(currentPlugins?.errors)) throw new Error('The current Runtime returned invalid plugin status.');
+      if (currentPlugins.errors.length > 0) {
+        throw new Error(`The current Runtime already reports ${currentPlugins.errors.length} plugin load issue(s); resolve them before replacement.`);
+      }
+    }
+    if (!full) {
+      if (!baseline.publishedAssets?.web?.['/']) throw new Error('The current WebUI release has no verified asset baseline; perform a complete deployment.');
+      const hashes = Object.assign({}, ...Object.values(baseline.publishedAssets));
+      const pluginInfo = await getJson(baseUrl, oldSession, '/api/plugins');
+      await verifyPublication(baseUrl, oldSession, { urls: Object.keys(hashes), hashes }, pluginInfo);
+    }
     console.log(`目标 Runtime 已确认：${runtimeEnvironment.PICO_HOST || '127.0.0.1'}:${port}（PID ${oldPid}）。`);
+
+    console.log('在隔离的源码快照中构建和检查；运行中的任务可以继续。');
+    await installSnapshotDependencies(sourceRoot);
+    const checkActions = new Set((plan.initialRelease ? [] : plan.changedChecks ?? []).map((check) => check.action));
+    if (checkActions.has('run-lint')) await runBuild('lint', sourceRoot);
+    if (full) {
+      await runBuild('build', sourceRoot);
+      await runTests(sourceRoot, { runtime: true, changedChecks: plan.initialRelease ? [] : plan.changedChecks });
+    } else {
+      await runBuild('typecheck', sourceRoot);
+      if (mainWeb) await runBuild('build:webui', sourceRoot);
+      if (pluginIds.length) await runBuild('build:plugins:ui', sourceRoot);
+      if (checkActions.has('run-tests')) await runBuild('plugins:build', sourceRoot);
+      await runTests(sourceRoot, { changedChecks: plan.changedChecks });
+    }
+    throwIfInterrupted();
+    publication = await prepareWebPublication({
+      sourceRoot,
+      targetRoot: projectRoot,
+      releaseId,
+      scope: { mainWeb, pluginIds },
+      sharedReleaseId: mainWeb ? releaseId : baseline.webReleaseId,
+    });
+    requirePicoListener(oldPid, oldStartTime);
+    throwIfInterrupted();
+    if (!full) {
+      await publication.commit();
+      publicationCommitted = true;
+      const pluginInfo = await getJson(baseUrl, oldSession, '/api/plugins');
+      await verifyPublication(baseUrl, oldSession, publication, pluginInfo);
+      const health = await getJson(baseUrl, oldSession, '/api/health');
+      if (health?.ok !== true) throw new Error('Runtime health check failed after WebUI publication.');
+      requirePicoListener(oldPid, oldStartTime);
+      throwIfInterrupted();
+      writeReleaseBaseline(releaseBaselinePath, updateBaseline(currentManifest, baseline, plan, false, { pid: oldPid, startTime: oldStartTime }, publication));
+      publicationSucceeded = true;
+      console.log(`前端发布完成：${releaseId}，Runtime PID ${oldPid} 未变化。`);
+      return;
+    }
 
     await waitForIdle(baseUrl, oldSession);
     throwIfInterrupted();
@@ -691,24 +984,8 @@ async function deploy() {
       throw new Error(`${lastActiveCount} Thread(s) became active before shutdown; the Runtime is still running.`);
     }
 
-    console.log('开始构建；构建失败时会恢复当前服务正在使用的构建产物。');
+    console.log('构建已完成；准备保留当前产物并替换 Runtime。');
     artifactBackup = backupBuildArtifacts(oldPid, oldStartTime);
-    try {
-      throwIfInterrupted();
-      runBuild('build');
-      runBuild('plugins:build:chatgpt');
-      requirePicoListener(oldPid, oldStartTime);
-      const activeAfterBuild = await getActiveThreadCount(baseUrl, oldSession);
-      throwIfInterrupted();
-      if (activeAfterBuild !== 0) {
-        throw new Error(`${activeAfterBuild} Thread(s) became active during the build; current artifacts will be restored.`);
-      }
-      writeBackupManifest(artifactBackup, 'built');
-    } catch (error) {
-      restoreBuildArtifacts(artifactBackup);
-      artifactBackup = undefined;
-      throw error;
-    }
 
     await confirmNoInFlightCommands();
     throwIfInterrupted();
@@ -717,6 +994,7 @@ async function deploy() {
     if (finalActiveCount !== 0) {
       throw new Error(`${finalActiveCount} Thread(s) became active before shutdown; current artifacts will be restored.`);
     }
+    requireUnchangedPluginEntrypoints(currentManifest);
 
     await revokeSession(baseUrl, oldSession, true);
     oldSession = undefined;
@@ -727,9 +1005,10 @@ async function deploy() {
     throwIfInterrupted();
     shutdownStarted = true;
     if (systemdContext) {
-      console.log(`通过 systemd 单元 ${systemdContext.unit} 重启 Runtime。`);
+      console.log(`通过 systemd 单元 ${systemdContext.unit} 停止 Runtime。`);
       try {
-        await restartSystemdUnit(systemdContext);
+        await controlSystemdUnit(systemdContext, 'stop');
+        await waitForOldRuntimeExit(oldPid, oldStartTime);
         oldProcessStopped = true;
       } catch (error) {
         oldProcessStopped = true;
@@ -741,13 +1020,26 @@ async function deploy() {
         throw error;
       }
     } else {
-      process.kill(oldPid, 'SIGTERM');
-      await waitForOldRuntimeExit(oldPid, oldStartTime);
-      oldProcessStopped = true;
+      try {
+        process.kill(oldPid, 'SIGTERM');
+        await waitForOldRuntimeExit(oldPid, oldStartTime);
+        oldProcessStopped = true;
+      } catch (error) {
+        oldProcessStopped = true;
+        try {
+          oldProcessStopped = !(listenerPids().includes(oldPid) && isPicoProcess(oldPid, oldStartTime));
+        } catch {
+          // Unknown service state must keep the backup for manual recovery.
+        }
+        throw error;
+      }
     }
     writeBackupManifest(artifactBackup, 'old-stopped');
 
-    throwIfInterrupted();
+    installRuntimeArtifacts(sourceRoot);
+    await publication.commit();
+    publicationCommitted = true;
+    if (systemdContext) await controlSystemdUnit(systemdContext, 'start');
     const child = systemdContext ? undefined : launchRuntime(runtimeEnvironment);
     const replacement = await waitForNewListener(oldPid, oldStartTime, child);
     requirePicoListener(replacement.pid, replacement.startTime);
@@ -761,17 +1053,22 @@ async function deploy() {
     await verifyWorkspace(baseUrl, newSession);
     const pluginInfo = await getJson(baseUrl, newSession, '/api/plugins');
     if (!Array.isArray(pluginInfo?.errors)) throw new Error('The replacement Runtime returned invalid plugin status.');
-    if (pluginInfo.errors.length > 0) {
-      console.warn(`Runtime is healthy, but plugin status reports ${pluginInfo.errors.length} load issue(s).`);
-    }
+    if (pluginInfo.errors.length > 0) throw new Error(`The replacement Runtime reports ${pluginInfo.errors.length} plugin load issue(s); the release baseline was not updated.`);
+    requireUnchangedPluginEntrypoints(currentManifest);
+    await verifyPublication(baseUrl, newSession, publication, pluginInfo);
     await revokeSession(baseUrl, newSession);
     newSession = undefined;
+    writeReleaseBaseline(releaseBaselinePath, updateBaseline(currentManifest, baseline, plan, true, replacement, publication));
+    publicationSucceeded = true;
     writeBackupManifest(artifactBackup, 'committed');
     discardBuildBackup(artifactBackup);
     artifactBackup = undefined;
     console.log(`部署完成：Runtime PID ${replacement.pid}，WebUI 与认证健康检查通过。日志：${logPath}`);
     if (receivedSignal) console.log(`部署期间收到 ${receivedSignal}；为避免服务停在中间状态，已完成替换。`);
   } finally {
+    if (publication && publicationCommitted && !publicationSucceeded && !oldProcessStopped) {
+      await publication.rollback().catch(() => console.error('Could not roll back WebUI entrypoints.'));
+    }
     if (artifactBackup) {
       try {
         if (oldProcessStopped) {
@@ -785,16 +1082,72 @@ async function deploy() {
     }
     if (oldSession) await revokeSession(baseUrl, oldSession);
     if (newSession) await revokeSession(baseUrl, newSession);
+    if (publication && !publicationCommitted) {
+      await publication.cleanupPrepared().catch(() => console.error('Could not remove an uncommitted WebUI release.'));
+    }
   }
 }
 
 async function main() {
+  const options = parseOptions(process.argv.slice(2));
+  const plugins = availablePluginIds(projectRoot);
+  if (options.allPluginUis) options.pluginIds = plugins;
+  const hasScope = options.full || options.web || options.pluginIds.length > 0 || options.checks;
+  if (options.plan && !hasScope) {
+    const baseline = readReleaseBaseline(releaseBaselinePath);
+    const currentManifest = buildReleaseManifest(projectRoot);
+    const diagnostic = diagnoseChanges({ currentManifest, baselineManifest: baseline });
+    showDiagnostics(diagnostic, baseline);
+    return;
+  }
+  if (!hasScope) throw new Error('Explicitly select --full, --web, --plugin-ui=<id>, --all-plugin-uis, or --checks.');
+  if (options.plan) {
+    const currentManifest = buildReleaseManifest(projectRoot);
+    const baseline = readReleaseBaseline(releaseBaselinePath);
+    const diagnostic = diagnoseChanges({ currentManifest, baselineManifest: baseline });
+    showDiagnostics(diagnostic, baseline);
+    const selection = selectDeploymentScope({ options, currentManifest, baselineManifest: baseline, availablePluginIds: plugins });
+    showSelection(selection);
+    if (selection.blocked) process.exitCode = 1;
+    return;
+  }
   const lock = acquireDeploymentLock();
+  let snapshot;
   try {
     recoverInterruptedBuilds();
-    await deploy();
+    const currentManifest = buildReleaseManifest(projectRoot);
+    const baseline = readReleaseBaseline(releaseBaselinePath);
+    const diagnostic = diagnoseChanges({ currentManifest, baselineManifest: baseline });
+    showDiagnostics(diagnostic, baseline);
+    const selection = selectDeploymentScope({ options, currentManifest, baselineManifest: baseline, availablePluginIds: plugins });
+    showSelection(selection);
+    if (selection.blocked) throw new Error('The selected scope needs review before it can be executed.');
+    const plan = selectedPlan(selection, diagnostic, currentManifest, baseline);
+    snapshot = await createSourceSnapshot(projectRoot);
+    const snapshotManifest = buildReleaseManifest(snapshot);
+    const comparable = (manifest) => ({
+      targets: Object.fromEntries(Object.entries(manifest.targets).map(([target, value]) => [target, value.files])),
+      checks: manifest.checks.files,
+      unknownPaths: manifest.unknownPaths,
+    });
+    if (!isDeepStrictEqual(comparable(snapshotManifest), comparable(currentManifest))) {
+      throw new Error('Source files changed while the deployment snapshot was created; retry deployment.');
+    }
+    if (plan.scope.checks) {
+      await installSnapshotDependencies(snapshot);
+      await runBuild('typecheck', snapshot);
+      await runBuild('plugins:build', snapshot);
+      await runNpm(['exec', '--', 'vitest', 'run'], snapshot);
+      console.log('检查完成，无需发布。');
+      return;
+    }
+    await deploy(plan, snapshotManifest, baseline, snapshot);
   } finally {
-    releaseDeploymentLock(lock);
+    try {
+      if (snapshot) await removeSourceSnapshot(snapshot);
+    } finally {
+      releaseDeploymentLock(lock);
+    }
   }
 }
 

@@ -163,8 +163,20 @@ async function servePluginUiAsset(runtime: PicoRuntime, request: Request, respon
   } catch {
     return notFound(response, 'Plugin UI asset not found');
   }
-  const location = runtime.plugins.webUiAssetLocation(pluginId, entry);
+  let location = runtime.plugins.webUiAssetLocation(pluginId, entry);
   if (!location) return notFound(response, 'Plugin UI asset not found');
+  const deployedPackageRoot = resolve(process.cwd(), 'dist', 'plugin-ui', pluginId);
+  const deployedAssetRoot = resolve(deployedPackageRoot, 'webui');
+  if (
+    location.pluginsRoot === resolve(process.cwd(), 'plugins') &&
+    existsSync(resolve(deployedAssetRoot, 'index.html'))
+  ) {
+    location = {
+      pluginsRoot: resolve(process.cwd(), 'dist', 'plugin-ui'),
+      packageRoot: deployedPackageRoot,
+      assetRoot: deployedAssetRoot,
+    };
+  }
 
   let safeRoot: string;
   let safeFile: string;
@@ -654,6 +666,18 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   if (production) {
     if (!existsSync(resolve(clientBuild, 'index.html')))
       throw new Error('Web build is missing. Run npm run build first.');
+    app.use('/releases/:releaseId', (request, response, next) => {
+      const releaseId = request.params.releaseId!;
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(releaseId)) return notFound(response, 'Web release not found');
+      express.static(resolve(clientBuild, 'releases', releaseId), { index: false, fallthrough: true })(
+        request,
+        response,
+        (error) => {
+          if (error && error.status !== 404) return next(error);
+          return notFound(response, 'Web release asset not found');
+        },
+      );
+    });
     app.use(express.static(clientBuild, { index: false }));
     app.use((request, response, next) => {
       if (request.path.startsWith('/api/')) return next();
