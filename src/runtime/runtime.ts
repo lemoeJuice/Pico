@@ -103,6 +103,7 @@ import {
   canonicalRecordsToPromptTurns,
   completedCanonicalModelInvocationBlocks,
   canonicalRewindThroughSeq,
+  omitConsumedThreadHistoryResults,
   projectThreadHistoryIo,
   runtimeCompactionTurn,
   runtimeContextCompaction,
@@ -2629,8 +2630,10 @@ export class PicoRuntime {
       );
     });
     const runtimeCompaction = activeRuntimeContextCompaction(modelProjectionRecords);
-    const projectedCanonicalRecords = canonicalConversationRecords(conversationProjection.records).filter(
-      (record) => !runtimeCompaction || record.seq > runtimeCompaction.contextThroughSeq,
+    const projectedCanonicalRecords = omitConsumedThreadHistoryResults(
+      canonicalConversationRecords(conversationProjection.records).filter(
+        (record) => !runtimeCompaction || record.seq > runtimeCompaction.contextThroughSeq,
+      ),
     );
     const compactionStartSeq = runtimeCompaction
       ? (modelProjectionRecords.find((record) => record.id === runtimeCompaction.sourceRecordIds[0])?.seq ?? 1)
@@ -3691,7 +3694,7 @@ export class PicoRuntime {
       ? createHash('sha256').update(canonicalHash).update(JSON.stringify(projectedPrefix.turns)).digest('hex')
       : canonicalHash;
     // Projected turns determine the safe boundary and request identity; the helper summarizes Canonical IO.
-    const sequenceIo = projectThreadHistoryIo(summarizedBlocks.flat()).records;
+    const sequenceIo = projectThreadHistoryIo(omitConsumedThreadHistoryResults(summarizedBlocks.flat())).records;
     const sourceText = [
       ...(!rebuildFromCanonical && previous
         ? [`Existing summary through Canonical seq ${previous.throughSeq}:\n${previous.summary}`]

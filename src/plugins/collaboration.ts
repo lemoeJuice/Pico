@@ -3,6 +3,26 @@ import type { Thread, ThreadModelSelection } from '../core/types.js';
 import type { CatalogSelection, CatalogModel, AdapterContribution } from '../contracts/model-catalog.js';
 import { projectThreadHistoryIo } from '../contracts/canonical-projection.js';
 
+const THREAD_HISTORY_MAX_RESULT_CHARS = 16_000;
+const THREAD_HISTORY_MAX_CHUNK_CHARS = 8_000;
+
+function jsonChars(value: unknown): number {
+  return JSON.stringify(value).length;
+}
+
+function historyRecordChunk(text: string, offset: number, requestedChars: number) {
+  const points = Array.from(text);
+  if (offset > points.length) throw new Error(`offset must be between 0 and ${points.length}.`);
+  const chunkChars = Math.min(requestedChars, THREAD_HISTORY_MAX_CHUNK_CHARS);
+  const chunk = points.slice(offset, offset + chunkChars).join('');
+  const nextOffset = offset + Array.from(chunk).length;
+  return {
+    chunk: { offset, total_chars: points.length, text: chunk },
+    next_offset: nextOffset < points.length ? nextOffset : null,
+    complete: nextOffset >= points.length,
+  };
+}
+
 type CollaborationServices = Pick<PluginContext, 'threads'>;
 type SpawnIndex = Record<
   string,
@@ -313,13 +333,16 @@ export const collaborationPlugin: PicoPlugin = {
       {
         name: 'read_thread_history',
         description:
-          'Read recent input/output records from a Thread in this Project, indexed by Canonical seq. Omit thread_id to read the current Thread. When attaching same-Thread history as a reference, use the returned seq value. Plugin records and diagnostic metadata are omitted. This does not wait for or change another Thread.',
+          'Read input/output records from a Thread in this Project, indexed by Canonical seq. Omit thread_id to read the current Thread. Each page is limited to 16,000 JSON characters. Use next_after_seq from the result to continue; use a smaller limit if the page is too large. Nested read_thread_history outputs are omitted to prevent repeated history expansion. For one oversized record, call again with record_seq, offset, and chunk_chars (up to 8,000) to read its JSON in chunks. A successful result is shown to the Model once; later requests receive a placeholder, so preserve useful findings and seq references or call this tool again. When attaching same-Thread history as a reference, use the returned seq value. Plugin records and diagnostic metadata are omitted. This does not wait for or change another Thread.',
         parameters: {
           type: 'object',
           properties: {
             thread_id: { type: 'string', minLength: 1 },
             after_seq: { type: 'integer', minimum: 0 },
             limit: { type: 'integer', minimum: 1, maximum: 100 },
+            record_seq: { type: 'integer', minimum: 1 },
+            offset: { type: 'integer', minimum: 0 },
+            chunk_chars: { type: 'integer', minimum: 1, maximum: THREAD_HISTORY_MAX_CHUNK_CHARS },
           },
           additionalProperties: false,
         },
@@ -331,17 +354,80 @@ export const collaborationPlugin: PicoPlugin = {
         const target = threads.get(targetId);
         if (!target || target.projectId !== sender.projectId)
           throw new Error('Target Thread must belong to the same Project');
-        const afterSeq =
-          typeof args.after_seq === 'number' && Number.isSafeInteger(args.after_seq) && args.after_seq >= 0
-            ? args.after_seq
-            : undefined;
+        const hasAfterSeq = Object.prototype.hasOwnProperty.call(args, 'after_seq');
+        if (
+          hasAfterSeq &&
+          (typeof args.after_seq !== 'number' || !Number.isSafeInteger(args.after_seq) || args.after_seq < 0)
+        ) {
+          throw new Error('after_seq must be a non-negative integer.');
+        }
+        const afterSeq = hasAfterSeq ? (args.after_seq as number) : undefined;
+        if (
+          Object.prototype.hasOwnProperty.call(args, 'limit') &&
+          (typeof args.limit !== 'number' || !Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > 100)
+        ) {
+          throw new Error('limit must be between 1 and 100.');
+        }
         const requestedLimit = typeof args.limit === 'number' && Number.isSafeInteger(args.limit) ? args.limit : 50;
         if (requestedLimit < 1 || requestedLimit > 100) throw new Error('limit must be between 1 and 100');
-        const records = context.canonical.read(target.id, {
+        const hasRecordSeq = Object.prototype.hasOwnProperty.call(args, 'record_seq');
+        if (
+          hasRecordSeq &&
+          (typeof args.record_seq !== 'number' || !Number.isSafeInteger(args.record_seq) || args.record_seq < 1)
+        ) {
+          throw new Error('record_seq must be a positive integer.');
+        }
+        const recordSeq = hasRecordSeq ? (args.record_seq as number) : undefined;
+        if (recordSeq !== undefined) {
+          if (afterSeq !== undefined || Object.prototype.hasOwnProperty.call(args, 'limit')) {
+            throw new Error('Use record_seq chunk arguments separately from after_seq and limit.');
+          }
+          const offset = typeof args.offset === 'number' ? args.offset : 0;
+          const chunkChars = typeof args.chunk_chars === 'number' ? args.chunk_chars : THREAD_HISTORY_MAX_CHUNK_CHARS;
+          if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('offset must be a non-negative integer.');
+          if (!Number.isSafeInteger(chunkChars) || chunkChars < 1 || chunkChars > THREAD_HISTORY_MAX_CHUNK_CHARS) {
+            throw new Error(`chunk_chars must be between 1 and ${THREAD_HISTORY_MAX_CHUNK_CHARS}.`);
+          }
+          const records = context.canonical.read(target.id, { afterSeq: recordSeq - 1, limit: 2 });
+          const record = records.find((candidate) => candidate.seq === recordSeq);
+          if (!record) throw new Error(`Canonical record ${recordSeq} was not found.`);
+          const projected = projectThreadHistoryIo([record]).records[0];
+          if (!projected) throw new Error(`Canonical record ${recordSeq} has no readable input/output.`);
+          const chunk = historyRecordChunk(JSON.stringify(projected), offset, chunkChars);
+          return { records: [{ seq: recordSeq, ...chunk }], has_more: chunk.next_offset !== null };
+        }
+        if (
+          Object.prototype.hasOwnProperty.call(args, 'offset') ||
+          Object.prototype.hasOwnProperty.call(args, 'chunk_chars')
+        ) {
+          throw new Error('offset and chunk_chars require record_seq.');
+        }
+
+        const scanRecords = context.canonical.read(target.id, {
           ...(afterSeq === undefined ? {} : { afterSeq }),
-          limit: requestedLimit,
+          limit: requestedLimit + 1,
         });
-        return projectThreadHistoryIo(records);
+        const pageRecords = scanRecords.slice(0, requestedLimit);
+        const result = {
+          records: projectThreadHistoryIo(pageRecords).records,
+          next_after_seq: pageRecords.at(-1)?.seq ?? afterSeq ?? 0,
+          has_more: scanRecords.length > requestedLimit,
+        };
+        const resultChars = jsonChars(result);
+        if (resultChars > THREAD_HISTORY_MAX_RESULT_CHARS) {
+          const oversized = result.records.find(
+            (record) => jsonChars({ records: [record] }) > THREAD_HISTORY_MAX_RESULT_CHARS,
+          );
+          if (oversized) {
+            throw new Error(
+              `History record at seq ${oversized.seq} exceeds the ${THREAD_HISTORY_MAX_RESULT_CHARS}-character result limit by itself. Read it in chunks with record_seq=${oversized.seq}, offset=0, and chunk_chars=${THREAD_HISTORY_MAX_CHUNK_CHARS}; do not retry the same page unchanged.`,
+            );
+          }
+          throw new Error(
+            `History page exceeds the ${THREAD_HISTORY_MAX_RESULT_CHARS}-character result limit. No records were returned. Retry with a smaller limit and the same starting cursor after_seq=${afterSeq ?? 0}; do not retry the same request unchanged.`,
+          );
+        }
+        return result;
       },
     );
 

@@ -123,8 +123,8 @@ export function projectThreadHistoryIo(value: unknown, depth = 0): { records: Ar
     } else if (record.kind === 'tool_result') {
       const toolName = typeof payload.toolName === 'string' ? payload.toolName : 'unknown';
       const result =
-        toolName === 'read_thread_history' && depth < 8
-          ? projectThreadHistoryIo(payload.result, depth + 1)
+        toolName === 'read_thread_history'
+          ? { omitted: 'Nested read_thread_history results are available by calling the tool directly.' }
           : sanitizeMultimodalResultValue(payload.result ?? null);
       projected.output = {
         tool: toolName,
@@ -138,8 +138,11 @@ export function projectThreadHistoryIo(value: unknown, depth = 0): { records: Ar
       if ('output' in record) {
         const output = recordObject(record.output);
         projected.output =
-          output.tool === 'read_thread_history' && depth < 8 && 'result' in output
-            ? { ...output, result: projectThreadHistoryIo(output.result, depth + 1) }
+          output.tool === 'read_thread_history' && 'result' in output
+            ? {
+                ...output,
+                result: { omitted: 'Nested read_thread_history results are available by calling the tool directly.' },
+              }
             : sanitizeMultimodalResultValue(record.output);
       }
     }
@@ -147,6 +150,33 @@ export function projectThreadHistoryIo(value: unknown, depth = 0): { records: Ar
     if ('input' in projected || 'output' in projected) records.push(projected);
   }
   return { records };
+}
+
+/** Hide successful history reads after a later Model response has seen them once. */
+export function omitConsumedThreadHistoryResults(records: readonly CanonicalRecord[]): CanonicalRecord[] {
+  const consumedThrough = records.reduce((latest, record) => {
+    if (record.kind !== 'assistant') return latest;
+    const payload = recordObject(record.payload);
+    return Number.isSafeInteger(payload.projectionThrough)
+      ? Math.max(latest, payload.projectionThrough as number)
+      : latest;
+  }, 0);
+  if (consumedThrough === 0) return [...records];
+  return records.map((record) => {
+    if (record.kind !== 'tool_result' || record.seq > consumedThrough) return record;
+    const payload = recordObject(record.payload);
+    if (payload.toolName !== 'read_thread_history' || payload.status !== 'completed') return record;
+    return {
+      ...record,
+      payload: {
+        ...payload,
+        result: {
+          omitted:
+            'This history result was already provided to the Model. Call read_thread_history again to inspect it.',
+        },
+      },
+    };
+  });
 }
 
 function reasoningContent(payload: AssistantPayload): string | undefined {

@@ -44,6 +44,16 @@ function setup() {
   const routes = new Map<string, (request: { body: unknown; query: URLSearchParams }) => unknown>();
   const stateMap = new Map<string, unknown>();
   const pipelines = new ExecutionPipelines();
+  const canonicalRecords = [
+    {
+      id: 'record-1',
+      threadId: parent.id,
+      seq: 1,
+      kind: 'message' as const,
+      payload: { role: 'assistant', content: 'Result is verified.', source: 'agent' },
+      createdAt: '2026-01-01T00:00:01.000Z',
+    },
+  ];
   const sent = new Map<string, { sender: string; target: string; content: string }>();
   const createByKey = new Map<string, Thread>();
   let idCount = 0;
@@ -127,16 +137,11 @@ function setup() {
       subscribe: () => () => undefined,
     },
     canonical: {
-      read: (threadId: string) => [
-        {
-          id: 'record-1',
-          threadId,
-          seq: 1,
-          kind: 'message',
-          payload: { role: 'assistant', content: 'Result is verified.', source: 'agent' },
-          createdAt: '2026-01-01T00:00:01.000Z',
-        },
-      ],
+      read: (threadId: string, options: { afterSeq?: number; limit?: number } = {}) =>
+        canonicalRecords
+          .filter((record) => record.seq > (options.afterSeq ?? 0))
+          .map((record) => ({ ...record, threadId }))
+          .slice(0, options.limit ?? 100),
       list: () => [],
       append: () => {
         throw new Error('unused');
@@ -145,7 +150,7 @@ function setup() {
     },
   } as unknown as PluginContext;
   void collaborationPlugin.activate?.(context);
-  return { parent, threadsById, tools, routes, sent, pipelines, stateMap, selectionByThread };
+  return { parent, threadsById, tools, routes, sent, pipelines, stateMap, selectionByThread, canonicalRecords };
 }
 
 describe('Collaboration plugin', () => {
@@ -182,11 +187,35 @@ describe('Collaboration plugin', () => {
     ]);
     expect(await env.tools.get('read_thread_history')!({ thread_id: first.threadId }, toolContext)).toMatchObject({
       records: [expect.objectContaining({ seq: 1, output: 'Result is verified.' })],
+      next_after_seq: 1,
+      has_more: false,
     });
     expect(await env.tools.get('read_thread_history')!({}, toolContext)).toMatchObject({
       records: [expect.objectContaining({ seq: 1, output: 'Result is verified.' })],
     });
     await expect(spawn({ prompt: 'Different task' }, toolContext)).rejects.toThrow('already used');
+  });
+
+  it('bounds history pages and returns oversized records in bounded chunks', async () => {
+    const env = setup();
+    const oversized = 'a'.repeat(20_000);
+    env.canonicalRecords[0]!.payload = { role: 'assistant', content: oversized, source: 'agent' };
+    const read = env.tools.get('read_thread_history')!;
+    const toolContext = { thread: env.parent, executionId: 'read-large' };
+
+    expect(() => read({ after_seq: -1 }, toolContext)).toThrow('after_seq must be a non-negative integer');
+    expect(() => read({ offset: 1 }, toolContext)).toThrow('offset and chunk_chars require record_seq');
+    expect(() => read({}, toolContext)).toThrow(/record at seq 1 exceeds.*record_seq=1.*chunk_chars=8000/);
+    const first = read({ record_seq: 1, offset: 0, chunk_chars: 8_000 }, toolContext) as {
+      records: Array<{ chunk: { text: string; offset: number; total_chars: number }; next_offset: number | null }>;
+    };
+    expect(first.records[0]?.chunk).toMatchObject({ offset: 0, total_chars: expect.any(Number) });
+    expect(first.records[0]?.chunk.text.length).toBeLessThanOrEqual(8_000);
+    expect(first.records[0]?.next_offset).toBeGreaterThan(0);
+    const second = read({ record_seq: 1, offset: first.records[0]!.next_offset!, chunk_chars: 8_000 }, toolContext) as {
+      records: Array<{ chunk: { offset: number } }>;
+    };
+    expect(second.records[0]?.chunk.offset).toBe(first.records[0]!.next_offset);
   });
 
   it('rejects messages outside the Project and exposes safe child management routes', async () => {

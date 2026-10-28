@@ -1,6 +1,10 @@
 import { expect, it } from 'vitest';
 import type { CanonicalRecord } from '../src/core/types.js';
-import { completedCanonicalModelInvocationBlocks } from '../src/contracts/canonical-projection.js';
+import {
+  completedCanonicalModelInvocationBlocks,
+  omitConsumedThreadHistoryResults,
+  projectThreadHistoryIo,
+} from '../src/contracts/canonical-projection.js';
 
 function record(seq: number, kind: CanonicalRecord['kind'], payload: Record<string, unknown>): CanonicalRecord {
   return {
@@ -33,7 +37,11 @@ it('keeps complete assistant and tool-result invocation batches together', () =>
     record(9, 'assistant', { toolCalls: [], batchId: null, content: 'third response' }),
   ]);
 
-  expect(blocks.map((block) => block.map((item) => item.seq))).toEqual([[1, 2], [4, 5, 6, 7], [8, 9]]);
+  expect(blocks.map((block) => block.map((item) => item.seq))).toEqual([
+    [1, 2],
+    [4, 5, 6, 7],
+    [8, 9],
+  ]);
 });
 
 it('does not expose an incomplete or mismatched tool batch as a compaction boundary', () => {
@@ -55,4 +63,45 @@ it('does not expose an incomplete or mismatched tool batch as a compaction bound
   expect(
     completedCanonicalModelInvocationBlocks(records.slice(0, 4)).map((block) => block.map((item) => item.seq)),
   ).toEqual([[1, 2]]);
+});
+
+it('keeps a history result for its first response and hides it after the consuming response', () => {
+  const source = record(2, 'tool_result', {
+    batchId: 'batch-1',
+    toolCallId: 'call-a',
+    toolName: 'read_thread_history',
+    status: 'completed',
+    result: { records: [{ seq: 1, output: 'large history' }] },
+  });
+  const firstProjection = omitConsumedThreadHistoryResults([source]);
+  expect(firstProjection[0]?.payload).toMatchObject({ result: { records: [{ output: 'large history' }] } });
+
+  const laterProjection = omitConsumedThreadHistoryResults([
+    source,
+    record(3, 'assistant', { projectionThrough: 2, toolCalls: [], content: 'I reviewed it.' }),
+  ]);
+  expect(laterProjection[0]?.payload).toMatchObject({
+    result: { omitted: expect.stringContaining('already provided') },
+  });
+  expect(source.payload).toMatchObject({ result: { records: [{ output: 'large history' }] } });
+});
+
+it('does not recursively expand history results read from another Thread', () => {
+  const nested = record(2, 'tool_result', {
+    batchId: 'batch-1',
+    toolCallId: 'call-a',
+    toolName: 'read_thread_history',
+    status: 'completed',
+    result: { records: [{ seq: 1, output: 'nested bulk data' }] },
+  });
+  expect(projectThreadHistoryIo([nested]).records).toEqual([
+    {
+      seq: 2,
+      output: {
+        tool: 'read_thread_history',
+        status: 'completed',
+        result: { omitted: expect.stringContaining('Nested read_thread_history') },
+      },
+    },
+  ]);
 });
