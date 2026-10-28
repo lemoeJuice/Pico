@@ -1,10 +1,11 @@
+import { projectContextPlugin } from '../../project-context.js';
 import { describe, expect, it } from 'vitest';
 import { FakeModel, response, setupRuntime } from '../../../../test/helpers.js';
 
 describe('Project Context Runtime integration', () => {
   it('shares explicit Project context across Threads without changing canonical Messages', async () => {
     const model = new FakeModel(() => response('Ready.'));
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [projectContextPlugin] });
     const sourceThread = env.createThread('host', 'Context editor');
     const otherExecutorThread = env.runtime.createThread(env.project.id, 'host', 'Host continuation');
     const isolatedProject = await env.runtime.createProject('Separate Project', env.workspace);

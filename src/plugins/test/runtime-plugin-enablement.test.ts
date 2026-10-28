@@ -1,9 +1,10 @@
+import { setupRuntimeWithStandardPlugins } from './helpers.js';
 import { describe, expect, it } from 'vitest';
-import { FakeModel, response, setupRuntime } from '../../../test/helpers.js';
+import { FakeModel, response } from '../../../test/helpers.js';
 
 describe('First-party plugin enablement', () => {
   it('can disable built-in workflow plugins through RuntimeOptions and the environment', async () => {
-    const env = await setupRuntime(new FakeModel(() => response('unused')), {
+    const env = await setupRuntimeWithStandardPlugins(new FakeModel(() => response('unused')), {
       disabledBuiltinPlugins: ['pico.collaboration'],
     });
     const disabledByOption = env.runtime.pluginInfo().plugins.map((plugin) => plugin.id);
@@ -13,7 +14,7 @@ describe('First-party plugin enablement', () => {
 
     const previous = process.env.PICO_DISABLED_PLUGINS;
     process.env.PICO_DISABLED_PLUGINS = ' pico.collaboration , pico.permissions ';
-    const envDisabled = await setupRuntime(new FakeModel(() => response('unused')));
+    const envDisabled = await setupRuntimeWithStandardPlugins(new FakeModel(() => response('unused')));
     try {
       const pluginIds = envDisabled.runtime.pluginInfo().plugins.map((plugin) => plugin.id);
       expect(pluginIds).not.toContain('pico.collaboration');

@@ -1,3 +1,6 @@
+import { setToolPolicy } from '../src/plugins/test/helpers.js';
+import { permissionPlugin } from '../src/plugins/permissions.js';
+import { collaborationPlugin } from '../src/plugins/collaboration.js';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -6,7 +9,7 @@ import { PicoStore } from '../src/core/store.js';
 import { startRemoteExecutorServer } from '../src/executor/remote-server.js';
 import { ToolCatalog } from '../src/executor/tool-catalog.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
-import { FakeModel, response, setupRuntime, setToolPolicy } from './helpers.js';
+import { FakeModel, response, setupRuntime } from './helpers.js';
 
 const token = 'pico-test-remote-executor-token-0123456789abcdef';
 
@@ -242,7 +245,7 @@ describe('Remote Host Executor', () => {
       }
       return response('Remote workspace inspected.');
     });
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [permissionPlugin, collaborationPlugin] });
     try {
       const connection = await env.runtime.addRemoteExecutorConnection(
         'Build host',
@@ -314,7 +317,7 @@ describe('Remote Host Executor', () => {
       }
       return response('The remote workspace is still available.');
     });
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
     try {
       const connection = await env.runtime.addRemoteExecutorConnection('Build host', endpoint, token);
       const thread = await env.runtime.createRemoteThread(
@@ -408,7 +411,7 @@ describe('Remote Host Executor', () => {
       port: 0,
     });
     const model = new FakeModel(() => response('Recovered after the missing execution.'));
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
     try {
       const connection = await env.runtime.addRemoteExecutorConnection(
         'Build host',
@@ -477,7 +480,7 @@ describe('Remote Host Executor', () => {
         ? response('', [{ id: 'long-remote-call', name: 'shell', arguments: { command: executionCommand } }])
         : response('Recovered the remote result.'),
     );
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
     const originalFetch = globalThis.fetch;
     try {
       const connection = await env.runtime.addRemoteExecutorConnection('Build host', endpoint, token);
@@ -703,7 +706,7 @@ describe('Remote Host Executor', () => {
           ])
         : response('Interrupted safely.'),
     );
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
     try {
       const connection = await env.runtime.addRemoteExecutorConnection(
         'Build host',
@@ -759,7 +762,7 @@ describe('Remote Host Executor', () => {
         ? response('', [{ id: 'lost-ack-interrupt-call', name: 'shell', arguments: { command } }])
         : response('The interrupted command did not continue.'),
     );
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
     const originalFetch = globalThis.fetch;
     try {
       const connection = await env.runtime.addRemoteExecutorConnection('Build host', endpoint, token);
@@ -840,7 +843,7 @@ describe('Remote Host Executor', () => {
         ? response('', [{ id: 'reordered-interrupt-call', name: 'shell', arguments: { command } }])
         : response('The command was interrupted before it could continue.'),
     );
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
     const originalFetch = globalThis.fetch;
     let heldSubmission = false;
     let submissionRequests = 0;

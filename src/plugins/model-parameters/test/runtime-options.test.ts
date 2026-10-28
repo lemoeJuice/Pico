@@ -1,10 +1,11 @@
+import { modelParametersPlugin } from '../index.js';
 import { describe, expect, it } from 'vitest';
 import { FakeModel, response, setupRuntime } from '../../../../test/helpers.js';
 
 describe('Model Parameters Runtime integration', () => {
   it('rejects stored semantic model options when their owner is disabled but permits empty options', async () => {
     const model = new FakeModel(() => response('completed without optional parameters'));
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [modelParametersPlugin] });
     try {
       const configured = env.createThread();
       const selection = env.runtime.threadModelSelection(configured.id);

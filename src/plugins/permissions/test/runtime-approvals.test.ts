@@ -1,3 +1,5 @@
+import { collaborationPlugin } from '../../collaboration.js';
+import { projectContextPlugin } from '../../project-context.js';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -68,7 +70,7 @@ async function until(predicate: () => boolean, timeoutMs = 3_000): Promise<void>
 
 describe('Permissions Runtime integration', () => {
   it('lists coordination tools and registers permission controls in the Runtime UI', async () => {
-    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const env = await setupRuntime(new FakeModel(() => response('unused')), { plugins: [permissionPlugin, projectContextPlugin, collaborationPlugin] });
     const thread = env.runtime.createThread(env.project.id, 'runtime', 'Permission tools');
     try {
       expect((await permissionView(env.runtime, thread.id)).tools.map((tool) => tool.name)).toEqual([
@@ -95,7 +97,7 @@ describe('Permissions Runtime integration', () => {
     const model = new FakeModel(() =>
       response('', [{ id: 'paged-pending-read', name: 'read_file', arguments: { path: 'facts.txt' } }]),
     );
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
     const thread = env.createThread('host');
     try {
       await env.runtime.submit(thread.id, 'paged-parent-message', 'Read facts.txt.');
@@ -189,7 +191,7 @@ describe('Permissions Runtime integration', () => {
         ? response('', [{ id: 'read:file:one', name: 'read_file', arguments: { path: 'facts.txt' } }])
         : response('I read the file.'),
     );
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
     const thread = env.createThread('host');
     await writeFile(`${env.workspace}/facts.txt`, 'The durable fact.\n', 'utf8');
     try {
@@ -238,7 +240,7 @@ describe('Permissions Runtime integration', () => {
         ? response('', [{ id: 'atomic-approval', name: 'read_file', arguments: { path: 'facts.txt' } }])
         : response('The approval was recorded.'),
     );
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
     const thread = env.createThread('host');
     await writeFile(`${env.workspace}/facts.txt`, 'transactional approval', 'utf8');
     try {
@@ -306,7 +308,7 @@ describe('Permissions Runtime integration', () => {
         ? response('', [{ id: 'policy-denial', name: 'read_file', arguments: { path: 'facts.txt' } }])
         : response('The tool was blocked by policy, so I will explain that and offer another path.'),
     );
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
     const thread = env.createThread('host');
     await setPermission(env.runtime, thread.id, 'read_file', 'deny');
     try {
@@ -344,7 +346,7 @@ describe('Permissions Runtime integration', () => {
         ? response('', [{ id: 'atomic-denial', name: 'read_file', arguments: { path: 'facts.txt' } }])
         : response('The file was read after the permission decision could be recorded.'),
     );
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
     const thread = env.createThread('host');
     await writeFile(`${env.workspace}/facts.txt`, 'transactional denial', 'utf8');
     await setPermission(env.runtime, thread.id, 'read_file', 'deny');
@@ -389,7 +391,7 @@ describe('Permissions Runtime integration', () => {
         ? response('', [{ id: 'regex-search', name: 'search_files', arguments: { pattern: '^(a+)+$' } }])
         : response('The search was interrupted.'),
     );
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
     const thread = env.createThread('host');
     await writeFile(`${env.workspace}/pathological.txt`, `${'a'.repeat(28)}!`, 'utf8');
     await setPermission(env.runtime, thread.id, 'search_files', 'allow');
@@ -422,7 +424,7 @@ describe('Permissions Runtime integration', () => {
         ? response('', [{ id: 'cancel-read', name: 'read_file', arguments: { path: 'facts.txt' } }])
         : response('The interrupted approval was not executed.'),
     );
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
     const thread = env.createThread('host');
     try {
       await env.runtime.submit(thread.id, 'cancel-approval-message', 'Read facts.txt');
@@ -490,7 +492,7 @@ describe('Permissions Runtime integration', () => {
           ? response('', [{ id: 'read-again', name: 'read_file', arguments: { path: 'facts.txt' } }])
           : response('The file was read twice.'),
     );
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
     const thread = env.createThread('host');
     await writeFile(`${env.workspace}/facts.txt`, 'The durable fact.\n', 'utf8');
     try {

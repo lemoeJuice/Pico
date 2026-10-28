@@ -1,3 +1,5 @@
+import { collaborationPlugin } from '../collaboration.js';
+import { projectContextPlugin } from '../project-context.js';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { FakeModel, response, setupRuntime } from '../../../test/helpers.js';
@@ -5,7 +7,7 @@ import { FakeModel, response, setupRuntime } from '../../../test/helpers.js';
 describe('First-party plugin Runtime integration', () => {
   it('runs Chat Threads on Runtime coordination tools without attaching a workspace Executor', async () => {
     const model = new FakeModel(() => response('Ready for a conversation.'));
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [projectContextPlugin, collaborationPlugin] });
     const thread = env.runtime.createThread(env.project.id, 'runtime', 'Chat');
     try {
       const status = await env.runtime.executorStatus(thread.id);

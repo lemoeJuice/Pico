@@ -1,3 +1,4 @@
+import { collaborationPlugin } from '../src/plugins/collaboration.js';
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
@@ -382,7 +383,7 @@ describe('durable Thread runtime invariants', () => {
           ])
         : response('Received.'),
     );
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [collaborationPlugin] });
     const sender = env.runtime.createThread(env.project.id, 'runtime', 'Chat sender');
     const recipient = env.runtime.createThread(env.project.id, 'runtime', 'Chat recipient');
     recipientId = recipient.id;
@@ -1257,7 +1258,7 @@ describe('durable Thread runtime invariants', () => {
         ]);
       return response('Child work is complete.');
     });
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [collaborationPlugin] });
     const parent = env.createThread('host', 'Main thread');
     parentId = parent.id;
     const unsubscribe = env.runtime.subscribe((event) => {

@@ -1,9 +1,10 @@
+import { permissionPlugin } from '../../permissions.js';
 import { describe, expect, it } from 'vitest';
 import { FakeModel, response, setupRuntime } from '../../../../test/helpers.js';
 
 describe('Permission plugin events', () => {
   it('does not emit plugin.updated when the permissions Tool list is read', async () => {
-    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const env = await setupRuntime(new FakeModel(() => response('unused')), { plugins: [permissionPlugin] });
     const thread = env.createThread('host');
     const events: Array<{ type: string; pluginId?: string }> = [];
     const unsubscribe = env.runtime.subscribe((event) => {

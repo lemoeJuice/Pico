@@ -1,3 +1,5 @@
+import { setToolPolicy } from '../src/plugins/test/helpers.js';
+import { permissionPlugin } from '../src/plugins/permissions.js';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -5,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { PicoStore } from '../src/core/store.js';
-import { assistantPayload, setToolPolicy } from './helpers.js';
+import { assistantPayload } from './helpers.js';
 import { ToolCatalog } from '../src/executor/tool-catalog.js';
 import { HostExecutor } from '../src/executor/executor.js';
 import { ContainerExecutor } from '../src/executor/container-executor.js';
@@ -995,7 +997,7 @@ describe('Executor execution identity and recovery', () => {
             ])
           : response('Stopped safely.'),
       );
-      const env = await setupRuntime(model);
+      const env = await setupRuntime(model, { plugins: [permissionPlugin] });
       const thread = env.createThread('host');
       setToolPolicy(env.store, thread.id, 'shell', 'allow');
       try {
