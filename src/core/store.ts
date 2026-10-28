@@ -700,7 +700,11 @@ export class PicoStore {
     };
   }
 
-  createThread(
+  createThread(...args: Parameters<PicoStore['createThreadWithResult']>): Thread {
+    return this.createThreadWithResult(...args).thread;
+  }
+
+  createThreadWithResult(
     projectId: string,
     executorKind: ExecutorKind,
     title = DEFAULT_THREAD_TITLE,
@@ -713,7 +717,7 @@ export class PicoStore {
       modelSelection?: ThreadModelSelection;
       toolOverrides?: Record<string, boolean>;
     } = {},
-  ): Thread {
+  ): { thread: Thread; created: boolean } {
     const project = this.getProject(projectId);
     if (!project) throw new ServiceError(404, 'Project not found');
     const remoteConnection = options.remoteConnectionId
@@ -765,7 +769,7 @@ export class PicoStore {
           }
           const previous = this.getThread(String(existing.thread_id));
           if (!previous) throw new Error('The Thread created for this idempotency key no longer exists.');
-          return previous;
+          return { thread: previous, created: false };
         }
       }
       const id = randomUUID();
@@ -813,7 +817,7 @@ export class PicoStore {
           createdAt,
         );
       }
-      return {
+      const thread: Thread = {
         id,
         projectId,
         executorId,
@@ -831,6 +835,7 @@ export class PicoStore {
         deletedAt: null,
         state: 'idle',
       };
+      return { thread, created: true };
     });
   }
 

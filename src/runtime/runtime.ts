@@ -1183,8 +1183,10 @@ export class PicoRuntime {
             (options.parentThreadId
               ? this.threadModelSelection(options.parentThreadId)
               : this.defaultThreadModelSelection());
-          const thread = this.store.transaction(() => {
-            const created = this.store.createThread(projectId, executorKind, title, { ...options, modelSelection });
+          const result = this.store.transaction(() => {
+            const result = this.store.createThreadWithResult(projectId, executorKind, title, { ...options, modelSelection });
+            if (!result.created) return result;
+            const created = result.thread;
             const hadToolSettings = this.hasStoredThreadToolSettings(created.id);
             if (options.parentThreadId) {
               this.inheritThreadToolSettings(options.parentThreadId, created.id);
@@ -1192,10 +1194,10 @@ export class PicoRuntime {
             if (!hadToolSettings && options.toolOverrides)
               this.applyThreadToolOverrides(created.id, options.toolOverrides);
             this.plugins.initializeThread(created);
-            return created;
+            return result;
           });
-          this.publish({ type: 'thread.created', thread });
-          return thread;
+          if (result.created) this.publish({ type: 'thread.created', thread: result.thread });
+          return result.thread;
         },
         send: (senderThreadId, targetId, content, messageId) => {
           const sender = this.requireUnarchivedThread(senderThreadId);

@@ -259,6 +259,47 @@ describe('PluginHost lifecycle', () => {
     }
   });
 
+  it.each([false, true])('initializes an idempotent plugin Thread once (initial failure: %s)', async (initialFailure) => {
+    let fail = initialFailure;
+    let create: import('../src/plugins/host.js').PluginContext['threads']['create'] | undefined;
+    let readIds: (() => string[]) | undefined;
+    const plugin: PicoPlugin = {
+      id: 'pico.idempotent-thread-test', name: 'Idempotent Thread test', version: '1.0.0',
+      activate({ threads, state }) {
+        create = threads.create;
+        readIds = () => state.get<string[]>('ids', []);
+        threads.onCreated((thread) => {
+          state.set('ids', [...state.get<string[]>('ids', []), thread.id]);
+          if (fail) throw new Error('initialization failed');
+        });
+      },
+    };
+    const env = await setupRuntime(new FakeModel(() => response()), { plugins: [plugin] });
+    let createdEvents = 0;
+    const unsubscribe = env.runtime.subscribe((event) => {
+      if (event.type === 'thread.created') createdEvents++;
+    });
+    try {
+      const request = () => create!(env.project.id, 'runtime', 'Child', { idempotencyKey: 'same-request' });
+      if (initialFailure) {
+        expect(request).toThrow('initialization failed');
+        expect(env.store.listThreads(env.project.id)).toHaveLength(0);
+        expect(readIds!()).toEqual([]);
+        expect(createdEvents).toBe(0);
+        fail = false;
+      }
+      const first = request();
+      const replay = request();
+      expect(replay.id).toBe(first.id);
+      expect(readIds!()).toEqual([first.id]);
+      expect(createdEvents).toBe(1);
+      expect(env.store.listThreads(env.project.id)).toHaveLength(1);
+    } finally {
+      unsubscribe();
+      await env.cleanup();
+    }
+  });
+
   it('rolls back a failed required initializer and publishes only committed Threads', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'pico-plugin-runtime-'));
     temporaryDirectories.push(directory);
