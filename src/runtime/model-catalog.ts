@@ -109,7 +109,8 @@ export class ModelCatalog {
       !validId(type.id) ||
       !type.label.trim() ||
       type.addPage.pluginId !== owner ||
-      !validId(type.addPage.pageId)
+      !validId(type.addPage.pageId) ||
+      (type.editPage !== undefined && (type.editPage.pluginId !== owner || !validId(type.editPage.pageId)))
     )
       bad('Invalid provider type.');
     if (this.types.has(type.id)) throw new ServiceError(409, 'Provider type already registered.');
@@ -166,6 +167,25 @@ export class ModelCatalog {
     this.store.transaction(() => this.store.setPluginState(namespace, stateKey, [...this.listInstances(), instance]));
     this.onChange?.();
     return clone(instance);
+  }
+  updateInstance(
+    owner: string,
+    id: string,
+    input: { label: string; config: Record<string, unknown> },
+  ): ProviderInstance {
+    const current = this.instance(owner, id);
+    if (!input.label.trim() || input.label.trim().length > 120 || !publicConfig(input.config))
+      bad('Invalid provider instance configuration.');
+    const updated = { ...current, label: input.label.trim(), config: clone(input.config) };
+    this.store.transaction(() =>
+      this.store.setPluginState(
+        namespace,
+        stateKey,
+        this.listInstances().map((entry) => (entry.id === id ? updated : entry)),
+      ),
+    );
+    this.onChange?.();
+    return clone(updated);
   }
   private instance(owner: string, id: string): ProviderInstance {
     const instance = this.listInstances().find((entry) => entry.id === id && entry.owner === owner);

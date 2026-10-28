@@ -11,6 +11,7 @@ export interface ProviderTypeContribution {
   label: string;
   description?: string;
   addPage: { pluginId: string; pageId: string };
+  editPage?: { pluginId: string; pageId: string };
 }
 export interface ProviderInstance {
   id: string;

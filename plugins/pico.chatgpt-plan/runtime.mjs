@@ -914,7 +914,8 @@ function createChatGptPlanPlugin() {
           id: "chatgpt-plan",
           label: "ChatGPT account",
           description: "Use a ChatGPT plan account through OpenAI\u2019s Responses API.",
-          addPage: { pluginId: "pico.chatgpt-plan", pageId: "account" }
+          addPage: { pluginId: "pico.chatgpt-plan", pageId: "account" },
+          editPage: { pluginId: "pico.chatgpt-plan", pageId: "account" }
         },
         {
           listModels: async (instance) => (await getAuth(instance.id).listModels()).map((model) => ({
@@ -994,6 +995,14 @@ function createChatGptPlanPlugin() {
         const label = typeof body.label === "string" ? body.label.trim() : "";
         if (!label || label.length > 120) throw new Error("Enter an account label.");
         return context.providers.add("chatgpt-plan", { label, config: providerConfig });
+      });
+      context.http.register("PUT", "/instances", (request) => {
+        const { id } = requireInstance(request);
+        const instance = context.providers.get(id);
+        const body = request.body && typeof request.body === "object" ? request.body : {};
+        const label = typeof body.label === "string" ? body.label.trim() : "";
+        if (!label || label.length > 120) throw new Error("Enter a provider name.");
+        return context.providers.update(id, { label, config: instance.config });
       });
       context.http.register("GET", "/status", (request) => requireInstance(request).auth.status());
       context.http.register("GET", "/models", async (request) => await requireInstance(request).auth.listModels());

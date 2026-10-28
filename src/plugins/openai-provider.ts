@@ -40,7 +40,11 @@ function configuration(value: unknown): { label: string; config: Configuration; 
     return invalid('Enter at least one model.');
   if (
     input.models.some(
-      (model) => typeof model !== 'string' || !model.trim() || model.length > 256 || Array.from(model).some((character) => character.charCodeAt(0) < 32),
+      (model) =>
+        typeof model !== 'string' ||
+        !model.trim() ||
+        model.length > 256 ||
+        Array.from(model).some((character) => character.charCodeAt(0) < 32),
     )
   )
     return invalid('Invalid model name.');
@@ -82,6 +86,7 @@ export const openAiProviderPlugin: PicoPlugin = {
         label: 'OpenAI-compatible',
         description: 'Connect an OpenAI-compatible API.',
         addPage: { pluginId: owner, pageId: 'add' },
+        editPage: { pluginId: owner, pageId: 'add' },
       },
       {
         listModels: async (instance) => modelsFor(instance),
@@ -115,6 +120,23 @@ export const openAiProviderPlugin: PicoPlugin = {
         throw error;
       }
       return instance;
+    });
+    context.http.register('PUT', '/instances', async (request: PluginHttpRequest) => {
+      const values = request.query.getAll('instanceId');
+      const instance = values.length === 1 && values[0] ? context.providers.get(values[0]) : null;
+      if (!instance || instance.typeId !== providerType) throw new ServiceError(404, 'Provider instance unavailable.');
+      const { label, config, apiKey } = configuration(request.body);
+      const updated = context.state.transaction(() => {
+        const result = context.providers.update(instance.id, { label, config: { ...config } });
+        if (apiKey) context.providers.secrets(instance.id).set('apiKey', apiKey);
+        return result;
+      });
+      try {
+        await context.providers.refresh(instance.id);
+        return { ...updated, refreshFailed: false };
+      } catch {
+        return { ...updated, refreshFailed: true };
+      }
     });
     context.http.register('DELETE', '/instances', async (request: PluginHttpRequest) => {
       const values = request.query.getAll('instanceId');

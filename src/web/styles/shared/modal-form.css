@@ -128,3 +128,77 @@
   font-size: 9px;
   overflow-wrap: anywhere;
 }
+
+.provider-settings {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+.provider-instance {
+  overflow: hidden;
+  border: 1px solid #dbe4dc;
+  border-radius: 12px;
+  background: #fff;
+}
+.provider-instance summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 15px;
+  cursor: pointer;
+  list-style: none;
+}
+.provider-instance summary::-webkit-details-marker {
+  display: none;
+}
+.provider-instance summary::before {
+  content: '▸';
+  color: #718377;
+}
+.provider-instance[open] summary::before {
+  content: '▾';
+}
+.provider-instance summary .field-note {
+  margin: 0 0 0 auto;
+}
+.provider-instance-content {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 15px;
+  border-top: 1px solid #e7ede8;
+}
+.provider-instance-content > :first-child {
+  align-self: stretch;
+}
+.provider-types {
+  display: grid;
+  gap: 8px;
+}
+.provider-types button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  text-align: left;
+}
+
+.provider-instance-name {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  gap: 6px;
+  color: #627066;
+  font-size: 10px;
+}
+.provider-instance-name input {
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid #dbe4dc;
+  border-radius: 8px;
+  background: #fff;
+  font: inherit;
+  font-size: 13px;
+}

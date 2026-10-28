@@ -457,6 +457,21 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     await runtime.modelCatalog.refreshInstance(request.params.instanceId!);
     response.json(runtime.modelCatalogView());
   });
+  app.patch('/api/provider-instances/:instanceId', (request, response) => {
+    const instance = runtime.modelCatalog.listInstances().find((item) => item.id === request.params.instanceId);
+    if (!instance) throw new ServiceError(404, 'Provider instance unavailable');
+    const body = request.body;
+    if (
+      !body ||
+      typeof body !== 'object' ||
+      Array.isArray(body) ||
+      Object.keys(body).some((key) => key !== 'label') ||
+      typeof body.label !== 'string'
+    )
+      throw new ServiceError(400, 'Invalid provider name');
+    runtime.modelCatalog.updateInstance(instance.owner, instance.id, { label: body.label, config: instance.config });
+    response.json(runtime.modelCatalogView());
+  });
   app.delete('/api/provider-instances/:instanceId', async (request, response) => {
     const instance = runtime.modelCatalog.listInstances().find((item) => item.id === request.params.instanceId);
     if (!instance) throw new ServiceError(404, 'Provider instance unavailable');

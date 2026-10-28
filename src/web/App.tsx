@@ -3410,7 +3410,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   Archived Threads
                 </button>
                 {pluginInfo.pages
-                  .filter((page) => page.group !== 'memory')
+                  .filter(
+                    (page) =>
+                      page.group !== 'memory' &&
+                      !modelCatalog.providerTypes.some((type) =>
+                        [type.addPage, type.editPage].some(
+                          (providerPage) => providerPage?.pluginId === page.pluginId && providerPage.pageId === page.id,
+                        ),
+                      ),
+                  )
                   .map((page) => (
                     <button
                       type="button"
@@ -3788,6 +3796,43 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 types={modelCatalog.providerTypes}
                 instances={modelCatalog.instances}
                 onAdd={(type) => openPluginPage(type.addPage.pluginId, type.addPage.pageId)}
+                onRename={async (id, label) =>
+                  setModelCatalog(
+                    await api<ModelCatalogView>(`/api/provider-instances/${encodeURIComponent(id)}`, {
+                      method: 'PATCH',
+                      body: JSON.stringify({ label }),
+                    }),
+                  )
+                }
+                renderPage={(type, instance) => {
+                  const reference = instance ? type.editPage : type.addPage;
+                  const page = reference && pluginInfo?.pages.find(
+                    (item) => item.pluginId === reference.pluginId && item.id === reference.pageId,
+                  );
+                  if (!page || !pluginUiContext) {
+                    return <p className="field-note">This Provider page is not available.</p>;
+                  }
+                  return (
+                    <PluginWebView
+                      key={`${page.pluginId}:${page.id}:${instance?.id ?? 'add'}`}
+                      pluginId={page.pluginId}
+                      entry={page.entry}
+                      viewType="page"
+                      viewId={page.id}
+                      externalAuthOrigins={page.externalAuthOrigins}
+                      {...pluginUiContext}
+                      context={{ ...pluginUiContext.context, ...(instance ? { providerInstanceId: instance.id } : {}) }}
+                      onNotice={(message) => {
+                        setNotice(message);
+                        void refreshModelCatalog().catch((caught: unknown) =>
+                          setError(caught instanceof Error ? caught.message : String(caught)),
+                        );
+                      }}
+                      isRegisteredPage={isRegisteredPluginPage}
+                      runCommand={runPluginCommand}
+                    />
+                  );
+                }}
                 onRefresh={async (id) =>
                   setModelCatalog(
                     await api<ModelCatalogView>(`/api/provider-instances/${encodeURIComponent(id)}/refresh`, {

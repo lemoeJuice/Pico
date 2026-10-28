@@ -405,6 +405,7 @@ export function isPluginUiToolbarStateMessage(value: unknown): value is PluginUi
 
 export interface PluginUiContext {
   thread: Thread | null;
+  providerInstanceId?: string;
   modelSelection?: ThreadModelSelection;
   /** Narrow identity for a result-area action; does not expose the Thread object or Tool arguments. */
   threadId?: string;
@@ -426,6 +427,7 @@ export function samePluginUiContext(left: PluginUiContext, right: PluginUiContex
     left.toolCall === right.toolCall &&
     left.result === right.result &&
     left.threadId === right.threadId &&
+    left.providerInstanceId === right.providerInstanceId &&
     left.toolResult?.executionId === right.toolResult?.executionId &&
     left.toolResult?.status === right.toolResult?.status
   );

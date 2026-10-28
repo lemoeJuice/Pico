@@ -11,6 +11,7 @@ function setup() {
   const owner = 'pico.openai-provider';
   let driver: ProviderTypeDriver;
   let failSecret = false;
+  let failRefresh = false;
   const routes = new Map<string, (request: PluginHttpRequest) => unknown>();
   const context = {
     providers: {
@@ -22,8 +23,11 @@ function setup() {
       get: (id: string) => catalog.listInstances().find((item) => item.owner === owner && item.id === id) ?? null,
       add: (typeId: string, input: Parameters<ModelCatalog['addInstance']>[2]) =>
         catalog.addInstance(owner, typeId, input),
+      update: (id: string, input: Parameters<ModelCatalog['updateInstance']>[2]) =>
+        catalog.updateInstance(owner, id, input),
       remove: (id: string) => catalog.removeInstance(owner, id),
-      refresh: (id: string) => catalog.refreshInstance(id),
+      refresh: (id: string) =>
+        failRefresh ? Promise.reject(new Error('refresh failed')) : catalog.refreshInstance(id),
       secrets: (id: string) => {
         const secrets = catalog.getInstanceSecrets(owner, id);
         return failSecret
@@ -55,6 +59,9 @@ function setup() {
     catalog,
     call,
     driver: () => driver!,
+    setRefreshFailure: (value: boolean) => {
+      failRefresh = value;
+    },
     setFailure: (value: boolean) => {
       failSecret = value;
     },
@@ -89,6 +96,40 @@ describe('OpenAI-compatible provider', () => {
       expect(env.catalog.listInstances()).toHaveLength(1);
     } finally {
       fetcher.mockRestore();
+      env.store.close();
+    }
+  });
+  it('updates one instance while preserving an omitted API key', async () => {
+    const env = setup();
+    try {
+      const first = (await env.call('POST', undefined, { ...config, apiKey: 'fake-one' })) as any;
+      const second = (await env.call('POST', undefined, { ...config, label: 'B', apiKey: 'fake-two' })) as any;
+      const updated = (await env.call('PUT', first.id, { ...config, label: 'Renamed', models: ['new-model'] })) as any;
+      expect(updated.id).toBe(first.id);
+      expect(updated.label).toBe('Renamed');
+      expect(await env.driver().authorize(updated, false)).toEqual({ authorization: 'Bearer fake-one' });
+      expect(await env.driver().authorize(second, false)).toEqual({ authorization: 'Bearer fake-two' });
+      expect(
+        env.catalog
+          .listModels()
+          .filter((model) => model.instanceId === first.id && model.availability === 'available')
+          .map((model) => model.name),
+      ).toEqual(['new-model']);
+      expect(JSON.stringify(env.call('GET'))).not.toContain('fake-one');
+    } finally {
+      env.store.close();
+    }
+  });
+  it('reports a refresh failure separately after saving settings', async () => {
+    const env = setup();
+    try {
+      const instance = (await env.call('POST', undefined, { ...config, apiKey: 'fake-one' })) as any;
+      env.setRefreshFailure(true);
+      const result = (await env.call('PUT', instance.id, { ...config, label: 'Saved' })) as any;
+      expect(result.refreshFailed).toBe(true);
+      expect(env.catalog.listInstances()[0]?.label).toBe('Saved');
+      expect(await env.driver().authorize(instance, false)).toEqual({ authorization: 'Bearer fake-one' });
+    } finally {
       env.store.close();
     }
   });

@@ -43,6 +43,25 @@ describe('model catalog API', () => {
       };
       expect(catalog.instances).toHaveLength(2);
       expect(JSON.stringify(catalog)).not.toContain('synthetic-only-api-key');
+      const renamedResponse = await request(`/api/provider-instances/${first.id}`, 'PATCH', { label: 'Renamed' });
+      expect(renamedResponse.status).toBe(200);
+      const renamed = (await renamedResponse.json()) as { instances: ProviderInstance[] };
+      expect(renamed.instances.find((item) => item.id === first.id)).toEqual({
+        ...first,
+        label: 'Renamed',
+        config: {},
+      });
+      expect(server.runtime.modelCatalog.listInstances().find((item) => item.id === first.id)).toEqual({
+        ...first,
+        label: 'Renamed',
+      });
+      expect(
+        server.runtime.store.getPrivateSecret('pico.openai-provider', `model-catalog-instance:${first.id}`, null),
+      ).toEqual({ apiKey: 'synthetic-only-api-key' });
+      expect((await request(`/api/provider-instances/${first.id}`, 'PATCH', { label: 'Bad', config: {} })).status).toBe(
+        400,
+      );
+      expect((await request('/api/provider-instances/missing', 'PATCH', { label: 'Bad' })).status).toBe(404);
       const a = catalog.models.find((model) => model.instanceId === first.id)!;
       const b = catalog.models.find((model) => model.instanceId === second.id)!;
       expect(a.modelId).not.toBe(b.modelId);

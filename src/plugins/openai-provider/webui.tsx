@@ -22,6 +22,27 @@ function AddProvider({ init, client }: { init: PluginUiInitMessage; client: Clie
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
+  const [refreshFailed, setRefreshFailed] = useState(false);
+  const instanceId = init.context.providerInstanceId;
+  useEffect(() => {
+    if (!instanceId) return;
+    setBusy(true);
+    void client
+      .props(init.settings, init.context)
+      .api<Array<{ id: string; label: string; config: { baseUrl: string; protocol: string; models: string[] } }>>(
+        '/api/plugins/pico.openai-provider/instances',
+      )
+      .then((items) => {
+        const item = items.find((entry) => entry.id === instanceId);
+        if (!item) throw new Error('Provider instance unavailable.');
+        setLabel(item.label);
+        setBaseUrl(item.config.baseUrl);
+        setProtocol(item.config.protocol);
+        setModels(item.config.models.join('\n'));
+      })
+      .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : String(caught)))
+      .finally(() => setBusy(false));
+  }, [client, init, instanceId]);
   useEffect(() => {
     client.ready(init.attemptId);
     return () => client.close();
@@ -37,18 +58,26 @@ function AddProvider({ init, client }: { init: PluginUiInitMessage; client: Clie
         if (action.actionId === 'save' && !busy) {
           setBusy(true);
           setError('');
+          setSaved(false);
+          setRefreshFailed(false);
           void client
             .props(init.settings, init.context)
-            .api('/api/plugins/pico.openai-provider/instances', {
-              method: 'POST',
-              body: JSON.stringify(providerInstanceRequest({ label, baseUrl, protocol, apiKey, models })),
-            })
-            .then(() => {
+            .api<{ refreshFailed?: boolean }>(
+              `/api/plugins/pico.openai-provider/instances${instanceId ? `?instanceId=${encodeURIComponent(instanceId)}` : ''}`,
+              {
+                method: instanceId ? 'PUT' : 'POST',
+                body: JSON.stringify(providerInstanceRequest({ label, baseUrl, protocol, apiKey, models })),
+              },
+            )
+            .then((result) => {
+              setRefreshFailed(result.refreshFailed === true);
               setApiKey('');
-              setLabel('');
-              setModels('');
+              if (!instanceId) {
+                setLabel('');
+                setModels('');
+              }
               setSaved(true);
-              client.props(init.settings, init.context).onNotice('Provider added.');
+              client.props(init.settings, init.context).onNotice(instanceId ? 'Provider saved.' : 'Provider added.');
             })
             .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : String(caught)))
             .finally(() => setBusy(false));
@@ -57,7 +86,7 @@ function AddProvider({ init, client }: { init: PluginUiInitMessage; client: Clie
     [client, init, label, baseUrl, protocol, apiKey, models, busy],
   );
   const nodes: PluginUiNode[] = [
-    { type: 'heading', text: 'Add OpenAI-compatible Provider' },
+    { type: 'heading', text: instanceId ? 'Edit OpenAI-compatible Provider' : 'Add OpenAI-compatible Provider' },
     { type: 'textInput', label: 'Name', value: label, actionId: 'label', disabled: busy },
     {
       type: 'textInput',
@@ -78,17 +107,30 @@ function AddProvider({ init, client }: { init: PluginUiInitMessage; client: Clie
       ],
       disabled: busy,
     },
-    { type: 'textInput', label: 'API key', value: apiKey, actionId: 'apiKey', inputType: 'password', disabled: busy },
+    {
+      type: 'textInput',
+      label: 'API key',
+      value: apiKey,
+      actionId: 'apiKey',
+      inputType: 'password',
+      placeholder: instanceId ? 'Leave blank to keep current key' : '',
+      disabled: busy,
+    },
     { type: 'textArea', label: 'Models (one per line)', value: models, actionId: 'models', disabled: busy },
     {
       type: 'button',
-      label: busy ? 'Adding…' : 'Add Provider',
+      label: busy ? 'Saving…' : instanceId ? 'Save Provider' : 'Add Provider',
       actionId: 'save',
       tone: 'primary',
       disabled: busy || !label.trim() || !baseUrl.trim() || !models.trim(),
     },
   ];
-  if (saved) nodes.push({ type: 'status', text: 'Provider added.', tone: 'success' });
+  if (saved) nodes.push({ type: 'status', text: instanceId ? 'Provider saved.' : 'Provider added.', tone: 'success' });
+  if (refreshFailed)
+    nodes.push({
+      type: 'paragraph',
+      text: 'Provider settings were saved, but model refresh failed. Save again to retry the refresh.',
+    });
   if (error) nodes.push({ type: 'paragraph', text: error });
   client.render(nodes);
   return null;

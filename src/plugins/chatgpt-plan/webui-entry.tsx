@@ -19,8 +19,7 @@ type ApiClient = ReturnType<typeof createPluginUiClient>;
 function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiClient }): ReactElement | null {
   const [settings, setSettings] = useState(init.settings);
   const [context, setContext] = useState(init.context as PluginUiContext);
-  const [instances, setInstances] = useState<Array<{ id: string; label: string }>>([]);
-  const [instanceId, setInstanceId] = useState('');
+  const [instanceId, setInstanceId] = useState(init.context.providerInstanceId ?? '');
   const [newLabel, setNewLabel] = useState('ChatGPT account');
   const refreshVersion = useRef(0);
   const [status, setStatus] = useState<{ connected: boolean; accountLabel?: string | null } | null>(null);
@@ -37,7 +36,7 @@ function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiCl
       client
         .props(settings, context)
         .api<T>(
-          `${apiRoot}${path}${path === '/instances' ? '' : `?instanceId=${encodeURIComponent(instanceId)}`}`,
+          `${apiRoot}${path}${path === '/instances' ? '' : `${path.includes('?') ? '&' : '?'}instanceId=${encodeURIComponent(instanceId)}`}`,
           init,
         ),
     [client, settings, context, instanceId],
@@ -84,8 +83,9 @@ function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiCl
   useEffect(() => {
     void api<Array<{ id: string; label: string }>>('/instances')
       .then((items) => {
-        setInstances(items);
-        setInstanceId((current) => (items.some((item) => item.id === current) ? current : (items[0]?.id ?? '')));
+        const selected = items.find((item) => item.id === init.context.providerInstanceId);
+        if (selected) setNewLabel(selected.label);
+        setInstanceId((current) => (items.some((item) => item.id === current) ? current : ''));
       })
       .catch((reason: unknown) => setError(errorText(reason)));
   }, [client]);
@@ -154,11 +154,20 @@ function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiCl
             body: JSON.stringify({ label: newLabel }),
           })
             .then((instance) => {
-              setInstances((items) => [...items, instance]);
+              client.props(settings, context).onNotice('Provider added.');
               setInstanceId(instance.id);
               setStatus(null);
               setModels([]);
             })
+            .catch((reason: unknown) => setError(errorText(reason)))
+            .finally(() => setBusy(false));
+          return;
+        }
+        if (id === 'instance.save') {
+          setBusy(true);
+          setError('');
+          void api('/instances?edit=1', { method: 'PUT', body: JSON.stringify({ label: newLabel }) })
+            .then(() => client.props(settings, context).onNotice('Provider saved.'))
             .catch((reason: unknown) => setError(errorText(reason)))
             .finally(() => setBusy(false));
           return;
@@ -298,32 +307,21 @@ function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiCl
     [client, api, refresh, settings, context, operationId, callbackUrl, busy, retrySent, newLabel],
   );
 
-  const nodes: PluginUiNode[] = [
-    { type: 'heading', text: 'ChatGPT accounts' },
-    {
-      type: 'select',
-      label: 'Account',
-      value: instanceId,
-      actionId: 'instance.select',
-      disabled: busy || instances.length === 0,
-      options: instances.length
-        ? instances.map((item) => ({ label: item.label, value: item.id }))
-        : [{ label: 'No accounts', value: '' }],
-    },
-    {
-      type: 'textInput',
-      label: 'New account label',
-      value: newLabel,
-      actionId: 'instance.label',
-      maxLength: 120,
-      disabled: busy,
-    },
-    { type: 'button', label: 'Add account', actionId: 'instance.create', disabled: busy || !newLabel.trim() },
-    {
-      type: 'paragraph',
-      text: 'Sign in with ChatGPT to use models available to your account. OAuth returns to 127.0.0.1. If the browser cannot reach Pico Runtime there, copy the full callback URL from the browser address bar and paste it below. Credentials remain with the Runtime.',
-    },
-  ];
+  const nodes: PluginUiNode[] = [];
+  if (!instanceId)
+    nodes.push(
+      { type: 'textInput', label: 'Name', value: newLabel, actionId: 'instance.label', maxLength: 120, disabled: busy },
+      { type: 'button', label: 'Add account', actionId: 'instance.create', disabled: busy || !newLabel.trim() },
+    );
+  if (init.context.providerInstanceId)
+    nodes.push(
+      { type: 'textInput', label: 'Name', value: newLabel, actionId: 'instance.label', maxLength: 120, disabled: busy },
+      { type: 'button', label: 'Save name', actionId: 'instance.save', disabled: busy || !newLabel.trim() },
+    );
+  nodes.push({
+    type: 'paragraph',
+    text: 'Sign in with ChatGPT to use models available to your account. OAuth returns to 127.0.0.1. If the browser cannot reach Pico Runtime there, copy the full callback URL from the browser address bar and paste it below. Credentials remain with the Runtime.',
+  });
   if (status?.connected)
     nodes.push(
       {
@@ -332,6 +330,15 @@ function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiCl
         tone: 'success',
       },
       { type: 'text', text: `${models.length} available model${models.length === 1 ? '' : 's'}` },
+      ...(models.length
+        ? [
+            {
+              type: 'list' as const,
+              ordered: false,
+              items: models.map((model) => ({ type: 'text' as const, text: model.displayName || model.slug })),
+            },
+          ]
+        : []),
       {
         type: 'actions',
         children: [
@@ -341,6 +348,14 @@ function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiCl
             actionId: 'account.refresh',
             tone: 'soft',
             disabled: busy,
+          },
+          {
+            type: 'button',
+            label: 'Reconnect',
+            actionId: 'account.connect',
+            tone: 'soft',
+            disabled: busy,
+            externalAuth: true,
           },
           { type: 'button', label: 'Disconnect', actionId: 'account.disconnect', tone: 'danger', disabled: busy },
         ],

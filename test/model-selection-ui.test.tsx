@@ -130,6 +130,7 @@ describe('model selection UI', () => {
         onAdd={() => undefined}
         onRefresh={async () => undefined}
         onDelete={async () => undefined}
+        onRename={async () => undefined}
       />,
     );
     expect(providers).toContain('Work');
