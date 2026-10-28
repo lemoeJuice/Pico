@@ -72,14 +72,12 @@ describe('model selection UI', () => {
   it('builds a provider request with a model list and omits an empty key', () => {
     expect(
       providerInstanceRequest({
-        label: ' Work ',
         baseUrl: ' https://example.test/v1 ',
         protocol: 'openai-responses',
         apiKey: '',
         models: ' first \n\nsecond\n',
       }),
     ).toEqual({
-      label: 'Work',
       baseUrl: 'https://example.test/v1',
       protocol: 'openai-responses',
       models: ['first', 'second'],

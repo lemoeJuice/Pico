@@ -122,7 +122,7 @@ export interface PluginContext extends Omit<PluginServices, 'models' | 'continua
     list(): ProviderInstance[];
     get(id: string): ProviderInstance | null;
     add(typeId: string, input: { label: string; config: Record<string, unknown> }): ProviderInstance;
-    update(id: string, input: { label: string; config: Record<string, unknown> }): ProviderInstance;
+    update(id: string, input: { config: Record<string, unknown> }): ProviderInstance;
     remove(id: string): Promise<void>;
     refresh(id: string): Promise<CatalogModel[]>;
     secrets(id: string): InstanceSecrets;
@@ -677,7 +677,9 @@ export class PluginHost {
         },
         update: (id, input) => {
           if (!this.modelCatalog) throw new Error('Model catalog is unavailable.');
-          return this.modelCatalog.updateInstance(plugin.id, id, input);
+          const instance = this.modelCatalog.listInstances().find((item) => item.id === id && item.owner === plugin.id);
+          if (!instance) throw new ServiceError(404, 'Provider instance unavailable.');
+          return this.modelCatalog.updateInstance(plugin.id, id, { label: instance.label, config: input.config });
         },
         remove: async (id) => {
           if (!this.modelCatalog) throw new Error('Model catalog is unavailable.');

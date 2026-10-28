@@ -148,6 +148,14 @@ export class ModelCatalog {
   listInstances(): ProviderInstance[] {
     return clone(this.store.getPluginState<ProviderInstance[]>(namespace, stateKey, []));
   }
+  createEmptyInstance(typeId: string): ProviderInstance {
+    const type = this.types.get(typeId);
+    if (!type) throw new ServiceError(404, 'Provider type unavailable.');
+    const labels = new Set(this.listInstances().map((instance) => instance.label));
+    let label = type.type.label;
+    for (let suffix = 2; labels.has(label); suffix++) label = `${type.type.label} ${suffix}`;
+    return this.addInstance(type.owner, typeId, { label, config: clone(type.driver.defaultConfig ?? {}) });
+  }
   addInstance(
     owner: string,
     typeId: string,

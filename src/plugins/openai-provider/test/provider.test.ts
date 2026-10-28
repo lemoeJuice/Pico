@@ -23,8 +23,11 @@ function setup() {
       get: (id: string) => catalog.listInstances().find((item) => item.owner === owner && item.id === id) ?? null,
       add: (typeId: string, input: Parameters<ModelCatalog['addInstance']>[2]) =>
         catalog.addInstance(owner, typeId, input),
-      update: (id: string, input: Parameters<ModelCatalog['updateInstance']>[2]) =>
-        catalog.updateInstance(owner, id, input),
+      update: (id: string, input: { config: Record<string, unknown> }) =>
+        catalog.updateInstance(owner, id, {
+          label: catalog.listInstances().find((item) => item.id === id)!.label,
+          config: input.config,
+        }),
       remove: (id: string) => catalog.removeInstance(owner, id),
       refresh: (id: string) =>
         failRefresh ? Promise.reject(new Error('refresh failed')) : catalog.refreshInstance(id),
@@ -99,6 +102,19 @@ describe('OpenAI-compatible provider', () => {
       env.store.close();
     }
   });
+  it('does not expose models or make requests for an empty instance', async () => {
+    const env = setup();
+    const fetcher = vi.spyOn(globalThis, 'fetch');
+    try {
+      const instance = env.catalog.createEmptyInstance('openai-compatible');
+      expect(await env.driver().listModels(instance)).toEqual([]);
+      expect(env.catalog.listModels()).toEqual([]);
+      expect(fetcher).not.toHaveBeenCalled();
+    } finally {
+      fetcher.mockRestore();
+      env.store.close();
+    }
+  });
   it('updates one instance while preserving an omitted API key', async () => {
     const env = setup();
     try {
@@ -106,7 +122,7 @@ describe('OpenAI-compatible provider', () => {
       const second = (await env.call('POST', undefined, { ...config, label: 'B', apiKey: 'fake-two' })) as any;
       const updated = (await env.call('PUT', first.id, { ...config, label: 'Renamed', models: ['new-model'] })) as any;
       expect(updated.id).toBe(first.id);
-      expect(updated.label).toBe('Renamed');
+      expect(updated.label).toBe('A');
       expect(await env.driver().authorize(updated, false)).toEqual({ authorization: 'Bearer fake-one' });
       expect(await env.driver().authorize(second, false)).toEqual({ authorization: 'Bearer fake-two' });
       expect(
@@ -127,7 +143,7 @@ describe('OpenAI-compatible provider', () => {
       env.setRefreshFailure(true);
       const result = (await env.call('PUT', instance.id, { ...config, label: 'Saved' })) as any;
       expect(result.refreshFailed).toBe(true);
-      expect(env.catalog.listInstances()[0]?.label).toBe('Saved');
+      expect(env.catalog.listInstances()[0]?.label).toBe('A');
       expect(await env.driver().authorize(instance, false)).toEqual({ authorization: 'Bearer fake-one' });
     } finally {
       env.store.close();

@@ -14,7 +14,6 @@ if (!element) throw new Error('Provider UI root is missing.');
 const root = createRoot(element);
 type Client = ReturnType<typeof createPluginUiClient>;
 function AddProvider({ init, client }: { init: PluginUiInitMessage; client: Client }) {
-  const [label, setLabel] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [protocol, setProtocol] = useState('openai-chat-completions');
   const [apiKey, setApiKey] = useState('');
@@ -35,10 +34,9 @@ function AddProvider({ init, client }: { init: PluginUiInitMessage; client: Clie
       .then((items) => {
         const item = items.find((entry) => entry.id === instanceId);
         if (!item) throw new Error('Provider instance unavailable.');
-        setLabel(item.label);
-        setBaseUrl(item.config.baseUrl);
-        setProtocol(item.config.protocol);
-        setModels(item.config.models.join('\n'));
+        setBaseUrl(item.config.baseUrl ?? '');
+        setProtocol(item.config.protocol ?? 'openai-chat-completions');
+        setModels((item.config.models ?? []).join('\n'));
       })
       .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : String(caught)))
       .finally(() => setBusy(false));
@@ -50,12 +48,11 @@ function AddProvider({ init, client }: { init: PluginUiInitMessage; client: Clie
   useEffect(
     () =>
       client.subscribeActions((action) => {
-        if (action.actionId === 'label') setLabel(String(action.value ?? ''));
         if (action.actionId === 'baseUrl') setBaseUrl(String(action.value ?? ''));
         if (action.actionId === 'protocol') setProtocol(String(action.value ?? ''));
         if (action.actionId === 'apiKey') setApiKey(String(action.value ?? ''));
         if (action.actionId === 'models') setModels(String(action.value ?? ''));
-        if (action.actionId === 'save' && !busy) {
+        if (action.actionId === 'save' && instanceId && !busy) {
           setBusy(true);
           setError('');
           setSaved(false);
@@ -63,69 +60,66 @@ function AddProvider({ init, client }: { init: PluginUiInitMessage; client: Clie
           void client
             .props(init.settings, init.context)
             .api<{ refreshFailed?: boolean }>(
-              `/api/plugins/pico.openai-provider/instances${instanceId ? `?instanceId=${encodeURIComponent(instanceId)}` : ''}`,
+              `/api/plugins/pico.openai-provider/instances?instanceId=${encodeURIComponent(instanceId)}`,
               {
-                method: instanceId ? 'PUT' : 'POST',
-                body: JSON.stringify(providerInstanceRequest({ label, baseUrl, protocol, apiKey, models })),
+                method: 'PUT',
+                body: JSON.stringify(providerInstanceRequest({ baseUrl, protocol, apiKey, models })),
               },
             )
             .then((result) => {
               setRefreshFailed(result.refreshFailed === true);
               setApiKey('');
-              if (!instanceId) {
-                setLabel('');
-                setModels('');
-              }
               setSaved(true);
-              client.props(init.settings, init.context).onNotice(instanceId ? 'Provider saved.' : 'Provider added.');
+              client.props(init.settings, init.context).onNotice('Provider saved.');
             })
             .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : String(caught)))
             .finally(() => setBusy(false));
         }
       }),
-    [client, init, label, baseUrl, protocol, apiKey, models, busy],
+    [client, init, instanceId, baseUrl, protocol, apiKey, models, busy],
   );
-  const nodes: PluginUiNode[] = [
-    { type: 'heading', text: instanceId ? 'Edit OpenAI-compatible Provider' : 'Add OpenAI-compatible Provider' },
-    { type: 'textInput', label: 'Name', value: label, actionId: 'label', disabled: busy },
-    {
-      type: 'textInput',
-      label: 'API base URL',
-      value: baseUrl,
-      actionId: 'baseUrl',
-      placeholder: 'https://api.openai.com/v1',
-      disabled: busy,
-    },
-    {
-      type: 'select',
-      label: 'Protocol',
-      value: protocol,
-      actionId: 'protocol',
-      options: [
-        { label: 'Chat Completions', value: 'openai-chat-completions' },
-        { label: 'Responses', value: 'openai-responses' },
-      ],
-      disabled: busy,
-    },
-    {
-      type: 'textInput',
-      label: 'API key',
-      value: apiKey,
-      actionId: 'apiKey',
-      inputType: 'password',
-      placeholder: instanceId ? 'Leave blank to keep current key' : '',
-      disabled: busy,
-    },
-    { type: 'textArea', label: 'Models (one per line)', value: models, actionId: 'models', disabled: busy },
-    {
-      type: 'button',
-      label: busy ? 'Saving…' : instanceId ? 'Save Provider' : 'Add Provider',
-      actionId: 'save',
-      tone: 'primary',
-      disabled: busy || !label.trim() || !baseUrl.trim() || !models.trim(),
-    },
-  ];
-  if (saved) nodes.push({ type: 'status', text: instanceId ? 'Provider saved.' : 'Provider added.', tone: 'success' });
+  const nodes: PluginUiNode[] = !instanceId
+    ? [{ type: 'paragraph', text: 'Add a Provider in Settings, then expand its card to configure it.' }]
+    : [
+        { type: 'heading', text: 'Edit OpenAI-compatible Provider' },
+        {
+          type: 'textInput',
+          label: 'API base URL',
+          value: baseUrl,
+          actionId: 'baseUrl',
+          placeholder: 'https://api.openai.com/v1',
+          disabled: busy,
+        },
+        {
+          type: 'select',
+          label: 'Protocol',
+          value: protocol,
+          actionId: 'protocol',
+          options: [
+            { label: 'Chat Completions', value: 'openai-chat-completions' },
+            { label: 'Responses', value: 'openai-responses' },
+          ],
+          disabled: busy,
+        },
+        {
+          type: 'textInput',
+          label: 'API key',
+          value: apiKey,
+          actionId: 'apiKey',
+          inputType: 'password',
+          placeholder: 'Leave blank to keep current key',
+          disabled: busy,
+        },
+        { type: 'textArea', label: 'Models (one per line)', value: models, actionId: 'models', disabled: busy },
+        {
+          type: 'button',
+          label: busy ? 'Saving…' : 'Save Provider',
+          actionId: 'save',
+          tone: 'primary',
+          disabled: busy || !baseUrl.trim() || !models.trim(),
+        },
+      ];
+  if (saved) nodes.push({ type: 'status', text: 'Provider saved.', tone: 'success' });
   if (refreshFailed)
     nodes.push({
       type: 'paragraph',

@@ -202,3 +202,15 @@
   font: inherit;
   font-size: 13px;
 }
+.provider-instance-actions {
+  display: flex;
+  gap: 8px;
+  align-self: stretch;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e7ede8;
+}
+.provider-title-input {
+  min-width: 0;
+  font: inherit;
+  padding: 4px 6px;
+}

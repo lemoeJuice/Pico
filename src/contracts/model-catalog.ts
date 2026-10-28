@@ -36,6 +36,8 @@ export interface CatalogModel extends ProviderModel {
   availability: 'available' | 'unknown' | 'unavailable';
 }
 export interface ProviderTypeDriver {
+  /** Public, non-secret configuration used when creating an unconfigured instance. */
+  defaultConfig?: Record<string, unknown>;
   /** Release external instance-owned resources after its local registration is revoked. */
   disposeInstance?(instance: ProviderInstance): Promise<void> | void;
   listModels(instance: ProviderInstance, signal?: AbortSignal): Promise<ProviderModel[]>;

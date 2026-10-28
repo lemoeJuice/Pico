@@ -134,6 +134,7 @@ function normalizedCredential(value: unknown): StoredCredentials | null {
 export interface ChatGptAccountStatus {
   connected: boolean;
   accountLabel: string | null;
+  previouslyConnected: boolean;
 }
 
 export interface ChatGptPluginState {
@@ -174,7 +175,11 @@ export class ChatGptPlanAuth {
     const connected = Boolean(
       credentials?.clientId && credentials.refreshToken && credentials.scopes.includes(planScope),
     );
-    return { connected, accountLabel: connected ? (credentials?.email ?? 'ChatGPT account') : null };
+    return {
+      connected,
+      accountLabel: connected ? (credentials?.email ?? 'ChatGPT account') : null,
+      previouslyConnected: Boolean(credentials?.subject),
+    };
   }
 
   async beginSignIn(redirectUri: string): Promise<{ authorizationUrl: string }> {
@@ -412,11 +417,7 @@ export class ChatGptPlanAuth {
       const latest = this.readCredentials();
       this.assertUsableCredentials(latest);
       if (!forceRefresh && latest.expiresAt! > this.now() + refreshAheadMs) return latest.accessToken!;
-      if (
-        forceRefresh &&
-        latest.refreshToken !== observed.refreshToken &&
-        latest.expiresAt! > this.now()
-      ) {
+      if (forceRefresh && latest.refreshToken !== observed.refreshToken && latest.expiresAt! > this.now()) {
         return latest.accessToken!;
       }
       return this.refresh(latest, requestTrace);

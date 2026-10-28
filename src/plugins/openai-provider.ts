@@ -66,6 +66,7 @@ function modelEndpoint(config: Configuration): string {
 }
 function modelsFor(instance: ProviderInstance): ProviderModel[] {
   const config = instance.config as unknown as Configuration;
+  if (!config.baseUrl || !Array.isArray(config.models) || !config.protocol) return [];
   return config.models.map((model) => ({
     id: model,
     name: model,
@@ -125,9 +126,9 @@ export const openAiProviderPlugin: PicoPlugin = {
       const values = request.query.getAll('instanceId');
       const instance = values.length === 1 && values[0] ? context.providers.get(values[0]) : null;
       if (!instance || instance.typeId !== providerType) throw new ServiceError(404, 'Provider instance unavailable.');
-      const { label, config, apiKey } = configuration(request.body);
+      const { config, apiKey } = configuration({ ...(request.body as Record<string, unknown>), label: instance.label });
       const updated = context.state.transaction(() => {
-        const result = context.providers.update(instance.id, { label, config: { ...config } });
+        const result = context.providers.update(instance.id, { config: { ...config } });
         if (apiKey) context.providers.secrets(instance.id).set('apiKey', apiKey);
         return result;
       });

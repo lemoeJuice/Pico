@@ -3795,7 +3795,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               <ProviderSettings
                 types={modelCatalog.providerTypes}
                 instances={modelCatalog.instances}
-                onAdd={(type) => openPluginPage(type.addPage.pluginId, type.addPage.pageId)}
+                onAdd={async (type) => setModelCatalog(await api<ModelCatalogView>('/api/provider-instances', { method: 'POST', body: JSON.stringify({ typeId: type.id }) }))}
                 onRename={async (id, label) =>
                   setModelCatalog(
                     await api<ModelCatalogView>(`/api/provider-instances/${encodeURIComponent(id)}`, {

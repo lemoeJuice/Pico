@@ -13,6 +13,7 @@ describe('model catalog', () => {
         'plugin',
         { id: 'type', label: 'Type', addPage: { pluginId: 'plugin', pageId: 'add' } },
         {
+          defaultConfig: { chatgpt: true, fetchRetries: 5, retryDelayMs: 2000, refreshOnUnauthorized: true },
           listModels: async () => [],
           authorize: async () => ({}),
           disposeInstance: async (instance) => {
@@ -28,7 +29,13 @@ describe('model catalog', () => {
         ).toThrow();
       }
       expect(catalog.listInstances()).toHaveLength(0);
-      const instance = catalog.addInstance('plugin', 'type', { label: 'Instance', config: {} });
+      const instance = catalog.createEmptyInstance('type');
+      expect(instance.config).toEqual({
+        chatgpt: true,
+        fetchRetries: 5,
+        retryDelayMs: 2000,
+        refreshOnUnauthorized: true,
+      });
       await catalog.removeInstance('plugin', instance.id);
       expect(disposed).toBe(true);
     } finally {

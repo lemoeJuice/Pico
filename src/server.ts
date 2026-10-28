@@ -453,6 +453,11 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     if (typeof request.query.modelId !== 'string') throw new ServiceError(400, 'modelId is required');
     response.json({ adapters: runtime.modelCatalog.matchingAdapters(request.query.modelId) });
   });
+  app.post('/api/provider-instances', (request, response) => {
+    const body = bodyObject(request);
+    runtime.modelCatalog.createEmptyInstance(requiredText(body, 'typeId'));
+    response.json(runtime.modelCatalogView());
+  });
   app.post('/api/provider-instances/:instanceId/refresh', async (request, response) => {
     await runtime.modelCatalog.refreshInstance(request.params.instanceId!);
     response.json(runtime.modelCatalogView());

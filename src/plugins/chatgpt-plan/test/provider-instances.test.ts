@@ -122,6 +122,15 @@ beforeEach(() => {
   vi.stubEnv('NODE_ENV', 'test');
 });
 describe('ChatGPT provider instances', () => {
+  it('declares the transport defaults for newly created instances', () => {
+    const env = setup();
+    expect(env.driver().defaultConfig).toEqual({
+      chatgpt: true,
+      fetchRetries: 5,
+      retryDelayMs: 2000,
+      refreshOnUnauthorized: true,
+    });
+  });
   it('isolates credentials and prevents completing another instance operation', async () => {
     const env = setup();
     const a = env.call('POST /instances', undefined, { label: 'A' }) as ProviderInstance;

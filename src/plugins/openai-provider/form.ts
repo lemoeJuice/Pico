@@ -1,12 +1,5 @@
-export function providerInstanceRequest(form: {
-  label: string;
-  baseUrl: string;
-  protocol: string;
-  apiKey: string;
-  models: string;
-}) {
+export function providerInstanceRequest(form: { baseUrl: string; protocol: string; apiKey: string; models: string }) {
   return {
-    label: form.label.trim(),
     baseUrl: form.baseUrl.trim(),
     protocol: form.protocol,
     ...(form.apiKey ? { apiKey: form.apiKey } : {}),

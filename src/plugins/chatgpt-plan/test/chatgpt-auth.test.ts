@@ -115,7 +115,7 @@ describe('Sign in with ChatGPT credentials', () => {
       }),
       redirectUri,
     );
-    expect(connected).toEqual({ connected: true, accountLabel: 'pico-user@example.test' });
+    expect(connected).toEqual({ connected: true, accountLabel: 'pico-user@example.test', previouslyConnected: true });
     expect(tokenRequests[0]?.get('grant_type')).toBe('authorization_code');
     expect(tokenRequests[0]?.get('client_id')).toBe('oaiapp_pico_test');
     expect(tokenRequests[0]?.get('code')).toBe('one-time-code');
@@ -154,7 +154,7 @@ describe('Sign in with ChatGPT credentials', () => {
     expect(auth.status().connected).toBe(true);
 
     await expect(auth.signOut()).resolves.toEqual({ remoteRevoked: true });
-    expect(auth.status()).toEqual({ connected: false, accountLabel: null });
+    expect(auth.status()).toEqual({ connected: false, accountLabel: null, previouslyConnected: true });
     const retained = state.get<Record<string, unknown>>('oauth', {});
     expect(retained.clientId).toBe('oaiapp_pico_test');
     expect(retained.refreshToken).toBeNull();
@@ -217,6 +217,7 @@ describe('Sign in with ChatGPT credentials', () => {
       expiresAt: 1,
       scopes: scopes.split(' '),
     });
+    expect(new ChatGptPlanAuth(new MemoryPluginState()).status().previouslyConnected).toBe(false);
     let refreshError = 'temporarily_unavailable';
     const auth = new ChatGptPlanAuth(state, async () => Response.json({ error: refreshError }, { status: 503 }));
 
@@ -226,7 +227,7 @@ describe('Sign in with ChatGPT credentials', () => {
 
     refreshError = 'invalid_grant';
     await expect(auth.accessToken(true)).rejects.toThrow('Reconnect your account');
-    expect(auth.status()).toEqual({ connected: false, accountLabel: null });
+    expect(auth.status()).toEqual({ connected: false, accountLabel: null, previouslyConnected: true });
     const expired = state.get<Record<string, unknown>>('oauth', {});
     expect(expired.refreshToken).toBeNull();
     expect(expired.accessToken).toBeNull();

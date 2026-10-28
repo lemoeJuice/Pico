@@ -189,7 +189,11 @@ var ChatGptPlanAuth = class {
     const connected = Boolean(
       credentials?.clientId && credentials.refreshToken && credentials.scopes.includes(planScope)
     );
-    return { connected, accountLabel: connected ? credentials?.email ?? "ChatGPT account" : null };
+    return {
+      connected,
+      accountLabel: connected ? credentials?.email ?? "ChatGPT account" : null,
+      previouslyConnected: Boolean(credentials?.subject)
+    };
   }
   async beginSignIn(redirectUri) {
     const redirect = new URL(redirectUri);
@@ -918,6 +922,7 @@ function createChatGptPlanPlugin() {
           editPage: { pluginId: "pico.chatgpt-plan", pageId: "account" }
         },
         {
+          defaultConfig: providerConfig,
           listModels: async (instance) => (await getAuth(instance.id).listModels()).map((model) => ({
             id: model.slug,
             name: model.slug,
@@ -995,14 +1000,6 @@ function createChatGptPlanPlugin() {
         const label = typeof body.label === "string" ? body.label.trim() : "";
         if (!label || label.length > 120) throw new Error("Enter an account label.");
         return context.providers.add("chatgpt-plan", { label, config: providerConfig });
-      });
-      context.http.register("PUT", "/instances", (request) => {
-        const { id } = requireInstance(request);
-        const instance = context.providers.get(id);
-        const body = request.body && typeof request.body === "object" ? request.body : {};
-        const label = typeof body.label === "string" ? body.label.trim() : "";
-        if (!label || label.length > 120) throw new Error("Enter a provider name.");
-        return context.providers.update(id, { label, config: instance.config });
       });
       context.http.register("GET", "/status", (request) => requireInstance(request).auth.status());
       context.http.register("GET", "/models", async (request) => await requireInstance(request).auth.listModels());
