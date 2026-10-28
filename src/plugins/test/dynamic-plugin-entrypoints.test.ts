@@ -5,6 +5,33 @@ import { PicoStore } from '../../core/store.js';
 import { PicoRuntime } from '../../runtime/runtime.js';
 
 describe('dynamic first-party plugin entries', () => {
+  it('registers provider add pages without private composer model controls', async () => {
+    const store = new PicoStore(':memory:');
+    const runtime = new PicoRuntime(store, { pluginDirectory: resolve(process.cwd(), 'plugins') });
+    try {
+      await runtime.initialize();
+      const types = runtime.modelCatalog.listProviderTypes();
+      expect(types).toContainEqual(
+        expect.objectContaining({ addPage: { pluginId: 'pico.chatgpt-plan', pageId: 'account' } }),
+      );
+      expect(types).toContainEqual(
+        expect.objectContaining({ addPage: { pluginId: 'pico.openai-provider', pageId: 'add' } }),
+      );
+      expect(runtime.pluginInfo().ui).not.toContainEqual(expect.objectContaining({ pluginId: 'pico.chatgpt-plan' }));
+      expect(runtime.pluginInfo().ui).not.toContainEqual(expect.objectContaining({ pluginId: 'pico.model-parameters' }));
+      expect(runtime.pluginInfo().pages).toContainEqual(
+        expect.objectContaining({
+          pluginId: 'pico.chatgpt-plan',
+          id: 'account',
+          externalAuthOrigins: ['https://auth.openai.com'],
+        }),
+      );
+    } finally {
+      await runtime.shutdown();
+      store.close();
+    }
+  });
+
   it('loads independent packages and applies the declared projection order', async () => {
     const store = new PicoStore(':memory:');
     const runtime = new PicoRuntime(store, { pluginDirectory: resolve(process.cwd(), 'plugins') });
@@ -50,8 +77,8 @@ describe('dynamic first-party plugin entries', () => {
       expect(runtime.pluginHttpRoute('pico.todo', 'GET', '/threads')).toBeDefined();
       expect(runtime.pluginHttpRoute('pico.todo', 'PATCH', '/items')).toBeDefined();
       expect(runtime.plugins.webUiAssetLocation('pico.todo', 'webui')).toBeDefined();
-      expect(runtime.pluginInfo().ui).toContainEqual(
-        expect.objectContaining({ pluginId: 'pico.chatgpt-plan', externalAuthOrigins: ['https://auth.openai.com'] }),
+      expect(runtime.modelCatalog.listProviderTypes()).toContainEqual(
+        expect.objectContaining({ addPage: { pluginId: 'pico.chatgpt-plan', pageId: 'account' } }),
       );
       expect(runtime.pluginInfo().pages).toContainEqual(
         expect.objectContaining({
