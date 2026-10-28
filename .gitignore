@@ -1,6 +1,8 @@
 node_modules/
 dist/
 data/
+.pico-deploy.lock
+.pico-deploy-backup-*/
 plugins/**/runtime.mjs
 plugins/**/runtime.mjs.map
 .env
