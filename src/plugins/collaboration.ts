@@ -88,7 +88,10 @@ export const collaborationPlugin: PicoPlugin = {
       {
         name: 'spawn_thread',
         description:
-          'Create a child Thread in the current Project, send it a bounded task, and return immediately without waiting for it.',
+          'Create a child Thread in the current Project, send it a bounded task, and return immediately without waiting for it. ' +
+          'Choose a model and supported parameters appropriate to the task, following any user preferences: consider a lighter model and lower reasoning effort for straightforward work, and stronger capabilities or higher reasoning effort for complex or high-risk work. ' +
+          'Use list_models to discover available models, matching adapters, and supported controls before selecting; do not guess model IDs or parameter values. ' +
+          'If model is omitted, the child inherits the parent Thread’s current model selection.',
         parameters: {
           type: 'object',
           properties: {
@@ -96,6 +99,8 @@ export const collaborationPlugin: PicoPlugin = {
             title: { type: 'string' },
             model: {
               type: 'object',
+              description:
+                'Optional child model selection from list_models. Set parameters.options using the selected adapter’s supported controls, including reasoning effort when available; use an empty options object when no options are needed.',
               properties: {
                 modelId: { type: 'string', minLength: 1 },
                 adapterId: { type: 'string', minLength: 1 },
