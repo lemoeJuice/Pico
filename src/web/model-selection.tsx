@@ -8,6 +8,7 @@ import type {
   ModelOptionValue,
   ProviderInstance,
 } from '../contracts/model-catalog.js';
+import { PluginUiSelect } from './plugin-ui-tree.js';
 
 export interface ModelSelectionProps {
   models: CatalogModel[];
@@ -127,44 +128,57 @@ function ParameterField({
     );
   }
   if (control.choices) {
+    const options = [
+      {
+        label:
+          control.defaultValue === undefined
+            ? 'Default'
+            : `Default (${control.choiceLabels?.[String(control.defaultValue)] ?? String(control.defaultValue)})`,
+        value: '',
+      },
+      ...control.choices.map((choice) => ({
+        label: control.choiceLabels?.[String(choice)] ?? String(choice),
+        value: String(choice),
+      })),
+    ];
     return (
       <label className={`model-selection-parameter ${className}`}>
         <span>{control.label}</span>
-        <select
+        <PluginUiSelect
+          label={control.label}
           value={String(value ?? '')}
+          options={options}
           disabled={disabled}
-          onChange={(event) => {
-            const selected = control.choices?.find((choice) => String(choice) === event.target.value);
-            onChange(selected);
+          compact={className === 'model-selection-primary-inline'}
+          onChange={(selectedValue) => {
+            if (selectedValue === '') {
+              onChange(undefined);
+              return;
+            }
+            const selected = control.choices?.find((choice) => String(choice) === selectedValue);
+            if (selected !== undefined) onChange(selected);
           }}
-        >
-          <option value="">
-            {control.defaultValue === undefined
-              ? 'Default'
-              : `Default (${control.choiceLabels?.[String(control.defaultValue)] ?? String(control.defaultValue)})`}
-          </option>
-          {control.choices.map((choice) => (
-            <option key={String(choice)} value={String(choice)}>
-              {control.choiceLabels?.[String(choice)] ?? String(choice)}
-            </option>
-          ))}
-        </select>
+        />
       </label>
     );
   }
   if (control.type === 'boolean') {
+    const options = [
+      { label: 'Default', value: '' },
+      { label: 'On', value: 'true' },
+      { label: 'Off', value: 'false' },
+    ];
     return (
       <label className={`model-selection-parameter ${className}`}>
         <span>{control.label}</span>
-        <select
+        <PluginUiSelect
+          label={control.label}
           value={value === undefined ? '' : String(value)}
+          options={options}
           disabled={disabled}
-          onChange={(event) => onChange(event.target.value === '' ? undefined : event.target.value === 'true')}
-        >
-          <option value="">Default</option>
-          <option value="true">On</option>
-          <option value="false">Off</option>
-        </select>
+          compact={className === 'model-selection-primary-inline'}
+          onChange={(selectedValue) => onChange(selectedValue === '' ? undefined : selectedValue === 'true')}
+        />
       </label>
     );
   }

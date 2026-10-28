@@ -28,6 +28,11 @@
     box-shadow 120ms ease,
     background 120ms ease;
 }
+.plugin-ui-select-trigger--compact {
+  min-height: 32px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
 .plugin-ui-select-trigger:hover:not(:disabled),
 .plugin-ui-select-trigger[aria-expanded='true'] {
   border-color: #cddace;
