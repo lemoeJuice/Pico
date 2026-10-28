@@ -38,6 +38,8 @@ import { isSessionExpired } from './session.js';
 import { pauseReasonIsError, visiblePauseReason } from './pause-reason.js';
 import { shouldSubmitOnEnter } from './composer-keys.js';
 import { upsertProjectThread } from './project-threads.js';
+import { updateProjectThreadList, updateThreadList, updateThreadSnapshot } from './thread-state.js';
+import { ThreadToolRequestGuard } from './thread-tool-requests.js';
 import { fetchStableSnapshot, snapshotForSelection, snapshotThreadIsSelected } from './snapshot-consistency.js';
 import { isNearScrollEnd } from './scroll-follow.js';
 import { threadCanBeInterrupted } from './thread-controls.js';
@@ -700,6 +702,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const observedModelExecutions = useRef(new Set<string>());
   const historyExpandedThreads = useRef(new Set<string>());
   const projectThreadLoads = useRef(new Set<string>());
+  const threadToolRequests = useRef(new ThreadToolRequestGuard());
   const draft = threadId ? (draftsByThread[threadId] ?? '') : '';
   const draftRef = useRef({ threadId, value: draft });
   activeProjectId.current = projectId;
@@ -890,31 +893,35 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const suggestedNewProjectName = workspaceDirectoryName(newProjectWorkspacePath);
 
   const loadThreadTools = useCallback(async (targetThreadId: string): Promise<void> => {
+    const request = threadToolRequests.current.begin(targetThreadId);
+    setSavingToolName(null);
     setThreadToolsLoading(true);
     setThreadToolsError('');
     try {
       const result = await api<{ tools: ThreadToolView[] }>(`/api/threads/${encodeURIComponent(targetThreadId)}/tools`);
-      if (activeThreadId.current === targetThreadId) setThreadTools(result.tools);
+      if (threadToolRequests.current.isCurrent(request, activeThreadId.current)) setThreadTools(result.tools);
     } catch (caught) {
-      if (activeThreadId.current === targetThreadId) {
+      if (threadToolRequests.current.isCurrent(request, activeThreadId.current)) {
         setThreadToolsError(caught instanceof Error ? caught.message : 'Could not load Thread tools.');
       }
     } finally {
-      if (activeThreadId.current === targetThreadId) setThreadToolsLoading(false);
+      if (threadToolRequests.current.isCurrent(request, activeThreadId.current)) setThreadToolsLoading(false);
     }
   }, []);
 
+  useLayoutEffect(() => {
+    threadToolRequests.current.invalidateAll();
+    setThreadTools([]);
+    setThreadToolsLoading(false);
+    setThreadToolsError('');
+    setSavingToolName(null);
+    setToolsMenuOpen(false);
+  }, [selectedThreadId]);
+
   useEffect(() => {
     if (!selectedThreadId) {
-      setThreadTools([]);
-      setThreadToolsLoading(false);
-      setThreadToolsError('');
-      setToolsMenuOpen(false);
       return;
     }
-    setThreadTools([]);
-    setThreadToolsError('');
-    setToolsMenuOpen(false);
     void loadThreadTools(selectedThreadId);
   }, [loadThreadTools, selectedThreadId]);
 
@@ -936,6 +943,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
   const toggleThreadTool = async (tool: ThreadToolView): Promise<void> => {
     if (!selectedThread || savingToolName) return;
+    const request = threadToolRequests.current.begin(selectedThread.id);
+    setThreadToolsLoading(false);
     setSavingToolName(tool.name);
     setThreadToolsError('');
     try {
@@ -943,11 +952,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         `/api/threads/${encodeURIComponent(selectedThread.id)}/tools`,
         { method: 'PUT', body: JSON.stringify({ name: tool.name, enabled: !tool.enabled }) },
       );
-      setThreadTools(result.tools);
+      if (threadToolRequests.current.isCurrent(request, activeThreadId.current)) setThreadTools(result.tools);
     } catch (caught) {
-      setThreadToolsError(caught instanceof Error ? caught.message : 'Could not update this Tool.');
+      if (threadToolRequests.current.isCurrent(request, activeThreadId.current)) {
+        setThreadToolsError(caught instanceof Error ? caught.message : 'Could not update this Tool.');
+      }
     } finally {
-      setSavingToolName(null);
+      if (threadToolRequests.current.isCurrent(request, activeThreadId.current)) setSavingToolName(null);
     }
   };
 
@@ -1014,20 +1025,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     const isActive = !updated.archivedAt && !updated.deletedAt;
     const isArchived = Boolean(updated.archivedAt) && !updated.deletedAt;
 
-    setThreadsByProject((current) => {
-      const projectThreads = current[updated.projectId] ?? [];
-      return {
-        ...current,
-        [updated.projectId]: isActive
-          ? upsertProjectThread(projectThreads, updated, updated.projectId)
-          : projectThreads.filter((thread) => thread.id !== updated.id),
-      };
-    });
-    setThreads((current) =>
-      isActive
-        ? upsertProjectThread(current, updated, activeProjectId.current)
-        : current.filter((thread) => thread.id !== updated.id),
-    );
+    setThreadsByProject((current) => updateProjectThreadList(current, updated));
+    setThreads((current) => updateThreadList(current, updated, activeProjectId.current));
     setArchivedThreads((current) =>
       isArchived
         ? upsertProjectThread(current, updated, updated.projectId)
@@ -1041,11 +1040,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       );
       setThreadId(next?.id ?? null);
     }
-    setSnapshot((current) => {
-      if (current?.thread.id !== updated.id) return current;
-      if (!isActive) return null;
-      return { ...current, thread: updated };
-    });
+    setSnapshot((current) => updateThreadSnapshot(current, updated));
   }, []);
 
   const refreshSelected = useCallback(() => {
@@ -1930,22 +1925,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     try {
       const updated = await api<Thread>(`/api/threads/${threadId}/${action}`, { method: 'POST', body: '{}' });
       setSnapshot((current) => {
-        if (current?.thread.id !== updated.id || (threadUpdateVersions.current.get(threadId) ?? 0) !== updateVersion)
-          return current;
-        return { ...current, thread: updated };
+        if ((threadUpdateVersions.current.get(threadId) ?? 0) !== updateVersion) return current;
+        return updateThreadSnapshot(current, updated);
       });
       setThreads((items) =>
         (threadUpdateVersions.current.get(threadId) ?? 0) === updateVersion
-          ? items.map((item) => (item.id === updated.id ? updated : item))
+          ? updateThreadList(items, updated, activeProjectId.current)
           : items,
       );
       if ((threadUpdateVersions.current.get(threadId) ?? 0) === updateVersion) {
-        setThreadsByProject((current) => ({
-          ...current,
-          [updated.projectId]: (current[updated.projectId] ?? []).map((item) =>
-            item.id === updated.id ? updated : item,
-          ),
-        }));
+        setThreadsByProject((current) => updateProjectThreadList(current, updated));
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -1964,20 +1953,17 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     ) {
       setSnapshot((current) =>
         current?.thread.id === targetThreadId
-          ? {
-              ...current,
-              thread: result.thread,
-              executions: [result.execution, ...current.executions.filter((item) => item.id !== result.execution.id)],
-            }
+          ? updateThreadSnapshot(
+              {
+                ...current,
+                executions: [result.execution, ...current.executions.filter((item) => item.id !== result.execution.id)],
+              },
+              result.thread,
+            )
           : current,
       );
-      setThreads((items) => items.map((item) => (item.id === result.thread.id ? result.thread : item)));
-      setThreadsByProject((current) => ({
-        ...current,
-        [result.thread.projectId]: (current[result.thread.projectId] ?? []).map((item) =>
-          item.id === result.thread.id ? result.thread : item,
-        ),
-      }));
+      setThreads((items) => updateThreadList(items, result.thread, activeProjectId.current));
+      setThreadsByProject((current) => updateProjectThreadList(current, result.thread));
     }
     return result.execution;
   };
