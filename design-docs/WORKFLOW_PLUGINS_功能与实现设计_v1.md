@@ -26,7 +26,7 @@ Project Context 与 Global Memory 是两个有不同作用域的插件能力，�
 - Canonical History 保存已经发生的 Message、完整 Model Step、Tool Call / Result 以及插件审计事件；已提交记录不可修改或删除。
 - 每个插件自己的当前状态保存在 Plugin State。可重建的进度游标、Goal 状态、Todo、记忆索引、Rolling Context 分层都属于可变状态。
 - 插件的审计事件采用插件命名空间追加到 Canonical History；Projection 只消费 Canonical Records 与插件状态，不回写历史。
-- Goal、开放 Todo、相关 Project / Global Memory 与 Rolling Context 都会影响模型输入。Goal 与 Todo 分别以带来源标识的 Projection turn/message 注入模型上下文，不只是 UI 状态；这些合成 turn 不伪装成已提交的 Canonical User Message。最终发送给 provider 的 prompt 必须来自 Runtime 记录的实际 Model Input，而不是 UI 事后拼出的近似版本。
+- Goal、Todo、相关 Project / Global Memory 与 Rolling Context 都会影响模型输入。Goal 和相关记忆可通过 Projection 提供上下文；Todo 在可用时提供稳定的能力提示，具体清单由模型按需调用工具读取。合成上下文不伪装成已提交的 Canonical User Message。最终发送给 provider 的 prompt 必须来自 Runtime 记录的实际 Model Input，而不是 UI 事后拼出的近似版本。
 
 ### 2.2 已有 Tool Batch 语义
 
@@ -141,7 +141,8 @@ Todo 是 Agent 可选的短期待办列表。收到用户消息后，Agent 自�
 
 **上下文与 UI**
 
-- 每次 Model Input 投影当前 Thread 的开放 Todo（数量较多时按活动和优先级裁剪）；已完成项保留于 UI / Canonical 审计记录，默认不占后续 prompt。
+- 每次 Model Input 在 Todo 工具可用时提供稳定的能力提示，模型按需通过 `todo_list` 读取当前 Thread 的清单，并通过可用的 Todo 工具修改；不自动投影当前事项。已完成项保留在 Todo 状态和 UI 中，也可由 `todo_list` 查询。
+- 不在每一步末尾插入临时 Todo 快照：这种合成消息在下一次投影时消失，可能使 provider 在其末尾写入的缓存断点无法复用。也不将当前状态插入较早的历史位置，以免倒置事项创建和状态变化的时间顺序。代价是模型需要自行判断何时读取清单，可能产生额外工具调用，也可能暂时不查看；Todo 仍不驱动续跑。
 - UI 在 Thread 侧栏/工具栏查看和手动修改；Agent 自动更新不要求逐项人工确认。支持从条目跳回来源 Message。
 - Todo 作为 Goal 的执行细节可以关联 Goal ID，但 Todo 也可独立存在；所有 open Todo 完成不自动代表 Goal 完成。
 
@@ -195,7 +196,7 @@ Projection 顺序与摘要必须稳定，不能为了短 prompt 每轮随机重�
 
 单独提供 Rolling Context Panel，按时间列出每段 tier、Canonical seq / Message 引用、源文本、摘要、摘要版本、Evaluator 判断与理由、预计成本、实际摘要/evaluator 开销及历史转层。用户可以 pin hot、手动 warm / cold、重试摘要和召回 cold 段；跨插件关闭仍可用的长会话压缩由 Runtime `/compact` 提供。
 
-每次主模型调用提供“实际 Model Input”视图：逐字展示最终传给 Model Adapter 的 system prompt、turns、tools 与 projection boundary；对每段标明原文、摘要替换、cold omission、Goal/Todo/Memory 注入来源以及 provider attempt。它应读取执行日志中记录的真实 prompt，精确保留换行和调用参数；凭证不进入记录。UI 同时解释每个 Canonical 区间为什么出现在或没出现在本次请求中。
+每次主模型调用提供“实际 Model Input”视图：逐字展示最终传给 Model Adapter 的 system prompt、turns、tools 与 projection boundary；对每段标明原文、摘要替换、cold omission、Goal/Memory 注入来源以及 provider attempt。Todo 能力提示属于 system prompt，清单仅在工具调用时作为工具结果出现。视图应读取执行日志中记录的真实 prompt，精确保留换行和调用参数；凭证不进入记录。UI 同时解释每个 Canonical 区间为什么出现在或没出现在本次请求中。
 
 ### 3.5 Project Context：自动 Project 记忆
 
@@ -282,7 +283,7 @@ Usage Plugin 汇总主 Model Step 与插件辅助模型调用，按 Thread、Pro
 
 1. 从 Canonical History 建立基础 turns 与 system prompt。
 2. Rolling Context 按当前 tier 保留 hot、以段摘要替换 warm、移除 cold。
-3. 注入当前 Goal 和开放 Todo。
+3. 注入当前 Goal；Todo 根据最终可用工具表提供稳定的能力提示，事项由工具按需读取。
 4. 查找与本轮相关的 Project Context 与 Global Memory，并注入有来源标识的短上下文。
 5. Permission 根据有效规则过滤不可用的 Tool schema；动态 ask 仍在单次 Invocation 阶段处理。
 6. Model Stage 与其他只读/路由插件完成最终处理后，Runtime 记录精确 Model Input 并提交 Adapter 请求。
@@ -326,7 +327,7 @@ Usage Plugin 汇总主 Model Step 与插件辅助模型调用，按 Thread、Pro
 
 - Auto-review 只替换 ask 的裁决者，一次决定只适用于确切调用，不扩大沙箱或持久扩大权限；失败默认 fail closed。
 - 用户 Goal 能在同一 Thread 上跨普通 Assistant final response 持续推进；pause、needs_input、complete、context/provider limit、Runtime restart 均能恢复或正确停止。
-- Agent 可以判断是否需要 Todo；开放 Todo 注入上下文，完成项被勾选并退出默认投影。
+- Agent 可以判断是否需要 Todo，按需读取及更新清单；当前事项不会自动注入上下文，完成项保留在状态中供查询。
 - Rolling Context 每个封段独立调用辅助模型直接总结；只有严格净成本预估完整且为正时才调用 Evaluator，未知成本时不调用 Reviewer、不自动转层。
 - Warm 使用该段已有直接摘要，cold 不进入 prompt；三层变化从不删改 Canonical History。
 - 用户能对照每次实际发送给 LLM 的原文和工具 schema，看到每个段如何投影、摘要替换和省略。
