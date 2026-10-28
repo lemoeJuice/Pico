@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -85,6 +85,65 @@ describe('PluginHost lifecycle', () => {
       );
       expect(host.httpRoutes()).toHaveLength(1);
       expect(store.getSetting<Record<string, boolean>>('plugin-enablement', {})['pico.dynamic-test']).toBe(true);
+    } finally {
+      await host.shutdown();
+      store.close();
+    }
+  });
+
+  it('loads only standard plugin exports and ignores legacy factory-only exports', async () => {
+    const store = new PicoStore(':memory:');
+    const directory = pluginDirectory();
+    writeFileSync(
+      join(directory, 'pico.factory-only.mjs'),
+      `export function createChatGptPlanPlugin() { throw new Error('legacy factory was called'); }\n`,
+    );
+    const host = new PluginHost(
+      store,
+      new ToolCatalog(),
+      new ExecutionPipelines(),
+      new CommandRegistry(),
+      directory,
+      unavailablePluginServices,
+    );
+    try {
+      await host.load();
+      expect(host.errors()).toContain('pico.factory-only.mjs: Plugin pico.factory-only.mjs must export a default PicoPlugin');
+      expect(host.catalog()).toContainEqual(
+        expect.objectContaining({
+          id: 'pico.factory-only',
+          loaded: false,
+          error: 'Plugin pico.factory-only.mjs must export a default PicoPlugin',
+        }),
+      );
+      expect(host.catalog()).toContainEqual(expect.objectContaining({ id: 'pico.dynamic-test', loaded: true }));
+    } finally {
+      await host.shutdown();
+      store.close();
+    }
+  });
+
+  it('reloads a packaged Runtime bundle after the bundle file changes', async () => {
+    const store = new PicoStore(':memory:');
+    const directory = pluginDirectory();
+    const packageDirectory = join(directory, 'pico.dynamic-test');
+    mkdirSync(packageDirectory);
+    writeFileSync(join(directory, 'pico.dynamic-test.mjs'), `export { default } from './pico.dynamic-test/runtime.mjs';\n`);
+    writeFileSync(join(packageDirectory, 'runtime.mjs'), pluginSource('1.0.0'));
+    const host = new PluginHost(
+      store,
+      new ToolCatalog(),
+      new ExecutionPipelines(),
+      new CommandRegistry(),
+      directory,
+      unavailablePluginServices,
+    );
+    try {
+      await host.load();
+      expect(host.catalog()).toContainEqual(expect.objectContaining({ id: 'pico.dynamic-test', version: '1.0.0' }));
+      writeFileSync(join(packageDirectory, 'runtime.mjs'), pluginSource('2.0.0'));
+      await host.reload('pico.dynamic-test');
+      expect(host.catalog()).toContainEqual(expect.objectContaining({ id: 'pico.dynamic-test', version: '2.0.0' }));
     } finally {
       await host.shutdown();
       store.close();

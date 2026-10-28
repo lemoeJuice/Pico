@@ -570,9 +570,8 @@ export class PluginHost {
     const imported = (await import(moduleUrl.href)) as {
       default?: PicoPlugin;
       plugin?: PicoPlugin;
-      createChatGptPlanPlugin?: () => PicoPlugin;
     };
-    const plugin = imported.default ?? imported.plugin ?? imported.createChatGptPlanPlugin?.();
+    const plugin = imported.default ?? imported.plugin;
     if (!plugin) throw new Error(`Plugin ${filename} must export a default PicoPlugin`);
     return plugin;
   }

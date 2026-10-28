@@ -1,6 +1,7 @@
 import { ServiceError } from '../contracts/service-error.js';
 import { migrateLegacyPermissions } from './migrations/legacy-permissions.js';
 import { migrateLegacyChatGptPreferences } from './migrations/legacy-chatgpt-preferences.js';
+import { assertPluginStateWriteAllowed, migrateLegacyPluginStorage } from './migrations/legacy-plugin-storage.js';
 import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -504,18 +505,15 @@ export class PicoStore {
       for (const row of states) {
         const pluginId = String(row.plugin_id);
         const keyName = String(row.key);
-        // ChatGPT OAuth material is migrated to private_secrets before being exposed as a fact.
-        if (pluginId === 'pico.chatgpt-plan' && keyName === 'oauth') {
-          this.setPrivateSecret(pluginId, keyName, json(row.value_json, null));
-          this.db.prepare('DELETE FROM plugin_state WHERE plugin_id = ? AND key = ?').run(pluginId, keyName);
-          continue;
-        }
         if (
-          (pluginId === 'pico.chatgpt-plan' && keyName === 'modelCatalog') ||
-          (pluginId === 'pico.permissions' && keyName === 'availableTools')
+          migrateLegacyPluginStorage(pluginId, keyName, json(row.value_json, null), {
+            setPrivateSecret: (owner, key, value) => this.setPrivateSecret(owner, key, value),
+            setPluginCache: (id, key, value) => this.setPluginCache(id, key, value),
+            deleteLegacyState: (id, key) => {
+              this.db.prepare('DELETE FROM plugin_state WHERE plugin_id = ? AND key = ?').run(id, key);
+            },
+          })
         ) {
-          this.setPluginCache(pluginId, keyName, json(row.value_json, null));
-          this.db.prepare('DELETE FROM plugin_state WHERE plugin_id = ? AND key = ?').run(pluginId, keyName);
           continue;
         }
         const scope = 'global';
@@ -1836,13 +1834,6 @@ export class PicoStore {
   }
 
   getPluginState<T>(pluginId: string, key: string, fallback: T): T {
-    if (pluginId === 'pico.chatgpt-plan' && key === 'oauth') return this.getPrivateSecret(pluginId, key, fallback);
-    if (
-      (pluginId === 'pico.chatgpt-plan' && key === 'modelCatalog') ||
-      (pluginId === 'pico.permissions' && key === 'availableTools')
-    ) {
-      return this.getPluginCache(pluginId, key, fallback);
-    }
     const row = this.db
       .prepare('SELECT value_json FROM plugin_state WHERE plugin_id = ? AND key = ?')
       .get(pluginId, key) as SqlRow | undefined;
@@ -1885,17 +1876,7 @@ export class PicoStore {
   }
 
   setPluginState<T>(pluginId: string, key: string, value: T): void {
-    if (pluginId === 'pico.chatgpt-plan' && key === 'oauth') {
-      this.setPrivateSecret(pluginId, key, value);
-      return;
-    }
-    if (
-      (pluginId === 'pico.chatgpt-plan' && key === 'modelCatalog') ||
-      (pluginId === 'pico.permissions' && key === 'availableTools')
-    ) {
-      this.setPluginCache(pluginId, key, value);
-      return;
-    }
+    assertPluginStateWriteAllowed(pluginId, key);
     const serialized = JSON.stringify(value);
     if (serialized === undefined) throw new Error('Plugin State must be JSON serializable');
     this.transaction(() => {

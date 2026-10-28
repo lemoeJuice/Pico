@@ -41,6 +41,7 @@ await build({
   target: 'node22',
   external: ['node:*'],
   minify: false,
+  footer: { js: 'export default createChatGptPlanPlugin();' },
 });
 await buildWebUi({ configFile: 'plugins/pico.model-parameters/vite.config.ts' });
 await buildWebUi({ configFile: 'plugins/pico.chatgpt-plan/vite.config.ts' });

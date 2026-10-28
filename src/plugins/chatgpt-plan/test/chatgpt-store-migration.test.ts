@@ -20,6 +20,14 @@ describe('ChatGPT Plan store migration', () => {
         );
       store.db
         .prepare('INSERT INTO plugin_state (plugin_id, key, value_json, updated_at) VALUES (?, ?, ?, ?)')
+        .run(
+          'pico.permissions',
+          'availableTools',
+          JSON.stringify(['read_file']),
+          new Date().toISOString(),
+        );
+      store.db
+        .prepare('INSERT INTO plugin_state (plugin_id, key, value_json, updated_at) VALUES (?, ?, ?, ?)')
         .run('example.plugin', 'legacy', JSON.stringify({ value: 9 }), new Date().toISOString());
       store.db
         .prepare('INSERT INTO plugin_state (plugin_id, key, value_json, updated_at) VALUES (?, ?, ?, ?)')
@@ -39,6 +47,10 @@ describe('ChatGPT Plan store migration', () => {
         models: [{ slug: 'cached-model' }],
         refreshedAt: 1,
       });
+      expect(store.getPluginState('pico.chatgpt-plan', 'modelCatalog', null)).toBeNull();
+      expect(store.getPluginState('pico.permissions', 'availableTools', null)).toBeNull();
+      expect(store.getPluginCache('pico.permissions', 'availableTools', null)).toEqual(['read_file']);
+      expect(store.getPluginState('pico.chatgpt-plan', 'oauth', null)).toBeNull();
       expect(
         store.db.prepare("SELECT 1 FROM plugin_state WHERE plugin_id = 'pico.chatgpt-plan' AND key = 'oauth'").get(),
       ).toBeUndefined();
@@ -58,6 +70,24 @@ describe('ChatGPT Plan store migration', () => {
     } finally {
       store?.close();
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects OAuth credentials written through ordinary Plugin State', () => {
+    const store = new PicoStore(':memory:');
+    const secret = { refreshToken: 'must-remain-private' };
+    try {
+      expect(() => store.setPluginState('pico.chatgpt-plan', 'oauth', secret)).toThrow(/Plugin Secrets/);
+      expect(store.getPluginState('pico.chatgpt-plan', 'oauth', null)).toBeNull();
+      expect(store.getPrivateSecret('pico.chatgpt-plan', 'oauth', null)).toBeNull();
+      expect(
+        store.db.prepare("SELECT 1 FROM plugin_state WHERE plugin_id = 'pico.chatgpt-plan' AND key = 'oauth'").get(),
+      ).toBeUndefined();
+      expect(store.listScopedCanonical('workflow:global').some((record) => JSON.stringify(record).includes(secret.refreshToken))).toBe(
+        false,
+      );
+    } finally {
+      store.close();
     }
   });
 });

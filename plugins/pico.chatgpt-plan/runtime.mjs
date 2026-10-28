@@ -1917,3 +1917,4 @@ function createChatGptPlanPlugin() {
 export {
   createChatGptPlanPlugin
 };
+export default createChatGptPlanPlugin();

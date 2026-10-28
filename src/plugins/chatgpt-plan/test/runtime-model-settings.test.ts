@@ -49,7 +49,7 @@ describe('ChatGPT Plan Runtime integration', () => {
       expect(info.providers).toContainEqual(expect.objectContaining({ id: 'chatgpt-plan' }));
       expect(env.runtime.availableCommands()).toContainEqual(expect.objectContaining({ name: 'chatgpt-provider' }));
 
-      env.store.setPluginState('pico.chatgpt-plan', 'oauth', {
+      env.store.setPrivateSecret('pico.chatgpt-plan', 'oauth', {
         hostId: 'urn:uuid:pico-test',
         clientId: 'oaiapp_pico_test',
         subject: 'chatgpt-user-1',

@@ -1,3 +1,1 @@
-import { createChatGptPlanPlugin } from './pico.chatgpt-plan/runtime.mjs';
-
-export default createChatGptPlanPlugin();
+export { default } from './pico.chatgpt-plan/runtime.mjs';
