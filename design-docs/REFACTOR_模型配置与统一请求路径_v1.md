@@ -1,150 +1,113 @@
-# 模型配置与统一请求路径设计 v1
+# 模型目录、适配器与统一请求路径设计 v2
 
-状态：2026-10-28 独立设计草案，尚未实施。本轮架构修复没有改变模型选择或 ChatGPT 推理请求行为。
+状态：2026-10-28 用户确认，分阶段实施。此文替代 v1 中全局模型选择及 Provider 绑定适配器的建议。
 
-## 1. 目标与现状
+## 1. 职责
 
-目标是把 ChatGPT 的推理请求纳入内建 OpenAI-compatible 模型请求实现，插件保留 OAuth 登录、刷新、账户状态和模型目录等账户能力。主步骤、辅助摘要和 Reviewer 继续走同一个 Runtime model stage，不新增执行循环或 Provider 专属 pipeline stage。
+| 组件                  | 职责                                                                               |
+| --------------------- | ---------------------------------------------------------------------------------- |
+| Provider 插件         | 注册 Provider 类型及添加页面，管理授权与模型发现，通过框架接口添加和移除自己的实例 |
+| Provider 实例         | 一个独立账户或连接；稳定标识、配置、专属凭据与目录缓存                             |
+| 模型目录              | 汇总实例下的模型、协议、来源及可用状态，同名不同来源分别注册                       |
+| 适配器插件            | 注册匹配条件、参数定义、校验、请求差异和 reasoning replay 逻辑                     |
+| 选择器                | 用户先选模型，再从右侧菜单中选择匹配的适配器并配置参数                             |
+| Thread / 插件调用配置 | 保存模型注册标识、适配器标识和参数                                                 |
+| 框架执行层            | 统一协议编解码、HTTP、SSE、取消、重试、诊断及 usage                                |
+| Runtime               | 调度执行、维护 Execution，并提交主对话 Assistant 和工具调用                        |
 
-当前实现已经共享 `PicoRuntime.invokeModel`，但只共享了上层调度：
+同一个插件可以同时注册 Provider 与适配器，两项贡献独立；Provider 不知道适配器。适配器不自行发送推理请求或维护重试循环。
 
-| 当前模块                            | 现有职责                                                               | 主要问题                              |
-| ----------------------------------- | ---------------------------------------------------------------------- | ------------------------------------- |
-| `src/runtime/runtime.ts`            | 模型选择解析、model pipeline、身份记录、主/辅助调用提交                | Thread 持久化身份与实际全局选择不一致 |
-| `src/runtime/provider-registry.ts`  | Provider 描述与可执行 handler 注册                                     | 账户身份、协议和执行实现绑定在一起    |
-| `src/runtime/model.ts`              | Chat Completions 编解码、HTTP、流解析、usage 与诊断                    | HTTP 和协议职责混合                   |
-| `src/plugins/chatgpt-plan/model.ts` | Responses 编解码、HTTP、OAuth 401 刷新、传输重试、流解析、usage 与诊断 | 插件维护第二套完整推理请求实现        |
-| `src/plugins/chatgpt-plan/auth.ts`  | OAuth 与模型目录                                                       | 这些能力适合继续独立于推理协议        |
-| `src/plugins/model-parameters`      | 能力校验、参数控件与 wire 参数映射                                     | 参数归属需要与目标解析顺序一致        |
+## 2. Provider 多实例
 
-当前 `threadModelSelection` 会合并全局 provider/model 与 Thread 参数；`updateThreadModelSelection` 主要更新参数，但公开类型仍接受完整模型身份。旧 Thread 视图保存的 provider/model 可能与真实请求不同。后续实现必须明确解决这个契约，而不能继续忽略部分输入字段。
+设置页不再切换全局 Provider/model，而是管理 Provider 实例列表。
 
-## 2. 统一请求实现，保留协议差异
+添加流程：点击添加 Provider → 选择插件注册的类型 → 打开插件提供的添加页面 → 登录或填写配置 → 框架创建实例 → 发现模型。
 
-内建 OpenAI-compatible 能力应同时承载 Chat Completions 和 Responses 两种协议。ChatGPT 连接选择 Responses codec，普通 API-key 连接可按其声明选择协议；不得直接把 ChatGPT 请求改发到 `/chat/completions`。
+同类型可以添加多次。实例有独立凭据、刷新协调和目录缓存。插件只能操作自己拥有的实例；框架负责持久化、唯一标识、归属校验及统一展示。连接配置不含原始凭据，公开目录不能暴露 headers、token 或带授权的 URL。
 
-这次合并只收敛 OpenAI-compatible 请求实现，保留现有第三方自定义 `ModelProvider` handler 的注册和分发能力。自定义协议继续经过同一个 model stage，由 registry 分发到其 handler；下面的 codec 选择规则仅适用于声明使用内建 adapter 的连接。
+删除实例使其模型不可用，历史调用记录保留。停用插件只让相关贡献不可用，保留实例配置以便恢复。目录刷新失败保留缓存并标记状态异常，不直接视为模型下架。
 
-官方迁移文档明确区分请求端点、输入和输出结构；Responses 的函数调用及状态携带也有独立表示。因此，协议编解码需要分别实现。[OpenAI Responses 迁移指南](https://developers.openai.com/api/docs/guides/migrate-to-responses)
+## 3. 模型与适配器选择
+
+模型选择器汇总所有实例的模型，不再先选 Provider。点击模型后，右侧展示所有兼容适配器的名称、来源和说明；选定后由框架生成参数面板。
+
+即使只有一个候选也由用户明确确认。多个匹配结果属于正常候选，不按注册顺序或数字优先级选出赢家。重复适配器标识属于注册错误。
+
+适配器采用结构化匹配条件，例如模型名、家族前缀、协议及必要的连接约束。匹配只决定候选集合，保存的选择决定实际启用哪个处理器。
+
+选择结构：
+
+```ts
+interface ModelSelection {
+  modelId: string;
+  adapterId: string;
+  parameters: {
+    temperature?: number | null;
+    options: Record<string, string | number | boolean>;
+  };
+}
+```
+
+模型注册标识包含具体实例归属；不能仅保存原始模型名。模型、适配器和参数整体校验、整体保存。菜单草稿不立即改变 Thread。
+
+新 Thread 初始为 Choose model。模型确认不可用时恢复该状态；适配器不可用或不再匹配时要求重选；旧参数失效时明确提示，不静默丢弃或回退。新增适配器不改变已有选择。
+
+## 4. 参数与适配器接口
+
+框架定义适配器接口，覆盖匹配、参数描述、默认值、校验、序列化、模型专属输入/结果处理及 replay 兼容性。参数 UI 和存储属于框架，模型知识可由插件独立发布。
+
+参数枚举、范围和默认值使用数据定义；复杂序列化和 replay 使用独立逻辑。一次调用选择一个适配器，不隐式拼接多个候选；显式公共逻辑复用允许。
+
+适配器注册在独立 registry，公共 model pipeline 在固定节点按需调用。各适配器不进入全局 middleware 链自行判断是否生效。
+
+## 5. 统一执行路径
 
 ```mermaid
 flowchart TD
-    A[主模型步骤 / 插件辅助调用] --> B[Runtime invokeModel 与 model pipeline]
-    B --> C[解析并冻结目标、能力、参数及调用身份]
-    C --> D[内建 OpenAI-compatible adapter]
-    D --> E[共享 HTTP 请求执行与 attempt 追踪]
-    E --> F[Chat Completions codec]
-    E --> G[Responses codec]
-    H[ChatGPT OAuth 与模型目录插件] -->|凭据能力与连接描述| C
-    H -->|临时授权信息 / 明确的刷新操作| E
+    A[Thread 或插件模型配置] --> B[Runtime 统一 model stage]
+    B --> C[校验并冻结选择与输入]
+    C --> D[选定适配器与公共协议编解码]
+    D --> E[框架请求执行器]
+    P[Provider 实例授权] --> E
+    E --> F[统一流事件与模型结果]
+    F --> G[Runtime 或调用插件处理结果]
 ```
 
-建议的内部拆分如下。共享部分必须只有一份可执行实现，不以两套 adapter 外加一个转发壳代替迁移。
+内建协议分别支持 Chat Completions 与 Responses，共享 HTTP 生命周期及 SSE 基础读取。ChatGPT 请求迁入框架 Responses 实现，插件只保留账户、OAuth 与目录。第三方扩展遵守同一调用和诊断契约。
 
-- **请求执行器**：HTTP 发送、取消、超时、重试预算、401 刷新协调和每次物理请求的诊断终结。
-- **SSE 帧读取器**：字节解码、帧边界、跨 chunk 拼接与 reader 清理；不解释模型事件语义。
-- **Chat Completions codec**：消息、工具和图片序列化，choices/delta、结束标记与 usage 解析。
-- **Responses codec**：input/output items、工具调用、reasoning replay、图片及语义流事件处理。
-- **统一结果契约**：继续返回现有 `ModelResponse` / `ModelStreamEvent`；Runtime 独占 Execution 与 Assistant 提交。
+每次逻辑调用冻结所选连接、模型、适配器、prompt 和参数。配置修改只影响新调用；物理重试不重新选择模型或进入 pipeline。model interceptor 不得悄悄更换用户保存的组合。
 
-Responses 使用具名语义事件，不能直接复用 Chat Completions 的 chunk 解释器；可复用的是底层 SSE 帧读取和请求生命周期。[OpenAI 流式响应指南](https://developers.openai.com/api/docs/guides/streaming-responses)
+迁移保留当前请求语义，包括完整 PromptTurn 回放、store:false、缓存/session 作用域、Fast、工具预览、usage、合法 completed-empty 和安全错误分类。
 
-首阶段以移动既有 Responses 实现并保持行为为主，后续再消除重复解析辅助函数。保留当前完整 PromptTurn 回放方式与 `store: false`，不同时改用远端 conversation/previous-response 状态。
+重试先保留连接现有策略：ChatGPT fetch 传输失败最多五次重试、两秒间隔，401 刷新前后共享预算；401 强制刷新最多一次；普通 API-key 不自动增加重试。流或解析失败不自动重新生成完整回复。授权绑定最终 endpoint，带授权推理请求拒绝未经批准的重定向。
 
-## 3. 配置、连接、协议与凭据分别归属
+## 6. 统一观测
 
-建议使用以下概念，先保留当前两种默认连接，不增加账户/Profile 管理产品：
+框架采集标准文本、推理、工具、usage 和完成事件，统一记录每个物理 attempt 的开始和终结。
 
-| 概念            | 保存内容                                                                                   | 所属边界                                     |
-| --------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------- |
-| 连接描述        | 稳定 connectionId、显示 Provider、endpoint、protocol、credential owner/reference、能力来源 | Runtime 配置；无原始凭据                     |
-| 当前模型目标    | connectionId 与 model                                                                      | 全局模型设置；是否允许 Thread 固定覆盖见下节 |
-| Thread 参数覆盖 | temperature 与经校验的语义选项                                                             | Thread 配置事实                              |
-| 有效请求选择    | 实际 connectionId、Provider、protocol、model、有效参数及配置修订                           | 每次逻辑调用冻结后的非敏感身份               |
-| 凭据            | API key、OAuth token、刷新状态与授权锁                                                     | 既有 private secrets / 专用 OAuth 存储       |
-| 模型目录        | 模型标识、展示属性与可用能力                                                               | 插件 cache；不是执行身份或恢复事实           |
+首字延迟从请求发送计至第一个非空用户可见文本增量，推理和工具参数另行处理。端到端输出吞吐以可靠 outputTokens 除以完整物理请求耗时，包含首字等待；不将其冒充首字后生成速度。缺少可靠 token 数据时不生成 TPS。非流式响应不伪造流式首字时间。
 
-内建 adapter 中，Provider 显示名不再决定使用哪段请求代码；protocol 决定 codec，credential owner 决定授权来源。失效连接、停用的凭据插件或不支持的参数应明确失败，不回退到另一个连接。
+## 7. 子 Thread 与插件调用
 
-插件只需声明其连接使用内建 Responses 协议，并提供授权与模型目录能力。授权函数只接收连接、目标 endpoint、signal 和是否强制刷新等必要信息，不接收完整 prompt，不负责发送推理 HTTP 请求。OAuth token endpoint 请求仍由 OAuth 插件负责。
+spawn_thread 工具可显式指定完整 ModelSelection，框架在创建前校验并与创建一起保存。未指定时复制父 Thread 当时的完整配置，之后独立。提供模型/适配器/参数查询能力供工具使用。
 
-授权信息只在请求进程内短暂使用。最终 endpoint 确定后，按连接允许的来源绑定授权；model interceptor 修改目标时，不得携带原目标凭据跨 endpoint。诊断和 Canonical 只记录非敏感连接身份，不记录原始 headers、token 或凭据指纹。
+插件调用在框架中独立配置：使用所属 Thread，或使用插件固定的完整选择。默认使用 Thread。摘要与标题等只提交任务输入，不自行请求 Provider，也不偷偷选择其他模型。首期不隐式覆盖已选参数。
 
-带授权的推理请求默认拒绝 HTTP 重定向。确有连接需要重定向时，必须逐跳验证目标并重新决定可携带的授权，不能只校验初始 URL 后依赖 fetch 自动跟随。
+插件调用保持幂等：同 key 的相同提交共享进行中操作或重放首次结果；不同显式意图冲突。首次接受时冻结配置，保存最终实际请求身份；配置变化需要新 key 才执行新调用。失败、取消或重启结局未知时不能自动重发。pipeline 短路允许没有物理 attempt。
 
-## 4. 模型选择策略需要显式定案
+## 8. 历史与 replay
 
-建议第一阶段保持当前“provider/model 跟随全局，参数允许 Thread 覆盖”的产品行为，修正其读写契约，不自动恢复旧设计中的固定模型语义。
+Canonical 及投影透明保存 replay 数据与格式来源；Rolling Context 不解释模型专属字段。执行时由框架根据适配器声明检查兼容性，并由对应逻辑编码。不兼容数据不得无条件发给新模型；缺少协议必需内容时明确失败。历史记录不因切换或卸载插件而重写。
 
-- 将读取返回值明确命名为有效选择；写入 Thread 的接口只接受参数覆盖。传入不属于该接口的 provider/model 应明确拒绝，不能继续悄悄忽略。
-- 全局修改作用于之后创建的逻辑模型调用；已开始的调用与其物理网络重试沿用冻结目标、prompt、协议及参数。
-- 用户主动 Retry 是新的逻辑调用，可以解析当时的新配置；保存 `retryOf` 关联。
-- Child 继承 Thread 参数时仅复制当前有效目标支持的参数；父配置之后变化不重写已创建 Child 的覆盖值。
-- 若需要“每个 Thread 固定模型”，再引入明确的 inherit/fixed 选择策略。读取、更新、Child 继承和 UI 必须一起表达该策略，不能靠旧视图中是否恰好有 provider/model 推断。
+## 9. 迁移与阶段提交
 
-这里仍是建议，不是本轮已实施决定。另一条可选路线是恢复 Thread 创建时固定身份，但它会改变近期全局选择行为，必须在实现前明确选择。
+1. 公共契约、实例目录和适配器基础。
+2. Provider 插件多实例与独立适配器注册。
+3. Thread、子 Thread 与插件调用配置及 API。
+4. 通用选择器、Provider 添加页与参数 UI。
+5. 统一协议请求实现并移除旧推理路径。
+6. 历史迁移、回归和范围审计。
 
-历史迁移以版本化新事实保存参数覆盖和已选策略，保留旧 Canonical 记录。旧 Thread 视图中的身份不应被自动当成用户明确固定的选择。模型选择事实、请求身份事实、API 类型和测试断言在同一阶段迁移。
+旧连接迁为可识别实例，旧 Thread 只有能可靠映射完整选择时才迁移；无法确定时保持 Choose model，不批量套用当前全局选择。保留旧 Canonical、replay 和无关工作区修改。
 
-### 辅助调用的幂等与最终请求身份
-
-当前 `preparePluginModelCall` 在 model pipeline 之前计算 `requestFingerprint`，而最终目标、prompt 和 wire 参数可能由 interceptor 修改。实现时必须分别说明「接受了哪个逻辑操作」与「最终执行了哪个请求」，不能将早期指纹描述为最终请求身份。
-
-建议采用两层身份，作为配置契约的一部分定案：
-
-- `submissionFingerprint` 表示调用方显式提交的意图，包括 plugin、Thread/Project、purpose、原始 prompt、显式目标或继承标记以及显式参数。同一 key 的不同显式意图冲突；接受记录、指纹、配置快照和 `(pluginId, key)` 的占用必须原子化，相同意图的并发请求共享同一个运行中操作，不能启动两次 pipeline。
-- 首次接受操作时保存所用配置快照。model pipeline 只运行一次，在最终 dispatch 前冻结 `resolvedRequestFingerprint`，覆盖最终连接、协议、model、prompt、有效参数和所用配置修订，并与接受记录关联。主调用与辅助调用共享这个冻结环节。未到达 dispatch 的短路完成或失败允许没有最终请求指纹，需记录其结果来源，不能伪造网络 attempt。
-- 相同 key 与提交意图重放首次完成结果，不因之后全局配置或 interceptor 变化重新请求；要使用新配置执行新操作，调用方必须使用新 key。失败或重启遗留的未完成操作保留显式状态，不能自动以新配置重跑。
-- 同次逻辑调用的物理网络重试使用同一冻结身份，不重新进入 model pipeline；提交内容和身份摘要不得扩大现有持久化敏感数据范围。重启时 running/dispatched 但无持久化结果属于结局未知，标记 interrupted/unknown 并要求新 key；已记录失败或中断也要求新 key，不自动重试。
-- signal 与事件回调不属于提交指纹。建议只有首次接受请求的 signal 控制共享操作；后到请求只等待最终结果，其取消仅取消自己的等待，不中断共享调用，也不补发实时事件。这一行为必须写入插件 API 契约并测试。
-
-该建议与当前混用有效选择和提交意图的单指纹语义有差异，必须版本化迁移。旧记录缺少可靠的原始意图时不能猜测可重放身份，应保持旧版校验或要求新 key。若产品选择「当前有效配置相同才可重放」，则需先定义可复用的纯解析契约，让幂等校验与 dispatch 使用同一结果；不得为探测身份而执行任意 model interceptor 两次。
-
-## 5. 重试、流与诊断的不变量
-
-共享实现不意味着所有连接采用相同重试策略。迁移先保持当前行为，再单独评估策略统一：
-
-| 情况                                          | 第一阶段行为                                                                                             |
-| --------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| ChatGPT 请求尚未收到响应的已知 fetch 传输失败 | 保留当前最多五次重试、两秒间隔；401 刷新前后共享这五次预算，等待支持 AbortSignal                         |
-| 普通 API-key 请求                             | 不因抽取执行器而自动增加重试                                                                             |
-| OAuth 401                                     | 由执行器调用授权能力强制刷新一次，再发一个有独立 attempt 的请求；再次 401 失败，不刷新或重置传输重试预算 |
-| 已收到响应后的流中断、解析失败或部分输出失败  | 不自动重新生成整条回复                                                                                   |
-| 主动 Interrupt                                | 传播同一取消意图，终止等待与请求，禁止之后提交 Assistant                                                 |
-| Responses completed 但没有文本或工具          | 保留当前合法空响应语义                                                                                   |
-
-每个真实 HTTP attempt 必须恰好 started 一次、settled 一次，覆盖 fetch 抛错、HTTP 拒绝、reader 失败、取消和成功完成。OAuth 请求单独标注授权阶段，不计作第二次模型逻辑调用。保留当前 Fast、usage、首字延迟、reasoning、工具预览、终结事件和错误白名单；避免 Runtime 再根据某个协议字符串猜测失败阶段。
-
-因此一次 ChatGPT 逻辑调用最多包含初始请求、五次传输失败重试和一次 401 后重发；OAuth token HTTP 请求不属于这个模型请求计数。
-
-缓存/session 标识从明确的调用作用域生成：主 Thread 与插件辅助调用保持各自稳定身份；保留现有 `prompt_cache_key`、session/thread headers 的适用语义，由连接描述控制是否启用。不能把这些字段硬编码为所有 OpenAI-compatible 服务的要求。
-
-reasoning replay 保持 opaque：由对应 codec 解释，Canonical 与 Projection 透明传递；跨协议或不兼容模型时应明确处理能力不匹配，不能把不支持的 replay 当普通用户文本发送。
-
-## 6. 分阶段实施与独立提交
-
-1. **定案配置契约**：选定全局/Thread 策略及辅助调用幂等语义，定义有效选择与参数写接口、冻结身份的公共环节，迁移历史视图及指纹版本，更新与该策略矛盾的测试。此阶段不移动请求实现。
-2. **提取共享 HTTP/SSE 基础实现**：以现有 Chat Completions 行为验证请求、取消和诊断；无实际模型调用行为变更。
-3. **迁入 Responses codec**：把 ChatGPT 模型文件中的通用请求/解析逻辑移入 core adapter，实现 API-key + Responses 的可测试组合；通过本地 fake server 验证协议与授权解耦。
-4. **改接 ChatGPT 连接**：插件只注册 OAuth、连接描述和模型目录能力；主/辅助调用均进入内建 adapter。移除旧 `ChatGptResponsesAdapter` 与插件推理 HTTP 发送实现，禁止长期双路径。
-5. **收拢通用模型 UI**：模型选择和能力参数面板消费统一契约；ChatGPT 专属页面保留登录、账户与目录刷新。校验目录缓存失效、插件停用和 UI 迟到响应。
-6. **回归与独立验收**：每阶段只提交对应源码、测试与必要生成产物；整个阶段不默认部署生产服务。
-
-## 7. 验收矩阵
-
-- 两协议分别覆盖普通文本、并行函数调用、完整 call/result 配对、多模态结果、reasoning 与 usage；相同领域输入保持有效模型结果语义。
-- Responses 覆盖 completed-empty、流未完成、工具参数分片、reasoning replay、错误正文脱敏；Chat Completions 保留现有兼容处理。
-- API-key/OAuth 与主/辅助调用交叉测试；Core Responses codec 不依赖 ChatGPT auth 类。
-- 已有自定义 ModelProvider 继续经过同一个 model stage 分发，不强制进入内建 OpenAI-compatible adapter。
-- 验证 401 刷新恰好一次、刷新前后共享传输失败预算、再次 401 失败、流中断不重放、退避取消，以及每个物理 attempt 终结一次。
-- model pipeline 改目标后，实际 endpoint、授权来源、参数、记录身份一致；错误连接、已停用插件、跨 endpoint 授权及未经允许的重定向明确拒绝。
-- 辅助调用覆盖同 key 并发去重、显式请求变化冲突、配置/interceptor 变化后的重放、短路、重启未完成记录和旧指纹迁移；pipeline 不因身份校验重复运行。
-- Thread/global 选择策略、Child 幂等创建、网络重试冻结身份、主动 Retry、重启及 Canonical 视图重建保持一致。
-- 使用合成凭据哨兵检查 Canonical、公开 Snapshot、plugin state、错误及诊断；测试只使用临时数据库和本地 fake server。
-- 基线失败按原因单独核对；本轮保留的模型选择契约失败必须在配置定案阶段转为真实验收用例，不通过删除断言或任意跳过规避。
-
-## 8. 设计验证范围
-
-本草案核对了本地 Runtime、Provider registry、两个模型实现、OAuth/模型目录与参数插件；官方资料仅用于确认公开 Chat Completions/Responses 协议差异。没有验证具体 ChatGPT 账户的授权范围、端点可用性或生产能力，不把共享协议推断为所有账户都可调用所有端点。
-
-实施前仍需定案：模型选择采用全局继承还是显式 Thread 固定；辅助调用采用提交意图幂等还是当前有效配置幂等；现有连接到新 connectionId 的迁移规则；各连接的 replay/参数能力边界。建议先保留当前公开连接身份与实际行为，通过版本化迁移逐步收敛。
+每阶段执行针对性验证后独立提交，最终完整构建和回归。基线失败按原因比较；与新契约冲突的旧测试改为真实新行为验收，不通过删除或跳过规避。测试使用临时数据库和模拟服务，不调用真实模型、不操作生产账户，本次不自动部署。
