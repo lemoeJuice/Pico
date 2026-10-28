@@ -2669,26 +2669,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             <Settings size={15} aria-hidden="true" />
             <span>Settings</span>
           </button>
-          <div className="sidebar-width-control">
-            <span className="sidebar-width-label">Sidebar width</span>
-            <div className="sidebar-width-options" role="group" aria-label="Sidebar width">
-              {SIDEBAR_WIDTH_OPTIONS.map((option) => (
-                <button
-                  className="sidebar-width-option"
-                  type="button"
-                  key={option.value}
-                  aria-pressed={sidebarWidth === option.value}
-                  title={`${option.label} sidebar width`}
-                  onClick={() => {
-                    setSidebarWidth(option.value);
-                    persistSidebarWidthPreference(option.value);
-                  }}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </div>
           {authRequired ? (
             <button className="session-logout" onClick={() => void onSignOut?.()} type="button">
               <LogOut size={14} aria-hidden="true" />
@@ -3605,7 +3585,32 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             </form>
           ) : miscellaneousSettingsOpen ? (
             <section className="plugin-settings-page general-settings-page" aria-label="General settings">
-              <p className="form-intro">Choose how tool call cards appear in Threads.</p>
+              <p className="form-intro">Choose how Pico appears in this browser and in Threads.</p>
+              <article className="native-tool-row general-setting-row">
+                <div className="native-tool-copy">
+                  <div className="native-tool-title">
+                    <strong>Sidebar width</strong>
+                  </div>
+                  <p>Choose the sidebar width for this browser.</p>
+                </div>
+                <div className="sidebar-width-options" role="group" aria-label="Sidebar width">
+                  {SIDEBAR_WIDTH_OPTIONS.map((option) => (
+                    <button
+                      className="sidebar-width-option"
+                      type="button"
+                      key={option.value}
+                      aria-pressed={sidebarWidth === option.value}
+                      title={`${option.label} sidebar width`}
+                      onClick={() => {
+                        setSidebarWidth(option.value);
+                        persistSidebarWidthPreference(option.value);
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </article>
               <article className="native-tool-row general-setting-row">
                 <div className="native-tool-copy">
                   <div className="native-tool-title">

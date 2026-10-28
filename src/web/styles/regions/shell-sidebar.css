@@ -444,17 +444,6 @@
   display: grid;
   gap: 6px;
 }
-.sidebar-width-control {
-  display: grid;
-  gap: 5px;
-  min-width: 0;
-  padding: 2px 4px 3px;
-}
-.sidebar-width-label {
-  color: #929e95;
-  font-size: 10px;
-  font-weight: 600;
-}
 .sidebar-width-options {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

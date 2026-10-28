@@ -89,6 +89,10 @@
   border: 1px solid #edf0eb;
   border-radius: 9px;
 }
+.general-setting-row .sidebar-width-options {
+  flex: 0 1 210px;
+  min-width: 150px;
+}
 .native-tool-copy {
   min-width: 0;
 }
