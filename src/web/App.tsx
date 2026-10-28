@@ -702,6 +702,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [snapshotError, setSnapshotError] = useState<{ threadId: string; message: string } | null>(null);
   const [snapshotRetry, setSnapshotRetry] = useState<{ threadId: string; attempt: number } | null>(null);
   const [snapshotRefreshingThreadId, setSnapshotRefreshingThreadId] = useState<string | null>(null);
+  const [followingLatest, setFollowingLatest] = useState(true);
   const [preservedHistoryThreadId, setPreservedHistoryThreadId] = useState<string | null>(null);
   const [bootstrapping, setBootstrapping] = useState(true);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
@@ -1861,6 +1862,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
   useEffect(() => {
     followLatest.current = true;
+    setFollowingLatest(true);
     listRef.current?.classList.add('conversation-scroll-follow-latest');
   }, [threadId]);
 
@@ -3288,6 +3290,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 onScroll={(event) => {
                   const follow = isNearScrollEnd(event.currentTarget);
                   followLatest.current = follow;
+                  setFollowingLatest(follow);
                   event.currentTarget.classList.toggle('conversation-scroll-follow-latest', follow);
                 }}
               >
@@ -3409,6 +3412,18 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 </ThinkingDisclosureContext.Provider>
               </div>
               <ThreadScrollbar scrollRef={listRef} threadId={selectedThreadId} />
+              <NewContentControl
+                key={selectedThread.id}
+                threadId={selectedThread.id}
+                latestSeq={activeSnapshotLatestSeq}
+                following={followingLatest}
+                onGoLatest={() => {
+                  followLatest.current = true;
+                  setFollowingLatest(true);
+                  if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+                  listRef.current?.classList.add('conversation-scroll-follow-latest');
+                }}
+              />
             </div>
 
             <div className="composer-wrap">
@@ -4964,6 +4979,41 @@ function AssistantDraftMessage({ threadId }: { threadId: string }) {
         {!draft.unconfirmed && !draft.previewIncomplete ? <AssistantToolPreviewSection threadId={threadId} executionId={draft.executionId} /> : null}
       </div>
     </div>
+  );
+}
+
+function NewContentControl({
+  threadId,
+  latestSeq,
+  following,
+  onGoLatest,
+}: {
+  threadId: string;
+  latestSeq: number | undefined;
+  following: boolean;
+  onGoLatest(): void;
+}) {
+  const draft = useAssistantDraftContent(threadId);
+  const [hasNewContent, setHasNewContent] = useState(false);
+  const previous = useRef({ seq: latestSeq, executionId: draft?.executionId, text: draft?.text, reasoning: draft?.reasoningSummary });
+  useEffect(() => {
+    const before = previous.current;
+    const next = { seq: latestSeq, executionId: draft?.executionId, text: draft?.text, reasoning: draft?.reasoningSummary };
+    const newer =
+      (next.seq !== undefined && before.seq !== undefined && next.seq > before.seq) ||
+      (next.executionId !== undefined && next.executionId !== before.executionId) ||
+      (next.executionId === before.executionId &&
+        ((next.text?.length ?? 0) > (before.text?.length ?? 0) ||
+          (next.reasoning?.length ?? 0) > (before.reasoning?.length ?? 0)));
+    previous.current = next;
+    if (following) setHasNewContent(false);
+    else if (newer) setHasNewContent(true);
+  }, [draft?.executionId, draft?.reasoningSummary, draft?.text, following, latestSeq]);
+  if (following) return null;
+  return (
+    <button type="button" className="new-content-button" onClick={onGoLatest}>
+      {hasNewContent ? 'New content · Back to latest' : 'Back to latest'}
+    </button>
   );
 }
 
