@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import type { PicoPlugin, PluginContext, PluginHttpRequest } from './host.js';
-import type { ProjectionInput } from '../runtime/stages.js';
 
 export type TodoStatus = 'open' | 'done';
 
@@ -279,7 +278,7 @@ export const todoPlugin: PicoPlugin = {
       (args, toolContext) => deleteTodo(state, contextThreadId(toolContext), args.id),
     );
 
-    pipelines.use<ProjectionInput, ProjectionInput>('projection', async (input, next) => {
+    pipelines.use('projection', async (input, next) => {
       const items = readThreadTodos(state, input.thread.id);
       const text = formatOpenTodos(items);
       if (!text) return next(input);

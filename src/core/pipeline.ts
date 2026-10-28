@@ -1,4 +1,6 @@
-export type PipelineStage = 'step' | 'projection' | 'model' | 'toolBatch' | 'toolInvocation';
+import type { PipelineStage } from '../contracts/plugin-pipeline.js';
+
+export type { PipelineStage } from '../contracts/plugin-pipeline.js';
 const pipelineStages = [
   'step',
   'projection',

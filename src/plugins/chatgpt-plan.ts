@@ -3,7 +3,7 @@ import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { createSharedChatGptOAuthSecrets, type SharedChatGptOAuthSecrets } from './chatgpt-plan/oauth-store.js';
-import type { ModelStageInput } from '../runtime/stages.js';
+import type { ModelStageInput } from '../contracts/plugin-pipeline.js';
 import { ChatGptPlanAuth, RetryableChatGptAuthorizationExchange } from './chatgpt-plan/auth.js';
 import { ChatGptResponsesAdapter } from './chatgpt-plan/model.js';
 import type { PicoPlugin, PluginHttpRequest } from './host.js';

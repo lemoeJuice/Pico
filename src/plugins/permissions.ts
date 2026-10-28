@@ -1,6 +1,6 @@
 import type { PicoPlugin } from './host.js';
-import type { Execution, Thread, ToolDefinition, UiContribution } from '../core/types.js';
-import type { ProjectionInput, ToolInvocationInput } from '../runtime/stages.js';
+import type { Thread, ToolDefinition, UiContribution } from '../core/types.js';
+import type { ToolInvocationInput } from '../contracts/plugin-pipeline.js';
 import type { ModelPrompt } from '../contracts/model.js';
 
 type PermissionPolicy = 'allow' | 'deny' | 'ask';
@@ -459,7 +459,7 @@ export const permissionPlugin: PicoPlugin = {
       return available.map((tool) => ({ ...tool, policy: rules[tool.name] ?? tool.policy }));
     };
 
-    pipelines.use<ProjectionInput, ProjectionInput>('projection', async (input, next) => {
+    pipelines.use('projection', async (input, next) => {
       const rules = readRules()[input.thread.id] ?? {};
       const available = input.tools.map((tool) => ({
         name: tool.name,
@@ -483,7 +483,7 @@ export const permissionPlugin: PicoPlugin = {
       return next({ ...input, tools: input.tools.filter((tool) => rules[tool.name] !== 'deny') });
     });
 
-    pipelines.use<ToolInvocationInput, Execution>('toolInvocation', async (input, next) => {
+    pipelines.use('toolInvocation', async (input, next) => {
       const policy = getPolicy(input.thread.id, input.call.name, input.toolSource, input.thread);
       if (policy === 'deny') {
         canonical.append(input.thread.id, {

@@ -1,6 +1,4 @@
 import type { ModelParameterSelection, ModelParameterTarget } from './types.js';
-import type { ModelStageInput } from '../../runtime/stages.js';
-import type { ModelResponse } from '../../contracts/model.js';
 import type { PicoPlugin } from '../host.js';
 import {
   controlsForTarget,
@@ -111,7 +109,7 @@ export const modelParametersPlugin: PicoPlugin = {
       return { ...profileView(target, updated.parameters.options), temperatureValue: updated.parameters.temperature };
     });
 
-    pipelines.use<ModelStageInput, ModelResponse>('model', async (input, next) => {
+    pipelines.use('model', async (input, next) => {
       if (!input.modelTarget) return next();
       const target = modelParameterTargetFromSettings(input.modelTarget);
       if (!target.endpoint) return next();

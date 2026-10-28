@@ -5,7 +5,7 @@ import type { Thread } from '../../../core/types.js';
 import { CommandRegistry, type PluginContext } from '../../../plugins/host.js';
 import { createChatGptPlanPlugin } from '../../../plugins/chatgpt-plan.js';
 import type { ModelPrompt, ModelResponse } from '../../../runtime/model.js';
-import type { ModelStageInput } from '../../../runtime/stages.js';
+import type { ModelStageInput } from '../../../contracts/plugin-pipeline.js';
 
 describe('ChatGPT provider plugin', () => {
   it('registers provider, model pipeline, account page, composer contribution, command and routes', async () => {

@@ -25,10 +25,7 @@ export const workspacePlugin: PicoPlugin = {
       },
     );
 
-    pipelines.use<
-      { systemPrompt: string; thread: { workspacePath: string; executorKind: string }; [key: string]: unknown },
-      { systemPrompt: string; [key: string]: unknown }
-    >('projection', async (input, next) =>
+    pipelines.use('projection', async (input, next) =>
       next({
         ...input,
         systemPrompt:

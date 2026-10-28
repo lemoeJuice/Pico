@@ -1,6 +1,6 @@
 import { DEFAULT_THREAD_TITLE, type CanonicalRecord, type MessagePayload } from '../core/types.js';
 import type { PluginContext, PicoPlugin } from './host.js';
-import type { StepInput } from '../runtime/stages.js';
+import type { StepInput } from '../contracts/plugin-pipeline.js';
 
 const MAX_SOURCE_CHARS = 12_000;
 const MAX_TITLE_CHARS = 100;
@@ -105,7 +105,7 @@ export const autoThreadTitlePlugin: PicoPlugin = {
   activate({ pipelines, models, threads, canonical }) {
     const context = { models, threads, canonical };
     const attemptedByThread = new Map<string, string>();
-    pipelines.use<StepInput, void>('step', async (input, next) => {
+    pipelines.use('step', async (input, next) => {
       await next();
       try {
         await generateTitle(context, attemptedByThread, input);

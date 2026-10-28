@@ -4,7 +4,6 @@ import {
   isMultimodalToolResult,
   type ImageInput,
 } from '../contracts/multimodal.js';
-import type { ProjectionInput } from '../runtime/stages.js';
 import type { PicoPlugin } from './host.js';
 
 function resultKey(batchId: unknown, callId: unknown): string | null {
@@ -24,7 +23,7 @@ export const visionPlugin: PicoPlugin = {
   // Run after Rolling Context and enrich only its final, retained tool results.
   pipelinePriority: { projection: 90 },
   activate({ pipelines }) {
-    pipelines.use<ProjectionInput, ProjectionInput>('projection', async (input, next) => {
+    pipelines.use('projection', async (input, next) => {
       const projected = await next(input);
       const results = new Map<string, ImageInput[]>();
       for (const record of input.records) {

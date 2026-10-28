@@ -10,7 +10,7 @@ import {
   runtimeContextCompaction,
 } from '../contracts/canonical-projection.js';
 import { sanitizeMultimodalResultValue } from '../contracts/multimodal.js';
-import type { ProjectionInput, ProjectionProvenance } from '../runtime/stages.js';
+import type { ProjectionInput, ProjectionProvenance } from '../contracts/plugin-pipeline.js';
 import type { PicoPlugin, PluginContext, PluginHttpRequest } from './host.js';
 
 export type RollingTier = 'hot' | 'warm' | 'cold';
@@ -435,7 +435,7 @@ export const rollingContextPlugin: PicoPlugin = {
       return next;
     };
 
-    pipelines.use<ProjectionInput, ProjectionInput>('projection', async (input, next) => {
+    pipelines.use('projection', async (input, next) => {
       const segments = await reconcile(input.thread, input.records);
       const projected = allTurns(context, input, segments);
       return next({

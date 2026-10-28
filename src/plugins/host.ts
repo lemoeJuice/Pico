@@ -1,4 +1,5 @@
 import type { ExecutorPluginContext } from '../executor/plugin-host.js';
+import type { PipelineStage, StageInputs, StageOutputs } from '../contracts/plugin-pipeline.js';
 import { unavailablePluginServices, type PluginServices } from './services.js';
 import { existsSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
@@ -11,7 +12,7 @@ import type {
   ToolDefinition,
   UiContribution,
 } from '../core/types.js';
-import type { ExecutionPipelines, Interceptor, PipelineStage } from '../core/pipeline.js';
+import type { ExecutionPipelines, Interceptor } from '../core/pipeline.js';
 import type { PicoStore } from '../core/store.js';
 import type { RuntimeToolContext, ToolCatalog } from '../executor/tool-catalog.js';
 import type {
@@ -128,7 +129,7 @@ export interface PluginContext extends Omit<PluginServices, 'models' | 'continua
     register(hasPendingWork: (threadId: string) => boolean): () => void;
   };
   pipelines: {
-    use<I, O>(stage: PipelineStage, interceptor: Interceptor<I, O>): void;
+    use<S extends PipelineStage>(stage: S, interceptor: Interceptor<StageInputs[S], StageOutputs[S]>): void;
   };
   commands: { register(command: PluginCommand): void };
   ui: {
@@ -640,8 +641,13 @@ export class PluginHost {
           }),
       },
       pipelines: {
-        use: (stage, interceptor) =>
-          this.pipelines.use(stage, plugin.id, interceptor, plugin.pipelinePriority?.[stage] ?? 0),
+        use: <S extends PipelineStage>(stage: S, interceptor: Interceptor<StageInputs[S], StageOutputs[S]>) =>
+          this.pipelines.use<StageInputs[S], StageOutputs[S]>(
+            stage,
+            plugin.id,
+            interceptor,
+            plugin.pipelinePriority?.[stage] ?? 0,
+          ),
       },
       models: {
         complete: (request) => this.services.models.complete(plugin.id, request),

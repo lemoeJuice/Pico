@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Thread } from '../core/types.js';
 import type { PicoPlugin, PluginContext } from './host.js';
-import type { ProjectionInput } from '../runtime/stages.js';
 
 export interface GlobalMemorySource {
   threadId: string;
@@ -338,7 +337,7 @@ export const globalMemoryPlugin: PicoPlugin = {
         return { deleted: true };
       },
     );
-    pipelines.use<ProjectionInput, ProjectionInput>('projection', async (input, next) => {
+    pipelines.use('projection', async (input, next) => {
       const memory = readMemory(state);
       if (!memory.autoEnabled) return next(input);
       const latestCanonicalUser = [...input.records]

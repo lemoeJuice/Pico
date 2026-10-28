@@ -116,7 +116,7 @@ describe('Runtime model provider dispatch', () => {
           });
           return { ...response('routed result'), model: input.prompt.model };
         });
-        context.pipelines.use<ModelStageInput, ModelResponse>('model', async (input, next) =>
+        context.pipelines.use('model', async (input, next) =>
           next({
             ...input,
             provider: 'routed-provider',
@@ -183,7 +183,7 @@ describe('Runtime model provider dispatch', () => {
           providerCalls += 1;
           return response('must not be called');
         });
-        context.pipelines.use<ModelStageInput, ModelResponse>('model', async (input, next) =>
+        context.pipelines.use('model', async (input, next) =>
           next({
             ...input,
             provider: 'routed-provider',

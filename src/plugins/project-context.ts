@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { CanonicalRecord, Thread } from '../core/types.js';
-import type { ProjectionInput, ProjectionProvenance } from '../runtime/stages.js';
+import type { ProjectionInput, ProjectionProvenance } from '../contracts/plugin-pipeline.js';
 import type { PicoPlugin, PluginContext, PluginHttpRequest } from './host.js';
 
 export type ProjectMemoryCategory = 'fact' | 'decision' | 'activity' | 'open-issue';
@@ -376,7 +376,7 @@ export const projectContextPlugin: PicoPlugin = {
       },
     );
 
-    pipelines.use<ProjectionInput, ProjectionInput>('projection', async (input, next) => {
+    pipelines.use('projection', async (input, next) => {
       if (!input.thread.projectId) return next(input);
       const query = currentQuery(input);
       const selected = selectProjectMemories(entriesForProject(context, input.thread.projectId), query);

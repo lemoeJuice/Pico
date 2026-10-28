@@ -3,12 +3,11 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AssistantPayload, CanonicalRecord, Execution } from '../src/core/types.js';
+import type { AssistantPayload, CanonicalRecord } from '../src/core/types.js';
 import { PicoStore } from '../src/core/store.js';
 import type { PicoPlugin } from '../src/plugins/host.js';
-import type { ModelAdapter, ModelPrompt, ModelResponse } from '../src/runtime/model.js';
+import type { ModelAdapter, ModelPrompt } from '../src/runtime/model.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
-import type { ModelStageInput, ProjectionInput, StepInput, ToolBatchInput } from '../src/runtime/stages.js';
 import { threadCanBeInterrupted } from '../src/web/thread-controls.js';
 import { assistantPayload, deferred, FakeModel, response, setupRuntime } from './helpers.js';
 
@@ -627,10 +626,10 @@ describe('durable Thread runtime invariants', () => {
       activate(context) {
         const { pipelines } = context;
         readPluginCanonicalHistory = context.canonical.list;
-        pipelines.use<ProjectionInput, ProjectionInput>('projection', async (input, next) =>
+        pipelines.use('projection', async (input, next) =>
           next({ ...input, systemPrompt: `${input.systemPrompt}\nProject context: stable architecture.` }),
         );
-        pipelines.use<ModelStageInput, ModelResponse>('model', async (input, next) =>
+        pipelines.use('model', async (input, next) =>
           next({
             ...input,
             prompt: { ...input.prompt, system: `${input.prompt.system}\nUse concise answers.` },
@@ -717,7 +716,7 @@ describe('durable Thread runtime invariants', () => {
             return name === 'batch_alpha' ? releaseAlpha.promise : releaseBeta.promise;
           });
         }
-        pipelines.use<ToolBatchInput, Execution[]>('toolBatch', async (input, next) => {
+        pipelines.use('toolBatch', async (input, next) => {
           const execute = input.execute;
           return next({
             ...input,
@@ -792,7 +791,7 @@ describe('durable Thread runtime invariants', () => {
           { name: 'step_boundary_tool', description: 'Step boundary test', parameters: { type: 'object' } },
           async () => 'tool finished',
         );
-        pipelines.use<StepInput, void>('step', async (input, next) => {
+        pipelines.use('step', async (input, next) => {
           const stepId = ++nextStepId;
           activeStepId = stepId;
           events.push(`step:${stepId}:start`);
@@ -803,7 +802,7 @@ describe('durable Thread runtime invariants', () => {
             activeStepId = null;
           }
         });
-        pipelines.use<ToolBatchInput, Execution[]>('toolBatch', async (input, next) => {
+        pipelines.use('toolBatch', async (input, next) => {
           events.push(`batch:${activeStepId ?? 'outside'}`);
           return next(input);
         });
@@ -876,7 +875,7 @@ describe('durable Thread runtime invariants', () => {
       name: 'Skip step',
       version: '1',
       activate({ pipelines }) {
-        pipelines.use<StepInput, void>('step', async () => undefined);
+        pipelines.use('step', async () => undefined);
       },
     };
     const model = new FakeModel(() => response('Should not run.'));
@@ -908,7 +907,7 @@ describe('durable Thread runtime invariants', () => {
             return 'unexpected';
           },
         );
-        pipelines.use<ToolBatchInput, Execution[]>('toolBatch', async (input) => {
+        pipelines.use('toolBatch', async (input) => {
           const now = new Date().toISOString();
           return input.calls.map((call) => ({
             id: `${input.thread.id}:${input.batchId.replace(/:batch$/, '')}:${call.id}`,
@@ -1011,7 +1010,7 @@ describe('durable Thread runtime invariants', () => {
             });
           },
         );
-        pipelines.use<ToolBatchInput, Execution[]>('toolBatch', async (input) => {
+        pipelines.use('toolBatch', async (input) => {
           void input.execute(input.calls[0]!);
           await toolStarted.promise;
           const execution = store!
@@ -1342,7 +1341,7 @@ describe('durable Thread runtime invariants', () => {
       name: 'Valid after invalid',
       version: '1',
       activate({ pipelines, ui }) {
-        pipelines.use<ProjectionInput, ProjectionInput>('projection', async (input, next) => next(input));
+        pipelines.use('projection', async (input, next) => next(input));
         ui.contribute({ slot: 'thread.toolbar', id: 'valid', label: 'Valid contribution' });
       },
     };
@@ -1374,10 +1373,12 @@ describe('durable Thread runtime invariants', () => {
       name: 'Immutable projection probe',
       version: '1',
       activate({ pipelines }) {
-        pipelines.use<any, any>('projection', async (input, next) => {
-          frozenObserved = Object.isFrozen(input.records[0]) && Object.isFrozen(input.records[0].payload);
+        pipelines.use('projection', async (input, next) => {
+          const record = input.records[0];
+          if (!record) throw new Error('Expected a canonical record in the projection.');
+          frozenObserved = Object.isFrozen(record) && Object.isFrozen(record.payload);
           try {
-            input.records[0].payload.content = 'rewritten';
+            record.payload.content = 'rewritten';
           } catch {
             /* Frozen canonical view rejects writes. */
           }

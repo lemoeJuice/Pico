@@ -1,5 +1,5 @@
 import type { Execution, Thread, UiContribution } from '../core/types.js';
-import type { ProjectionInput } from '../runtime/stages.js';
+import type { ProjectionInput } from '../contracts/plugin-pipeline.js';
 import type { PicoPlugin, PluginContext } from './host.js';
 
 type GoalStatus = 'active' | 'paused' | 'needs_input' | 'completed' | 'cleared';
@@ -129,7 +129,7 @@ export const goalPlugin: PicoPlugin = {
       return Boolean(goal?.status === 'active' && thread && thread.state !== 'paused' && thread.state !== 'pausing');
     });
 
-    pipelines.use<ProjectionInput, ProjectionInput>('projection', async (input, next) => {
+    pipelines.use('projection', async (input, next) => {
       const goal = getGoal(input.thread.id);
       if (!goal || goal.status === 'cleared') return next(input);
       const goalInstructions = [

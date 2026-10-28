@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import WebSocket from 'ws';
 import type { Thread } from '../core/types.js';
 import { DEFAULT_SYSTEM_PROMPT } from '../contracts/system-prompt.js';
-import type { ProjectionInput, ToolInvocationInput } from '../runtime/stages.js';
 import type { PluginContext, PicoPlugin, PluginHttpRequest } from './host.js';
 
 const PLUGIN_ID = 'pico.qq-adapter';
@@ -674,7 +673,7 @@ export const qqAdapterPlugin: PicoPlugin = {
       group: 'Integrations',
     });
 
-    pipelines.use<ProjectionInput, ProjectionInput>('projection', async (input, next) => {
+    pipelines.use('projection', async (input, next) => {
       const config = readConfig(context);
       if (!config.projectId || input.thread.projectId !== config.projectId) return next(input);
       const start = input.systemPrompt.startsWith(DEFAULT_SYSTEM_PROMPT) ? DEFAULT_SYSTEM_PROMPT.length : 0;
@@ -686,8 +685,7 @@ export const qqAdapterPlugin: PicoPlugin = {
       });
     });
 
-    pipelines.use<ToolInvocationInput, Awaited<ReturnType<ToolInvocationInput['invoke']>>>(
-      'toolInvocation',
+    pipelines.use('toolInvocation',
       async (input, next) => {
         const projectId = readConfig(context).projectId;
         if (projectId && input.thread.projectId === projectId) return input.invoke();

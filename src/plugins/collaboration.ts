@@ -1,7 +1,6 @@
 import type { PicoPlugin, PluginContext } from './host.js';
 import type { Thread, ThreadModelSelection } from '../core/types.js';
 import { projectThreadHistoryIo } from '../contracts/canonical-projection.js';
-import type { ProjectionInput } from '../runtime/stages.js';
 
 type CollaborationServices = Pick<PluginContext, 'threads'>;
 type SpawnIndex = Record<
@@ -42,7 +41,7 @@ export const collaborationPlugin: PicoPlugin = {
   pipelinePriority: { projection: 60 },
   activate({ tools, pipelines, commands, http, state, ...context }) {
     const { threads } = context as typeof context & CollaborationServices;
-    pipelines.use<ProjectionInput, ProjectionInput>('projection', async (input, next) =>
+    pipelines.use('projection', async (input, next) =>
       next({
         ...input,
         systemPrompt:
