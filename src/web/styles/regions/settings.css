@@ -225,7 +225,32 @@
   border-color: #f0dfdb;
 }
 .plugin-manager-copy {
+  flex: 1;
   min-width: 0;
+}
+.plugin-manager-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+.plugin-manager-summary::-webkit-details-marker {
+  display: none;
+}
+.plugin-manager-chevron {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--ink-soft);
+  transition: transform 0.15s ease;
+}
+.plugin-manager-copy[open] .plugin-manager-chevron {
+  transform: rotate(90deg);
+}
+.plugin-manager-model-settings {
+  display: grid;
+  gap: 12px;
+  margin: 14px 0 0 22px;
 }
 .plugin-manager-title-row {
   display: flex;

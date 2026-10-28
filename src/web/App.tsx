@@ -72,6 +72,7 @@ import {
 } from './model-execution-groups.js';
 import { conversationTimeline } from './conversation-timeline.js';
 import { PluginWebView } from './plugin-web-view.js';
+import { PluginUiSelect } from './plugin-ui-tree.js';
 import { McpSettings } from './mcp-settings.js';
 import './mcp-settings.css';
 import { ModelSelection, selectionForActiveThread } from './model-selection.js';
@@ -3689,25 +3690,37 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               <div className="plugin-manager-list">
                 {pluginInfo?.catalog.map((plugin) => (
                   <article className="plugin-manager-card" key={plugin.id}>
-                    <div className="plugin-manager-copy">
-                      <div className="plugin-manager-title-row">
-                        <h3>{plugin.name}</h3>
-                        <span className={`plugin-manager-status ${plugin.loaded ? 'is-loaded' : ''}`}>
-                          {plugin.loaded ? 'Loaded' : plugin.enabled ? 'Load failed' : 'Disabled'}
-                        </span>
-                      </div>
-                      <p>
-                        {plugin.id} · v{plugin.version} · {plugin.source}
-                      </p>
-                      {plugin.error ? <p className="plugin-manager-error">{plugin.error}</p> : null}
-                      {plugin.required ? <p className="field-note">Required by Pico</p> : null}
-                        <label>
-                          Model for plugin calls{' '}
-                          <select
+                    <details className="plugin-manager-copy">
+                      <summary className="plugin-manager-summary">
+                        <ChevronRight className="plugin-manager-chevron" size={14} aria-hidden="true" />
+                        <div>
+                          <div className="plugin-manager-title-row">
+                            <h3>{plugin.name}</h3>
+                            <span className={`plugin-manager-status ${plugin.loaded ? 'is-loaded' : ''}`}>
+                              {plugin.loaded ? 'Loaded' : plugin.enabled ? 'Load failed' : 'Disabled'}
+                            </span>
+                          </div>
+                          <p>
+                            {plugin.id} · v{plugin.version} · {plugin.source}
+                          </p>
+                          {plugin.error ? <p className="plugin-manager-error">{plugin.error}</p> : null}
+                          {plugin.required ? <p className="field-note">Required by Pico</p> : null}
+                        </div>
+                      </summary>
+                      <div className="plugin-manager-model-settings">
+                        <div className="plugin-ui-field">
+                          <span>Model for plugin calls</span>
+                          <PluginUiSelect
+                            label={`Model for ${plugin.name} plugin calls`}
+                            compact={false}
                             disabled={busyPluginSelections.has(plugin.id)}
                             value={pluginModelSelections[plugin.id]?.mode ?? 'thread'}
-                            onChange={(event) => {
-                              const mode = event.target.value as 'thread' | 'fixed';
+                            options={[
+                              { value: 'thread', label: 'Inherit Thread' },
+                              { value: 'fixed', label: 'Choose independently' },
+                            ]}
+                            onChange={(value) => {
+                              const mode = value as 'thread' | 'fixed';
                               const current = pluginModelSelections[plugin.id];
                               if (mode === 'fixed' && !current?.selection) {
                                 pluginSelectionDrafts.current.add(plugin.id);
@@ -3723,11 +3736,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                                 setError(caught instanceof Error ? caught.message : String(caught)),
                               );
                             }}
-                          >
-                            <option value="thread">Inherit Thread</option>
-                            <option value="fixed">Choose independently</option>
-                          </select>
-                        </label>
+                          />
+                        </div>
                         {pluginModelSelections[plugin.id]?.mode === 'fixed' ? (
                           <ModelSelection
                             models={modelCatalog.models}
@@ -3739,7 +3749,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                             }}
                           />
                         ) : null}
-                    </div>
+                      </div>
+                    </details>
                     <div className="plugin-manager-actions">
                       <button
                         type="button"
