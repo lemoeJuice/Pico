@@ -397,7 +397,7 @@ export function ModelSelection({
             <button
               type="button"
               ref={rightTriggerRef}
-              className="composer-model-name composer-model-name-right"
+              className="setup-caption composer-model-name composer-model-name-right"
               onClick={(event) => {
                 anchorRef.current = event.currentTarget;
                 setModelsOpen((current) => !current);
@@ -406,9 +406,6 @@ export function ModelSelection({
               aria-haspopup="dialog"
             >
               <span>{activeLabel}</span>
-              <span className="model-selection-chevron" aria-hidden="true">
-                ⌄
-              </span>
             </button>,
             rightTarget,
           )
