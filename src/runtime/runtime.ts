@@ -1191,14 +1191,17 @@ export class PicoRuntime {
             (options.parentThreadId
               ? this.threadModelSelection(options.parentThreadId)
               : this.defaultThreadModelSelection());
-          const thread = this.store.createThread(projectId, executorKind, title, { ...options, modelSelection });
-          const hadToolSettings = this.hasStoredThreadToolSettings(thread.id);
-          if (options.parentThreadId) {
-            this.inheritThreadToolSettings(options.parentThreadId, thread.id);
-          } else if (!hadToolSettings) this.initializeThreadToolSettings(thread.id);
-          if (!hadToolSettings && options.toolOverrides)
-            this.applyThreadToolOverrides(thread.id, options.toolOverrides);
-          this.plugins.threadCreated(thread);
+          const thread = this.store.transaction(() => {
+            const created = this.store.createThread(projectId, executorKind, title, { ...options, modelSelection });
+            const hadToolSettings = this.hasStoredThreadToolSettings(created.id);
+            if (options.parentThreadId) {
+              this.inheritThreadToolSettings(options.parentThreadId, created.id);
+            } else if (!hadToolSettings) this.initializeThreadToolSettings(created.id);
+            if (!hadToolSettings && options.toolOverrides)
+              this.applyThreadToolOverrides(created.id, options.toolOverrides);
+            this.plugins.initializeThread(created);
+            return created;
+          });
           this.publish({ type: 'thread.created', thread });
           return thread;
         },
@@ -1452,11 +1455,14 @@ export class PicoRuntime {
   }
 
   createThread(projectId: string, executorKind: Thread['executorKind'], title = DEFAULT_THREAD_TITLE): Thread {
-    const thread = this.store.createThread(projectId, executorKind, title.trim() || DEFAULT_THREAD_TITLE, {
-      modelSelection: this.defaultThreadModelSelection(),
+    const thread = this.store.transaction(() => {
+      const created = this.store.createThread(projectId, executorKind, title.trim() || DEFAULT_THREAD_TITLE, {
+        modelSelection: this.defaultThreadModelSelection(),
+      });
+      if (!this.hasStoredThreadToolSettings(created.id)) this.initializeThreadToolSettings(created.id);
+      this.plugins.initializeThread(created);
+      return created;
     });
-    if (!this.hasStoredThreadToolSettings(thread.id)) this.initializeThreadToolSettings(thread.id);
-    this.plugins.threadCreated(thread);
     this.publish({ type: 'thread.created', thread });
     return thread;
   }
@@ -1557,13 +1563,16 @@ export class PicoRuntime {
       connection.accessToken,
       remoteWorkspacePath,
     );
-    const thread = this.store.createThread(projectId, 'host', title.trim() || DEFAULT_THREAD_TITLE, {
-      remoteConnectionId: connection.id,
-      workspacePath,
-      modelSelection: this.defaultThreadModelSelection(),
+    const thread = this.store.transaction(() => {
+      const created = this.store.createThread(projectId, 'host', title.trim() || DEFAULT_THREAD_TITLE, {
+        remoteConnectionId: connection.id,
+        workspacePath,
+        modelSelection: this.defaultThreadModelSelection(),
+      });
+      if (!this.hasStoredThreadToolSettings(created.id)) this.initializeThreadToolSettings(created.id);
+      this.plugins.initializeThread(created);
+      return created;
     });
-    if (!this.hasStoredThreadToolSettings(thread.id)) this.initializeThreadToolSettings(thread.id);
-    this.plugins.threadCreated(thread);
     this.publish({ type: 'thread.created', thread });
     return thread;
   }

@@ -102,7 +102,7 @@ interface RegisteredPluginPage extends PluginPageContribution {
 export interface PluginContext extends Omit<PluginServices, 'models' | 'continuations' | 'threads'> {
   threads: Omit<PluginServices['threads'], 'updateTitle'> & {
     updateTitle(threadId: string, title: string): Thread;
-    /** Subscribe to Thread creation after initialization and before the created event is published. */
+    /** Register synchronous, required Thread initialization inside the Thread creation transaction. */
     onCreated(listener: (thread: Thread) => void): () => void;
   };
   tools: {
@@ -268,7 +268,8 @@ export class PluginHost {
     return [...this.loaded];
   }
 
-  threadCreated(thread: Thread): void {
+  /** Run required plugin initialization while the caller's Thread creation transaction is open. */
+  initializeThread(thread: Thread): void {
     for (const listeners of this.threadCreatedListeners.values()) {
       for (const listener of listeners) listener(thread);
     }

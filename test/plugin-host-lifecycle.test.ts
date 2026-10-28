@@ -7,6 +7,7 @@ import { ExecutionPipelines } from '../src/core/pipeline.js';
 import { ToolCatalog } from '../src/executor/tool-catalog.js';
 import { CommandRegistry, PluginHost, type PicoPlugin } from '../src/plugins/host.js';
 import { unavailablePluginServices } from '../src/plugins/services.js';
+import { FakeModel, response, setupRuntime } from './helpers.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -166,6 +167,87 @@ describe('PluginHost lifecycle', () => {
     } finally {
       await host.shutdown();
       store.close();
+    }
+  });
+
+  it('propagates required Thread creation initialization failures', async () => {
+    const store = new PicoStore(':memory:');
+    const host = new PluginHost(
+      store,
+      new ToolCatalog(),
+      new ExecutionPipelines(),
+      new CommandRegistry(),
+      pluginDirectory(),
+      unavailablePluginServices,
+    );
+    const plugin: PicoPlugin = {
+      id: 'pico.thread-created-test',
+      name: 'Thread created test',
+      version: '1.0.0',
+      activate({ threads }) {
+        threads.onCreated(() => {
+          throw new Error('required initialization failed');
+        });
+      },
+    };
+    try {
+      await host.load([plugin]);
+      const thread = { id: 'thread-1' } as import('../src/core/types.js').Thread;
+      expect(() => host.initializeThread(thread)).toThrow('required initialization failed');
+    } finally {
+      await host.shutdown();
+      store.close();
+    }
+  });
+
+  it('rolls back a failed required initializer and publishes only committed Threads', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'pico-plugin-runtime-'));
+    temporaryDirectories.push(directory);
+    let failInitialization = true;
+    let readInitializedIds: (() => string[]) | undefined;
+    const plugin: PicoPlugin = {
+      id: 'pico.thread-transaction-test',
+      name: 'Thread transaction test',
+      version: '1.0.0',
+      activate({ threads, state }) {
+        threads.onCreated((thread) => {
+          const ids = state.get<string[]>('initializedIds', []);
+          state.set('initializedIds', [...ids, thread.id]);
+          if (failInitialization) throw new Error('required initialization failed');
+        });
+        readInitializedIds = () => state.get<string[]>('initializedIds', []);
+      },
+    };
+    const env = await setupRuntime(new FakeModel(() => response()), {
+      plugins: [plugin],
+      pluginDirectory: directory,
+    });
+    let eventThreadVisible: boolean | undefined;
+    const unsubscribe = env.runtime.subscribe((event) => {
+      const thread = event.thread;
+      if (
+        event.type === 'thread.created' &&
+        thread &&
+        typeof thread === 'object' &&
+        'id' in thread &&
+        typeof thread.id === 'string'
+      ) {
+        eventThreadVisible = env.runtime.getThread(thread.id) !== null;
+      }
+    });
+    try {
+      expect(() => env.runtime.createThread(env.project.id, 'runtime')).toThrow('required initialization failed');
+      expect(env.store.listThreads(env.project.id)).toHaveLength(0);
+      expect(readInitializedIds?.()).toEqual([]);
+
+      failInitialization = false;
+      const thread = env.runtime.createThread(env.project.id, 'runtime');
+      expect(env.store.getThread(thread.id)).not.toBeNull();
+      expect(readInitializedIds?.()).toEqual([thread.id]);
+      expect(eventThreadVisible).toBe(true);
+    } finally {
+      unsubscribe();
+      await env.cleanup();
     }
   });
 });
