@@ -17,6 +17,7 @@ export interface ModelSelectionProps {
   onSave(selection: CatalogSelection): Promise<void>;
   convenient?: boolean;
   rightTarget?: HTMLElement | null;
+  convenientTarget?: HTMLElement | null;
 }
 
 export function selectionForAdapter(
@@ -111,6 +112,20 @@ function ParameterField({
 }) {
   const [draft, setDraft] = useState(String(value ?? ''));
   useEffect(() => setDraft(String(value ?? '')), [value]);
+  if (className === 'model-selection-primary-inline' && control.type === 'boolean') {
+    return (
+      <label className="model-selection-switch">
+        <span>{control.label}</span>
+        <input
+          type="checkbox"
+          checked={Boolean(value ?? control.defaultValue)}
+          disabled={disabled}
+          onChange={(event) => onChange(event.target.checked)}
+        />
+        <span className="model-selection-switch-track" aria-hidden="true" />
+      </label>
+    );
+  }
   if (control.choices) {
     return (
       <label className={`model-selection-parameter ${className}`}>
@@ -180,9 +195,15 @@ export function ModelSelection({
   onSave,
   convenient = true,
   rightTarget,
+  convenientTarget,
 }: ModelSelectionProps) {
   const [modelsOpen, setModelsOpen] = useState(false);
   const [parametersOpen, setParametersOpen] = useState(false);
+  const [mode, setMode] = useState<'convenient' | 'full'>('convenient');
+  const [draftAdapter, setDraftAdapter] = useState<AdapterContribution | null>(null);
+  const [draftTemperature, setDraftTemperature] = useState('');
+  const [draftOptions, setDraftOptions] = useState<Record<string, ModelOptionValue>>({});
+  const [submenuPosition, setSubmenuPosition] = useState<CSSProperties>({});
   const [model, setModel] = useState<CatalogModel | null>(null);
   const [adapters, setAdapters] = useState<AdapterContribution[]>([]);
   const [selectedAdapters, setSelectedAdapters] = useState<{ modelId: string; items: AdapterContribution[] } | null>(
@@ -198,6 +219,8 @@ export function ModelSelection({
   const rightTriggerRef = useRef<HTMLButtonElement>(null);
   const anchorRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const submenuRef = useRef<HTMLDivElement>(null);
+  const modelItemRef = useRef<HTMLElement | null>(null);
   const moreRef = useRef<HTMLButtonElement>(null);
   const moreMenuRef = useRef<HTMLDivElement>(null);
 
@@ -249,12 +272,28 @@ export function ModelSelection({
     !selection?.unavailableReason
       ? selectedModel.label
       : 'Choose model...';
+  const activeSource =
+    selectedModel && activeLabel !== 'Choose model...'
+      ? (instances.find((instance) => instance.id === selectedModel.instanceId)?.label ?? selectedModel.instanceId)
+      : null;
 
   useLayoutEffect(() => {
     if (!modelsOpen) return;
     const place = () => {
       const rect = anchorRef.current?.getBoundingClientRect();
-      if (rect) setPosition(modelSelectionPosition(rect, { width: window.innerWidth, height: window.innerHeight }));
+      if (rect) {
+        const base = modelSelectionPosition(rect, { width: window.innerWidth, height: window.innerHeight });
+        const width = Math.min(mode === 'full' ? 720 : 300, Math.max(0, window.innerWidth - 32));
+        const availableHeight = 'bottom' in base ? rect.top - 24 : window.innerHeight - rect.bottom - 24;
+        const maxHeight =
+          mode === 'full' ? Math.max(0, Math.min(window.innerHeight * 0.75, availableHeight)) : base.maxHeight;
+        setPosition({
+          ...base,
+          width,
+          maxHeight,
+          left: Math.max(16, Math.min(rect.left, window.innerWidth - width - 16)),
+        });
+      }
     };
     place();
     window.addEventListener('resize', place);
@@ -263,7 +302,37 @@ export function ModelSelection({
       window.removeEventListener('resize', place);
       window.removeEventListener('scroll', place, true);
     };
-  }, [modelsOpen]);
+  }, [modelsOpen, mode]);
+
+  useLayoutEffect(() => {
+    if (!modelsOpen || mode !== 'convenient' || !model) return;
+    const placeSubmenu = () => {
+      const anchor = modelItemRef.current;
+      const submenu = submenuRef.current;
+      if (!anchor || !submenu) return;
+      const rect = anchor.getBoundingClientRect();
+      const margin = Math.min(12, window.innerWidth / 2, window.innerHeight / 2);
+      const width = Math.max(0, Math.min(240, window.innerWidth - 2 * margin));
+      const maxHeight = Math.max(0, Math.min(360, window.innerHeight - 2 * margin));
+      const height = Math.min(submenu.getBoundingClientRect().height, maxHeight);
+      const preferredLeft =
+        rect.right + 4 + width <= window.innerWidth - margin ? rect.right + 4 : rect.left - width - 4;
+      const left = Math.max(margin, Math.min(preferredLeft, window.innerWidth - margin - width));
+      const top = Math.max(margin, Math.min(rect.top, window.innerHeight - margin - height));
+      setSubmenuPosition((current) =>
+        current.left === left && current.top === top && current.width === width && current.maxHeight === maxHeight
+          ? current
+          : { left, top, width, maxHeight },
+      );
+    };
+    placeSubmenu();
+    window.addEventListener('resize', placeSubmenu);
+    window.addEventListener('scroll', placeSubmenu, true);
+    return () => {
+      window.removeEventListener('resize', placeSubmenu);
+      window.removeEventListener('scroll', placeSubmenu, true);
+    };
+  }, [modelsOpen, mode, model, loading, adapters, submenuPosition]);
 
   useEffect(() => {
     if (modelsOpen) menuRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
@@ -299,7 +368,9 @@ export function ModelSelection({
     };
   }, [modelsOpen, parametersOpen]);
 
-  async function chooseModel(next: CatalogModel) {
+  async function chooseModel(next: CatalogModel, target?: HTMLElement) {
+    modelItemRef.current = target ?? null;
+    setDraftAdapter(null);
     const isCurrent = request.current.begin();
     setModel(next);
     setAdapters([]);
@@ -333,6 +404,13 @@ export function ModelSelection({
 
   async function chooseAdapter(next: AdapterContribution) {
     if (!model) return;
+    if (mode === 'full') {
+      const same = selection?.modelId === model.modelId && selection.adapterId === next.id;
+      setDraftAdapter(next);
+      setDraftTemperature(same ? String(selection?.parameters.temperature ?? '') : '');
+      setDraftOptions(same ? { ...selection.parameters.options } : {});
+      return;
+    }
     const sameSelection = selection?.modelId === model.modelId && selection.adapterId === next.id;
     const temperature =
       sameSelection && selection.parameters.temperature != null ? String(selection.parameters.temperature) : '';
@@ -368,48 +446,41 @@ export function ModelSelection({
     }
   }
 
+  function openChooser(nextMode: 'convenient' | 'full', target: HTMLButtonElement) {
+    anchorRef.current = target;
+    setMode(nextMode);
+    setModelsOpen((current) => mode !== nextMode || !current);
+    setModel(null);
+    setAdapters([]);
+    setDraftAdapter(null);
+    setError('');
+  }
+
   const primaryControls = selectedAdapter?.controls.filter((control) => control.group === 'primary') ?? [];
   const otherControls = selectedAdapter?.controls.filter((control) => control.group !== 'primary') ?? [];
   const hasOtherParameters = Boolean(otherControls.length || selectedAdapter?.temperature.supported);
 
-  return (
+  const convenientContent = (
     <div className="model-selection">
       {convenient ? (
         <button
           type="button"
           ref={triggerRef}
           className="composer-model-name"
-          onClick={(event) => {
-            anchorRef.current = event.currentTarget;
-            setModelsOpen((current) => !current);
-          }}
-          aria-expanded={modelsOpen}
+          onClick={(event) => openChooser('convenient', event.currentTarget)}
+          aria-label={activeSource ? `${activeLabel} — ${activeSource}` : activeLabel}
+          aria-expanded={modelsOpen && mode === 'convenient'}
           aria-haspopup="dialog"
         >
-          <span>{activeLabel}</span>
+          <span className="model-selection-trigger-label">
+            {activeLabel}
+            {activeSource ? <small>{activeSource}</small> : null}
+          </span>
           <span className="model-selection-chevron" aria-hidden="true">
             ⌄
           </span>
         </button>
       ) : null}
-      {rightTarget
-        ? createPortal(
-            <button
-              type="button"
-              ref={rightTriggerRef}
-              className="setup-caption composer-model-name composer-model-name-right"
-              onClick={(event) => {
-                anchorRef.current = event.currentTarget;
-                setModelsOpen((current) => !current);
-              }}
-              aria-expanded={modelsOpen}
-              aria-haspopup="dialog"
-            >
-              <span>{activeLabel}</span>
-            </button>,
-            rightTarget,
-          )
-        : null}
       {selection?.unavailableReason || (adapterStatus === 'unavailable' && selection?.adapterId) ? (
         <span className="model-selection-unavailable" role="status">
           {selection.unavailableReason ?? 'Saved model or adapter is unavailable. Choose again.'}
@@ -522,44 +593,95 @@ export function ModelSelection({
           {error}
         </span>
       ) : null}
+    </div>
+  );
+
+  return (
+    <>
+      {convenientTarget ? createPortal(convenientContent, convenientTarget) : rightTarget ? null : convenientContent}
+      {rightTarget
+        ? createPortal(
+            <>
+              {!convenientTarget &&
+              (selection?.unavailableReason || (adapterStatus === 'unavailable' && selection?.adapterId)) ? (
+                <span className="model-selection-unavailable" role="status">
+                  {selection?.unavailableReason ?? 'Saved model or adapter is unavailable. Choose again.'}
+                </span>
+              ) : null}
+              {!convenientTarget && error ? (
+                <span className="model-selection-error" role="alert">
+                  {error}
+                </span>
+              ) : null}
+              <button
+                type="button"
+                ref={rightTriggerRef}
+                className="setup-caption composer-model-name composer-model-name-right"
+                onClick={(event) => openChooser('full', event.currentTarget)}
+                aria-expanded={modelsOpen && mode === 'full'}
+                aria-haspopup="dialog"
+              >
+                <span>{activeLabel}</span>
+              </button>
+            </>,
+            rightTarget,
+          )
+        : null}
       {modelsOpen
         ? createPortal(
             <div
               ref={menuRef}
               style={position}
-              className="model-selection-panel"
+              className={`model-selection-panel ${mode === 'full' ? 'model-selection-full' : 'model-selection-compact'}`}
               role="dialog"
               aria-label="Choose model"
             >
-              <div className="model-selection-models">
-                <div className="model-selection-placeholder" aria-hidden="true">
-                  Choose model...
+              {mode === 'full' ? (
+                <div className="model-selection-heading">
+                  <strong>Choose model</strong>
+                  <button type="button" onClick={() => setModelsOpen(false)}>
+                    Close
+                  </button>
                 </div>
-                {models.length === 0 ? (
-                  <p className="model-selection-empty">No models available. Add a Provider in settings.</p>
-                ) : null}
-                {models.map((item) => {
-                  const source =
-                    instances.find((instance) => instance.id === item.instanceId)?.label ?? item.instanceId;
-                  return (
-                    <button
-                      type="button"
-                      key={item.modelId}
-                      disabled={item.availability === 'unavailable' || saving}
-                      aria-pressed={model?.modelId === item.modelId}
-                      title={`${item.label} — ${source}`}
-                      onClick={() => void chooseModel(item)}
-                    >
-                      <span className="model-selection-model-label">{item.label}</span>
-                      <span className="model-selection-model-source">{source}</span>
-                    </button>
-                  );
-                })}
-              </div>
-              <div className="model-selection-adapters" aria-live="polite">
+              ) : null}
+              <div className="model-selection-layout">
+                <div className="model-selection-models">
+                  {mode === 'convenient' ? (
+                    <div className="model-selection-placeholder" aria-hidden="true">
+                      Choose model...
+                    </div>
+                  ) : null}
+                  {models.length === 0 ? (
+                    <p className="model-selection-empty">No models available. Add a Provider in settings.</p>
+                  ) : null}
+                  {models.map((item) => {
+                    const source =
+                      instances.find((instance) => instance.id === item.instanceId)?.label ?? item.instanceId;
+                    return (
+                      <button
+                        type="button"
+                        key={item.modelId}
+                        disabled={item.availability === 'unavailable' || saving}
+                        aria-pressed={model?.modelId === item.modelId}
+                        title={`${item.label} — ${source}`}
+                        onClick={(event) => void chooseModel(item, event.currentTarget)}
+                      >
+                        <span className="model-selection-model-label">{item.label}</span>
+                        <span className="model-selection-model-source">{source}</span>
+                      </button>
+                    );
+                  })}
+                </div>
                 {model ? (
-                  <>
-                    <div className="model-selection-adapter-heading">{model.label}</div>
+                  <div
+                    ref={mode === 'convenient' ? submenuRef : undefined}
+                    className={mode === 'full' ? 'model-selection-adapters' : 'model-selection-submenu'}
+                    style={mode === 'convenient' ? submenuPosition : undefined}
+                    aria-live="polite"
+                  >
+                    <div className="model-selection-adapter-heading">
+                      {mode === 'full' ? `Adapter for ${model.label}` : model.label}
+                    </div>
                     {loading ? <p className="model-selection-empty">Loading adapters…</p> : null}
                     {!loading && adapters.length === 0 ? (
                       <p className="model-selection-empty">No matching adapters.</p>
@@ -570,17 +692,76 @@ export function ModelSelection({
                         key={item.id}
                         className="model-selection-adapter"
                         disabled={saving}
+                        aria-pressed={draftAdapter?.id === item.id}
                         aria-label={`Use ${item.label}${item.owner ? ` by ${item.owner}` : ''}`}
                         onClick={() => void chooseAdapter(item)}
                       >
-                        <span>{item.label}</span>
-                        <small>{item.owner ?? item.id}</small>
+                        <span>
+                          {item.label}
+                          <small>{item.owner ?? item.id}</small>
+                        </span>
                       </button>
                     ))}
-                  </>
-                ) : (
-                  <p className="model-selection-empty">Select a model to see matching adapters.</p>
-                )}
+                    {mode === 'full' && draftAdapter ? (
+                      <section className="model-selection-full-parameters" aria-label="Model parameters">
+                        <strong>Parameters</strong>
+                        {draftAdapter.temperature.supported ? (
+                          <label>
+                            Temperature
+                            <input
+                              type="number"
+                              value={
+                                draftAdapter.temperature.fixedValue === undefined
+                                  ? draftTemperature
+                                  : String(draftAdapter.temperature.fixedValue)
+                              }
+                              step={draftAdapter.temperature.step ?? 'any'}
+                              disabled={draftAdapter.temperature.fixedValue !== undefined}
+                              min={draftAdapter.temperature.min}
+                              max={draftAdapter.temperature.max}
+                              placeholder="Default"
+                              onChange={(event) => setDraftTemperature(event.target.value)}
+                            />
+                          </label>
+                        ) : null}
+                        {draftAdapter.controls.map((control) => (
+                          <ParameterField
+                            key={control.id}
+                            control={control}
+                            value={draftOptions[control.id]}
+                            disabled={saving}
+                            onChange={(value) =>
+                              setDraftOptions((current) => {
+                                const next = { ...current };
+                                if (value === undefined) delete next[control.id];
+                                else next[control.id] = value;
+                                return next;
+                              })
+                            }
+                          />
+                        ))}
+                        <button
+                          type="button"
+                          className="model-selection-confirm"
+                          disabled={saving}
+                          onClick={() => {
+                            try {
+                              void save(selectionForAdapter(model, draftAdapter, draftTemperature, draftOptions));
+                            } catch (caught) {
+                              setError(caught instanceof Error ? caught.message : String(caught));
+                            }
+                          }}
+                        >
+                          {saving ? 'Saving…' : 'Confirm selection'}
+                        </button>
+                      </section>
+                    ) : null}
+                  </div>
+                ) : mode === 'full' ? (
+                  <div className="model-selection-adapters">
+                    <p className="model-selection-empty">Select a model to see matching adapters.</p>
+                  </div>
+                ) : null}
               </div>
               {error ? (
                 <p className="model-selection-panel-error" role="alert">
@@ -591,6 +772,6 @@ export function ModelSelection({
             document.body,
           )
         : null}
-    </div>
+    </>
   );
 }

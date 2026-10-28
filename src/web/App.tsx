@@ -606,6 +606,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [settings, setSettings] = useState<PublicSettings | null>(null);
   const [contextManagement, setContextManagement] = useState<ContextManagementSettings | null>(null);
   const [modelSelectionRightTarget, setModelSelectionRightTarget] = useState<HTMLSpanElement | null>(null);
+  const [modelSelectionConvenientTarget, setModelSelectionConvenientTarget] = useState<HTMLDivElement | null>(null);
   const [miscellaneousSettings, setMiscellaneousSettings] = useState<MiscellaneousSettings | null>(null);
   const [contextManagementForm, setContextManagementForm] = useState({
     contextWindowTokens: '272000',
@@ -3085,6 +3086,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     aria-label="Message"
                   />
                   <div className="composer-footer">
+                    {miscellaneousSettings?.convenientModelParameters ? (
+                      <div
+                        className="composer-plugin-controls"
+                        ref={setModelSelectionConvenientTarget}
+                        aria-label="Model controls"
+                      />
+                    ) : null}
                     <div className="composer-footer-actions">
                       {composerActions.map((item) => (
                         <PluginContributionView
@@ -3136,6 +3144,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 <ModelSelection
                   key={`model-selection:${selectedThread.id}`}
                   convenient={miscellaneousSettings?.convenientModelParameters ?? false}
+                  convenientTarget={modelSelectionConvenientTarget}
                   rightTarget={modelSelectionRightTarget}
                   models={modelCatalog.models}
                   instances={modelCatalog.instances}
@@ -3629,7 +3638,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     <strong>Convenient model parameters</strong>
                   </div>
                   <p>
-                    Show model and parameter controls below the composer. The model name at the bottom right always
+                    Show model and parameter controls inside the composer. The model name at the bottom right always
                     opens the selector.
                   </p>
                 </div>
