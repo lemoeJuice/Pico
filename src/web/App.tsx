@@ -87,7 +87,7 @@ import type {
   ProviderTypeContribution,
 } from '../contracts/model-catalog.js';
 import { DeveloperSettings } from './developer-settings.js';
-import { appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from './history-pages.js';
+import { appendSnapshotExecution, appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from './history-pages.js';
 import {
   Archive,
   ArrowUpRight,
@@ -1438,13 +1438,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           if (execution?.threadId === activeThreadId.current) {
             noteSnapshotChange(execution.threadId);
             setSnapshot((current) =>
-              current
-                ? {
-                    ...current,
-                    executions: [execution, ...current.executions.filter((item) => item.id !== execution.id)],
-                  }
-                : current,
+              current?.thread.id === execution.threadId ? appendSnapshotExecution(current, execution) : current,
             );
+            if (execution.kind === 'model' && execution.status !== 'pending' && execution.status !== 'running') {
+              void loadSnapshot(execution.threadId).catch((caught: unknown) => {
+                setError(caught instanceof Error ? caught.message : String(caught));
+              });
+            }
           }
         } else if (
           event.type === 'thread.model-selection.updated' &&
@@ -1581,6 +1581,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     };
   }, [
     acceptMessage,
+    loadSnapshot,
     loadThreadTools,
     noteSnapshotChange,
     observeModelExecutions,

@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { CanonicalRecord, Execution, Thread, ThreadModelSelection } from '../src/core/types.js';
 import type { ThreadSnapshot } from '../src/runtime/runtime.js';
-import { appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from '../src/web/history-pages.js';
+import {
+  appendSnapshotExecution,
+  appendSnapshotRecord,
+  mergeEarlierSnapshot,
+  mergeLatestSnapshot,
+} from '../src/web/history-pages.js';
 
 function snapshot(
   threadId: string,
@@ -71,6 +76,60 @@ describe('Thread history page merging', () => {
     expect(gap.hasEarlierRecords).toBe(true);
   });
 
+  it('preserves active path metadata from the current snapshot when loading an earlier page', () => {
+    const current = {
+      ...snapshot('thread', records(11, 20), true),
+      activePathRecordIds: ['record-1', 'record-11', 'record-20'],
+      activePathExecutionIds: ['current-execution'],
+      hasInactiveHistory: true,
+      historyBranches: [
+        {
+          id: 'rewind-current',
+          parentId: null,
+          targetRecordId: 'record-11',
+          targetSeq: 11,
+          createdAt: new Date(11).toISOString(),
+          preview: 'current branch',
+          onActivePath: true,
+          active: true,
+        },
+      ],
+    };
+    const earlier = {
+      ...snapshot('thread', records(1, 10), false),
+      activePathRecordIds: ['record-1', 'record-10'],
+      activePathExecutionIds: ['older-page-execution'],
+      hasInactiveHistory: true,
+    };
+
+    const merged = mergeEarlierSnapshot(current, earlier);
+
+    expect(merged.records.map((record) => record.seq)).toEqual(Array.from({ length: 20 }, (_v, i) => i + 1));
+    expect(merged.activePathRecordIds).toEqual(current.activePathRecordIds);
+    expect(merged.activePathExecutionIds).toEqual(current.activePathExecutionIds);
+    expect(merged.historyBranches).toEqual(current.historyBranches);
+  });
+
+  it('uses a fresh snapshot to recover active path membership after a record gap', () => {
+    const current = {
+      ...snapshot('thread', records(1, 5), false),
+      activePathRecordIds: ['record-1', 'record-5'],
+      hasInactiveHistory: true,
+    };
+    const refreshed = {
+      ...snapshot('thread', records(20, 25), true),
+      activePathRecordIds: ['record-1', 'record-25'],
+      activePathExecutionIds: ['fresh-execution'],
+      hasInactiveHistory: true,
+    };
+
+    const merged = mergeLatestSnapshot(current, refreshed);
+
+    expect(merged.records.map((record) => record.seq)).toEqual([20, 21, 22, 23, 24, 25]);
+    expect(merged.activePathRecordIds).toEqual(refreshed.activePathRecordIds);
+    expect(merged.activePathExecutionIds).toEqual(refreshed.activePathExecutionIds);
+  });
+
   it('keeps the live history window bounded unless the user loaded older pages', () => {
     const current = snapshot('thread', records(1, 100), false);
     const appended = appendSnapshotRecord(current, records(101, 101)[0]!);
@@ -82,6 +141,111 @@ describe('Thread history page merging', () => {
     const expanded = appendSnapshotRecord(current, records(101, 101)[0]!, true);
     expect(expanded.records).toHaveLength(101);
     expect(expanded.hasEarlierRecords).toBe(false);
+  });
+
+  it('adds an in-order appended record to the active path membership', () => {
+    const current = {
+      ...snapshot('thread', records(1, 2), false),
+      activePathRecordIds: ['record-1', 'record-2'],
+      hasInactiveHistory: true,
+    };
+
+    const appended = appendSnapshotRecord(current, records(3, 3)[0]!);
+
+    expect(appended.activePathRecordIds).toEqual(['record-1', 'record-2', 'record-3']);
+  });
+
+  it.each(['context-rewound', 'context-restored'])(
+    'does not blindly add a %s structural record to the active path',
+    (action) => {
+      const current = {
+        ...snapshot('thread', records(1, 2), false),
+        activePathRecordIds: ['record-1', 'record-2'],
+        hasInactiveHistory: true,
+      };
+      const structuralRecord: CanonicalRecord = {
+        id: `structure-${action}`,
+        threadId: 'thread',
+        seq: 3,
+        kind: 'plugin',
+        payload: { pluginId: 'pico.runtime', action, version: 1 },
+        createdAt: new Date(3).toISOString(),
+      };
+
+      const appended = appendSnapshotRecord(current, structuralRecord);
+      const subsequent = appendSnapshotRecord(appended, records(4, 4)[0]!);
+
+      expect(appended.records.map((record) => record.id)).toContain(structuralRecord.id);
+      expect(appended.activePathRecordIds).toEqual(current.activePathRecordIds);
+      expect(subsequent.activePathRecordIds).toEqual(current.activePathRecordIds);
+    },
+  );
+
+  it('does not add a record across a sequence gap to active path membership', () => {
+    const current = {
+      ...snapshot('thread', records(1, 2), false),
+      activePathRecordIds: ['record-1', 'record-2'],
+      hasInactiveHistory: true,
+    };
+
+    const appended = appendSnapshotRecord(current, records(4, 4)[0]!);
+    const subsequent = appendSnapshotRecord(appended, records(5, 5)[0]!);
+
+    expect(appended.records.map((record) => record.seq)).toEqual([1, 2, 4]);
+    expect(appended.activePathRecordIds).toEqual(current.activePathRecordIds);
+    expect(subsequent.activePathRecordIds).toEqual(current.activePathRecordIds);
+    const fresh = { ...snapshot('thread', records(1, 5), false), activePathRecordIds: ['record-1', 'record-5'] };
+    const recovered = mergeLatestSnapshot(subsequent, fresh);
+    expect(appendSnapshotRecord(recovered, records(6, 6)[0]!).activePathRecordIds).toContain('record-6');
+  });
+
+  it('adds executions only when their generation and input boundary belong to the active path', () => {
+    const current = {
+      ...snapshot('thread', records(1, 3), false),
+      activePathRecordIds: ['record-1', 'record-2', 'record-3'],
+      activePathExecutionIds: ['prior-execution'],
+      hasInactiveHistory: true,
+      historyBranches: [
+        {
+          id: 'rewind-current',
+          parentId: null,
+          targetRecordId: 'record-2',
+          targetSeq: 3,
+          createdAt: new Date(4).toISOString(),
+          preview: 'active branch',
+          onActivePath: true,
+          active: true,
+        },
+      ],
+    };
+    const execution = (id: string, generation: string, status: Execution['status'] = 'running') =>
+      ({
+        id,
+        threadId: 'thread',
+        kind: 'model',
+        batchId: null,
+        toolName: null,
+        arguments: { projectionThrough: 3, activePathRewindId: generation },
+        status,
+        result: null,
+        error: null,
+        createdAt: new Date(5).toISOString(),
+        updatedAt: new Date(5).toISOString(),
+      }) as Execution;
+
+    const active = appendSnapshotExecution(current, execution('active-execution', 'rewind-current'));
+    const oldGeneration = appendSnapshotExecution(current, execution('old-execution', 'rewind-old'));
+    const failed = appendSnapshotExecution(active, execution('active-execution', 'rewind-current', 'failed'));
+
+    expect(active.activePathExecutionIds).toContain('active-execution');
+    expect(active.executions.find((item) => item.id === 'active-execution')?.status).toBe('running');
+    expect(oldGeneration.activePathExecutionIds).not.toContain('old-execution');
+    expect(failed.activePathExecutionIds).toContain('active-execution');
+    expect(failed.executions.find((item) => item.id === 'active-execution')?.status).toBe('failed');
+
+    const paged = { ...current, records: records(10, 12), activePathExecutionIds: ['active-execution'] };
+    const updatedOutsidePage = appendSnapshotExecution(paged, execution('active-execution', 'rewind-old', 'failed'));
+    expect(updatedOutsidePage.activePathExecutionIds).toContain('active-execution');
   });
 
   it('keeps a large active Tool Batch intact while new records arrive', () => {
