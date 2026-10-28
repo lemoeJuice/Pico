@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { ModelInputAttempt } from '../src/contracts/runtime.js';
-import { ComposerTps, latestOutputTokensPerSecond } from '../src/web/model-metrics.js';
+import { ComposerTps, latestOutputTokensPerSecond, TextSpeedWindow } from '../src/web/model-metrics.js';
 import { mergePluginSelectionRefresh } from '../src/web/plugin-model-selection-state.js';
 
 describe('provider throughput', () => {
@@ -22,7 +22,26 @@ describe('provider throughput', () => {
       <ComposerTps threadId="a" executionId="b" status="completed" request={async <T,>() => ({}) as T} />,
     );
     expect(markup).toContain('TPS —');
-    expect(markup).toContain('including the wait for the first text');
+    expect(markup).toContain('Estimated visible-text tokens');
+  });
+  it('estimates a rolling text speed and resets after a pause', () => {
+    const speed = new TextSpeedWindow();
+    expect(speed.add(0, 'abcd')).toBeNull();
+    expect(speed.add(1000, 'abcdefgh')).toBe(2);
+    expect(speed.add(5000, 'abcd')).toBeNull();
+    expect(speed.add(6000, '中文')).toBe(2);
+  });
+  it('requires 500ms of observations and isolates a new execution', () => {
+    const first = new TextSpeedWindow();
+    expect(first.add(0, 'abcd')).toBeNull();
+    expect(first.add(1, 'abcdefgh')).toBeNull();
+    expect(first.add(499, 'abcd')).toBeNull();
+    expect(first.add(500, 'abcd')).toBe(8);
+    const nextExecution = new TextSpeedWindow();
+    expect(nextExecution.add(501, 'abcd')).toBeNull();
+    expect(nextExecution.add(502, 'abcdefgh')).toBeNull();
+    expect(nextExecution.add(4000, 'abcd')).toBeNull();
+    expect(nextExecution.add(4500, 'abcd')).toBe(2);
   });
   it('preserves in-flight edits and independent plugin choices when refreshes return', () => {
     const old = { a: 'fixed draft', b: 'old', c: 'saving' };
