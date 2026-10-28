@@ -605,6 +605,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [bootstrapping, setBootstrapping] = useState(true);
   const [settings, setSettings] = useState<PublicSettings | null>(null);
   const [contextManagement, setContextManagement] = useState<ContextManagementSettings | null>(null);
+  const [modelSelectionRightTarget, setModelSelectionRightTarget] = useState<HTMLSpanElement | null>(null);
   const [miscellaneousSettings, setMiscellaneousSettings] = useState<MiscellaneousSettings | null>(null);
   const [contextManagementForm, setContextManagementForm] = useState({
     contextWindowTokens: '272000',
@@ -2092,16 +2093,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     }
   };
 
-  const setToolCardsExpandedByDefault = async (enabled: boolean): Promise<void> => {
+  const updateMiscellaneousSetting = async (key: keyof MiscellaneousSettings, enabled: boolean): Promise<void> => {
     if (!miscellaneousSettings || settingsSaving) return;
     const previous = miscellaneousSettings;
-    setMiscellaneousSettings({ ...previous, toolCardsExpandedByDefault: enabled });
+    setMiscellaneousSettings({ ...previous, [key]: enabled });
     setSettingsSaving(true);
     setError('');
     try {
       const saved = await api<MiscellaneousSettings>('/api/settings/miscellaneous', {
         method: 'PUT',
-        body: JSON.stringify({ toolCardsExpandedByDefault: enabled }),
+        body: JSON.stringify({ [key]: enabled }),
       });
       setMiscellaneousSettings(saved);
     } catch (caught) {
@@ -3134,6 +3135,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               <div className="composer-caption composer-meta">
                 <ModelSelection
                   key={`model-selection:${selectedThread.id}`}
+                  convenient={miscellaneousSettings?.convenientModelParameters ?? false}
+                  rightTarget={modelSelectionRightTarget}
                   models={modelCatalog.models}
                   instances={modelCatalog.instances}
                   selection={activeModelSelection ?? null}
@@ -3167,6 +3170,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     ) : null,
                   )}
                 <div className="composer-status-info">
+                  <span ref={setModelSelectionRightTarget} className="composer-model-right-target" />
                   <ComposerTps
                       key={`model-metrics:${selectedThread.id}`}
                     threadId={selectedThread.id}
@@ -3614,6 +3618,30 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               <article className="native-tool-row general-setting-row">
                 <div className="native-tool-copy">
                   <div className="native-tool-title">
+                    <strong>Convenient model parameters</strong>
+                  </div>
+                  <p>
+                    Show model and parameter controls below the composer. The model name at the bottom right always
+                    opens the selector.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className={`native-tool-switch ${miscellaneousSettings?.convenientModelParameters ? 'is-enabled' : ''}`}
+                  role="switch"
+                  aria-checked={miscellaneousSettings?.convenientModelParameters ?? false}
+                  aria-label="Convenient model parameters"
+                  disabled={settingsSaving || !miscellaneousSettings}
+                  onClick={() =>
+                    void updateMiscellaneousSetting('convenientModelParameters', !miscellaneousSettings?.convenientModelParameters)
+                  }
+                >
+                  <span />
+                </button>
+              </article>
+              <article className="native-tool-row general-setting-row">
+                <div className="native-tool-copy">
+                  <div className="native-tool-title">
                     <strong>Expand tool cards by default</strong>
                   </div>
                   <p>
@@ -3629,7 +3657,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   aria-label="Expand tool cards by default"
                   disabled={settingsSaving || !miscellaneousSettings}
                     onClick={() =>
-                      void setToolCardsExpandedByDefault(!miscellaneousSettings?.toolCardsExpandedByDefault)
+                      void updateMiscellaneousSetting('toolCardsExpandedByDefault', !miscellaneousSettings?.toolCardsExpandedByDefault)
                     }
                 >
                   <span />

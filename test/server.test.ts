@@ -156,14 +156,20 @@ describe('Pico server access boundary', () => {
       const defaultMiscellaneousSettings = await fetch(`${base}/api/settings/miscellaneous`, {
         headers: cookieHeaders,
       }).then((response) => response.json());
-      expect(defaultMiscellaneousSettings).toEqual({ toolCardsExpandedByDefault: false });
+      expect(defaultMiscellaneousSettings).toEqual({ toolCardsExpandedByDefault: false, convenientModelParameters: false });
       const miscellaneousSettingsUpdate = await fetch(`${base}/api/settings/miscellaneous`, {
         method: 'PUT',
         headers: { ...cookieHeaders, 'content-type': 'application/json' },
         body: JSON.stringify({ toolCardsExpandedByDefault: true }),
       });
       expect(miscellaneousSettingsUpdate.status).toBe(200);
-      expect(await miscellaneousSettingsUpdate.json()).toEqual({ toolCardsExpandedByDefault: true });
+      expect(await miscellaneousSettingsUpdate.json()).toEqual({ toolCardsExpandedByDefault: true, convenientModelParameters: false });
+      const convenientUpdate = await fetch(`${base}/api/settings/miscellaneous`, {
+        method: 'PUT',
+        headers: { ...cookieHeaders, 'content-type': 'application/json' },
+        body: JSON.stringify({ convenientModelParameters: true }),
+      });
+      expect(await convenientUpdate.json()).toEqual({ toolCardsExpandedByDefault: true, convenientModelParameters: true });
       expect(await upgradeStatus(wsUrl, { cookie })).toBe(101);
       expect(await upgradeStatus(wsUrl, { cookie, origin: 'https://attacker.example' })).toBe(403);
       await waitForConnected(wsUrl, cookieHeaders);

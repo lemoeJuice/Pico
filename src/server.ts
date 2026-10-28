@@ -512,10 +512,14 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   });
   app.put('/api/settings/miscellaneous', (request, response) => {
     const body = bodyObject(request);
-    if (typeof body.toolCardsExpandedByDefault !== 'boolean') {
-      throw new ServiceError(400, 'Default tool card expansion must be a boolean.');
+    const update: Partial<MiscellaneousSettings> = {};
+    for (const key of ['toolCardsExpandedByDefault', 'convenientModelParameters'] as const) {
+      if (body[key] !== undefined) {
+        if (typeof body[key] !== 'boolean') throw new ServiceError(400, `${key} must be a boolean.`);
+        update[key] = body[key];
+      }
     }
-    const update: Partial<MiscellaneousSettings> = { toolCardsExpandedByDefault: body.toolCardsExpandedByDefault };
+    if (Object.keys(update).length === 0) throw new ServiceError(400, 'A miscellaneous setting is required.');
     response.json(runtime.updateMiscellaneousSettings(update));
   });
   app.get('/api/commands', (_request, response) => response.json(runtime.availableCommands()));

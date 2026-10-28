@@ -15,6 +15,8 @@ export interface ModelSelectionProps {
   selection: (CatalogSelection & { unavailableReason?: string }) | null;
   loadAdapters(modelId: string): Promise<AdapterContribution[]>;
   onSave(selection: CatalogSelection): Promise<void>;
+  convenient?: boolean;
+  rightTarget?: HTMLElement | null;
 }
 
 export function selectionForAdapter(
@@ -170,11 +172,22 @@ function ParameterField({
 }
 
 /** Shared chooser for Thread and plugin model selections. */
-export function ModelSelection({ models, instances, selection, loadAdapters, onSave }: ModelSelectionProps) {
+export function ModelSelection({
+  models,
+  instances,
+  selection,
+  loadAdapters,
+  onSave,
+  convenient = true,
+  rightTarget,
+}: ModelSelectionProps) {
   const [modelsOpen, setModelsOpen] = useState(false);
   const [parametersOpen, setParametersOpen] = useState(false);
   const [model, setModel] = useState<CatalogModel | null>(null);
   const [adapters, setAdapters] = useState<AdapterContribution[]>([]);
+  const [selectedAdapters, setSelectedAdapters] = useState<{ modelId: string; items: AdapterContribution[] } | null>(
+    null,
+  );
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -182,6 +195,8 @@ export function ModelSelection({ models, instances, selection, loadAdapters, onS
   const [position, setPosition] = useState<CSSProperties>({});
   const request = useRef(new LatestModelRequest());
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const rightTriggerRef = useRef<HTMLButtonElement>(null);
+  const anchorRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const moreRef = useRef<HTMLButtonElement>(null);
   const moreMenuRef = useRef<HTMLDivElement>(null);
@@ -205,7 +220,7 @@ export function ModelSelection({ models, instances, selection, loadAdapters, onS
     void loadAdapters(selection.modelId)
       .then((items) => {
         if (alive) {
-          setAdapters(items);
+          setSelectedAdapters({ modelId: selection.modelId, items });
           setAdapterStatus(items.some((item) => item.id === selection.adapterId) ? 'available' : 'unavailable');
         }
       })
@@ -218,7 +233,10 @@ export function ModelSelection({ models, instances, selection, loadAdapters, onS
   }, [selection?.modelId, selection?.adapterId, loadAdapters]);
 
   const selectedModel = models.find((item) => item.modelId === selection?.modelId);
-  const selectedAdapter = adapters.find((item) => item.id === selection?.adapterId) ?? null;
+  const selectedAdapter =
+    selectedAdapters && selectedAdapters.modelId === selection?.modelId
+      ? (selectedAdapters.items.find((item) => item.id === selection?.adapterId) ?? null)
+      : null;
   const [temperatureDraft, setTemperatureDraft] = useState('');
   useEffect(
     () => setTemperatureDraft(String(selection?.parameters.temperature ?? '')),
@@ -235,7 +253,7 @@ export function ModelSelection({ models, instances, selection, loadAdapters, onS
   useLayoutEffect(() => {
     if (!modelsOpen) return;
     const place = () => {
-      const rect = triggerRef.current?.getBoundingClientRect();
+      const rect = anchorRef.current?.getBoundingClientRect();
       if (rect) setPosition(modelSelectionPosition(rect, { width: window.innerWidth, height: window.innerHeight }));
     };
     place();
@@ -258,6 +276,7 @@ export function ModelSelection({ models, instances, selection, loadAdapters, onS
       if (
         menuRef.current?.contains(event.target) ||
         triggerRef.current?.contains(event.target) ||
+        rightTriggerRef.current?.contains(event.target) ||
         moreMenuRef.current?.contains(event.target) ||
         moreRef.current?.contains(event.target)
       )
@@ -270,7 +289,7 @@ export function ModelSelection({ models, instances, selection, loadAdapters, onS
       event.stopPropagation();
       if (parametersOpen) setParametersOpen(false);
       else setModelsOpen(false);
-      triggerRef.current?.focus();
+      anchorRef.current?.focus();
     };
     document.addEventListener('pointerdown', dismiss);
     document.addEventListener('keydown', escape);
@@ -320,7 +339,6 @@ export function ModelSelection({ models, instances, selection, loadAdapters, onS
     const options = sameSelection ? { ...selection.parameters.options } : {};
     try {
       await save(selectionForAdapter(model, next, temperature, options));
-      setAdapters((current) => (current.some((item) => item.id === next.id) ? current : [...current, next]));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
@@ -356,25 +374,51 @@ export function ModelSelection({ models, instances, selection, loadAdapters, onS
 
   return (
     <div className="model-selection">
-      <button
-        type="button"
-        ref={triggerRef}
-        className="composer-model-name"
-        onClick={() => setModelsOpen((current) => !current)}
-        aria-expanded={modelsOpen}
-        aria-haspopup="dialog"
-      >
-        <span>{activeLabel}</span>
-        <span className="model-selection-chevron" aria-hidden="true">
-          ⌄
-        </span>
-      </button>
+      {convenient ? (
+        <button
+          type="button"
+          ref={triggerRef}
+          className="composer-model-name"
+          onClick={(event) => {
+            anchorRef.current = event.currentTarget;
+            setModelsOpen((current) => !current);
+          }}
+          aria-expanded={modelsOpen}
+          aria-haspopup="dialog"
+        >
+          <span>{activeLabel}</span>
+          <span className="model-selection-chevron" aria-hidden="true">
+            ⌄
+          </span>
+        </button>
+      ) : null}
+      {rightTarget
+        ? createPortal(
+            <button
+              type="button"
+              ref={rightTriggerRef}
+              className="composer-model-name composer-model-name-right"
+              onClick={(event) => {
+                anchorRef.current = event.currentTarget;
+                setModelsOpen((current) => !current);
+              }}
+              aria-expanded={modelsOpen}
+              aria-haspopup="dialog"
+            >
+              <span>{activeLabel}</span>
+              <span className="model-selection-chevron" aria-hidden="true">
+                ⌄
+              </span>
+            </button>,
+            rightTarget,
+          )
+        : null}
       {selection?.unavailableReason || (adapterStatus === 'unavailable' && selection?.adapterId) ? (
         <span className="model-selection-unavailable" role="status">
           {selection.unavailableReason ?? 'Saved model or adapter is unavailable. Choose again.'}
         </span>
       ) : null}
-      {selectedAdapter?.temperature.supported ? (
+      {convenient && selectedAdapter?.temperature.supported ? (
         <label className="model-selection-inline-parameter">
           <span>Temperature</span>
           <input
@@ -395,17 +439,18 @@ export function ModelSelection({ models, instances, selection, loadAdapters, onS
           />
         </label>
       ) : null}
-      {primaryControls.map((control) => (
-        <ParameterField
-          key={control.id}
-          control={control}
-          value={selection?.parameters.options[control.id]}
-          disabled={saving}
-          className="model-selection-primary-inline"
-          onChange={(value) => saveOption(control, value)}
-        />
-      ))}
-      {hasOtherParameters || primaryControls.length ? (
+      {convenient &&
+        primaryControls.map((control) => (
+          <ParameterField
+            key={control.id}
+            control={control}
+            value={selection?.parameters.options[control.id]}
+            disabled={saving}
+            className="model-selection-primary-inline"
+            onChange={(value) => saveOption(control, value)}
+          />
+        ))}
+      {convenient && (hasOtherParameters || primaryControls.length) ? (
         <>
           <button
             type="button"

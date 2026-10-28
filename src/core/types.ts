@@ -156,6 +156,7 @@ export interface ContextManagementSettings {
 
 export interface MiscellaneousSettings {
   toolCardsExpandedByDefault: boolean;
+  convenientModelParameters: boolean;
 }
 
 export interface ToolDefinition {

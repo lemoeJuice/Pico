@@ -155,6 +155,7 @@ const DEFAULT_CONTEXT_MANAGEMENT_SETTINGS: ContextManagementSettings = {
 };
 const DEFAULT_MISCELLANEOUS_SETTINGS: MiscellaneousSettings = {
   toolCardsExpandedByDefault: false,
+  convenientModelParameters: false,
 };
 
 function compactionBlockTokenEstimate(
@@ -4486,12 +4487,19 @@ export class PicoRuntime {
         typeof stored.toolCardsExpandedByDefault === 'boolean'
           ? stored.toolCardsExpandedByDefault
           : DEFAULT_MISCELLANEOUS_SETTINGS.toolCardsExpandedByDefault,
+      convenientModelParameters:
+        typeof stored.convenientModelParameters === 'boolean'
+          ? stored.convenientModelParameters
+          : DEFAULT_MISCELLANEOUS_SETTINGS.convenientModelParameters,
     };
   }
 
   updateMiscellaneousSettings(update: Partial<MiscellaneousSettings>): MiscellaneousSettings {
-    if (typeof update.toolCardsExpandedByDefault !== 'boolean') {
+    if (update.toolCardsExpandedByDefault !== undefined && typeof update.toolCardsExpandedByDefault !== 'boolean') {
       throw new Error('Default tool card expansion must be a boolean.');
+    }
+    if (update.convenientModelParameters !== undefined && typeof update.convenientModelParameters !== 'boolean') {
+      throw new Error('Convenient model parameters must be a boolean.');
     }
     const next = { ...this.getMiscellaneousSettings(), ...update };
     this.store.setSetting('miscellaneous', next);
