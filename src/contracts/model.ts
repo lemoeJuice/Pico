@@ -19,11 +19,7 @@ export interface ProviderRequestResponse {
 }
 
 export type ProviderHttpErrorReason =
-  | 'unsupported_parameter'
-  | 'invalid_value'
-  | 'invalid_type'
-  | 'missing_parameter'
-  | 'unknown';
+  'unsupported_parameter' | 'invalid_value' | 'invalid_type' | 'missing_parameter' | 'unknown';
 
 /** A sanitized subset of an HTTP error response from a model provider. */
 export interface ProviderHttpError {
@@ -43,6 +39,8 @@ export interface ProviderRequestSummary {
   eventCounts?: Record<string, number>;
   /** For streaming requests, milliseconds from fetch dispatch to the first non-empty user-facing text delta; reasoning and tool-call deltas do not count. */
   firstTextMs?: number;
+  /** Output tokens per second over the entire physical request, including first-text latency. */
+  outputTokensPerSecond?: number;
   deltaTextCharacters?: number;
   outputTextCharacters?: number;
   outputItemCounts?: Record<string, number>;

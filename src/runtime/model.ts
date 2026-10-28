@@ -1,4 +1,3 @@
-import { performance } from 'node:perf_hooks';
 import type { ModelSettings, TokenUsage } from '../core/types.js';
 import { ModelCallError } from '../contracts/model-error.js';
 import type {
@@ -8,7 +7,7 @@ import type {
   ModelResponse,
   ModelStreamEvent,
 } from '../contracts/model.js';
-import { isDeepSeekModelId } from './model-compat.js';
+import { executeModelRequest, errorCodeFrom } from './model-transport.js';
 
 export type {
   ModelPrompt,
@@ -23,6 +22,18 @@ export type {
   ProviderRequestSummary,
 } from '../contracts/model.js';
 
+export interface ChatCompletionsOptions {
+  protocolTraits?: { reasoningContent?: boolean; cacheHitMissUsage?: boolean };
+  authorize?: (
+    forceRefresh: boolean,
+    signal: AbortSignal,
+    trace?: ModelRequestTrace,
+  ) => Promise<Record<string, string>>;
+  refreshOnUnauthorized?: boolean;
+  fetchRetries?: number;
+  retryDelayMs?: number;
+}
+
 export interface ModelAdapter {
   complete(
     prompt: ModelPrompt,
@@ -32,6 +43,7 @@ export interface ModelAdapter {
     requestTrace?: ModelRequestTrace,
     onEvent?: (event: ModelStreamEvent) => void,
     requestParameters?: ModelRequestParameters,
+    options?: ChatCompletionsOptions,
   ): Promise<ModelResponse>;
 }
 
@@ -55,7 +67,7 @@ function endpointFor(baseUrl: string): string {
   return `${base}/chat/completions`;
 }
 
-function toWireMessages(prompt: ModelPrompt): Array<Record<string, unknown>> {
+function toWireMessages(prompt: ModelPrompt, reasoningContent: boolean): Array<Record<string, unknown>> {
   const messages: Array<Record<string, unknown>> = [{ role: 'system', content: prompt.system }];
   for (let index = 0; index < prompt.turns.length; index += 1) {
     const turn = prompt.turns[index]!;
@@ -63,7 +75,7 @@ function toWireMessages(prompt: ModelPrompt): Array<Record<string, unknown>> {
       messages.push({
         role: turn.role,
         content: turn.content,
-        ...(turn.role === 'assistant' && isDeepSeekModelId(prompt.model) && typeof turn.reasoningContent === 'string'
+        ...(turn.role === 'assistant' && reasoningContent && typeof turn.reasoningContent === 'string'
           ? { reasoning_content: turn.reasoningContent }
           : {}),
       });
@@ -71,7 +83,7 @@ function toWireMessages(prompt: ModelPrompt): Array<Record<string, unknown>> {
       messages.push({
         role: 'assistant',
         content: turn.content || null,
-        ...(isDeepSeekModelId(prompt.model) && typeof turn.reasoningContent === 'string'
+        ...(reasoningContent && typeof turn.reasoningContent === 'string'
           ? { reasoning_content: turn.reasoningContent }
           : {}),
         tool_calls: turn.calls.map((call) => ({
@@ -111,7 +123,7 @@ function toWireMessages(prompt: ModelPrompt): Array<Record<string, unknown>> {
   return messages;
 }
 
-function usageFrom(value: unknown, models: string[]): TokenUsage | null {
+function usageFrom(value: unknown, cacheHitMissUsage: boolean): TokenUsage | null {
   if (!value || typeof value !== 'object') return null;
   const usage = value as Record<string, unknown>;
   const inputTokens = typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : undefined;
@@ -122,20 +134,15 @@ function usageFrom(value: unknown, models: string[]): TokenUsage | null {
     rawPromptDetails && typeof rawPromptDetails === 'object' && !Array.isArray(rawPromptDetails)
       ? (rawPromptDetails as Record<string, unknown>)
       : null;
-  const cachedInputTokens =
-    typeof promptDetails?.cached_tokens === 'number' ? promptDetails.cached_tokens : undefined;
+  const cachedInputTokens = typeof promptDetails?.cached_tokens === 'number' ? promptDetails.cached_tokens : undefined;
   const cacheWriteTokens =
     typeof promptDetails?.cache_write_tokens === 'number' ? promptDetails.cache_write_tokens : undefined;
-  const deepSeekUsage = models.some(isDeepSeekModelId);
+  const deepSeekUsage = cacheHitMissUsage;
   const deepSeekCacheHits =
-    deepSeekUsage && typeof usage.prompt_cache_hit_tokens === 'number'
-      ? usage.prompt_cache_hit_tokens
-      : undefined;
+    deepSeekUsage && typeof usage.prompt_cache_hit_tokens === 'number' ? usage.prompt_cache_hit_tokens : undefined;
   // DeepSeek misses are ordinary input tokens; the API does not report them as cache writes.
   const deepSeekCacheMisses =
-    deepSeekUsage && typeof usage.prompt_cache_miss_tokens === 'number'
-      ? usage.prompt_cache_miss_tokens
-      : undefined;
+    deepSeekUsage && typeof usage.prompt_cache_miss_tokens === 'number' ? usage.prompt_cache_miss_tokens : undefined;
   const resolvedInputTokens =
     inputTokens ??
     (deepSeekCacheHits !== undefined && deepSeekCacheMisses !== undefined
@@ -177,6 +184,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
     requestTrace?: ModelRequestTrace,
     onEvent?: (event: ModelStreamEvent) => void,
     requestParameters?: ModelRequestParameters,
+    options?: ChatCompletionsOptions,
   ): Promise<ModelResponse> {
     if (!prompt.model.trim()) throw new Error('Choose a model in Settings before sending a message.');
     const headers: Record<string, string> = {
@@ -192,7 +200,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
         : { temperature: requestParameters?.temperature ?? prompt.temperature }),
       stream: true,
       stream_options: { include_usage: true },
-      messages: toWireMessages(prompt),
+      messages: toWireMessages(prompt, options?.protocolTraits?.reasoningContent === true),
       tools: prompt.tools.map((tool) => ({
         type: 'function',
         function: { name: tool.name, description: tool.description, parameters: tool.parameters },
@@ -200,206 +208,213 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
       parallel_tool_calls: true,
       ...requestParameters?.fields,
     });
-    const providerAttemptId = requestTrace?.started({
+    const tracedRequest = await executeModelRequest({
+      endpoint,
       provider: settings.provider,
       protocol: 'chat-completions',
-      endpoint,
-      attempt: 1,
-    });
-    const startedAt = performance.now();
-    const response = await fetch(endpoint, {
-      method: 'POST',
+      body,
       headers,
       signal,
-      body,
+      trace: requestTrace,
+      authorization: options?.authorize
+        ? { authorize: options.authorize, refreshOnUnauthorized: options.refreshOnUnauthorized === true }
+        : undefined,
+      fetchRetries: options?.fetchRetries,
+      retryDelayMs: options?.retryDelayMs,
     });
-    if (providerAttemptId) {
-      requestTrace?.response(providerAttemptId, {
-        status: response.status,
-        contentType: response.headers.get('content-type'),
-        ...(response.headers.get('x-request-id') ? { providerRequestId: response.headers.get('x-request-id')! } : {}),
-      });
-    }
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new ModelCallError('http-response', response.status);
-    }
-    if (!response.body) throw new Error('Model provider returned an empty response stream');
-    const contentType = response.headers.get('content-type') ?? '';
-    if (!contentType.includes('text/event-stream')) {
-      const value = (await response.json()) as Record<string, unknown>;
-      const choices = value.choices as Array<Record<string, unknown>> | undefined;
-      const message = choices?.[0]?.message as Record<string, unknown> | undefined;
-      if (!message) throw new Error('Model provider response did not include a choice');
-      const content = typeof message.content === 'string' ? message.content : '';
-      if (content) onText(content);
-      const responseModel = typeof value.model === 'string' ? value.model : prompt.model;
-      const reasoningContent =
-        (isDeepSeekModelId(prompt.model) || isDeepSeekModelId(responseModel)) &&
-        typeof message.reasoning_content === 'string'
-          ? (message.reasoning_content as string)
-          : undefined;
-      const reasoningSummary =
-        typeof message.reasoning_summary === 'string'
-          ? message.reasoning_summary
-          : typeof message.reasoning_summary_text === 'string'
-            ? message.reasoning_summary_text
+    const response = tracedRequest.response;
+    const startedAt = tracedRequest.startedAt;
+    try {
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new ModelCallError('http-response', response.status);
+      }
+      if (!response.body) throw new Error('Model provider returned an empty response stream');
+      const contentType = response.headers.get('content-type') ?? '';
+      if (!contentType.includes('text/event-stream')) {
+        const value = (await response.json()) as Record<string, unknown>;
+        const choices = value.choices as Array<Record<string, unknown>> | undefined;
+        const message = choices?.[0]?.message as Record<string, unknown> | undefined;
+        if (!message) throw new Error('Model provider response did not include a choice');
+        const content = typeof message.content === 'string' ? message.content : '';
+        if (content) onText(content);
+        const responseModel = typeof value.model === 'string' ? value.model : prompt.model;
+        const reasoningContent =
+          options?.protocolTraits?.reasoningContent === true && typeof message.reasoning_content === 'string'
+            ? (message.reasoning_content as string)
             : undefined;
-      const calls = Array.isArray(message.tool_calls) ? (message.tool_calls as Array<Record<string, unknown>>) : [];
-      const result: ModelResponse = {
+        const reasoningSummary =
+          typeof message.reasoning_summary === 'string'
+            ? message.reasoning_summary
+            : typeof message.reasoning_summary_text === 'string'
+              ? message.reasoning_summary_text
+              : undefined;
+        const calls = Array.isArray(message.tool_calls) ? (message.tool_calls as Array<Record<string, unknown>>) : [];
+        const result: ModelResponse = {
+          content,
+          ...(reasoningSummary ? { reasoningSummary } : {}),
+          ...(reasoningContent ? { reasoningContent } : {}),
+          toolCalls: calls.map((item, index) => {
+            const fn = item.function as Record<string, unknown> | undefined;
+            const name = typeof fn?.name === 'string' ? fn.name : '';
+            return {
+              id: typeof item.id === 'string' ? item.id : `tool-${index}`,
+              name,
+              arguments: parseToolArguments(typeof fn?.arguments === 'string' ? fn.arguments : '{}', name),
+            };
+          }),
+          usage: usageFrom(value.usage, options?.protocolTraits?.cacheHitMissUsage === true),
+          model: responseModel,
+          finishReason: typeof choices?.[0]?.finish_reason === 'string' ? (choices[0]!.finish_reason as string) : null,
+        };
+        {
+          tracedRequest.settle({
+            outcome: 'completed',
+            durationMs: Date.now() - startedAt,
+            toolCallCount: result.toolCalls.length,
+            finishReason: result.finishReason,
+            usage: result.usage,
+          });
+        }
+        return result;
+      }
+
+      let firstTextMs: number | undefined;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let content = '';
+      let reasoningSummary = '';
+      let reasoningContent = '';
+      let usage: TokenUsage | null = null;
+      let actualModel = prompt.model;
+      let finishReason: string | null = null;
+      let done = false;
+      const calls = new Map<number, OpenAiToolCall>();
+      const consume = (line: string): void => {
+        if (!line.startsWith('data:')) return;
+        const data = line.slice(5).trim();
+        if (!data) return;
+        if (data === '[DONE]') {
+          done = true;
+          return;
+        }
+        let chunk: Record<string, unknown>;
+        try {
+          chunk = JSON.parse(data) as Record<string, unknown>;
+        } catch {
+          throw new Error('Model provider sent invalid streaming JSON');
+        }
+        if (typeof chunk.model === 'string') actualModel = chunk.model;
+        usage = usageFrom(chunk.usage, options?.protocolTraits?.cacheHitMissUsage === true) ?? usage;
+        const choices = chunk.choices as Array<Record<string, unknown>> | undefined;
+        const choice = choices?.[0];
+        if (!choice) return;
+        if (typeof choice.finish_reason === 'string') finishReason = choice.finish_reason;
+        const delta = choice.delta as Record<string, unknown> | undefined;
+        if (!delta) return;
+        if (typeof delta.content === 'string' && delta.content) {
+          firstTextMs ??= Date.now() - startedAt;
+          content += delta.content;
+          onText(delta.content);
+        }
+        const deepSeekReasoningDelta =
+          options?.protocolTraits?.reasoningContent === true && typeof delta.reasoning_content === 'string'
+            ? delta.reasoning_content
+            : undefined;
+        if (deepSeekReasoningDelta !== undefined) reasoningContent += deepSeekReasoningDelta;
+        const reasoningDelta =
+          deepSeekReasoningDelta !== undefined
+            ? deepSeekReasoningDelta
+            : typeof delta.reasoning_summary_text === 'string'
+              ? delta.reasoning_summary_text
+              : typeof delta.reasoning_summary === 'string'
+                ? delta.reasoning_summary
+                : undefined;
+        if (reasoningDelta) {
+          if (deepSeekReasoningDelta === undefined) reasoningSummary += reasoningDelta;
+          onEvent?.({ type: 'reasoning_summary.delta', delta: reasoningDelta });
+        }
+        const chunks = Array.isArray(delta.tool_calls) ? (delta.tool_calls as Array<Record<string, unknown>>) : [];
+        for (const item of chunks) {
+          const index = typeof item.index === 'number' ? item.index : calls.size;
+          const current = calls.get(index) ?? { index, name: '', arguments: '' };
+          if (typeof item.id === 'string') current.id = item.id;
+          const fn = item.function as Record<string, unknown> | undefined;
+          if (typeof fn?.name === 'string') current.name += fn.name;
+          if (typeof fn?.arguments === 'string') current.arguments += fn.arguments;
+          calls.set(index, current);
+          onEvent?.({
+            type: 'tool_call.preview',
+            index,
+            ...(current.id ? { id: current.id } : {}),
+            ...(current.name ? { name: current.name } : {}),
+            argumentsText: current.arguments,
+          });
+        }
+      };
+      const processBuffer = (final = false): void => {
+        const lines = buffer.split(/\r?\n/);
+        buffer = final ? '' : (lines.pop() ?? '');
+        for (const line of lines) consume(line);
+        if (final && buffer) consume(buffer);
+      };
+
+      try {
+        while (!done) {
+          const { value, done: streamEnded } = await reader.read();
+          if (streamEnded) {
+            buffer += decoder.decode();
+            processBuffer(true);
+            break;
+          }
+          buffer += decoder.decode(value, { stream: true });
+          processBuffer();
+        }
+      } catch (error) {
+        await reader.cancel().catch(() => undefined);
+        throw error;
+      }
+      await reader.cancel().catch(() => undefined);
+      if (!finishReason && !done) throw new Error('Model stream ended before the step completed');
+      const toolCalls = [...calls.values()]
+        .sort((a, b) => a.index - b.index)
+        .map((call, index) => ({
+          id: call.id ?? `tool-${index}`,
+          name: call.name,
+          arguments: parseToolArguments(call.arguments, call.name),
+        }));
+      const result = {
         content,
         ...(reasoningSummary ? { reasoningSummary } : {}),
         ...(reasoningContent ? { reasoningContent } : {}),
-        toolCalls: calls.map((item, index) => {
-          const fn = item.function as Record<string, unknown> | undefined;
-          const name = typeof fn?.name === 'string' ? fn.name : '';
-          return {
-            id: typeof item.id === 'string' ? item.id : `tool-${index}`,
-            name,
-            arguments: parseToolArguments(typeof fn?.arguments === 'string' ? fn.arguments : '{}', name),
-          };
-        }),
-        usage: usageFrom(value.usage, [prompt.model, responseModel]),
-        model: responseModel,
-        finishReason: typeof choices?.[0]?.finish_reason === 'string' ? (choices[0]!.finish_reason as string) : null,
+        toolCalls,
+        usage,
+        model: actualModel,
+        finishReason,
       };
-      if (providerAttemptId) {
-        requestTrace?.settled(providerAttemptId, {
+      {
+        tracedRequest.settle({
           outcome: 'completed',
-          durationMs: performance.now() - startedAt,
+          durationMs: Date.now() - startedAt,
+          ...(firstTextMs === undefined ? {} : { firstTextMs }),
           toolCallCount: result.toolCalls.length,
           finishReason: result.finishReason,
           usage: result.usage,
         });
       }
       return result;
-    }
-
-    let firstTextMs: number | undefined;
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let content = '';
-    let reasoningSummary = '';
-    let reasoningContent = '';
-    let usage: TokenUsage | null = null;
-    let actualModel = prompt.model;
-    let finishReason: string | null = null;
-    let done = false;
-    const calls = new Map<number, OpenAiToolCall>();
-    const consume = (line: string): void => {
-      if (!line.startsWith('data:')) return;
-      const data = line.slice(5).trim();
-      if (!data) return;
-      if (data === '[DONE]') {
-        done = true;
-        return;
-      }
-      let chunk: Record<string, unknown>;
-      try {
-        chunk = JSON.parse(data) as Record<string, unknown>;
-      } catch {
-        throw new Error('Model provider sent invalid streaming JSON');
-      }
-      if (typeof chunk.model === 'string') actualModel = chunk.model;
-      usage = usageFrom(chunk.usage, [prompt.model, actualModel]) ?? usage;
-      const choices = chunk.choices as Array<Record<string, unknown>> | undefined;
-      const choice = choices?.[0];
-      if (!choice) return;
-      if (typeof choice.finish_reason === 'string') finishReason = choice.finish_reason;
-      const delta = choice.delta as Record<string, unknown> | undefined;
-      if (!delta) return;
-      if (typeof delta.content === 'string' && delta.content) {
-        firstTextMs ??= performance.now() - startedAt;
-        content += delta.content;
-        onText(delta.content);
-      }
-      const deepSeekReasoningDelta =
-        (isDeepSeekModelId(prompt.model) || isDeepSeekModelId(actualModel)) &&
-        typeof delta.reasoning_content === 'string'
-          ? delta.reasoning_content
-          : undefined;
-      if (deepSeekReasoningDelta !== undefined) reasoningContent += deepSeekReasoningDelta;
-      const reasoningDelta =
-        deepSeekReasoningDelta !== undefined
-          ? deepSeekReasoningDelta
-          : typeof delta.reasoning_summary_text === 'string'
-            ? delta.reasoning_summary_text
-            : typeof delta.reasoning_summary === 'string'
-              ? delta.reasoning_summary
-              : undefined;
-      if (reasoningDelta) {
-        if (deepSeekReasoningDelta === undefined) reasoningSummary += reasoningDelta;
-        onEvent?.({ type: 'reasoning_summary.delta', delta: reasoningDelta });
-      }
-      const chunks = Array.isArray(delta.tool_calls) ? (delta.tool_calls as Array<Record<string, unknown>>) : [];
-      for (const item of chunks) {
-        const index = typeof item.index === 'number' ? item.index : calls.size;
-        const current = calls.get(index) ?? { index, name: '', arguments: '' };
-        if (typeof item.id === 'string') current.id = item.id;
-        const fn = item.function as Record<string, unknown> | undefined;
-        if (typeof fn?.name === 'string') current.name += fn.name;
-        if (typeof fn?.arguments === 'string') current.arguments += fn.arguments;
-        calls.set(index, current);
-        onEvent?.({
-          type: 'tool_call.preview',
-          index,
-          ...(current.id ? { id: current.id } : {}),
-          ...(current.name ? { name: current.name } : {}),
-          argumentsText: current.arguments,
-        });
-      }
-    };
-    const processBuffer = (final = false): void => {
-      const lines = buffer.split(/\r?\n/);
-      buffer = final ? '' : (lines.pop() ?? '');
-      for (const line of lines) consume(line);
-      if (final && buffer) consume(buffer);
-    };
-
-    try {
-      while (!done) {
-        const { value, done: streamEnded } = await reader.read();
-        if (streamEnded) {
-          buffer += decoder.decode();
-          processBuffer(true);
-          break;
-        }
-        buffer += decoder.decode(value, { stream: true });
-        processBuffer();
-      }
     } catch (error) {
-      await reader.cancel().catch(() => undefined);
+      const interrupted = signal.aborted || (error instanceof Error && error.name === 'AbortError');
+      const status = response.ok ? undefined : response.status;
+      const code = interrupted ? 'aborted' : status ? `http_${status}` : errorCodeFrom(error);
+      tracedRequest.settle({
+        outcome: interrupted ? 'interrupted' : 'failed',
+        durationMs: Date.now() - startedAt,
+        errorCategory: interrupted ? 'aborted' : status ? 'http' : 'protocol',
+        ...(code ? { errorCode: code } : {}),
+      });
       throw error;
     }
-    await reader.cancel().catch(() => undefined);
-    if (!finishReason && !done) throw new Error('Model stream ended before the step completed');
-    const toolCalls = [...calls.values()]
-      .sort((a, b) => a.index - b.index)
-      .map((call, index) => ({
-        id: call.id ?? `tool-${index}`,
-        name: call.name,
-        arguments: parseToolArguments(call.arguments, call.name),
-      }));
-    const result = {
-      content,
-      ...(reasoningSummary ? { reasoningSummary } : {}),
-      ...(reasoningContent ? { reasoningContent } : {}),
-      toolCalls,
-      usage,
-      model: actualModel,
-      finishReason,
-    };
-    if (providerAttemptId) {
-      requestTrace?.settled(providerAttemptId, {
-        outcome: 'completed',
-        durationMs: performance.now() - startedAt,
-        ...(firstTextMs === undefined ? {} : { firstTextMs }),
-        toolCallCount: result.toolCalls.length,
-        finishReason: result.finishReason,
-        usage: result.usage,
-      });
-    }
-    return result;
   }
 }
