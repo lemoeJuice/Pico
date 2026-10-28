@@ -2,6 +2,52 @@ import { describe, expect, it, vi } from 'vitest';
 import { AssistantDraftStore } from '../src/web/assistant-drafts-store.js';
 
 describe('AssistantDraftStore', () => {
+  it('resumes only at the matching offset and keeps unreplayed previews marked incomplete', () => {
+    const store = new AssistantDraftStore();
+    store.appendText('thread-a', 'execution-a', 'hello');
+    store.markDisconnected();
+    expect(store.resumeText('thread-a', 'execution-a', 4, '!')).toBe(false);
+    expect(store.resumeText('thread-a', 'execution-b', 5, '!')).toBe(false);
+    expect(store.resumeText('thread-a', 'execution-a', 5, ' world')).toBe(true);
+    expect(store.getContent('thread-a')).toMatchObject({
+      text: 'hello world', previewIncomplete: true,
+    });
+    expect(store.getContent('thread-a')?.unconfirmed).toBeUndefined();
+    store.appendPreview('thread-a', 'execution-a', { type: 'reasoning', delta: 'missing earlier part' });
+    expect(store.getContent('thread-a')?.reasoningSummary).toBeUndefined();
+  });
+
+  it('merges a matching overlap without duplicating text and rejects conflicts', () => {
+    const store = new AssistantDraftStore();
+    store.appendText('thread-a', 'execution-a', 'hello wor');
+    store.markDisconnected();
+    expect(store.resumeText('thread-a', 'execution-a', 5, ' wrong')).toBe(false);
+    expect(store.resumeText('thread-a', 'execution-a', 5, ' world')).toBe(true);
+    expect(store.getContent('thread-a')?.text).toBe('hello world');
+  });
+
+  it('retains partial text as unconfirmed on disconnect and clears only the matching execution', () => {
+    const store = new AssistantDraftStore();
+    const changed = vi.fn();
+    store.subscribeContent('thread-a', changed);
+    store.appendText('thread-a', 'execution-a', 'partial reply');
+    store.appendText('thread-b', 'execution-b', 'other reply');
+    changed.mockClear();
+
+    store.markDisconnected();
+
+    expect(store.getContent('thread-a')).toMatchObject({
+      executionId: 'execution-a', text: 'partial reply', unconfirmed: true,
+    });
+    expect(store.getContent('thread-b')?.unconfirmed).toBe(true);
+    expect(changed).toHaveBeenCalledTimes(1);
+    store.clear('thread-a', 'execution-other');
+    expect(store.getContent('thread-a')?.text).toBe('partial reply');
+    store.clear('thread-a', 'execution-a');
+    expect(store.getContent('thread-a')).toBeNull();
+    expect(store.getContent('thread-b')?.text).toBe('other reply');
+  });
+
   it('coalesces text notifications per frame while keeping the latest snapshot available', () => {
     const frames: Array<() => void> = [];
     const store = new AssistantDraftStore((callback) => frames.push(callback));

@@ -9,6 +9,8 @@ import {
 export interface AssistantDraftContent {
   executionId: string;
   text: string;
+  unconfirmed?: boolean;
+  previewIncomplete?: boolean;
   reasoningSummary?: string;
 }
 
@@ -100,7 +102,34 @@ export class AssistantDraftStore {
     executionId: string,
     preview: { type: 'reasoning'; delta: string } | { type: 'tool'; call: ToolCallPreview },
   ): void {
+    const current = this.drafts[threadId];
+    if (current?.executionId === executionId && current.previewIncomplete) return;
     this.replaceDrafts(appendAssistantPreview(this.drafts, threadId, executionId, preview));
+  }
+
+  markUnconfirmed(threadId: string, executionId: string): void {
+    const draft = this.drafts[threadId];
+    if (!draft || draft.executionId !== executionId || draft.unconfirmed) return;
+    this.replaceDrafts({ ...this.drafts, [threadId]: { ...draft, unconfirmed: true } });
+  }
+
+  resumeText(threadId: string, executionId: string, offset: number, text: string): boolean {
+    const draft = this.drafts[threadId];
+    if ((draft && draft.executionId !== executionId) || (draft?.text.length ?? 0) < offset) return false;
+    const currentText = draft?.text ?? '';
+    const overlap = Math.min(currentText.length - offset, text.length);
+    if (currentText.slice(offset, offset + overlap) !== text.slice(0, overlap)) return false;
+    this.replaceDrafts({
+      ...this.drafts,
+      [threadId]: {
+        ...(draft ?? {}),
+        executionId,
+        text: currentText + text.slice(overlap),
+        unconfirmed: false,
+        previewIncomplete: true,
+      },
+    });
+    return true;
   }
 
   clear(threadId: string, executionId?: string): void {
@@ -109,6 +138,14 @@ export class AssistantDraftStore {
 
   clearAll(): void {
     this.replaceDrafts({});
+  }
+
+  markDisconnected(): void {
+    const next: AssistantDrafts = {};
+    for (const [threadId, draft] of Object.entries(this.drafts)) {
+      next[threadId] = draft.unconfirmed ? draft : { ...draft, unconfirmed: true };
+    }
+    this.replaceDrafts(next);
   }
 
   private subscribe(registry: Map<string, Set<Listener>>, key: string, listener: Listener): () => void {
@@ -155,12 +192,16 @@ export class AssistantDraftStore {
         ? {
             executionId: after.executionId,
             text: after.text,
+            ...(after.unconfirmed ? { unconfirmed: true } : {}),
+            ...(after.previewIncomplete ? { previewIncomplete: true } : {}),
             ...(after.reasoningSummary === undefined ? {} : { reasoningSummary: after.reasoningSummary }),
           }
         : null;
       if (
         beforeContent?.executionId !== afterContent?.executionId ||
         beforeContent?.text !== afterContent?.text ||
+        beforeContent?.unconfirmed !== afterContent?.unconfirmed ||
+        beforeContent?.previewIncomplete !== afterContent?.previewIncomplete ||
         beforeContent?.reasoningSummary !== afterContent?.reasoningSummary
       ) {
         if (afterContent) this.contentSnapshots.set(threadId, afterContent);

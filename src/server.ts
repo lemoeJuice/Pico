@@ -13,6 +13,7 @@ import {
 } from './server-auth.js';
 import express, { type ErrorRequestHandler, type Request, type Response } from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
+import { attachModelDraftResume } from './server/model-draft-resume.js';
 import { PicoRuntime } from './runtime/runtime.js';
 import { ServiceError } from './contracts/service-error.js';
 import { errorResponse, parserError } from './server-errors.js';
@@ -636,6 +637,7 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   });
   websocketServer.on('connection', (socket) => {
     sockets.add(socket);
+    attachModelDraftResume(socket, runtime);
     socket.send(JSON.stringify({ type: 'connected' }));
     socket.on('close', () => sockets.delete(socket));
   });

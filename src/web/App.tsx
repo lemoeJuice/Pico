@@ -869,6 +869,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const pluginEventSequence = useRef(0);
   const unavailableModelExecutions = useRef<AssistantStreamExecutions>(new Map());
   const observedModelExecutions = useRef(new Set<string>());
+  const eventSocket = useRef<WebSocket | null>(null);
+  const resumeRequests = useRef(new Map<string, { threadId: string; offset: number; requestId: string; timer: number }>());
+  const unavailableResumeRequests = useRef(new Set<string>());
+  const resumeSequence = useRef(0);
   const historyExpandedThreads = useRef(new Set<string>());
   const projectThreadLoads = useRef(new Set<string>());
   const threadToolRequests = useRef(new ThreadToolRequestGuard());
@@ -989,8 +993,39 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const settleModelExecution = useCallback((executionId: string): void => {
     activeModelExecutions.current.delete(executionId);
     observedModelExecutions.current.delete(executionId);
+    const pending = resumeRequests.current.get(executionId);
+    if (pending) window.clearTimeout(pending.timer);
+    resumeRequests.current.delete(executionId);
+    unavailableResumeRequests.current.delete(executionId);
     if (!unavailableModelExecutions.current.delete(executionId)) return;
     setUnavailableModelExecutionIds(new Set(unavailableModelExecutions.current.keys()));
+  }, []);
+
+  const resumeModelDraft = useCallback((targetThreadId: string, executionId: string): void => {
+    const socket = eventSocket.current;
+    if (
+      !socket || socket.readyState !== WebSocket.OPEN || resumeRequests.current.has(executionId) ||
+      unavailableResumeRequests.current.has(executionId)
+    ) return;
+    const current = assistantDraftStore.getContent(targetThreadId);
+    if (current && current.executionId !== executionId) return;
+    const offset = current?.text.length ?? 0;
+    const requestId = String(++resumeSequence.current);
+    const timer = window.setTimeout(() => {
+      const pending = resumeRequests.current.get(executionId);
+      if (!pending || pending.requestId !== requestId) return;
+      resumeRequests.current.delete(executionId);
+      unavailableResumeRequests.current.add(executionId);
+      assistantDraftStore.markUnconfirmed(targetThreadId, executionId);
+      if (activeThreadId.current === targetThreadId) refreshSelectedRef.current();
+    }, 8_000);
+    resumeRequests.current.set(executionId, { threadId: targetThreadId, offset, requestId, timer });
+    try {
+      socket.send(JSON.stringify({ type: 'model.resume', threadId: targetThreadId, executionId, offset, requestId }));
+    } catch {
+      window.clearTimeout(timer);
+      resumeRequests.current.delete(executionId);
+    }
   }, []);
 
   const markThreadSending = (targetThreadId: string, isSending: boolean): void => {
@@ -1163,6 +1198,19 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       if (value && requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current)) {
         setSnapshotRetry(null);
         observeModelExecutions(value.executions);
+        for (const execution of value.executions) {
+          if (execution.kind === 'model' && execution.status === 'running' && unavailableModelExecutions.current.has(execution.id)) {
+            resumeModelDraft(id, execution.id);
+          }
+        }
+        const draftExecutionId = assistantDraftStore.getExecutionId(id);
+        if (draftExecutionId) {
+          const committed = value.records.some((record) => record.id === `${draftExecutionId}:assistant`);
+          const failed = value.executions.some(
+            (execution) => execution.id === draftExecutionId && (execution.status === 'failed' || execution.status === 'interrupted'),
+          );
+          if (committed || failed) assistantDraftStore.clear(id, draftExecutionId);
+        }
         for (const record of value.records) {
           if (
             record.kind === 'message' &&
@@ -1175,7 +1223,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         setSnapshot((current) => mergeLatestSnapshot(current, value));
       }
     },
-    [acceptMessage, observeModelExecutions],
+    [acceptMessage, observeModelExecutions, resumeModelDraft],
   );
 
   const noteSnapshotChange = useCallback((threadId: string | null | undefined): void => {
@@ -1474,6 +1522,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       if (closed) return;
       const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
       socket = new WebSocket(`${protocol}//${location.host}/api/events`);
+      eventSocket.current = socket;
       socket.onopen = () => {
         if (closed) {
           socket?.close();
@@ -1482,6 +1531,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         retry = 750;
         observedModelExecutions.current = new Set();
         setSocketConnected(true);
+        for (const [executionId, targetThreadId] of unavailableModelExecutions.current) {
+          resumeModelDraft(targetThreadId, executionId);
+        }
         refreshSelectedRef.current();
       };
       socket.onmessage = (message) => {
@@ -1490,6 +1542,35 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         try {
           event = JSON.parse(String(message.data)) as RuntimeEvent;
         } catch {
+          return;
+        }
+        if (
+          event.type === 'model.resume.result' &&
+          typeof event.threadId === 'string' &&
+          typeof event.executionId === 'string' &&
+          typeof event.requestId === 'string'
+        ) {
+          const pending = resumeRequests.current.get(event.executionId);
+          if (!pending || pending.requestId !== event.requestId || pending.threadId !== event.threadId) return;
+          window.clearTimeout(pending.timer);
+          resumeRequests.current.delete(event.executionId);
+          if (
+            activeModelExecutions.current.get(event.executionId) === event.threadId &&
+            event.status === 'available' &&
+            event.fromOffset === pending.offset &&
+            typeof event.text === 'string' &&
+            event.nextOffset === pending.offset + event.text.length &&
+            assistantDraftStore.resumeText(event.threadId, event.executionId, pending.offset, event.text)
+          ) {
+            unavailableModelExecutions.current.delete(event.executionId);
+            observedModelExecutions.current.add(event.executionId);
+            setUnavailableModelExecutionIds(new Set(unavailableModelExecutions.current.keys()));
+          } else {
+            unavailableResumeRequests.current.add(event.executionId);
+            if (activeThreadId.current === event.threadId) {
+              void loadSnapshot(event.threadId).catch(() => undefined);
+            }
+          }
           return;
         }
         if (event.type === 'mcp.server.updated' || event.type === 'mcp.server.deleted') {
@@ -1584,6 +1665,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               observedModelExecutions.current.delete(execution.id);
             }
             observeModelExecutions([execution]);
+            if (execution.status === 'failed' || execution.status === 'interrupted') {
+              assistantDraftStore.clear(execution.threadId, execution.id);
+            }
           }
           if (execution?.threadId === activeThreadId.current) {
             noteSnapshotChange(execution.threadId);
@@ -1616,6 +1700,20 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           const draftThreadId = event.threadId;
           const executionId = event.executionId;
           const delta = event.delta;
+          if (activeModelExecutions.current.get(executionId) !== draftThreadId) return;
+          if (event.offset !== undefined && (!Number.isSafeInteger(event.offset) || (event.offset as number) < 0)) return;
+          const currentDraft = assistantDraftStore.getContent(draftThreadId);
+          const expectedOffset = currentDraft?.executionId === executionId ? currentDraft.text.length : 0;
+          if (
+            (currentDraft?.executionId === executionId && currentDraft.unconfirmed) ||
+            (typeof event.offset === 'number' && event.offset > expectedOffset)
+          ) {
+            unavailableModelExecutions.current.set(executionId, draftThreadId);
+            setUnavailableModelExecutionIds(new Set(unavailableModelExecutions.current.keys()));
+            assistantDraftStore.markUnconfirmed(draftThreadId, executionId);
+            resumeModelDraft(draftThreadId, executionId);
+            return;
+          }
           if (
             !canAppendAssistantDelta(
               activeModelExecutions.current,
@@ -1626,7 +1724,20 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           ) {
             return;
           }
-          assistantDraftStore.appendText(draftThreadId, executionId, delta);
+          if (typeof event.offset === 'number' && event.offset < expectedOffset) {
+            const overlap = expectedOffset - event.offset;
+            if (currentDraft?.text.slice(event.offset, event.offset + Math.min(overlap, delta.length)) !== delta.slice(0, overlap)) {
+              unavailableModelExecutions.current.set(executionId, draftThreadId);
+              unavailableResumeRequests.current.add(executionId);
+              setUnavailableModelExecutionIds(new Set(unavailableModelExecutions.current.keys()));
+              assistantDraftStore.markUnconfirmed(draftThreadId, executionId);
+              return;
+            }
+            if (overlap >= delta.length) return;
+            assistantDraftStore.appendText(draftThreadId, executionId, delta.slice(overlap));
+          } else {
+            assistantDraftStore.appendText(draftThreadId, executionId, delta);
+          }
         } else if (
           (event.type === 'model.reasoning_summary.delta' || event.type === 'model.tool_call.preview') &&
           typeof event.threadId === 'string' &&
@@ -1701,12 +1812,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       socket.onclose = () => {
         if (closed) return;
         setSocketConnected(false);
+        eventSocket.current = null;
+        for (const pending of resumeRequests.current.values()) window.clearTimeout(pending.timer);
+        resumeRequests.current.clear();
+        unavailableResumeRequests.current.clear();
         setCompactingThreadIds(new Set());
         void isSessionExpired().then((expired) => {
           if (expired) window.dispatchEvent(new Event('pico:auth-expired'));
         });
         if (!closed) {
-          // WebSocket deltas are transient and cannot be replayed after reconnect.
+          // Keep the last visible text in memory, clearly marked as unconfirmed.
           const unavailable = assistantStreamsAfterDisconnect(
             activeModelExecutions.current,
             assistantDraftStore.getAll(),
@@ -1714,7 +1829,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           );
           unavailableModelExecutions.current = unavailable;
           setUnavailableModelExecutionIds(new Set(unavailable.keys()));
-          assistantDraftStore.clearAll();
+          assistantDraftStore.markDisconnected();
           timer = window.setTimeout(connect, retry);
           retry = Math.min(retry * 1.7, 12_000);
         }
@@ -1727,6 +1842,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     return () => {
       closed = true;
       if (timer) window.clearTimeout(timer);
+      eventSocket.current = null;
+      for (const pending of resumeRequests.current.values()) window.clearTimeout(pending.timer);
+      resumeRequests.current.clear();
+      unavailableResumeRequests.current.clear();
       socket?.close();
     };
   }, [
@@ -1735,6 +1854,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     loadThreadTools,
     noteSnapshotChange,
     observeModelExecutions,
+    resumeModelDraft,
     settleModelExecution,
     syncThreadLists,
   ]);
@@ -4832,11 +4952,16 @@ function AssistantDraftMessage({ threadId }: { threadId: string }) {
       </div>
       <div className="message-body">
         <div className="message-author">
-          Pico <span className="typing-label">writing</span>
+          Pico <span className="typing-label">{draft.unconfirmed ? 'connection interrupted' : 'writing'}</span>
         </div>
+        {draft.unconfirmed ? (
+          <p className="projection-state" role="status">Partial text may be incomplete. Waiting for a confirmed reply.</p>
+        ) : draft.previewIncomplete ? (
+          <p className="projection-state" role="status">Earlier reasoning and tool previews may be incomplete.</p>
+        ) : null}
         {draft.reasoningSummary ? <Reasoning text={draft.reasoningSummary} /> : null}
         {draft.text ? <Markdown>{draft.text}</Markdown> : null}
-        <AssistantToolPreviewSection threadId={threadId} executionId={draft.executionId} />
+        {!draft.unconfirmed && !draft.previewIncomplete ? <AssistantToolPreviewSection threadId={threadId} executionId={draft.executionId} /> : null}
       </div>
     </div>
   );

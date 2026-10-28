@@ -94,6 +94,7 @@ import type {
 import { McpManager } from './mcp-manager.js';
 import { resolveToolSurface } from './tool-surface.js';
 import { projectedCompactionPrefix } from './projection-mapping.js';
+import { ModelDraftBuffer, type ModelDraftReadResult } from './model-draft-buffer.js';
 import type { McpServerInput, McpServerView, StartMcpServerOptions } from '../contracts/mcp.js';
 export type { McpServerInput, McpServerView, StartMcpServerOptions } from '../contracts/mcp.js';
 import type { PicoPlugin } from '../plugins/host.js';
@@ -1002,6 +1003,7 @@ export class PicoRuntime {
   private readonly executionListeners = new Set<(execution: Execution) => void>();
   private storeUnsubscribers: Array<() => void> = [];
   private readonly loops = new Map<string, Promise<void>>();
+  private readonly modelDrafts = new ModelDraftBuffer();
   private readonly snapshotHistoryCache = new Map<string, {
     seq: number;
     settingsKey: string;
@@ -1254,6 +1256,7 @@ export class PicoRuntime {
   }
 
   private async finishShutdown(): Promise<void> {
+    this.modelDrafts.clear();
     for (const controller of this.modelSignals.values()) controller.abort();
     for (const controller of this.pluginModelCallControllers) controller.abort();
     for (const active of this.runtimeToolRuns.values()) active.controller.abort();
@@ -1288,6 +1291,25 @@ export class PicoRuntime {
   subscribe(listener: (event: RuntimeEvent) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  readModelDraft(threadId: string, executionId: string, offset: number): ModelDraftReadResult {
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new RangeError('Model draft offset must be a non-negative safe integer.');
+    }
+    const execution = this.store.getExecution(executionId);
+    const controller = this.modelSignals.get(executionId);
+    if (
+      !execution ||
+      execution.threadId !== threadId ||
+      execution.kind !== 'model' ||
+      execution.status !== 'running' ||
+      !controller ||
+      controller.signal.aborted
+    ) {
+      return { status: 'unavailable' };
+    }
+    return this.modelDrafts.read(threadId, executionId, offset);
   }
 
   private publish(event: RuntimeEvent): void {
@@ -2304,7 +2326,10 @@ export class PicoRuntime {
     this.store.setPause(threadId, true, 'Interrupted by user. Continue when ready to inspect the current environment.');
     for (const [executionId, controller] of this.modelSignals) {
       const execution = this.store.getExecution(executionId);
-      if (execution?.threadId === threadId) controller.abort();
+      if (execution?.threadId === threadId) {
+        this.modelDrafts.end(threadId, executionId);
+        controller.abort();
+      }
     }
     this.recoverOrphanedModelExecutions(threadId, 'interrupt');
     for (const [executionId, active] of this.runtimeToolRuns) {
@@ -3193,6 +3218,7 @@ export class PicoRuntime {
 
     for (const execution of orphaned) {
       try {
+        this.modelDrafts.end(threadId, execution.id);
         const current = this.store.getExecution(execution.id);
         if (!current || terminalStatus(current.status)) continue;
         const interrupted = this.store.transitionExecution(execution.id, 'interrupted', {
@@ -3431,10 +3457,11 @@ export class PicoRuntime {
     const identified = this.store.setModelExecutionModel(modelExecutionId, modelSettings.model);
     this.executionChanged(identified);
     const running = this.store.transitionExecution(modelExecutionId, 'running');
-    this.executionChanged(running);
     const controller = new AbortController();
+    this.modelDrafts.begin(thread.id, modelExecutionId);
     this.modelSignals.set(modelExecutionId, controller);
-    let latestDraft = '';
+    this.executionChanged(running);
+    let latestDraftCharacters = 0;
     try {
       modelSettings = this.resolveModelSettings(modelSelection);
       const ignoredLegacyFields = projectionRecords.flatMap((record) => {
@@ -3532,8 +3559,10 @@ export class PicoRuntime {
         signal: controller.signal,
         onText: (delta: string) => {
           if (controller.signal.aborted) return;
-          latestDraft += delta;
-          this.publish({ type: 'model.delta', threadId: thread.id, executionId: modelExecutionId, delta });
+          const offset = latestDraftCharacters;
+          latestDraftCharacters += delta.length;
+          this.modelDrafts.append(thread.id, modelExecutionId, offset, delta);
+          this.publish({ type: 'model.delta', threadId: thread.id, executionId: modelExecutionId, delta, offset });
         },
         onEvent: (event) => {
           if (controller.signal.aborted) return;
@@ -3571,7 +3600,7 @@ export class PicoRuntime {
             requestId,
             status: controller.signal.aborted ? 'interrupted' : 'failed',
             error: safeModelError(error, controller.signal.aborted),
-            partialOutputCharacters: latestDraft.length,
+            partialOutputCharacters: latestDraftCharacters,
           });
         throw error;
       }
@@ -3648,10 +3677,11 @@ export class PicoRuntime {
       if (current && !terminalStatus(current.status)) {
         const settled = this.store.transitionExecution(modelExecutionId, interrupted ? 'interrupted' : 'failed', {
           error: error instanceof Error ? error.message : String(error),
-          detail: { partialOutputDiscarded: latestDraft.length > 0 },
+          detail: { partialOutputDiscarded: latestDraftCharacters > 0 },
         });
         this.executionChanged(settled);
       }
+      this.modelDrafts.end(thread.id, modelExecutionId);
       this.publish({ type: 'model.draft-ended', threadId: thread.id, executionId: modelExecutionId });
       if (!interrupted) {
         const reason = error instanceof Error ? error.message : String(error);
@@ -3669,6 +3699,7 @@ export class PicoRuntime {
         });
       }
     } finally {
+      this.modelDrafts.end(thread.id, modelExecutionId);
       this.modelSignals.delete(modelExecutionId);
     }
   }
