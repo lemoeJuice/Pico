@@ -90,6 +90,7 @@ import type {
   ToolInvocationInput,
 } from './stages.js';
 import { McpManager } from './mcp-manager.js';
+import { resolveToolSurface } from './tool-surface.js';
 import type { McpServerInput, McpServerView, StartMcpServerOptions } from '../contracts/mcp.js';
 export type { McpServerInput, McpServerView, StartMcpServerOptions } from '../contracts/mcp.js';
 import type { PicoPlugin } from '../plugins/host.js';
@@ -671,16 +672,6 @@ function mcpTargetValue(value: unknown): McpToolTarget | null {
 
 function sameMcpTarget(left: McpToolTarget, right: McpToolTarget): boolean {
   return left.serverId === right.serverId && left.toolKey === right.toolKey;
-}
-
-function disambiguatedMcpToolName(name: string, target: McpToolTarget, occupied: Set<string>): string {
-  const digest = createHash('sha256').update(`${target.serverId}\0${target.toolKey}`).digest('hex');
-  for (const length of [8, 12, 16, 24, 32]) {
-    const suffix = digest.slice(0, length);
-    const candidate = `${name.slice(0, 63 - suffix.length).replace(/[_-]+$/g, '')}_${suffix}`;
-    if (!occupied.has(candidate)) return candidate;
-  }
-  throw new Error(`MCP tool name collision could not be resolved: ${name}`);
 }
 
 function diagnosticText(value: unknown, maxLength = 128): string | undefined {
@@ -1755,19 +1746,11 @@ export class PicoRuntime {
     const runtimeTools = this.tools.listBySource('runtime').map(({ definition }) => definition);
     const registeredMcpTools = this.registeredMcpTools();
     const cachedSurface = this.readCachedThreadToolSurface(threadId);
-    const mcpTools = registeredMcpTools.map((registered) => {
-      const cachedName = cachedSurface?.tools.find((tool) => {
-        const target = cachedSurface.mcpTargets?.[tool.name];
-        return (
-          cachedSurface.sources[tool.name] === 'mcp' && target !== undefined && sameMcpTarget(target, registered.target)
-        );
-      });
-      return {
-        definition: cachedName ?? registered.definition,
-        target: registered.target,
-        mcpIsInvokeAction: registered.mcpToolName === 'invoke_action',
-      };
-    });
+    const mcpTools = registeredMcpTools.map((registered) => ({
+      definition: registered.definition,
+      target: registered.target,
+      ...(registered.mcpToolName === undefined ? {} : { mcpToolName: registered.mcpToolName }),
+    }));
     const binding = requiresExternalExecutor(thread.executorKind) ? this.store.executorForThread(threadId) : null;
     let executorTools: ToolDefinition[] = [];
 
@@ -1785,37 +1768,22 @@ export class PicoRuntime {
       }
     }
 
-    const known = new Map<
-      string,
-      {
-        definition: ToolDefinition;
-        source: 'runtime' | 'executor' | 'mcp';
-        mcpServerId?: string;
-        mcpIsInvokeAction?: boolean;
-        mcpTarget?: McpToolTarget;
-      }
-    >();
-    for (const definition of runtimeTools) known.set(definition.name, { definition, source: 'runtime' });
-    for (const { definition, target, mcpIsInvokeAction } of mcpTools) {
-      known.set(definition.name, {
-        definition,
-        source: 'mcp',
-        mcpServerId: target.serverId,
-        mcpIsInvokeAction,
-        mcpTarget: target,
-      });
-    }
-    for (const definition of executorTools) {
-      if (!known.has(definition.name)) known.set(definition.name, { definition, source: 'executor' });
-    }
-    return [...known.values()].map(({ definition, source, mcpServerId, mcpIsInvokeAction, mcpTarget }) => ({
-      name: definition.name,
-      description: definition.description,
-      source,
-      ...(mcpServerId ? { mcpServerId } : {}),
-      ...(mcpServerId ? { mcpIsInvokeAction: mcpIsInvokeAction === true } : {}),
-      enabled: this.threadToolEnabled(threadId, definition.name, source, mcpTarget),
-    }));
+    const surface = resolveToolSurface(runtimeTools, executorTools, mcpTools);
+    return surface.tools.map((definition) => {
+      const source = surface.sources[definition.name]!;
+      const mcpTarget = surface.mcpTargets[definition.name];
+      const registeredMcp = mcpTarget
+        ? registeredMcpTools.find((registered) => sameMcpTarget(registered.target, mcpTarget))
+        : undefined;
+      return {
+        name: definition.name,
+        description: definition.description,
+        source,
+        ...(mcpTarget ? { mcpServerId: mcpTarget.serverId } : {}),
+        ...(mcpTarget ? { mcpIsInvokeAction: registeredMcp?.mcpToolName === 'invoke_action' } : {}),
+        enabled: this.threadToolEnabled(threadId, definition.name, source, mcpTarget),
+      };
+    });
   }
 
   async setThreadToolEnabled(threadId: string, toolName: string, enabled: boolean): Promise<ThreadToolView[]> {
@@ -3876,20 +3844,13 @@ export class PicoRuntime {
     mcpTargets: Record<string, McpToolTarget>;
   }> {
     const runtimeTools = this.tools.listBySource('runtime').map((tool) => tool.definition);
-    const tools = new Map(runtimeTools.map((tool) => [tool.name, tool]));
-    const sources: Record<string, 'runtime' | 'executor' | 'mcp'> = Object.fromEntries(
-      runtimeTools.map((tool) => [tool.name, 'runtime']),
-    );
-    const mcpTargets: Record<string, McpToolTarget> = {};
-    for (const registered of this.registeredMcpTools()) {
-      let name = registered.definition.name;
-      if (tools.has(name)) name = disambiguatedMcpToolName(name, registered.target, new Set(tools.keys()));
-      tools.set(name, { ...registered.definition, name });
-      sources[name] = 'mcp';
-      mcpTargets[name] = registered.target;
-    }
+    const mcpTools = this.registeredMcpTools().map((registered) => ({
+      definition: registered.definition,
+      target: registered.target,
+      ...(registered.mcpToolName === undefined ? {} : { mcpToolName: registered.mcpToolName }),
+    }));
     if (thread.executorKind === 'runtime') {
-      const surface = { tools: [...tools.values()], sources, mcpTargets };
+      const surface = resolveToolSurface(runtimeTools, [], mcpTools);
       this.cacheThreadToolSurface(thread.id, surface);
       return surface;
     }
@@ -3897,29 +3858,8 @@ export class PicoRuntime {
     const binding = this.store.executorForThread(thread.id);
     if (!binding) throw new Error('Executor binding is missing while discovering its Tools.');
     const adapter = this.adapterFor(binding);
-    for (const definition of await adapter.listTools(binding)) {
-      if (tools.has(definition.name)) {
-        if (sources[definition.name] !== 'mcp') {
-          throw new Error(
-            `Tool name collision: ${definition.name} is registered by both Runtime and ${binding.label} Executor sources.`,
-          );
-        }
-        const target = mcpTargets[definition.name];
-        if (!target) throw new Error(`MCP target for colliding tool ${definition.name} is unavailable.`);
-        const mcpDefinition = tools.get(definition.name)!;
-        const oldName = definition.name;
-        tools.delete(oldName);
-        delete sources[oldName];
-        delete mcpTargets[oldName];
-        const renamed = disambiguatedMcpToolName(oldName, target, new Set([...tools.keys(), definition.name]));
-        tools.set(renamed, { ...mcpDefinition, name: renamed });
-        sources[renamed] = 'mcp';
-        mcpTargets[renamed] = target;
-      }
-      tools.set(definition.name, definition);
-      sources[definition.name] = 'executor';
-    }
-    const surface = { tools: [...tools.values()], sources, mcpTargets };
+    const executorTools = await adapter.listTools(binding);
+    const surface = resolveToolSurface(runtimeTools, executorTools, mcpTools);
     this.cacheThreadToolSurface(thread.id, surface);
     return surface;
   }
