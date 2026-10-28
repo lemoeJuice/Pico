@@ -43,6 +43,7 @@ import { fetchStableSnapshot, snapshotForSelection, snapshotThreadIsSelected } f
 import { isNearScrollEnd } from './scroll-follow.js';
 import { threadCanBeInterrupted } from './thread-controls.js';
 import { executorStatusFromProbe } from './executor-status.js';
+import { shouldCloseModalOnEscape } from './modal-behavior.js';
 import {
   assistantStreamsAfterDisconnect,
   canAppendAssistantDelta,
@@ -430,6 +431,8 @@ function ThreadStateControl({
   );
 }
 
+const activeModalDialogs: HTMLElement[] = [];
+
 function Modal({
   title,
   contextLabel = 'PICO · SETTINGS',
@@ -447,6 +450,95 @@ function Modal({
   error: string;
   onDismissError(): void;
 }) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const openDialogs = activeModalDialogs;
+    openDialogs.push(dialog);
+    let lastTabDirection: 'forward' | 'backward' = 'forward';
+
+    const getPortalRoots = () =>
+      Array.from(
+        document.querySelectorAll<HTMLElement>(
+          'body > .plugin-ui-select-menu, body > .model-selection-panel, body > .model-selection-more-menu',
+        ),
+      );
+    const isWithinModal = (target: EventTarget | null, portals: HTMLElement[]) =>
+      target instanceof Node && (dialog.contains(target) || portals.some((portal) => portal.contains(target)));
+    const isVisible = (element: HTMLElement) => {
+      if (element.tabIndex < 0 || element.matches(':disabled,[aria-disabled="true"]')) return false;
+      for (let current: HTMLElement | null = element; current; current = current.parentElement) {
+        if (current.hidden || current.hasAttribute('inert') || current.getAttribute('aria-hidden') === 'true') return false;
+        const style = window.getComputedStyle(current);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+      }
+      return true;
+    };
+    const getFocusable = (portals: HTMLElement[]) => {
+      const selector =
+        'a[href], area[href], button, input, select, textarea, summary, iframe, object, embed, [contenteditable="true"], [tabindex]';
+      return [
+        ...dialog.querySelectorAll<HTMLElement>(selector),
+        ...portals.flatMap((portal) => Array.from(portal.querySelectorAll<HTMLElement>(selector))),
+      ].filter((element) => !element.closest('[hidden],[inert],[aria-hidden="true"]') && isVisible(element));
+    };
+
+    // Focus the dialog itself on open so opening it does not move an editing caret.
+    if (!dialog.contains(document.activeElement)) dialog.focus();
+
+    const handleTabKey = (event: KeyboardEvent) => {
+      if (openDialogs.at(-1) !== dialog || event.defaultPrevented || event.key !== 'Tab') return;
+      lastTabDirection = event.shiftKey ? 'backward' : 'forward';
+      const portals = getPortalRoots();
+      const focusable = getFocusable(portals);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      if (event.shiftKey && (document.activeElement === first || !isWithinModal(document.activeElement, portals))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || !isWithinModal(document.activeElement, portals))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    const containFocus = (event: FocusEvent) => {
+      const portals = getPortalRoots();
+      if (openDialogs.at(-1) !== dialog || isWithinModal(event.target, portals)) return;
+      const focusable = getFocusable(portals);
+      const target = lastTabDirection === 'backward' ? focusable.at(-1) : focusable[0];
+      if (target) target.focus();
+      else dialog.focus();
+    };
+    const handleWindowKeyDown = (event: KeyboardEvent) => {
+      if (!shouldCloseModalOnEscape(event, openDialogs.at(-1) === dialog)) return;
+      event.preventDefault();
+      onCloseRef.current();
+    };
+
+    // Run after document listeners so portal widgets can consume Escape first.
+    document.addEventListener('keydown', handleTabKey);
+    window.addEventListener('keydown', handleWindowKeyDown);
+    document.addEventListener('focusin', containFocus, true);
+    return () => {
+      window.removeEventListener('keydown', handleWindowKeyDown);
+      document.removeEventListener('keydown', handleTabKey);
+      document.removeEventListener('focusin', containFocus, true);
+      const index = openDialogs.lastIndexOf(dialog);
+      if (index !== -1) openDialogs.splice(index, 1);
+      if (previouslyFocused?.isConnected) previouslyFocused.focus();
+    };
+  }, []);
+
   return (
     <div
       className="modal-backdrop"
@@ -456,10 +548,12 @@ function Modal({
       }}
     >
       <section
+        ref={dialogRef}
         className={`modal${className ? ` ${className}` : ''}`}
         role="dialog"
         aria-modal="true"
         aria-label={title}
+        tabIndex={-1}
       >
         <div className="modal-heading">
           <div>
