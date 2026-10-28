@@ -339,7 +339,19 @@ describe('dynamic plugin UI boundary', () => {
   });
 
   it('keeps host input sizing semantic and supports six-row Goal fields', () => {
-    const css = readFileSync(new URL('../src/web/styles.css', import.meta.url), 'utf8');
+    const css = [
+      '../src/web/styles/shared/plugin-inputs.css',
+      '../src/web/styles/shared/plugin-select.css',
+      '../src/web/styles/shared/plugin-switch.css',
+      '../src/web/styles/shared/plugin-range.css',
+      '../src/web/styles/shared/plugin-status.css',
+      '../src/web/styles/shared/plugin-fields.css',
+      '../src/web/styles/shared/plugin-buttons.css',
+      '../src/web/styles/regions/composer-layout.css',
+      '../src/web/styles/regions/composer-integration.css',
+    ]
+      .map((path) => readFileSync(new URL(path, import.meta.url), 'utf8'))
+      .join('\n');
     const renderer = readFileSync(new URL('../src/web/plugin-ui-tree.tsx', import.meta.url), 'utf8');
     expect(css).toMatch(/\.plugin-ui-text-input\s*\{[^}]*white-space:\s*nowrap;[^}]*overflow-x:\s*auto;/s);
     expect(css).toMatch(/\.plugin-ui-text-area\s*\{[^}]*line-height:\s*1\.5;[^}]*overflow:\s*hidden;/s);

@@ -25,7 +25,7 @@ describe('semantic plugin UI slots', () => {
   });
 
   it('lets the block popover scroll long host-rendered content within the visible viewport', () => {
-    const css = readFileSync(new URL('../src/web/styles.css', import.meta.url), 'utf8');
+    const css = readFileSync(new URL('../src/web/styles/regions/toolbar-panels.css', import.meta.url), 'utf8');
     const view = readFileSync(new URL('../src/web/plugin-web-view.tsx', import.meta.url), 'utf8');
     expect(css).toMatch(/\.plugin-toolbar-popover\s*\{[^}]*overflow-x:\s*hidden;[^}]*overflow-y:\s*auto;/s);
     expect(css).toMatch(/\.plugin-toolbar-popover > \.plugin-ui-host-rendered\s*\{[^}]*display:\s*block;/s);
