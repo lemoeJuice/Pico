@@ -396,8 +396,12 @@ export function runtimeConversationProjection(records: readonly CanonicalRecord[
     const parent = recordsForProjection(node.parentProjectionId);
     if (node.targetRecordId) {
       const targetIndex = parent.findIndex((record) => record.id === node.targetRecordId);
-      if (targetIndex < 0) return [];
-      return [...parent.slice(0, targetIndex + 1), ...(recordsByProjection.get(projectionId) ?? [])];
+      const throughSeq = node.throughSeq;
+      if (targetIndex < 0 || throughSeq === undefined) return [];
+      return [
+        ...parent.filter((record) => record.seq <= throughSeq),
+        ...(recordsByProjection.get(projectionId) ?? []),
+      ];
     }
     if (node.throughSeq !== undefined) {
       return [
@@ -734,6 +738,8 @@ function toolResultContent(payload: ToolResultPayload): string {
     return `Tool failed: ${payload.error ?? 'Unknown error'}${typeof guidance === 'string' ? `\nModel guidance: ${guidance}` : ''}`;
   }
   if (payload.toolName === 'read_thread_history') {
+    const result = recordObject(payload.result);
+    if (typeof result.omitted === 'string') return JSON.stringify({ omitted: result.omitted });
     return JSON.stringify(projectThreadHistoryIo(payload.result));
   }
   if (isMultimodalToolResultEnvelope(payload.result)) return multimodalToolResultText(payload.result);
