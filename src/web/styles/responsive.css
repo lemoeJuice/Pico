@@ -62,7 +62,7 @@
     width: min(var(--sidebar-width, 268px), calc(100vw - 46px));
     padding-top: 68px;
     transform: translateX(-105%);
-    transition: transform 0.22s ease;
+    transition: transform 180ms ease;
     box-shadow: 12px 0 40px rgba(37, 53, 41, 0.12);
   }
   .sidebar.sidebar-open {

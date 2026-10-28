@@ -74,7 +74,7 @@
 .connection-dot.online,
 .thread-state-dot.state-running {
   background: #76a185;
-  box-shadow: 0 0 0 3px rgba(118, 161, 133, 0.12);
+  box-shadow: 0 0 0 3px rgba(118, 161, 133, 0.16);
 }
 .connection-dot.offline,
 .executor-offline .connection-dot {

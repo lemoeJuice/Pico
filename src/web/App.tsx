@@ -699,6 +699,26 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [threads, setThreads] = useState<Thread[]>([]);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<ThreadSnapshot | null>(null);
+  const snapshotRef = useRef(snapshot);
+  snapshotRef.current = snapshot;
+  const [liveEntrances, setLiveEntrances] = useState<ReadonlySet<string>>(() => new Set());
+  const entranceTimers = useRef(new Set<number>());
+  const markLiveEntrance = useCallback((key: string) => {
+    setLiveEntrances((current) => new Set(current).add(key));
+    const timer = window.setTimeout(() => {
+      entranceTimers.current.delete(timer);
+      setLiveEntrances((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+    }, 500);
+    entranceTimers.current.add(timer);
+  }, []);
+  useEffect(() => () => {
+    for (const timer of entranceTimers.current) window.clearTimeout(timer);
+    entranceTimers.current.clear();
+  }, []);
   const [snapshotError, setSnapshotError] = useState<{ threadId: string; message: string } | null>(null);
   const [snapshotRetry, setSnapshotRetry] = useState<{ threadId: string; attempt: number } | null>(null);
   const [snapshotRefreshingThreadId, setSnapshotRefreshingThreadId] = useState<string | null>(null);
@@ -1630,6 +1650,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           }
         } else if (event.type === 'record') {
           const record = event.record as CanonicalRecord | undefined;
+          if (
+            record?.kind === 'message' && record.threadId === activeThreadId.current &&
+            snapshotRef.current?.thread.id === record.threadId &&
+            !snapshotRef.current.records.some((item) => item.id === record.id)
+          ) markLiveEntrance(`record:${record.id}`);
           if (record?.kind === 'message' && record.threadId) {
             if (record.payload.source === 'user' && typeof record.payload.content === 'string') {
               acceptMessage(record.threadId, record.id, record.payload.content);
@@ -1724,6 +1749,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             )
           ) {
             return;
+          }
+          if (!currentDraft && (event.offset === undefined || event.offset === 0)) {
+            markLiveEntrance(`draft:${executionId}`);
           }
           if (typeof event.offset === 'number' && event.offset < expectedOffset) {
             const overlap = expectedOffset - event.offset;
@@ -1853,6 +1881,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     acceptMessage,
     loadSnapshot,
     loadThreadTools,
+    markLiveEntrance,
     noteSnapshotChange,
     observeModelExecutions,
     resumeModelDraft,
@@ -3328,6 +3357,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       ) : item.record.kind === 'message' ? (
                         <MessageBubble
                           key={item.record.id}
+                          animateEntrance={liveEntrances.has(`record:${item.record.id}`)}
                           record={item.record}
                           thread={selectedThread}
                           threadId={selectedThread.id}
@@ -3368,7 +3398,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       ),
                     )}
                     {selectedThreadCompacting ? <ContextCompactionProgressCard /> : null}
-                    <AssistantDraftMessage threadId={selectedThread.id} />
+                    <AssistantDraftMessage threadId={selectedThread.id} liveEntrances={liveEntrances} />
                     {!activeSnapshot ? (
                       <div className="empty-thread" role="status">
                         {snapshotError?.threadId === selectedThread.id ? (
@@ -4840,6 +4870,7 @@ function ThreadScrollbar({
 
 function MessageBubble({
   record,
+  animateEntrance = false,
   thread,
   threadId,
   modelExecutionGroups,
@@ -4854,6 +4885,7 @@ function MessageBubble({
   rewindDisabled,
 }: {
   record: CanonicalRecord;
+  animateEntrance?: boolean;
   thread: Thread;
   threadId: string;
   modelExecutionGroups: ModelExecutionGroup[];
@@ -4883,7 +4915,7 @@ function MessageBubble({
   return (
     <div
       id={`canonical-message-${record.seq}`}
-      className={`user-message ${incoming ? 'incoming-message' : ''} ${
+      className={`user-message ${animateEntrance ? 'live-content-entrance' : ''} ${incoming ? 'incoming-message' : ''} ${
         modelExecutionGroups.length > 0 ? 'has-model-execution-groups' : ''
       }`}
     >
@@ -4957,11 +4989,11 @@ function useAssistantExecutionId(threadId: string) {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-function AssistantDraftMessage({ threadId }: { threadId: string }) {
+function AssistantDraftMessage({ threadId, liveEntrances }: { threadId: string; liveEntrances: ReadonlySet<string> }) {
   const draft = useAssistantDraftContent(threadId);
   if (!draft) return null;
   return (
-    <div className="assistant-message draft-message">
+    <div className={`assistant-message draft-message ${liveEntrances.has(`draft:${draft.executionId}`) ? 'live-content-entrance' : ''}`}>
       <div className="assistant-avatar">
         <Sparkles size={13} aria-hidden="true" />
       </div>

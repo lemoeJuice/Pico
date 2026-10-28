@@ -81,6 +81,7 @@
   border: 1px solid #dce5dc;
   border-radius: 11px;
   box-shadow: 0 10px 26px rgb(38 53 42 / 16%);
+  animation: fade-in 140ms ease-out both;
   -webkit-overflow-scrolling: touch;
 }
 .plugin-ui-select-option {

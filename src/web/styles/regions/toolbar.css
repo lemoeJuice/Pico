@@ -47,5 +47,6 @@
     border: 1px solid #d7e2d6;
     border-radius: 10px;
     box-shadow: 0 12px 30px rgba(45, 62, 51, 0.14);
+    animation: fade-in 140ms ease-out both;
   }
 }
