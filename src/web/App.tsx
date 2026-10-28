@@ -3152,6 +3152,23 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 </div>
               </div>
               <div className="composer-caption composer-meta">
+                <ModelSelection
+                  key={`model-selection:${selectedThread.id}`}
+                  models={modelCatalog.models}
+                  instances={modelCatalog.instances}
+                  selection={activeModelSelection ?? null}
+                  loadAdapters={loadAdapters}
+                  onSave={async (selection) => {
+                    const targetThreadId = selectedThread.id;
+                    const saved = await api<ThreadModelSelection>(
+                      `/api/threads/${encodeURIComponent(targetThreadId)}/model-selection`,
+                      { method: 'PUT', body: JSON.stringify(selection) },
+                    );
+                    setSnapshot((current) =>
+                      selectionForActiveThread(current, activeThreadId.current, targetThreadId, saved),
+                    );
+                  }}
+                />
                 {pluginUiContext &&
                   composerStatusContributions.map((item) =>
                     item.pluginId && item.entry && item.component ? (
@@ -3170,23 +3187,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     ) : null,
                   )}
                 <div className="composer-status-info">
-                    <ModelSelection
-                      key={`model-selection:${selectedThread.id}`}
-                      models={modelCatalog.models}
-                      instances={modelCatalog.instances}
-                      selection={activeModelSelection ?? null}
-                      loadAdapters={loadAdapters}
-                      onSave={async (selection) => {
-                        const targetThreadId = selectedThread.id;
-                        const saved = await api<ThreadModelSelection>(
-                          `/api/threads/${encodeURIComponent(targetThreadId)}/model-selection`,
-                          { method: 'PUT', body: JSON.stringify(selection) },
-                        );
-                        setSnapshot((current) =>
-                          selectionForActiveThread(current, activeThreadId.current, targetThreadId, saved),
-                        );
-                      }}
-                    />
                   <ComposerTps
                       key={`model-metrics:${selectedThread.id}`}
                     threadId={selectedThread.id}
