@@ -51,6 +51,7 @@ function parseMcpServerInput(body: Record<string, unknown>): McpServerInput {
   const name = requiredText(body, 'name');
   const transport = body.transport;
   const autoStart = optionalBoolean(body, 'autoStart');
+  const visibleByDefault = optionalBoolean(body, 'visibleByDefault');
   if (transport === 'stdio') {
     const args = body.args === undefined ? [] : body.args;
     if (!Array.isArray(args) || args.some((argument) => typeof argument !== 'string')) {
@@ -73,6 +74,7 @@ function parseMcpServerInput(body: Record<string, unknown>): McpServerInput {
       ...(typeof cwd === 'string' && cwd.trim() ? { cwd: cwd.trim() } : {}),
       ...(env && typeof env === 'object' ? { env: env as Record<string, string> } : {}),
       ...(autoStart === undefined ? {} : { autoStart }),
+      ...(visibleByDefault === undefined ? {} : { visibleByDefault }),
     };
   }
   if (transport === 'streamable-http') {
@@ -98,6 +100,7 @@ function parseMcpServerInput(body: Record<string, unknown>): McpServerInput {
           : {}),
       ...(confirmPrivateNetworkAccess === undefined ? {} : { confirmPrivateNetworkAccess }),
       ...(autoStart === undefined ? {} : { autoStart }),
+      ...(visibleByDefault === undefined ? {} : { visibleByDefault }),
     };
   }
   throw new ServiceError(400, 'transport must be stdio or streamable-http');

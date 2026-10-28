@@ -714,7 +714,30 @@ export class McpManager {
       input = { ...input, url: restoreRedactedQuery(input.url, currentBeforeUpdate.url) };
     }
     const validated = validateInput(input);
-    const stopPromise = this.stop(id);
+    const currentSecret = this.secret(id);
+    const currentEnv = currentSecret.env ?? {};
+    const nextEnv = validated.transport === 'stdio' ? validated.env ?? currentEnv : currentEnv;
+    const sameEnvironment =
+      Object.keys(nextEnv).length === Object.keys(currentEnv).length &&
+      Object.entries(nextEnv).every(([key, value]) => currentEnv[key] === value);
+    const onlyVisibilityDefaultChanged =
+      validated.visibleByDefault !== undefined &&
+      validated.visibleByDefault !== currentBeforeUpdate.visibleByDefault &&
+      validated.name === currentBeforeUpdate.name &&
+      validated.transport === currentBeforeUpdate.transport &&
+      (validated.autoStart === undefined || validated.autoStart === currentBeforeUpdate.autoStart) &&
+      (validated.transport === 'stdio'
+        ? currentBeforeUpdate.transport === 'stdio' &&
+          validated.command === currentBeforeUpdate.command &&
+          JSON.stringify(validated.args ?? []) === JSON.stringify(currentBeforeUpdate.args) &&
+          validated.cwd === currentBeforeUpdate.cwd &&
+          sameEnvironment
+        : currentBeforeUpdate.transport === 'streamable-http' &&
+          validated.url === currentBeforeUpdate.url &&
+          (validated.bearerToken === undefined || validated.bearerToken === currentSecret.bearerToken) &&
+          (validated.confirmPrivateNetworkAccess === undefined ||
+            validated.confirmPrivateNetworkAccess === currentBeforeUpdate.confirmPrivateNetworkAccess));
+    const stopPromise = onlyVisibilityDefaultChanged ? Promise.resolve(undefined) : this.stop(id);
     return this.enqueueTransition(id, async () => {
       await stopPromise;
       const current = this.requireConfig(id);
