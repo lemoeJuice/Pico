@@ -372,6 +372,8 @@ export const globalMemoryPlugin: PicoPlugin = {
           kind: 'plugin' as const,
           disposition: 'raw' as const,
           turnIndex: index,
+          turnStartIndex: index,
+          turnEndIndex: index + 1,
         },
       ];
       return next({ ...input, turns, provenance });

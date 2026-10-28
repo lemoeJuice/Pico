@@ -61,6 +61,9 @@ export interface ProjectionProvenance {
   canonicalEndSeq?: number;
   summaryVersion?: string;
   turnIndex?: number;
+  /** Half-open range of projected turns attributable to this source. */
+  turnStartIndex?: number;
+  turnEndIndex?: number;
   reason?: string;
 }
 

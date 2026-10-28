@@ -302,6 +302,8 @@ export const todoPlugin: PicoPlugin = {
             kind: 'plugin' as const,
             disposition: 'raw' as const,
             turnIndex,
+            turnStartIndex: turnIndex,
+            turnEndIndex: turnIndex + 1,
             reason: 'This unfinished result is a reminder for the current Thread.',
           })),
         ],

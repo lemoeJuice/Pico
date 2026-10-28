@@ -91,6 +91,7 @@ import type {
 } from './stages.js';
 import { McpManager } from './mcp-manager.js';
 import { resolveToolSurface } from './tool-surface.js';
+import { projectedCompactionPrefix } from './projection-mapping.js';
 import type { McpServerInput, McpServerView, StartMcpServerOptions } from '../contracts/mcp.js';
 export type { McpServerInput, McpServerView, StartMcpServerOptions } from '../contracts/mcp.js';
 import type { PicoPlugin } from '../plugins/host.js';
@@ -230,90 +231,6 @@ function latestRuntimeContextProjectionSeq(records: readonly CanonicalRecord[]):
     }
   }
   return null;
-}
-
-interface ProjectedCompactionPrefix {
-  throughSeq: number;
-  turns: PromptTurn[];
-}
-
-function projectedCompactionPrefix(
-  records: readonly CanonicalRecord[],
-  thread: Thread,
-  projection: ProjectionInput,
-  candidateThroughSeq: number,
-): ProjectedCompactionPrefix | null {
-  const provenance = projection.provenance ?? [];
-  const hasRollingProjection = provenance.some(
-    (item) => item.sourcePluginId === 'pico.rolling-context' && item.kind === 'rolling_segment',
-  );
-  let throughSeq = 0;
-  let turnLimit = 0;
-
-  if (hasRollingProjection) {
-    const rollingSources = provenance.filter(
-      (item) =>
-        item.sourcePluginId === 'pico.rolling-context' &&
-        Number.isSafeInteger(item.canonicalStartSeq) &&
-        Number.isSafeInteger(item.canonicalEndSeq) &&
-        (item.canonicalStartSeq as number) > 0 &&
-        (item.canonicalEndSeq as number) >= (item.canonicalStartSeq as number),
-    );
-    const rollingByStartSeq = new Map(rollingSources.map((item) => [item.canonicalStartSeq!, item]));
-    const runtimeCompaction = activeRuntimeContextCompaction(records);
-    if (runtimeCompaction && runtimeCompaction.contextThroughSeq <= candidateThroughSeq) {
-      turnLimit = 1;
-      throughSeq = runtimeCompaction.contextThroughSeq;
-    }
-    for (const record of canonicalConversationRecords(records)) {
-      if (record.seq <= throughSeq) continue;
-      if (record.seq > candidateThroughSeq) break;
-
-      const projectedSource = rollingByStartSeq.get(record.seq);
-      if (projectedSource) {
-        const endSeq = projectedSource.canonicalEndSeq!;
-        if (endSeq > candidateThroughSeq) break;
-        const sourceRecords = canonicalConversationRecords(records).filter(
-          (item) => item.seq >= record.seq && item.seq <= endSeq,
-        );
-        if (projectedSource.disposition === 'summary') turnLimit += 1;
-        else if (projectedSource.disposition === 'raw') {
-          turnLimit += canonicalBlockToPromptTurns(sourceRecords, thread).length;
-        }
-        throughSeq = endSeq;
-        continue;
-      }
-
-      // Rolling Context can pass through records individually when an active
-      // Runtime summary ends inside one of its user-turn blocks; those turns
-      // remain in the same order in the final projection.
-      turnLimit += canonicalBlockToPromptTurns([record], thread).length;
-      throughSeq = record.seq;
-    }
-  } else {
-    const runtimeCompaction = activeRuntimeContextCompaction(records);
-    const compactedPrefixTurns =
-      runtimeCompaction && runtimeCompaction.contextThroughSeq <= candidateThroughSeq ? 1 : 0;
-    const rawPrefix = canonicalConversationRecords(records).filter(
-      (record) =>
-        record.seq <= candidateThroughSeq && (!runtimeCompaction || record.seq > runtimeCompaction.contextThroughSeq),
-    );
-    turnLimit = compactedPrefixTurns + canonicalRecordsToPromptTurns(rawPrefix, thread).length;
-    throughSeq = candidateThroughSeq;
-  }
-
-  if (throughSeq <= 0 || turnLimit <= 0 || turnLimit > projection.turns.length) return null;
-  const pluginTurnIndexes = new Set(
-    provenance
-      .filter(
-        (item) => item.kind === 'plugin' && Number.isSafeInteger(item.turnIndex) && (item.turnIndex as number) >= 0,
-      )
-      .map((item) => item.turnIndex as number),
-  );
-  return {
-    throughSeq,
-    turns: projection.turns.slice(0, turnLimit).filter((_turn, index) => !pluginTurnIndexes.has(index)),
-  };
 }
 
 function validateModelParameters(value: unknown): ModelRequestParameters {
@@ -2737,7 +2654,7 @@ export class PicoRuntime {
       );
     });
     const runtimeCompaction = activeRuntimeContextCompaction(modelProjectionRecords);
-    const projectedCanonicalRecords = conversationProjection.records.filter(
+    const projectedCanonicalRecords = canonicalConversationRecords(conversationProjection.records).filter(
       (record) => !runtimeCompaction || record.seq > runtimeCompaction.contextThroughSeq,
     );
     const compactionStartSeq = runtimeCompaction
@@ -2756,12 +2673,32 @@ export class PicoRuntime {
         hiddenBranchRanges.push(lastHiddenRange);
       }
     }
+    const rawBlocks = completedCanonicalModelInvocationBlocks(projectedCanonicalRecords);
+    const completedCount = rawBlocks.reduce((count, block) => count + block.length, 0);
+    const remainingRecords = projectedCanonicalRecords.slice(completedCount);
+    if (remainingRecords.length) rawBlocks.push(remainingRecords);
+    const rawMappedTurns: PromptTurn[] = [];
+    const rawProvenance = rawBlocks.map((block): ProjectionProvenance => {
+      const turnStartIndex = rawMappedTurns.length + (runtimeCompaction ? 1 : 0);
+      rawMappedTurns.push(...canonicalBlockToPromptTurns(block, thread));
+      return {
+        id: `canonical:${block[0]!.id}`,
+        sourcePluginId: 'pico.core',
+        label: 'Canonical conversation block',
+        kind: 'canonical',
+        disposition: 'raw',
+        canonicalStartSeq: block[0]!.seq,
+        canonicalEndSeq: block.at(-1)!.seq,
+        turnStartIndex,
+        turnEndIndex: rawMappedTurns.length + (runtimeCompaction ? 1 : 0),
+      };
+    });
     const baseProjection: ProjectionInput = {
       thread,
       records: modelProjectionRecords,
       through,
       systemPrompt: `${baseSystemPrompt}\n\n${thread.executorKind === 'runtime' ? 'This Thread uses Chat mode. It has no project workspace, filesystem, shell, or external execution environment. It can use tools provided by Runtime plugins.' : ''}\n\nCurrent Thread ID: ${thread.id}\n${thread.parentThreadId ? `Parent Thread ID: ${thread.parentThreadId}` : 'This Thread has no parent.'}`,
-      turns: this.projectTurns(modelProjectionRecords, thread),
+      turns: [...(runtimeCompaction ? [runtimeCompactionTurn(runtimeCompaction)] : []), ...rawMappedTurns],
       tools: enabledTools,
       toolSources: enabledToolSources,
       mcpTargets: enabledMcpTargets,
@@ -2786,6 +2723,8 @@ export class PicoRuntime {
                 disposition: 'summary' as const,
                 canonicalStartSeq: compactionStartSeq!,
                 canonicalEndSeq: runtimeCompaction.throughSeq,
+                turnStartIndex: 0,
+                turnEndIndex: 1,
                 reason: 'A Runtime-owned summary replaces this preserved Canonical prefix.',
                 turnIndex: 0,
               },
@@ -2794,26 +2733,19 @@ export class PicoRuntime {
         ...(runtimeCompaction && runtimeCompaction.contextThroughSeq > runtimeCompaction.throughSeq
           ? [
               {
-                id: `runtime-context-restore:${runtimeCompaction.sourceHash}:${runtimeCompaction.contextThroughSeq}`,
+                id: `runtime-context-restore:${runtimeCompaction.sourceHash}`,
                 sourcePluginId: 'pico.runtime',
-                label: `Canonical history through ${runtimeCompaction.contextThroughSeq} restored out of model context`,
+                label: 'Restored history omitted from model context',
                 kind: 'canonical' as const,
                 disposition: 'omitted' as const,
                 canonicalStartSeq: runtimeCompaction.throughSeq + 1,
                 canonicalEndSeq: runtimeCompaction.contextThroughSeq,
-                reason: 'The user restored an earlier context checkpoint. Canonical History remains intact.',
+                turnStartIndex: 1,
+                turnEndIndex: 1,
               },
             ]
           : []),
-        ...projectedCanonicalRecords.map((record): ProjectionProvenance => ({
-          id: `canonical:${record.id}`,
-          sourcePluginId: 'pico.core',
-          label: `Canonical ${record.kind}`,
-          kind: 'canonical',
-          disposition: 'raw',
-          canonicalStartSeq: record.seq,
-          canonicalEndSeq: record.seq,
-        })),
+        ...rawProvenance,
       ],
     };
     return this.pipelines.run('projection', baseProjection, async (value) => value);
@@ -3625,14 +3557,6 @@ export class PicoRuntime {
     }
   }
 
-  private projectTurns(records: readonly CanonicalRecord[], thread: Thread): PromptTurn[] {
-    const compaction = activeRuntimeContextCompaction(records);
-    const conversation = runtimeConversationProjection(records).records;
-    if (!compaction) return canonicalRecordsToPromptTurns(conversation, thread);
-    const remaining = conversation.filter((record) => record.seq > compaction.contextThroughSeq);
-    return [runtimeCompactionTurn(compaction), ...canonicalRecordsToPromptTurns(remaining, thread)];
-  }
-
   private async compactThread(
     thread: Thread | null,
     allowActiveLoop = false,
@@ -3688,7 +3612,7 @@ export class PicoRuntime {
 
     const candidateThroughSeq = eligible.at(-1)!.at(-1)!.seq;
     const projectedPrefix = projectedInput
-      ? projectedCompactionPrefix(projectedInput.records, thread, projectedInput, candidateThroughSeq)
+      ? projectedCompactionPrefix(projectedInput.records, projectedInput, candidateThroughSeq)
       : null;
     if (projectedInput && !projectedPrefix) {
       return {
@@ -3709,6 +3633,7 @@ export class PicoRuntime {
     const sourceHash = projectedPrefix
       ? createHash('sha256').update(canonicalHash).update(JSON.stringify(projectedPrefix.turns)).digest('hex')
       : canonicalHash;
+    // Projected turns determine the safe boundary and request identity; the helper summarizes Canonical IO.
     const sequenceIo = projectThreadHistoryIo(summarizedBlocks.flat()).records;
     const sourceText = [
       ...(!rebuildFromCanonical && previous

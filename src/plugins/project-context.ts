@@ -392,6 +392,8 @@ export const projectContextPlugin: PicoPlugin = {
           kind: 'plugin',
           disposition: 'raw',
           turnIndex,
+          turnStartIndex: turnIndex,
+          turnEndIndex: turnIndex + 1,
           ...(entry.sourceSeq === null ? {} : { canonicalStartSeq: entry.sourceSeq, canonicalEndSeq: entry.sourceSeq }),
           reason: entry.pinned
             ? 'Pinned Project Memory.'

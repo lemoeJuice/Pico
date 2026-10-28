@@ -247,10 +247,27 @@ function allTurns(
       canonicalEndSeq: runtimeCompaction.throughSeq,
       reason: 'A Runtime-owned summary replaces this preserved Canonical prefix.',
       turnIndex: 0,
+      turnStartIndex: 0,
+      turnEndIndex: 1,
+    });
+  }
+  if (runtimeCompaction && runtimeCompaction.contextThroughSeq > runtimeCompaction.throughSeq) {
+    provenance.push({
+      id: `runtime-restore:${runtimeCompaction.sourceHash}`,
+      sourcePluginId: 'pico.runtime',
+      label: 'Restored history omitted from model context',
+      kind: 'canonical',
+      disposition: 'omitted',
+      canonicalStartSeq: runtimeCompaction.throughSeq + 1,
+      canonicalEndSeq: runtimeCompaction.contextThroughSeq,
+      turnStartIndex: turns.length,
+      turnEndIndex: turns.length,
     });
   }
   const relevant = canonicalConversationRecords(input.records);
-  const blocks = canonicalTurnBlocks(input.records);
+  const blocks = canonicalTurnBlocks(
+    input.records.filter((record) => !runtimeCompaction || record.seq > runtimeCompaction.contextThroughSeq),
+  );
   const blockByStart = new Map(blocks.map((block) => [block[0]!.seq, block]));
   for (const record of relevant) {
     if (runtimeCompaction && record.seq <= runtimeCompaction.contextThroughSeq) continue;
@@ -259,6 +276,7 @@ function allTurns(
     const block = blockByStart.get(record.seq);
     if (segment && block && isRecordPresent(input.records, segment)) {
       for (const id of segment.sourceRecordIds) consumed.add(id);
+      const turnStartIndex = turns.length;
       if (segment.tier === 'warm') {
         turns.push({
           kind: 'message',
@@ -271,6 +289,8 @@ function allTurns(
           label: `Rolling summary ${segment.startSeq}-${segment.endSeq}`,
           kind: 'rolling_segment',
           disposition: 'summary',
+          turnStartIndex,
+          turnEndIndex: turns.length,
           canonicalStartSeq: segment.startSeq,
           canonicalEndSeq: segment.endSeq,
           ...(segment.summaryVersion ? { summaryVersion: segment.summaryVersion } : {}),
@@ -283,6 +303,8 @@ function allTurns(
           label: `Cold segment ${segment.startSeq}-${segment.endSeq}`,
           kind: 'rolling_segment',
           disposition: 'omitted',
+          turnStartIndex,
+          turnEndIndex: turns.length,
           canonicalStartSeq: segment.startSeq,
           canonicalEndSeq: segment.endSeq,
           ...(segment.summaryVersion ? { summaryVersion: segment.summaryVersion } : {}),
@@ -292,6 +314,7 @@ function allTurns(
       continue;
     }
     if (block) {
+      const turnStartIndex = turns.length;
       const blockTurns = canonicalBlockToPromptTurns(block, input.thread);
       turns.push(...blockTurns);
       block.forEach((item) => consumed.add(item.id));
@@ -301,12 +324,26 @@ function allTurns(
         label: `Canonical segment ${block[0]!.seq}-${block.at(-1)!.seq}`,
         kind: 'rolling_segment',
         disposition: 'raw',
+        turnStartIndex,
+        turnEndIndex: turns.length,
         canonicalStartSeq: block[0]!.seq,
         canonicalEndSeq: block.at(-1)!.seq,
         reason: 'Segment remains hot or has not reached a safe full-turn boundary.',
       });
     } else {
+      const turnStartIndex = turns.length;
       turns.push(...canonicalBlockToPromptTurns([record], input.thread));
+      provenance.push({
+        id: `rolling:raw:${record.id}`,
+        sourcePluginId: 'pico.rolling-context',
+        label: 'Canonical record',
+        kind: 'canonical',
+        disposition: 'raw',
+        canonicalStartSeq: record.seq,
+        canonicalEndSeq: record.seq,
+        turnStartIndex,
+        turnEndIndex: turns.length,
+      });
     }
   }
   // Preserve any core projection additions (for example, initial system turns) only when its
@@ -605,8 +642,7 @@ export const rollingContextPlugin: PicoPlugin = {
         const records = canonical.list(threadId);
         let warmed = 0;
         for (const item of segments) {
-          if (!item.summary || item.summaryStatus !== 'completed' || !canManualCompact(records, item))
-            continue;
+          if (!item.summary || item.summaryStatus !== 'completed' || !canManualCompact(records, item)) continue;
           const updated = transition(item, 'warm', 'Explicit user fallback compact.');
           saveSegments(
             context,
