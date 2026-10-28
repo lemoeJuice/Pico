@@ -78,6 +78,8 @@ export interface AdapterMatch {
 export interface AdapterContribution {
   id: string;
   label: string;
+  /** Filled by the catalog from the registering plugin, never trusted from a contribution. */
+  owner?: string;
   description?: string;
   match: AdapterMatch;
   matchAny?: AdapterMatch[];

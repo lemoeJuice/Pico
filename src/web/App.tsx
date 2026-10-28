@@ -23,7 +23,6 @@ import type {
   MessagePayload,
   MiscellaneousSettings,
   ModelProviderContribution,
-  ModelSettings,
   Project,
   PublicSettings,
   RemoteExecutorConnectionView,
@@ -75,12 +74,21 @@ import { conversationTimeline } from './conversation-timeline.js';
 import { PluginWebView } from './plugin-web-view.js';
 import { McpSettings } from './mcp-settings.js';
 import './mcp-settings.css';
-import { PluginUiSelect } from './plugin-ui-tree.js';
+import { ModelSelection, selectionForActiveThread } from './model-selection.js';
+import { ProviderSettings } from './provider-settings.js';
+import { ComposerTps } from './model-metrics.js';
+import { mergePluginSelectionRefresh } from './plugin-model-selection-state.js';
+import type {
+  AdapterContribution,
+  CatalogModel,
+  CatalogSelection,
+  ProviderInstance,
+  ProviderTypeContribution,
+} from '../contracts/model-catalog.js';
 import { DeveloperSettings } from './developer-settings.js';
 import { appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from './history-pages.js';
 import {
   Archive,
-  ArrowRight,
   ArrowUpRight,
   Box,
   ChevronLeft,
@@ -150,6 +158,13 @@ type PluginInfo = {
   pipelines: Array<{ stage: string; pluginId: string; order: number }>;
   errors: string[];
 };
+type ModelCatalogView = {
+  providerTypes: ProviderTypeContribution[];
+  instances: ProviderInstance[];
+  models: CatalogModel[];
+};
+type PluginModelSelection = { mode: 'thread' | 'fixed'; selection?: CatalogSelection & { unavailableReason?: string } };
+
 type PluginHostUiProps = Omit<PluginUiProps, 'executeCommand'>;
 
 type RuntimeEvent = Record<string, unknown> & { type: string };
@@ -439,7 +454,12 @@ function Modal({
         if (event.currentTarget === event.target) onClose();
       }}
     >
-      <section className={`modal${className ? ` ${className}` : ''}`} role="dialog" aria-modal="true" aria-label={title}>
+      <section
+        className={`modal${className ? ` ${className}` : ''}`}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+      >
         <div className="modal-heading">
           <div>
             <p className="eyebrow">{contextLabel}</p>
@@ -669,14 +689,56 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [newThreadRemoteConnectionId, setNewThreadRemoteConnectionId] = useState('');
   const [newThreadRemoteWorkspacePath, setNewThreadRemoteWorkspacePath] = useState('');
   const [remoteForm, setRemoteForm] = useState({ name: '', endpointUrl: '', accessToken: '' });
-  const [modelForm, setModelForm] = useState({
-    baseUrl: '',
-    model: '',
-    apiKey: '',
-    temperature: 0.2,
-    provider: 'openai-compatible' as ModelSettings['provider'],
-    hasApiKey: false,
+  const [modelCatalog, setModelCatalog] = useState<ModelCatalogView>({ providerTypes: [], instances: [], models: [] });
+  const [pluginModelSelections, setPluginModelSelections] = useState<Record<string, PluginModelSelection>>({});
+  const pluginSelectionVersions = useRef<Record<string, number>>({});
+  const pluginSelectionBusy = useRef(new Set<string>());
+  const pluginSelectionDrafts = useRef(new Set<string>());
+  const [busyPluginSelections, setBusyPluginSelections] = useState<Set<string>>(new Set());
+  const refreshPluginSelections = useCallback(async () => {
+    const versions = { ...pluginSelectionVersions.current };
+    const result = await api<Record<string, PluginModelSelection>>('/api/plugins/model-selections');
+    setPluginModelSelections((current) =>
+      mergePluginSelectionRefresh(
+        current,
+        result,
+        versions,
+        pluginSelectionVersions.current,
+        pluginSelectionBusy.current,
+        pluginSelectionDrafts.current,
+      ),
+    );
+  }, []);
+  const savePluginSelection = async (id: string, config: PluginModelSelection): Promise<void> => {
+    if (pluginSelectionBusy.current.has(id)) throw new Error('A model selection is already being saved.');
+    pluginSelectionBusy.current.add(id);
+    pluginSelectionVersions.current[id] = (pluginSelectionVersions.current[id] ?? 0) + 1;
+    setBusyPluginSelections(new Set(pluginSelectionBusy.current));
+    try {
+      const saved = await api<PluginModelSelection>(`/api/plugins/${encodeURIComponent(id)}/model-selection`, {
+        method: 'PUT',
+        body: JSON.stringify(config),
   });
+      pluginSelectionDrafts.current.delete(id);
+      setPluginModelSelections((items) => ({ ...items, [id]: saved }));
+    } finally {
+      pluginSelectionVersions.current[id] = (pluginSelectionVersions.current[id] ?? 0) + 1;
+      pluginSelectionBusy.current.delete(id);
+      setBusyPluginSelections(new Set(pluginSelectionBusy.current));
+    }
+  };
+  const loadAdapters = useCallback(
+    async (modelId: string) =>
+      (
+        await api<{ adapters: AdapterContribution[] }>(
+          `/api/model-catalog/adapters?modelId=${encodeURIComponent(modelId)}`,
+        )
+      ).adapters,
+    [],
+  );
+  const refreshModelCatalog = useCallback(async () => {
+    setModelCatalog(await api<ModelCatalogView>('/api/model-catalog'));
+  }, []);
   const listRef = useRef<HTMLDivElement>(null);
   const pendingThinkingScrollAdjustment = useRef<{
     summary: HTMLElement;
@@ -865,8 +927,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     activeThreadNotice && activeThreadNoticeSeverity === 'error'
       ? activeThreadNotice
       : noticeForThread(threadId, threadNotices, notice);
-  const activeNoticeSeverity =
-    activeThreadNotice && activeThreadNoticeSeverity === 'error' ? 'error' : 'notice';
+  const activeNoticeSeverity = activeThreadNotice && activeThreadNoticeSeverity === 'error' ? 'error' : 'notice';
   const filteredCommands = useMemo(() => {
     if (!draft.startsWith('/')) return [];
     const commandInput = draft.slice(1);
@@ -877,16 +938,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const uiContributions = pluginInfo?.ui ?? [];
   const toolbarContributions = uiContributionsAt(uiContributions, 'thread.toolbar');
   const composerActions = uiContributionsAt(uiContributions, 'composer.action');
-  const composerModelProvider = settings?.provider ?? activeSnapshot?.modelSelection.provider;
-  const composerModelContributions = uiContributionsAt(uiContributions, 'composer.model', composerModelProvider);
   const composerStatusContributions = uiContributionsAt(uiContributions, 'composer.status');
-  const activeModelExecutionId =
+  const latestModelExecution =
     selectedThread && activeSnapshot?.thread.id === selectedThread.id
-      ? (activeSnapshot.executions.find(
-          (execution) =>
-            execution.kind === 'model' && (execution.status === 'pending' || execution.status === 'running'),
-        )?.id ?? null)
-      : null;
+      ? [...activeSnapshot.executions]
+          .filter((execution) => execution.kind === 'model')
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+      : undefined;
   const sidebarPanels = uiContributionsAt(uiContributions, 'sidebar.panel');
   const toolResultContributions = uiContributionsAt(uiContributions, 'tool.result');
   const newProjectWorkspacePath = newProjectPath || defaultWorkspace;
@@ -1069,6 +1127,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           api<PluginInfo>('/api/plugins'),
           api<{ defaultWorkspace: string }>('/api/info'),
           api<RemoteExecutorConnectionView[]>('/api/executor-connections'),
+          api<ModelCatalogView>('/api/model-catalog'),
+          api<Record<string, PluginModelSelection>>('/api/plugins/model-selections'),
         ]),
       () => 0,
       () => alive,
@@ -1076,8 +1136,18 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       .then((bootstrap) => {
         if (!alive || !bootstrap) return;
         setBootstrapping(false);
-        const [projectList, modelSettings, contextSettings, miscellaneous, commandList, pluginResult, info, connections] =
-          bootstrap;
+        const [
+          projectList,
+          modelSettings,
+          contextSettings,
+          miscellaneous,
+          commandList,
+          pluginResult,
+          info,
+          connections,
+          catalog,
+          pluginSelections,
+        ] = bootstrap;
         setProjects(projectList);
         setSettings(modelSettings);
         setContextManagement(contextSettings);
@@ -1087,7 +1157,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           compactionThresholdTokens: String(contextSettings.compactionThresholdTokens),
           keepRecentTokens: String(contextSettings.keepRecentTokens),
         });
-        setModelForm({ ...modelSettings, apiKey: '' });
+        setModelCatalog(catalog);
+        setPluginModelSelections(pluginSelections);
         setCommands(commandList);
         setPluginInfo(pluginResult);
         setDefaultWorkspace(info.defaultWorkspace);
@@ -1097,7 +1168,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         setProjectId(initial);
         setExpandedProjectIds(new Set(initial ? [initial] : []));
         if (initial) localStorage.setItem('pico.project', initial);
-        if (modelSettings.model.trim() === '') setSettingsOpen(false);
       })
       .catch((caught: unknown) => {
         if (alive) {
@@ -1466,7 +1536,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         } else if (event.type === 'settings.updated') {
           const value = event.settings as PublicSettings;
           setSettings(value);
-          setModelForm((current) => ({ ...current, ...value }));
+        } else if (event.type === 'model-catalog.updated') {
+          const selectedId = activeThreadId.current;
+          void Promise.all([
+            refreshModelCatalog(),
+            refreshPluginSelections(),
+            ...(selectedId ? [loadSnapshot(selectedId)] : []),
+          ]).catch((caught: unknown) => setError(caught instanceof Error ? caught.message : String(caught)));
         }
       };
       socket.onclose = () => {
@@ -1500,7 +1576,14 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       if (timer) window.clearTimeout(timer);
       socket?.close();
     };
-  }, [acceptMessage, loadThreadTools, noteSnapshotChange, observeModelExecutions, settleModelExecution, syncThreadLists]);
+  }, [
+    acceptMessage,
+    loadThreadTools,
+    noteSnapshotChange,
+    observeModelExecutions,
+    settleModelExecution,
+    syncThreadLists,
+  ]);
 
   useEffect(() => {
     followLatest.current = true;
@@ -1968,35 +2051,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     return result.execution;
   };
 
-  const saveModelSettings = async (event: FormEvent): Promise<void> => {
-    event.preventDefault();
-    setSettingsSaving(true);
-    setError('');
-    const body: Partial<ModelSettings> = {
-      baseUrl: modelForm.baseUrl,
-      provider: modelForm.provider,
-    };
-    // Switching providers must not carry the previous provider's model into its saved selection.
-    if (modelForm.provider === 'openai-compatible') {
-      body.model = modelForm.model;
-    }
-    if (modelForm.apiKey) body.apiKey = modelForm.apiKey;
-    try {
-      const saved = await api<PublicSettings>('/api/settings/model', {
-        method: 'PUT',
-        body: JSON.stringify(body),
-      });
-      setSettings(saved);
-      setModelForm({ ...saved, apiKey: '' });
-      setNotice('Model settings saved on this Pico Runtime.');
-      setSettingsOpen(false);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setSettingsSaving(false);
-    }
-  };
-
   const saveContextManagementSettings = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
     const contextWindowTokens = Number(contextManagementForm.contextWindowTokens);
@@ -2059,40 +2113,26 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   };
 
   const updateModelSettingsFromPlugin: PluginUiProps['updateModelSettings'] = async (update, targetThreadId) => {
-    const updatesGlobalTarget = update.provider !== undefined || update.model !== undefined || update.baseUrl !== undefined;
-    if (targetThreadId && !updatesGlobalTarget) {
-      const current = await api<ThreadModelSelection>(
-        `/api/threads/${encodeURIComponent(targetThreadId)}/model-selection`,
-      );
-      const provider = update.provider ?? current.provider;
-      const model = update.model ?? current.model;
-      const targetChanged = provider !== current.provider || model !== current.model;
+    if (!targetThreadId || update.provider !== undefined || update.model !== undefined || update.baseUrl !== undefined)
+      throw new Error('Choose a model using the model selector.');
+    const current = await api<CatalogSelection>(`/api/threads/${encodeURIComponent(targetThreadId)}/model-selection`);
       const saved = await api<ThreadModelSelection>(
         `/api/threads/${encodeURIComponent(targetThreadId)}/model-selection`,
         {
           method: 'PUT',
           body: JSON.stringify({
             ...current,
-            provider,
-            model,
             parameters: {
               ...current.parameters,
               ...(update.temperature === undefined ? {} : { temperature: update.temperature }),
-              ...(targetChanged ? { options: {} } : {}),
             },
           }),
         },
       );
-      if (activeThreadId.current === targetThreadId) {
+    if (activeThreadId.current === targetThreadId)
         setSnapshot((snapshot) =>
           snapshot?.thread.id === targetThreadId ? { ...snapshot, modelSelection: saved } : snapshot,
         );
-      }
-      return;
-    }
-    const saved = await api<PublicSettings>('/api/settings/model', { method: 'PUT', body: JSON.stringify(update) });
-    setSettings(saved);
-    setModelForm((form) => ({ ...form, ...saved, apiKey: '' }));
   };
 
   const openCanonicalMessage: PluginUiProps['openMessage'] = async (seq) => {
@@ -2183,19 +2223,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
   const activeModelSelection =
     activeSnapshot && selectedThread && activeSnapshot.thread.id === selectedThread.id
-      ? (() => {
-          const selection = activeSnapshot.modelSelection;
-          const targetMatchesGlobal =
-            !settings || (selection.provider === settings.provider && selection.model === settings.model);
-          return {
-            ...selection,
-            ...(settings ? { provider: settings.provider, connectionId: 'default', model: settings.model } : {}),
-            parameters: {
-              ...selection.parameters,
-              ...(targetMatchesGlobal ? {} : { options: {} }),
-            },
-          };
-        })()
+      ? activeSnapshot.modelSelection
       : undefined;
   const viewContext: PluginUiContext = {
     thread: selectedThread,
@@ -2287,23 +2315,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         expansionKey={expansionKey}
       />
     );
-  };
-
-  const clearApiKey = async (): Promise<void> => {
-    try {
-      const saved = await api<PublicSettings>('/api/settings/model', {
-        method: 'PUT',
-        body: JSON.stringify({
-          baseUrl: modelForm.baseUrl,
-          model: modelForm.model,
-          apiKey: '',
-        }),
-      });
-      setSettings(saved);
-      setModelForm({ ...saved, apiKey: '' });
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    }
   };
 
   const executeContribution = (item: UiContribution): void => {
@@ -2808,9 +2819,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 ? 'Loading your Projects, Threads, and Runtime settings…'
                 : 'Pico keeps your conversations and execution state close, so you can pick up where you left off.'}
             </p>
-            {settings?.model || selectedProject ? (
+              {modelCatalog.instances.length > 0 || selectedProject ? (
               <div className="welcome-actions">
-                {settings?.model && !selectedProject ? (
+                  {modelCatalog.instances.length > 0 && !selectedProject ? (
                   <button
                     className="button button-primary"
                     disabled={bootstrapping}
@@ -2830,7 +2841,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 ) : null}
               </div>
             ) : null}
-            {!settings?.model ? (
+              {modelCatalog.instances.length === 0 ? (
               <button className="welcome-settings button button-primary" onClick={() => setSettingsOpen(true)}>
                 <Settings size={14} aria-hidden="true" /> Configure a model connection
               </button>
@@ -3018,9 +3029,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                           onRetryModelExecution={retryModelExecution}
                           retryDisabled={currentState === 'running' || currentState === 'pausing'}
                           rewindDisabled={
-                            currentState === 'running' ||
-                            currentState === 'pausing' ||
-                            threadContextRestoring
+                              currentState === 'running' || currentState === 'pausing' || threadContextRestoring
                           }
                         />
                       ) : item.record.kind === 'assistant' ? (
@@ -3095,34 +3104,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     aria-label="Message"
                   />
                   <div className="composer-footer">
-                    {pluginUiContext && composerModelContributions.length > 0 ? (
-                      <div className="composer-plugin-controls" aria-label="Model controls">
-                        {composerModelContributions.map((item) => {
-                          return item.pluginId && item.entry && item.component ? (
-                            <PluginWebView
-                              key={pluginUiContributionKey(item)}
-                              pluginId={item.pluginId}
-                              entry={item.entry}
-                              viewType="component"
-                              viewId={item.component}
-                              uiSlot={item.slot}
-                              controlLabel={item.label}
-                              controlClassName="composer-plugin-action"
-                              supportsPopover={item.supportsPopover}
-                              externalAuthOrigins={item.externalAuthOrigins}
-                              events={pluginEvents}
-                              {...pluginUiContext}
-                              isRegisteredPage={isRegisteredPluginPage}
-                              runCommand={runPluginCommand}
-                            />
-                          ) : (
-                            <span className="field-note" key={pluginUiContributionKey(item)}>
-                              {item.label} requires a plugin Web UI entry.
-                            </span>
-                          );
-                        })}
-                      </div>
-                    ) : null}
                     <div className="composer-footer-actions">
                       {composerActions.map((item) => (
                         <PluginContributionView
@@ -3160,7 +3141,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                         }
                         onClick={() => void sendMessage()}
                       >
-                        {selectedThreadSending ? <i className="tiny-spinner" /> : <Send size={15} aria-hidden="true" />}
+                          {selectedThreadSending ? (
+                            <i className="tiny-spinner" />
+                          ) : (
+                            <Send size={15} aria-hidden="true" />
+                          )}
                       </button>
                     </div>
                   </div>
@@ -3185,17 +3170,29 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     ) : null,
                   )}
                 <div className="composer-status-info">
-                  {settings?.model ? (
-                    <span className="composer-model-name">{settings.model}</span>
-                  ) : (
-                    <button className="setup-caption composer-model-name" onClick={() => setSettingsOpen(true)}>
-                      Choose a model <ArrowRight size={12} aria-hidden="true" />
-                    </button>
-                  )}
+                    <ModelSelection
+                      key={`model-selection:${selectedThread.id}`}
+                      models={modelCatalog.models}
+                      instances={modelCatalog.instances}
+                      selection={activeModelSelection ?? null}
+                      loadAdapters={loadAdapters}
+                      onSave={async (selection) => {
+                        const targetThreadId = selectedThread.id;
+                        const saved = await api<ThreadModelSelection>(
+                          `/api/threads/${encodeURIComponent(targetThreadId)}/model-selection`,
+                          { method: 'PUT', body: JSON.stringify(selection) },
+                        );
+                        setSnapshot((current) =>
+                          selectionForActiveThread(current, activeThreadId.current, targetThreadId, saved),
+                        );
+                      }}
+                    />
                   <ComposerTps
-                    key={selectedThread.id}
+                      key={`model-metrics:${selectedThread.id}`}
                     threadId={selectedThread.id}
-                    executionId={activeModelExecutionId}
+                      executionId={latestModelExecution?.id ?? null}
+                      status={latestModelExecution?.status ?? null}
+                      request={api}
                   />
                   {activeSnapshot?.thread.id === selectedThread.id && contextManagement ? (
                     <span
@@ -3256,8 +3253,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             )}
             {executorDetails.updateAvailable && executorDetails.updateSupported === false ? (
               <p>
-                Update this standalone Executor from its installation machine, then check again here. This installation
-                cannot update it through the current connection.
+                  Update this standalone Executor from its installation machine, then check again here. This
+                  installation cannot update it through the current connection.
               </p>
             ) : null}
             <div className="executor-update-actions">
@@ -3506,7 +3503,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               ) : (
                 <div className="archived-thread-list">
                   {archivedThreads.map((thread) => {
-                    const projectName = projects.find((project) => project.id === thread.projectId)?.name ?? 'Project';
+                      const projectName =
+                        projects.find((project) => project.id === thread.projectId)?.name ?? 'Project';
                     return (
                       <article className="archived-thread-card" key={thread.id}>
                         <div className="archived-thread-copy">
@@ -3625,7 +3623,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   aria-checked={miscellaneousSettings?.toolCardsExpandedByDefault ?? false}
                   aria-label="Expand tool cards by default"
                   disabled={settingsSaving || !miscellaneousSettings}
-                  onClick={() => void setToolCardsExpandedByDefault(!miscellaneousSettings?.toolCardsExpandedByDefault)}
+                    onClick={() =>
+                      void setToolCardsExpandedByDefault(!miscellaneousSettings?.toolCardsExpandedByDefault)
+                    }
                 >
                   <span />
                 </button>
@@ -3651,6 +3651,44 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       </p>
                       {plugin.error ? <p className="plugin-manager-error">{plugin.error}</p> : null}
                       {plugin.required ? <p className="field-note">Required by Pico</p> : null}
+                        <label>
+                          Model for plugin calls{' '}
+                          <select
+                            disabled={busyPluginSelections.has(plugin.id)}
+                            value={pluginModelSelections[plugin.id]?.mode ?? 'thread'}
+                            onChange={(event) => {
+                              const mode = event.target.value as 'thread' | 'fixed';
+                              const current = pluginModelSelections[plugin.id];
+                              if (mode === 'fixed' && !current?.selection) {
+                                pluginSelectionDrafts.current.add(plugin.id);
+                                pluginSelectionVersions.current[plugin.id] =
+                                  (pluginSelectionVersions.current[plugin.id] ?? 0) + 1;
+                                setPluginModelSelections((items) => ({ ...items, [plugin.id]: { mode } }));
+                                return;
+                              }
+                              void savePluginSelection(
+                                plugin.id,
+                                mode === 'thread' ? { mode } : { mode, selection: current!.selection! },
+                              ).catch((caught: unknown) =>
+                                setError(caught instanceof Error ? caught.message : String(caught)),
+                              );
+                            }}
+                          >
+                            <option value="thread">Inherit Thread</option>
+                            <option value="fixed">Choose independently</option>
+                          </select>
+                        </label>
+                        {pluginModelSelections[plugin.id]?.mode === 'fixed' ? (
+                          <ModelSelection
+                            models={modelCatalog.models}
+                            instances={modelCatalog.instances}
+                            selection={pluginModelSelections[plugin.id]?.selection ?? null}
+                            loadAdapters={loadAdapters}
+                            onSave={async (selection) => {
+                              await savePluginSelection(plugin.id, { mode: 'fixed', selection });
+                            }}
+                          />
+                        ) : null}
                     </div>
                     <div className="plugin-manager-actions">
                       <button
@@ -3668,7 +3706,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     </div>
                   </article>
                 ))}
-                {pluginInfo?.catalog.length === 0 ? <p className="field-note">No runtime plugins were found.</p> : null}
+                  {pluginInfo?.catalog.length === 0 ? (
+                    <p className="field-note">No runtime plugins were found.</p>
+                  ) : null}
               </div>
             </section>
           ) : memoryManagerOpen ? (
@@ -3705,93 +3745,31 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 />
               ) : (
                 <p className="field-note">
-                  This plugin page is registered by {selectedPluginPage?.pluginId ?? pluginPageSelection.pluginId}, but
-                  its Web UI entry is not available.
+                    This plugin page is registered by {selectedPluginPage?.pluginId ?? pluginPageSelection.pluginId},
+                    but its Web UI entry is not available.
                 </p>
               )}
             </section>
           ) : (
-            <>
-              <form className="form-stack" onSubmit={(event) => void saveModelSettings(event)}>
-                <p className="form-intro">Choose how this Runtime connects to its model provider.</p>
-                <label>
-                  Provider
-                  <PluginUiSelect
-                    label="Provider"
-                    value={modelForm.provider}
-                    compact={false}
-                    options={
-                      pluginInfo?.providers.map((provider) => ({ value: provider.id, label: provider.label })) ?? []
-                    }
-                    onChange={(provider) =>
-                      setModelForm((form) => ({
-                        ...form,
-                        provider,
-                        model: settings?.modelsByProvider?.[provider] ?? '',
-                      }))
+              <ProviderSettings
+                types={modelCatalog.providerTypes}
+                instances={modelCatalog.instances}
+                onAdd={(type) => openPluginPage(type.addPage.pluginId, type.addPage.pageId)}
+                onRefresh={async (id) =>
+                  setModelCatalog(
+                    await api<ModelCatalogView>(`/api/provider-instances/${encodeURIComponent(id)}/refresh`, {
+                      method: 'POST',
+                    }),
+                  )
+                }
+                onDelete={async (id) =>
+                  setModelCatalog(
+                    await api<ModelCatalogView>(`/api/provider-instances/${encodeURIComponent(id)}`, {
+                      method: 'DELETE',
+                    }),
+                  )
                     }
                   />
-                </label>
-                {modelForm.provider === 'openai-compatible' ? (
-                  <>
-                    <label>
-                      API base URL
-                      <input
-                        value={modelForm.baseUrl}
-                        onChange={(event) => setModelForm((form) => ({ ...form, baseUrl: event.target.value }))}
-                        placeholder="https://api.openai.com/v1"
-                        autoComplete="url"
-                      />
-                    </label>
-                    <label>
-                      Model
-                      <input
-                        value={modelForm.model}
-                        onChange={(event) => setModelForm((form) => ({ ...form, model: event.target.value }))}
-                        placeholder="gpt-4.1-mini"
-                      />
-                    </label>
-                    <label>
-                      API key{' '}
-                      <span className="field-note">
-                        {modelForm.hasApiKey
-                          ? 'A key is saved. Leave blank to keep it.'
-                          : 'Stored locally in Pico’s data file.'}
-                      </span>
-                      <input
-                        value={modelForm.apiKey}
-                        onChange={(event) => setModelForm((form) => ({ ...form, apiKey: event.target.value }))}
-                        type="password"
-                        placeholder={modelForm.hasApiKey ? 'Saved · enter a new key to replace' : 'sk-…'}
-                        autoComplete="new-password"
-                      />
-                    </label>
-                  </>
-                ) : (
-                  <p className="field-note">
-                    Provider-specific sign-in and model choices are contributed by the provider plugin. Choose its
-                    controls below the message composer, or open its settings page above. Save to use this provider.
-                  </p>
-                )}
-                <div className="form-actions">
-                  {modelForm.provider === 'openai-compatible' ? (
-                    <button
-                      type="button"
-                      className="button button-quiet"
-                      onClick={() => void clearApiKey()}
-                      disabled={!settings?.hasApiKey}
-                    >
-                      Clear saved key
-                    </button>
-                  ) : (
-                    <span />
-                  )}
-                  <button className="button button-primary" disabled={settingsSaving}>
-                    {settingsSaving ? 'Saving…' : 'Save settings'}
-                  </button>
-                </div>
-              </form>
-            </>
           )}
         </Modal>
       ) : null}
@@ -3804,7 +3782,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           onDismissError={() => setError('')}
         >
           <form className="form-stack" onSubmit={(event) => void createProject(event)}>
-            <p className="form-intro">A Project groups Threads that share the same workspace and long-term context.</p>
+              <p className="form-intro">
+                A Project groups Threads that share the same workspace and long-term context.
+              </p>
             <label>
               Project name
               <input
@@ -3931,7 +3911,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       {threadHistoryOpen && selectedThread ? (
         <ConversationHistoryDialog
           branches={activeSnapshot?.thread.id === selectedThread.id ? (activeSnapshot.historyBranches ?? []) : []}
-          hasInactiveHistory={activeSnapshot?.thread.id === selectedThread.id && activeSnapshot.hasInactiveHistory === true}
+            hasInactiveHistory={
+              activeSnapshot?.thread.id === selectedThread.id && activeSnapshot.hasInactiveHistory === true
+            }
           showPreservedHistory={preservedHistoryThreadId === selectedThread.id}
           onShowPreservedHistory={() => {
             setPreservedHistoryThreadId(preservedHistoryThreadId === selectedThread.id ? null : selectedThread.id);
@@ -3996,7 +3978,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           onDismissError={() => setError('')}
         >
           <form className="form-stack" onSubmit={(event) => void createThread(event)}>
-            <p className="form-intro">Choose how this Thread runs. Its execution mode stays fixed for its lifetime.</p>
+              <p className="form-intro">
+                Choose how this Thread runs. Its execution mode stays fixed for its lifetime.
+              </p>
             <label>
               Thread name <span className="field-note">Optional</span>
               <input
@@ -4486,71 +4470,6 @@ function useAssistantDraftContent(threadId: string) {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-function estimateStreamTokenCount(text: string): number {
-  const pieces =
-    text.match(
-      /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]|[\p{L}\p{M}\p{N}]+|[^\s\p{L}\p{M}\p{N}]/gu,
-    ) ?? [];
-  return pieces.reduce((tokens, piece) => {
-    if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(piece)) return tokens + 1;
-    if (/[\p{L}\p{M}\p{N}]/u.test(piece)) return tokens + Math.max(1, Math.ceil([...piece].length / 4));
-    return tokens + 1;
-  }, 0);
-}
-
-function ComposerTps({ threadId, executionId }: { threadId: string; executionId: string | null }) {
-  const draft = useAssistantDraftContent(threadId);
-  // The streamed draft carries the execution ID even if the latest snapshot has not caught up yet.
-  const liveExecutionId = executionId ?? (draft?.text ? draft.executionId : null);
-  const activeText = liveExecutionId && draft?.executionId === liveExecutionId ? draft.text : '';
-  const hasActiveText = activeText.length > 0;
-  const startedAt = useRef<{ executionId: string; time: number } | null>(null);
-  const previousExecutionId = useRef<string | null>(null);
-  const [now, setNow] = useState(() => performance.now());
-  const [lastTps, setLastTps] = useState<number | null>(null);
-
-  if (previousExecutionId.current !== liveExecutionId) {
-    previousExecutionId.current = liveExecutionId;
-    startedAt.current = null;
-  }
-  if (liveExecutionId && hasActiveText && startedAt.current?.executionId !== liveExecutionId) {
-    startedAt.current = { executionId: liveExecutionId, time: performance.now() };
-  }
-
-  useEffect(() => {
-    if (!liveExecutionId || !hasActiveText) return undefined;
-    setNow(performance.now());
-    const timer = window.setInterval(() => setNow(performance.now()), 500);
-    return () => window.clearInterval(timer);
-  }, [liveExecutionId, hasActiveText]);
-
-  const start =
-    liveExecutionId && startedAt.current?.executionId === liveExecutionId ? startedAt.current.time : null;
-  const elapsedSeconds = start === null ? 0 : Math.max(0, (now - start) / 1_000);
-  const currentTps =
-    hasActiveText && elapsedSeconds > 0
-      ? estimateStreamTokenCount(activeText) / Math.max(0.5, elapsedSeconds)
-      : null;
-
-  useEffect(() => {
-    if (currentTps !== null && Number.isFinite(currentTps)) setLastTps(currentTps);
-  }, [currentTps]);
-
-  const tps = liveExecutionId ? currentTps : lastTps;
-  const label = tps === null ? 'TPS —' : `TPS ~${Math.round(tps)}`;
-  return (
-    <span
-      className="composer-tps"
-      title="Estimated output tokens per second from streamed text. The tokenizer varies by model; timing starts at the first visible text."
-      aria-label={
-        tps === null ? 'Estimated output speed unavailable' : `Estimated output speed ${Math.round(tps)} tokens per second`
-      }
-    >
-      {label}
-    </span>
-  );
-}
-
 function useAssistantExecutionId(threadId: string) {
   const subscribe = useCallback(
     (listener: () => void) => assistantDraftStore.subscribeExecution(threadId, listener),
@@ -4921,6 +4840,9 @@ function ModelInputDisclosure({
                 {request.providerError?.type ? ` · ${request.providerError.type}` : ''}
                 {request.providerError?.code ? ` · ${request.providerError.code}` : ''}
               </summary>
+              {request.outputTokensPerSecond !== undefined ? (
+                <p className="projection-note">Output tokens per second includes the wait for first text.</p>
+              ) : null}
               <pre className="projection-view">
                 {toJson({
                   provider: request.provider,
@@ -4938,6 +4860,7 @@ function ModelInputDisclosure({
                   providerError: request.providerError,
                   eventCounts: request.eventCounts,
                   firstTextMs: request.firstTextMs,
+                  outputTokensPerSecond: request.outputTokensPerSecond,
                   deltaTextCharacters: request.deltaTextCharacters,
                   outputTextCharacters: request.outputTextCharacters,
                   outputItemCounts: request.outputItemCounts,
@@ -5087,7 +5010,9 @@ function AssistantBubble({
       <button
         type="button"
         className="assistant-avatar assistant-avatar-toggle"
-        aria-label={showModelDetails ? 'Hide model details and continue action' : 'Show model details and continue action'}
+        aria-label={
+          showModelDetails ? 'Hide model details and continue action' : 'Show model details and continue action'
+        }
         aria-expanded={showModelDetails}
         title={showModelDetails ? 'Hide model details and continue action' : 'Show model details and continue action'}
         onClick={() => setShowModelDetails((visible) => !visible)}
@@ -5217,7 +5142,10 @@ function ContextCompactionResultCard({ record }: { record: CanonicalRecord }) {
 
 function ContextRewindCard({ record, targetSeq }: { record: CanonicalRecord; targetSeq: number }) {
   return (
-    <aside className="context-compaction-card context-rewind-card" aria-label="Conversation continued from an earlier turn">
+    <aside
+      className="context-compaction-card context-rewind-card"
+      aria-label="Conversation continued from an earlier turn"
+    >
       <div className="context-compaction-icon" aria-hidden="true">
         <RotateCcw size={14} />
       </div>
@@ -5265,7 +5193,9 @@ function ConversationHistoryDialog({
     const children = childrenByParent.get(branch.id) ?? [];
     return (
       <div className="history-branch-item" key={branch.id} role="listitem">
-        <div className={`history-branch-node${branch.active ? ' is-active' : ''}${branch.onActivePath ? ' is-on-active-path' : ''}`}>
+        <div
+          className={`history-branch-node${branch.active ? ' is-active' : ''}${branch.onActivePath ? ' is-on-active-path' : ''}`}
+        >
           <div className="history-branch-heading">
             <strong>Continued from seq {branch.targetSeq}</strong>
             <span className={`history-branch-status${branch.active ? ' is-active' : ''}`}>
@@ -5297,7 +5227,8 @@ function ConversationHistoryDialog({
     >
       <div className="form-stack conversation-history-dialog">
         <p className="form-intro">
-          Each Continue from here action starts a preserved path from an earlier message. The active path is marked below.
+          Each Continue from here action starts a preserved path from an earlier message. The active path is marked
+          below.
         </p>
         {branches.length > 0 ? (
           <div className="history-branch-tree" role="list" aria-label="Conversation paths">
@@ -5322,7 +5253,9 @@ function ConversationHistoryDialog({
               <GitBranch size={13} aria-hidden="true" />
               {showPreservedHistory ? 'Show active path only' : 'Show preserved history'}
             </button>
-          ) : <span />}
+          ) : (
+            <span />
+          )}
           <button type="button" className="button button-quiet" onClick={onClose}>
             Close
           </button>

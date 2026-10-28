@@ -75,6 +75,7 @@ describe('model catalog', () => {
       const adapter: AdapterContribution = {
         id: 'adapter',
         label: 'Adapter',
+        owner: 'untrusted-owner',
         match: { familyPrefixes: ['family-'], protocols: ['responses'] },
         controls: [{ id: 'effort', label: 'Effort', type: 'string', choices: ['high', 'low'] }],
         temperature: { supported: true, min: 0, max: 2 },
@@ -82,6 +83,7 @@ describe('model catalog', () => {
       catalog.registerAdapter('adapter-plugin', adapter);
       catalog.registerAdapter('adapter-plugin', { ...adapter, id: 'other-adapter' });
       expect(catalog.matchingAdapters(first!.modelId)).toHaveLength(2);
+      expect(catalog.matchingAdapters(first!.modelId).every((item) => item.owner === 'adapter-plugin')).toBe(true);
       const selection = {
         modelId: first!.modelId,
         adapterId: 'adapter',

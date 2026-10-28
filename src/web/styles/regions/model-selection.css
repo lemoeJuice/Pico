@@ -1,0 +1,116 @@
+.model-selection {
+  position: relative;
+}
+.model-selection-panel {
+  position: fixed;
+  z-index: 50;
+  box-sizing: border-box;
+  overflow: auto;
+  padding: 16px;
+  color: #46564b;
+  font-size: 12px;
+  background: #fcfdfb;
+  border: 1px solid #d8e1d7;
+  border-radius: 12px;
+  box-shadow: 0 8px 30px #0002;
+}
+.model-selection-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  gap: 18px;
+  margin-top: 12px;
+}
+.model-selection-heading,
+.provider-instance {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.model-selection-models,
+.model-selection-parameters,
+.provider-types {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  margin: 12px 0;
+}
+.model-selection-models {
+  margin: 0;
+}
+.model-selection-detail {
+  min-width: 0;
+  border-left: 1px solid #e4eae2;
+  padding-left: 18px;
+}
+.model-selection-models button,
+.model-selection-adapter {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+  padding: 10px;
+  color: inherit;
+  font: inherit;
+  border: 1px solid #e4eae2;
+  border-radius: 8px;
+  background: white;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.model-selection-models button span:last-child {
+  flex-shrink: 0;
+}
+.model-selection-adapter {
+  margin-top: 8px;
+}
+.model-selection-adapter small {
+  display: block;
+  margin-top: 4px;
+  opacity: 0.75;
+}
+.model-selection-panel button[aria-pressed='true'] {
+  border-color: #72927a;
+  background: #eaf1e9;
+}
+.model-selection-parameters label {
+  display: grid;
+  gap: 4px;
+}
+.model-selection-parameters input,
+.model-selection-parameters select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid #d8e1d7;
+  border-radius: 6px;
+  color: inherit;
+  background: white;
+}
+.model-selection-heading > button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.provider-instance {
+  padding: 12px 0;
+  border-bottom: 1px solid #ddd;
+}
+.provider-types button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+@media (max-width: 600px) {
+  .model-selection-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .model-selection-detail {
+    border-left: 0;
+    border-top: 1px solid #e4eae2;
+    padding: 12px 0 0;
+  }
+}

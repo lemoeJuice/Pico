@@ -133,6 +133,7 @@ export class ModelCatalog {
       owner,
       adapter: {
         ...adapter,
+        owner,
         match: clone(adapter.match),
         controls: clone(adapter.controls),
         temperature: clone(adapter.temperature),
@@ -300,10 +301,10 @@ export class ModelCatalog {
     const model = this.listModels().find((entry) => entry.modelId === modelId);
     return model
       ? [...this.adapters.values()]
-          .map(({ adapter }) => adapter)
-          .filter((adapter) => matches(adapter, model))
-          .map((adapter) => ({
+          .filter(({ adapter }) => matches(adapter, model))
+          .map(({ owner, adapter }) => ({
             ...adapter,
+            owner,
             match: clone(adapter.match),
             controls: clone(adapter.controlsForModel?.(clone(model)) ?? adapter.controls),
             temperature: clone(adapter.temperatureForModel?.(clone(model)) ?? adapter.temperature),

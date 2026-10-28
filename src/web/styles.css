@@ -31,3 +31,5 @@
 @import './styles/regions/reasoning.css';
 @import './styles/regions/composer-integration.css';
 @import './styles/regions/tool-card-heading.css';
+
+@import './styles/regions/model-selection.css';
