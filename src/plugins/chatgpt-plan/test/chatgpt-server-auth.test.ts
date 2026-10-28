@@ -26,7 +26,9 @@ describe('ChatGPT plugin server authorization', () => {
       process.env.PICO_ACCESS_TOKEN = 'pico-test-token-'.repeat(3);
       server = await startServer();
       const base = `http://127.0.0.1:${server.port}`;
-      const pluginPage = await fetch(`${base}/_pico/plugin-ui/pico.chatgpt-plan/webui/index.html`);
+      const pluginPage = await fetch(`${base}/_pico/plugin-ui/pico.chatgpt-plan/webui/index.html`, {
+        headers: { connection: 'close' },
+      });
       expect(pluginPage.status).toBe(200);
       const pluginCsp = pluginPage.headers.get('content-security-policy') ?? '';
       expect(pluginCsp).toContain(`script-src 'self' ${base}`);
@@ -34,7 +36,9 @@ describe('ChatGPT plugin server authorization', () => {
       expect(pluginCsp).toContain("connect-src 'none'");
       expect(pluginCsp).toContain("frame-ancestors 'self'");
       expect(await pluginPage.text()).toContain('./build/webui.js');
-      const pluginBundle = await fetch(`${base}/_pico/plugin-ui/pico.chatgpt-plan/webui/build/webui.js`);
+      const pluginBundle = await fetch(`${base}/_pico/plugin-ui/pico.chatgpt-plan/webui/build/webui.js`, {
+        headers: { connection: 'close' },
+      });
       expect(pluginBundle.status).toBe(200);
       expect(pluginBundle.headers.get('content-type')).toContain('javascript');
     } finally {
@@ -60,14 +64,28 @@ describe('ChatGPT plugin server authorization', () => {
         body: JSON.stringify({ token: process.env.PICO_ACCESS_TOKEN }),
       });
       const cookie = (login.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
-      const unauthorized = await fetch(`${base}/api/plugins/pico.chatgpt-plan/sign-in`, {
+      const create = await fetch(`${base}/api/plugins/pico.chatgpt-plan/instances`, {
+        method: 'POST',
+        headers: { origin, cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ label: 'Test account' }),
+      });
+      expect(create.status).toBe(200);
+      const instance = (await create.json()) as { id: string };
+      const signInUrl = `${base}/api/plugins/pico.chatgpt-plan/sign-in?instanceId=${encodeURIComponent(instance.id)}`;
+      const unauthorized = await fetch(signInUrl, {
         method: 'POST',
         headers: { origin, 'content-type': 'application/json' },
         body: '{}',
       });
       expect(unauthorized.status).toBe(401);
 
-      const start = await fetch(`${base}/api/plugins/pico.chatgpt-plan/sign-in`, {
+      const crossOrigin = await fetch(signInUrl, {
+        method: 'POST',
+        headers: { origin: 'https://evil.invalid', cookie, 'content-type': 'application/json' },
+        body: '{}',
+      });
+      expect(crossOrigin.status).toBe(400);
+      const start = await fetch(signInUrl, {
         method: 'POST',
         headers: { origin, cookie, 'content-type': 'application/json' },
         body: '{}',

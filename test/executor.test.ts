@@ -13,7 +13,7 @@ import { HostExecutor } from '../src/executor/executor.js';
 import { ContainerExecutor } from '../src/executor/container-executor.js';
 import { EXECUTOR_PROTOCOL_VERSION } from '../src/executor/remote-protocol.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
-import { FakeModel, response, setupRuntime } from './helpers.js';
+import { FakeModel, response, setupRuntime, setupTestCatalog } from './helpers.js';
 
 interface MockRemoteExecution {
   id: string;
@@ -357,8 +357,9 @@ describe('Executor execution identity and recovery', () => {
         return { contents: 'changed after restart' };
       },
     });
+    const catalog = await setupTestCatalog(runtime);
+    runtime.updateThreadModelSelection(thread.id, catalog.select());
     await runtime.initialize();
-    runtime.updateModelSettings({ model: 'test-model' });
     try {
       await runtime.drain();
       const results = store

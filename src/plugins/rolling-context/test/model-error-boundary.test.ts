@@ -10,7 +10,9 @@ const canary = 'synthetic-api-key-never-use-outside-this-test';
 
 describe('Rolling Context model error handling', () => {
   it('redacts a real OpenAI-compatible HTTP error from main and auxiliary model paths', async () => {
+    let authenticatedRequests = 0;
     const server = createServer((request, response) => {
+      if (request.headers.authorization === `Bearer ${canary}`) authenticatedRequests += 1;
       response.writeHead(401, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ error: `Rejected ${request.headers.authorization ?? ''}` }));
     });
@@ -41,12 +43,46 @@ describe('Rolling Context model error handling', () => {
     };
     const env = await setupRuntime(new OpenAiCompatibleAdapter(), { plugins: [recorder] });
     try {
-      env.runtime.updateModelSettings({
-        baseUrl: `http://127.0.0.1:${address.port}/v1`,
-        apiKey: canary,
-        model: 'boundary-test-model',
+      const owner = 'test.http-provider';
+      env.runtime.modelCatalog.registerProviderType(
+        owner,
+        {
+          id: 'test.http',
+          label: 'Local HTTP',
+          addPage: { pluginId: owner, pageId: 'add' },
+        },
+        {
+          listModels: async () => [
+            {
+              id: 'boundary-test-model',
+              name: 'boundary-test-model',
+              label: 'Boundary',
+              protocol: 'openai-chat-completions',
+              endpoint: `http://127.0.0.1:${address.port}/v1`,
+              supportsImages: true,
+            },
+          ],
+          authorize: async (instance) => ({
+            authorization: `Bearer ${env.runtime.modelCatalog.getInstanceSecrets(owner, instance.id).get('apiKey', '')}`,
+          }),
+        },
+      );
+      env.runtime.modelCatalog.registerAdapter(owner, {
+        id: 'test.http-adapter',
+        label: 'Local HTTP adapter',
+        match: { providerTypeIds: ['test.http'] },
+        controls: [],
+        temperature: { supported: true, min: 0, max: 2 },
       });
+      const instance = env.runtime.modelCatalog.addInstance(owner, 'test.http', { label: 'Local', config: {} });
+      env.runtime.modelCatalog.getInstanceSecrets(owner, instance.id).set('apiKey', canary);
+      const [model] = await env.runtime.modelCatalog.refreshInstance(instance.id);
       const thread = env.createThread('host');
+      env.runtime.updateThreadModelSelection(thread.id, {
+        modelId: model!.modelId,
+        adapterId: 'test.http-adapter',
+        parameters: { options: {} },
+      });
       const runtimeErrors: unknown[] = [];
       env.runtime.subscribe((event) => {
         if (event.type === 'runtime.error') runtimeErrors.push(event);
@@ -60,7 +96,7 @@ describe('Rolling Context model error handling', () => {
         expect.objectContaining({ type: 'runtime.error', message: 'Model provider returned HTTP 401.' }),
       );
       const mainDiagnostic = execution && env.runtime.getModelInputAttempts(thread.id, execution.id);
-      expect(mainDiagnostic?.some((attempt) => attempt.error === 'Model request failed (http_401).')).toBe(true);
+      expect(mainDiagnostic?.some((attempt) => attempt.error === 'Model provider returned HTTP 401.')).toBe(true);
 
       const auxiliaryError = await completeAuxiliary!({
         threadId: thread.id,
@@ -109,6 +145,7 @@ describe('Rolling Context model error handling', () => {
         segment,
         'Only a local synthetic source record.',
       );
+      expect(authenticatedRequests).toBeGreaterThanOrEqual(3);
       expect(rolled.summaryStatus).toBe('failed');
       expect(rolled.evaluator.reason).toBe('Model provider returned HTTP 401.');
 

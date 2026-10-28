@@ -1,3 +1,13 @@
+import type {
+  AdapterContribution,
+  CatalogModel,
+  CatalogSelection,
+  ProviderInstance,
+  ProviderTypeContribution,
+  ProviderTypeDriver,
+  InstanceSecrets,
+} from '../contracts/model-catalog.js';
+import { ModelCatalog } from '../runtime/model-catalog.js';
 import { ServiceError } from '../contracts/service-error.js';
 import type { ExecutorPluginContext } from '../executor/plugin-host.js';
 import type { PipelineStage, StageInputs, StageOutputs } from '../contracts/plugin-pipeline.js';
@@ -16,12 +26,6 @@ import type {
 import type { ExecutionPipelines, Interceptor } from '../core/pipeline.js';
 import type { PicoStore } from '../core/store.js';
 import type { RuntimeToolContext, ToolCatalog } from '../executor/tool-catalog.js';
-import type {
-  InitialModelSelection,
-  ModelProviderRegistry,
-  ModelSelectionNormalizer,
-  RegisteredModelHandler,
-} from '../runtime/provider-registry.js';
 
 function validExternalAuthOrigins(origins: unknown): origins is string[] {
   if (!Array.isArray(origins) || origins.length === 0 || origins.length > 8) return false;
@@ -113,18 +117,25 @@ export interface PluginContext extends Omit<PluginServices, 'models' | 'continua
       execute: (args: Record<string, unknown>, context: RuntimeToolContext) => Promise<unknown> | unknown,
     ): void;
   };
+  providers: {
+    registerType(type: ProviderTypeContribution, driver: ProviderTypeDriver): void;
+    list(): ProviderInstance[];
+    get(id: string): ProviderInstance | null;
+    add(typeId: string, input: { label: string; config: Record<string, unknown> }): ProviderInstance;
+    remove(id: string): Promise<void>;
+    refresh(id: string): Promise<CatalogModel[]>;
+    secrets(id: string): InstanceSecrets;
+  };
   models: {
+    registerAdapter(adapter: AdapterContribution): void;
+    catalog(): CatalogModel[];
+    matchingAdapters(modelId: string): AdapterContribution[];
+    validateSelection(selection: CatalogSelection): CatalogSelection;
     complete: (
       request: Parameters<PluginServices['models']['complete']>[1],
     ) => ReturnType<PluginServices['models']['complete']>;
     history: PluginServices['models']['history'];
     subscribe: PluginServices['models']['subscribe'];
-    registerProvider(provider: ModelProviderContribution, handler: RegisteredModelHandler): void;
-    registerSelectionNormalizer(
-      provider: string,
-      normalize: ModelSelectionNormalizer,
-      initial?: InitialModelSelection,
-    ): void;
   };
   continuations: {
     register(hasPendingWork: (threadId: string) => boolean): () => void;
@@ -263,7 +274,7 @@ export class PluginHost {
     private readonly pluginDirectory = resolve(process.env.PICO_PLUGIN_DIR ?? join(process.cwd(), 'plugins')),
     private readonly services: PluginServices = unavailablePluginServices,
     private readonly options: PluginHostOptions = {},
-    private readonly providerRegistry?: ModelProviderRegistry,
+    private readonly modelCatalog: ModelCatalog = new ModelCatalog(store),
   ) {}
 
   list(): LoadedPlugin[] {
@@ -318,7 +329,8 @@ export class PluginHost {
     const candidate = this.candidates.get(pluginId);
     if (!candidate) throw new ServiceError(404, 'Plugin is not installed.');
     if (!enabled && this.requiredPlugins.has(pluginId)) throw new ServiceError(409, 'This plugin is required by Pico.');
-    if (enabled && this.forcedDisabled.has(pluginId)) throw new ServiceError(409, 'This plugin is disabled by Runtime policy.');
+    if (enabled && this.forcedDisabled.has(pluginId))
+      throw new ServiceError(409, 'This plugin is disabled by Runtime policy.');
     if (this.enablement.get(pluginId) === enabled) return this.catalog();
     this.assertLifecycleSafe();
     if (!enabled) {
@@ -433,7 +445,7 @@ export class PluginHost {
       ...this.contributions.filter((item) => item.pluginId !== pluginId),
     );
     this.pages.splice(0, this.pages.length, ...this.pages.filter((item) => item.pluginId !== pluginId));
-    this.providerRegistry?.removeOwner(pluginId);
+    this.modelCatalog?.removeOwner(pluginId);
     this.routes.splice(0, this.routes.length, ...this.routes.filter((item) => item.pluginId !== pluginId));
     try {
       await plugin.deactivate?.();
@@ -472,7 +484,7 @@ export class PluginHost {
   }
 
   modelProviders(): ModelProviderContribution[] {
-    return this.providerRegistry?.list() ?? [];
+    return this.modelCatalog?.listProviderTypes() ?? [];
   }
 
   httpRoutes(): ReadonlyArray<RegisteredPluginHttpRoute> {
@@ -649,21 +661,52 @@ export class PluginHost {
             plugin.pipelinePriority?.[stage] ?? 0,
           ),
       },
+      providers: {
+        registerType: (type, driver) => {
+          if (!this.modelCatalog) throw new Error('Model catalog is unavailable.');
+          this.modelCatalog.registerProviderType(plugin.id, type, driver);
+        },
+        list: () => this.modelCatalog?.listInstances().filter((instance) => instance.owner === plugin.id) ?? [],
+        get: (id) =>
+          this.modelCatalog?.listInstances().find((instance) => instance.id === id && instance.owner === plugin.id) ??
+          null,
+        add: (typeId, input) => {
+          if (!this.modelCatalog) throw new Error('Model catalog is unavailable.');
+          return this.modelCatalog.addInstance(plugin.id, typeId, input);
+        },
+        remove: async (id) => {
+          if (!this.modelCatalog) throw new Error('Model catalog is unavailable.');
+          await this.modelCatalog.removeInstance(plugin.id, id);
+        },
+        refresh: async (id) => {
+          if (
+            !this.modelCatalog?.listInstances().some((instance) => instance.id === id && instance.owner === plugin.id)
+          )
+            throw new ServiceError(404, 'Provider instance unavailable.');
+          return this.modelCatalog.refreshInstance(id);
+        },
+        secrets: (id) => {
+          if (!this.modelCatalog) throw new Error('Model catalog is unavailable.');
+          return this.modelCatalog.getInstanceSecrets(plugin.id, id);
+        },
+      },
       models: {
+        registerAdapter: (adapter) => {
+          if (!this.modelCatalog) throw new Error('Model catalog is unavailable.');
+          this.modelCatalog.registerAdapter(plugin.id, adapter);
+        },
+        catalog: () => this.modelCatalog?.listModels() ?? [],
+        matchingAdapters: (modelId) => this.modelCatalog?.matchingAdapters(modelId) ?? [],
+        validateSelection: (selection) => {
+          if (!this.modelCatalog) throw new Error('Model catalog is unavailable.');
+          return this.modelCatalog.validateSelection(selection);
+        },
         complete: (request) => this.services.models.complete(plugin.id, request),
         history: this.services.models.history,
         subscribe: (listener) => {
           const unsubscribe = this.services.models.subscribe(listener);
           subscriptions.push(unsubscribe);
           return unsubscribe;
-        },
-        registerProvider: (provider, handler) => {
-          if (!this.providerRegistry) throw new Error('Model provider registry is unavailable.');
-          this.providerRegistry.register(plugin.id, provider, handler);
-        },
-        registerSelectionNormalizer: (provider, normalize, initial) => {
-          if (!this.providerRegistry) throw new Error('Model provider registry is unavailable.');
-          this.providerRegistry.registerSelectionNormalizer(plugin.id, provider, normalize, initial);
         },
       },
       continuations: {
@@ -798,7 +841,7 @@ export class PluginHost {
       this.tools.removeOwner(plugin.id);
       this.pipelines.removePlugin(plugin.id);
       this.commands.removeOwner(plugin.id);
-      this.providerRegistry?.removeOwner(plugin.id);
+      this.modelCatalog?.removeOwner(plugin.id);
       this.contributions.splice(contributionsStart);
       this.pages.splice(pagesStart);
       this.routes.splice(routesStart);

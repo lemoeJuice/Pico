@@ -5,7 +5,7 @@ import { WebSocket } from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startServer } from '../src/server.js';
 import type { ThreadSnapshot } from '../src/runtime/runtime.js';
-import { assistantPayload } from './helpers.js';
+import { assistantPayload, setupTestCatalog } from './helpers.js';
 
 const envKeys = ['PICO_HOST', 'PICO_PORT', 'PICO_DB_PATH', 'PICO_ACCESS_TOKEN'] as const;
 const originalEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
@@ -324,6 +324,7 @@ describe('Pico server access boundary', () => {
       process.env.PICO_DB_PATH = join(directory, 'pico.sqlite');
       delete process.env.PICO_ACCESS_TOKEN;
       server = await startServer();
+      const catalog = await setupTestCatalog(server.runtime, ['thread-pinned-model', 'other-model']);
       const project = await server.runtime.createProject('History pages', directory);
       const thread = server.runtime.createThread(project.id, 'host');
       for (let index = 0; index < 235; index += 1) {
@@ -338,7 +339,7 @@ describe('Pico server access boundary', () => {
       const latestResponse = await fetch(`${base}/api/threads/${thread.id}`);
       expect(latestResponse.status).toBe(200);
       const latest = (await latestResponse.json()) as ThreadSnapshot;
-      expect(latest.modelSelection).toMatchObject({ provider: 'openai-compatible', connectionId: 'default' });
+      expect(latest.modelSelection).toMatchObject({ modelId: '', adapterId: '', parameters: { options: {} } });
       expect(latest.records).toHaveLength(100);
       expect(latest.records[0]?.id).toBe('api-history-135');
       expect(latest.hasEarlierRecords).toBe(true);
@@ -355,7 +356,8 @@ describe('Pico server access boundary', () => {
       const selectionResponse = await fetch(`${base}/api/threads/${thread.id}/model-selection`);
       expect(selectionResponse.status).toBe(200);
       const selection = (await selectionResponse.json()) as ThreadSnapshot['modelSelection'];
-      const updatedSelection = { ...selection, model: 'thread-pinned-model' };
+      expect(selection).toMatchObject({ modelId: '', adapterId: '' });
+      const updatedSelection = catalog.select('thread-pinned-model');
       const savedSelectionResponse = await fetch(`${base}/api/threads/${thread.id}/model-selection`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
@@ -363,8 +365,14 @@ describe('Pico server access boundary', () => {
       });
       expect(savedSelectionResponse.status).toBe(200);
       expect(await savedSelectionResponse.json()).toMatchObject({ model: 'thread-pinned-model' });
-      server.runtime.updateModelSettings({ model: 'future-thread-default' });
-      expect(server.runtime.threadModelSelection(thread.id).model).toBe('thread-pinned-model');
+      const another = server.runtime.createThread(project.id, 'host');
+      expect(server.runtime.threadModelSelection(another.id)).toMatchObject({ modelId: '', adapterId: '' });
+      server.runtime.updateThreadModelSelection(another.id, catalog.select('other-model'));
+      expect(server.runtime.threadModelSelection(thread.id)).toMatchObject({
+        modelId: updatedSelection.modelId,
+        adapterId: updatedSelection.adapterId,
+        model: 'thread-pinned-model',
+      });
     } finally {
       await server?.close();
       await rm(directory, { recursive: true, force: true });

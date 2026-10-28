@@ -1,15 +1,15 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { createSharedChatGptOAuthSecrets, type SharedChatGptOAuthSecrets } from './chatgpt-plan/oauth-store.js';
-import type { ModelStageInput } from '../contracts/plugin-pipeline.js';
 import { ChatGptPlanAuth, RetryableChatGptAuthorizationExchange } from './chatgpt-plan/auth.js';
-import { ChatGptResponsesAdapter } from './chatgpt-plan/model.js';
 import type { PicoPlugin, PluginHttpRequest } from './host.js';
 
 interface CallbackOperation {
   operationId: string;
+  instanceId: string;
+  auth: ChatGptPlanAuth;
   redirectUri: string;
   server: Server;
   handlingCallback: boolean;
@@ -31,17 +31,6 @@ function callbackForRetry(callback: URLSearchParams): URLSearchParams {
     if (values.length === 1 && values[0]) retry.set(name, values[0]);
   }
   return retry;
-}
-
-function promptCacheKeyFor(input: ModelStageInput): string {
-  const call = input.pluginModelCall;
-  if (!call) return input.thread.id;
-
-  const digest = createHash('sha256')
-    .update(JSON.stringify(['pico.chatgpt-plan.plugin-cache.v1', input.thread.id, call.pluginId, call.purpose]))
-    .digest('hex');
-  // Keep the affinity key bounded while deriving a stable namespace per Thread, plugin, and purpose.
-  return `pico-plugin:${digest.slice(0, 52)}`;
 }
 
 function escapeHtml(value: string): string {
@@ -92,10 +81,13 @@ export function createChatGptPlanPlugin(): PicoPlugin {
   const callbackServers = new Set<Server>();
   const callbackTimeouts = new Map<Server, NodeJS.Timeout>();
   const callbackOperations = new Map<string, CallbackOperation>();
-  let auth: ChatGptPlanAuth | null = null;
+  const authByInstance = new Map<string, ChatGptPlanAuth>();
   let sharedOAuthSecrets: SharedChatGptOAuthSecrets | null = null;
+  const instanceSharedSecrets = new Map<string, SharedChatGptOAuthSecrets>();
+  let instanceAvailable: (id: string) => boolean = () => false;
+  let refreshCatalog: (id: string) => Promise<unknown> = async () => undefined;
 
-  const closeCallbackServer = (server: Server): Promise<void> => {
+  const closeCallbackServer = (server: Server, force = false): Promise<void> => {
     const timeout = callbackTimeouts.get(server);
     if (timeout) clearTimeout(timeout);
     callbackTimeouts.delete(server);
@@ -104,7 +96,10 @@ export function createChatGptPlanPlugin(): PicoPlugin {
       if (operation.server === server) callbackOperations.delete(operationId);
     }
     if (!server.listening) return Promise.resolve();
-    return new Promise((resolve) => server.close(() => resolve()));
+    return new Promise((resolve) => {
+      server.close(() => resolve());
+      if (force) server.closeAllConnections();
+    });
   };
 
   const completeCallback = async (
@@ -112,6 +107,14 @@ export function createChatGptPlanPlugin(): PicoPlugin {
     callback: URLSearchParams,
     retryExchange = false,
   ): Promise<CallbackCompletionResult> => {
+    if (!instanceAvailable(operation.instanceId)) {
+      return {
+        status: 'failed',
+        message: 'This ChatGPT account instance no longer exists.',
+        retryable: false,
+        retryExchange: false,
+      };
+    }
     if (operation.handlingCallback) {
       return {
         status: 'failed',
@@ -120,7 +123,7 @@ export function createChatGptPlanPlugin(): PicoPlugin {
         retryExchange: Boolean(operation.retryCallback),
       };
     }
-    if (!auth!.hasPendingAuthorization(callback.get('state'), operation.redirectUri)) {
+    if (!operation.auth.hasPendingAuthorization(callback.get('state'), operation.redirectUri)) {
       return {
         status: 'failed',
         message: 'This ChatGPT sign-in attempt expired or did not match. Start again.',
@@ -132,9 +135,12 @@ export function createChatGptPlanPlugin(): PicoPlugin {
     operation.handlingCallback = true;
     let result: CallbackCompletionResult;
     try {
-      await auth!.completeSignIn(callback, operation.redirectUri, { allowTransportRetry: !retryExchange });
+      await operation.auth.completeSignIn(callback, operation.redirectUri, { allowTransportRetry: !retryExchange });
       operation.retryCallback = null;
-      void auth!.refreshModels().catch(() => undefined);
+      void operation.auth
+        .refreshModels()
+        .then(() => refreshCatalog(operation.instanceId))
+        .catch(() => undefined);
       result = {
         status: 'connected',
         message: 'ChatGPT is connected. Return to Pico.',
@@ -142,7 +148,7 @@ export function createChatGptPlanPlugin(): PicoPlugin {
         retryExchange: false,
       };
     } catch (error) {
-      const pending = auth!.hasPendingAuthorization(callback.get('state'), operation.redirectUri);
+      const pending = operation.auth.hasPendingAuthorization(callback.get('state'), operation.redirectUri);
       const canRetryExchange =
         !retryExchange &&
         pending &&
@@ -177,45 +183,151 @@ export function createChatGptPlanPlugin(): PicoPlugin {
       sharedOAuthSecrets = sharedOAuthPath
         ? createSharedChatGptOAuthSecrets(sharedOAuthPath, 'pico.chatgpt-plan')
         : null;
-      auth = new ChatGptPlanAuth(
-        context.state,
-        fetch,
-        Date.now,
-        sharedOAuthSecrets ?? context.secrets ?? context.state,
-        context.cache,
-      );
-      const model = new ChatGptResponsesAdapter(auth);
-
-      context.models.registerProvider(
+      instanceAvailable = (id) => context.providers.get(id)?.typeId === 'chatgpt-plan';
+      refreshCatalog = (id) => context.providers.refresh(id);
+      const providerConfig = { chatgpt: true, fetchRetries: 5, retryDelayMs: 2000, refreshOnUnauthorized: true };
+      const sharedSecretsFor = (
+        instance: import('../contracts/model-catalog.js').ProviderInstance,
+      ): SharedChatGptOAuthSecrets | null => {
+        if (sharedOAuthSecrets && instance.config.legacyShared === true) return sharedOAuthSecrets;
+        if (!sharedOAuthPath) return null;
+        let secrets = instanceSharedSecrets.get(instance.id);
+        if (!secrets) {
+          secrets = createSharedChatGptOAuthSecrets(sharedOAuthPath, `pico.chatgpt-plan:instance:${instance.id}`);
+          instanceSharedSecrets.set(instance.id, secrets);
+        }
+        return secrets;
+      };
+      const secretsFor = (id: string) => {
+        const instance = context.providers.get(id);
+        if (!instance || instance.typeId !== 'chatgpt-plan') throw new Error('ChatGPT account instance not found.');
+        const shared = sharedSecretsFor(instance);
+        const raw = shared ?? context.providers.secrets(id);
+        const ensureActive = (): void => {
+          if (!instanceAvailable(id)) throw new Error('ChatGPT account instance no longer exists.');
+        };
+        const guarded = {
+          get: <T>(key: string, fallback: T): T => {
+            ensureActive();
+            return raw.get(key, fallback);
+          },
+          set: <T>(key: string, value: T): void => {
+            ensureActive();
+            raw.set(key, value);
+          },
+        };
+        return shared
+          ? {
+              ...guarded,
+              withLock: async <T>(operation: () => Promise<T>): Promise<T> => {
+                ensureActive();
+                return shared.withLock(async () => {
+                  ensureActive();
+                  return operation();
+                });
+              },
+            }
+          : guarded;
+      };
+      const getAuth = (id: string): ChatGptPlanAuth => {
+        const instance = context.providers.get(id);
+        if (!instance || instance.typeId !== 'chatgpt-plan') throw new Error('ChatGPT account instance not found.');
+        let auth = authByInstance.get(id);
+        if (!auth) {
+          const prefix = `instance:${id}:`;
+          const cache = {
+            get: <T>(key: string, fallback: T): T => context.cache.get(prefix + key, fallback),
+            set: <T>(key: string, value: T): void => {
+              if (!instanceAvailable(id)) throw new Error('ChatGPT account instance no longer exists.');
+              context.cache.set(prefix + key, value);
+            },
+          };
+          auth = new ChatGptPlanAuth(context.state, fetch, Date.now, secretsFor(id), cache);
+          authByInstance.set(id, auth);
+        }
+        return auth;
+      };
+      const requireInstance = (request: PluginHttpRequest): { id: string; auth: ChatGptPlanAuth } => {
+        const values = request.query.getAll('instanceId');
+        if (values.length !== 1 || !values[0]) throw new Error('A ChatGPT account instance is required.');
+        return { id: values[0], auth: getAuth(values[0]) };
+      };
+      context.providers.registerType(
         {
           id: 'chatgpt-plan',
           label: 'ChatGPT account',
           description: 'Use a ChatGPT plan account through OpenAI’s Responses API.',
-          supportsImages: true,
+          addPage: { pluginId: 'pico.chatgpt-plan', pageId: 'account' },
         },
-        async (input) => {
-          input.recordModelInput(input.prompt, input.provider, input.projectionProvenance);
-          return model.complete(
-            input.prompt,
-            input.signal,
-            input.onText,
-            input.requestTrace,
-            input.onEvent,
-            input.requestParameters,
-            input.thread.id,
-            promptCacheKeyFor(input),
-          );
+        {
+          listModels: async (instance) =>
+            (await getAuth(instance.id).listModels()).map((model) => ({
+              id: model.slug,
+              name: model.slug,
+              label: model.displayName,
+              protocol: 'openai-responses',
+              supportsImages: true,
+              endpoint: 'https://api.openai.com/v1/responses',
+            })),
+          authorize: async (instance, forceRefresh, signal) => {
+            if (signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
+            return { authorization: `Bearer ${await getAuth(instance.id).accessToken(forceRefresh)}` };
+          },
+          disposeInstance: async (instance) => {
+            const operations = [...callbackOperations.values()].filter(
+              (operation) => operation.instanceId === instance.id,
+            );
+            await Promise.all(operations.map((operation) => closeCallbackServer(operation.server, true)));
+            authByInstance.delete(instance.id);
+            context.cache.set(`instance:${instance.id}:modelCatalog`, null);
+            const secrets = sharedSecretsFor(instance);
+            if (secrets) {
+              try {
+                await secrets.withLock(async () => {
+                  secrets.clear();
+                });
+              } finally {
+                if (secrets !== sharedOAuthSecrets) {
+                  instanceSharedSecrets.delete(instance.id);
+                  secrets.close();
+                }
+              }
+            }
+            if (instance.config.legacyMigration === true) context.secrets?.delete('oauth');
+          },
         },
       );
-
+      // Only create a legacy instance when an old credential actually exists. The marker makes migration idempotent.
+      const sharedLegacy = sharedOAuthSecrets?.get<unknown>('oauth', null) ?? null;
+      const legacy = sharedLegacy ?? context.secrets?.get<unknown>('oauth', null) ?? null;
+      const legacyId = context.state.get<string | null>('legacyInstanceId', null);
+      if (legacy && !legacyId) {
+        const instance =
+          context.providers
+            .list()
+            .find((item) => item.typeId === 'chatgpt-plan' && item.config.legacyMigration === true) ??
+          context.providers.add('chatgpt-plan', {
+            label: 'ChatGPT account',
+            config: { ...providerConfig, legacyMigration: true, legacyShared: Boolean(sharedLegacy) },
+          });
+        const secrets = secretsFor(instance.id);
+        if (!secrets.get('oauth', null)) secrets.set('oauth', legacy);
+        const catalog =
+          context.cache.get<unknown>('modelCatalog', null) ?? context.state.get<unknown>('modelCatalog', null);
+        if (catalog) context.cache.set(`instance:${instance.id}:modelCatalog`, catalog);
+        context.state.set('legacyInstanceId', instance.id);
+      }
       context.commands.register({
         name: 'chatgpt-provider',
-        description: 'Show whether the ChatGPT account provider is connected.',
+        description: 'Show whether a ChatGPT account provider is connected.',
         execute() {
-          const status = auth?.status();
+          const connected = context.providers
+            .list()
+            .filter((instance) => instance.typeId === 'chatgpt-plan')
+            .some((instance) => getAuth(instance.id).status().connected);
           return {
-            text: status?.connected
-              ? `ChatGPT account connected${status.accountLabel ? ` as ${status.accountLabel}` : ''}.`
+            text: connected
+              ? 'A ChatGPT account is connected.'
               : 'No ChatGPT account is connected. Open the ChatGPT plugin settings to connect one.',
           };
         },
@@ -228,27 +340,34 @@ export function createChatGptPlanPlugin(): PicoPlugin {
         entry: 'webui',
         externalAuthOrigins: ['https://auth.openai.com'],
       });
-      context.ui.contribute({
-        slot: 'composer.model',
-        id: 'model-controls',
-        label: 'ChatGPT model controls',
-        description: 'Choose the ChatGPT model, reasoning effort, and Fast mode for this provider.',
-        entry: 'webui',
-        component: 'ChatGptPlanComposerModel',
-        providers: ['chatgpt-plan'],
-        externalAuthOrigins: ['https://auth.openai.com'],
+      context.http.register('GET', '/instances', () =>
+        context.providers.list().filter((instance) => instance.typeId === 'chatgpt-plan'),
+      );
+      context.http.register('POST', '/instances', (request) => {
+        const body =
+          request.body && typeof request.body === 'object' && !Array.isArray(request.body)
+            ? (request.body as Record<string, unknown>)
+            : {};
+        const label = typeof body.label === 'string' ? body.label.trim() : '';
+        if (!label || label.length > 120) throw new Error('Enter an account label.');
+        return context.providers.add('chatgpt-plan', { label, config: providerConfig });
       });
-
-      context.http.register('GET', '/status', () => auth!.status());
-      context.http.register('GET', '/models', async () => await auth!.listModels());
-      context.http.register('POST', '/models/refresh', async () => await auth!.listModels(true));
+      context.http.register('GET', '/status', (request) => requireInstance(request).auth.status());
+      context.http.register('GET', '/models', async (request) => await requireInstance(request).auth.listModels());
+      context.http.register('POST', '/models/refresh', async (request) => {
+        const { id, auth } = requireInstance(request);
+        const models = await auth.listModels(true);
+        await context.providers.refresh(id);
+        return models;
+      });
       context.http.register('POST', '/sign-in', async (request: PluginHttpRequest) => {
+        const { id: instanceId, auth } = requireInstance(request);
         const uiOrigin = request.origin;
         if (!uiOrigin) throw new Error('ChatGPT sign-in must be started from the Pico Web UI.');
         const operationId = randomUUID();
         let server: Server;
         let operation: CallbackOperation | null = null;
-        let redirectUri = '';
+        let redirectUri: string;
 
         server = createServer((callbackRequest, callbackResponse) => {
           const callbackUrl = new URL(callbackRequest.url ?? '/', 'http://127.0.0.1');
@@ -303,6 +422,8 @@ export function createChatGptPlanPlugin(): PicoPlugin {
         redirectUri = `http://127.0.0.1:${(address as AddressInfo).port}/auth/callback`;
         operation = {
           operationId,
+          instanceId,
+          auth,
           redirectUri,
           server,
           handlingCallback: false,
@@ -311,7 +432,7 @@ export function createChatGptPlanPlugin(): PicoPlugin {
         };
         callbackOperations.set(operationId, operation);
         try {
-          const { authorizationUrl } = await auth!.beginSignIn(redirectUri);
+          const { authorizationUrl } = await auth.beginSignIn(redirectUri);
           const timeout = setTimeout(() => void closeCallbackServer(server), 10 * 60_000);
           timeout.unref();
           callbackTimeouts.set(server, timeout);
@@ -325,7 +446,9 @@ export function createChatGptPlanPlugin(): PicoPlugin {
           throw error;
         }
       });
-      context.http.register('POST', '/sign-in/complete', async ({ body }: PluginHttpRequest) => {
+      context.http.register('POST', '/sign-in/complete', async (request: PluginHttpRequest) => {
+        const { id: instanceId, auth } = requireInstance(request);
+        const { body } = request;
         if (!body || typeof body !== 'object' || Array.isArray(body)) {
           throw new Error('Paste the full ChatGPT callback URL from the browser address bar.');
         }
@@ -338,7 +461,8 @@ export function createChatGptPlanPlugin(): PicoPlugin {
           throw new Error('Paste the full ChatGPT callback URL from the browser address bar.');
         }
         const operation = callbackOperations.get(input.operationId);
-        if (!operation) throw new Error('This ChatGPT sign-in attempt is no longer active. Start again.');
+        if (!operation || operation.instanceId !== instanceId)
+          throw new Error('This ChatGPT sign-in attempt is no longer active. Start again.');
 
         if (operation.retryCallback) {
           return {
@@ -349,12 +473,14 @@ export function createChatGptPlanPlugin(): PicoPlugin {
           } satisfies CallbackCompletionResult;
         }
 
-        const callback = auth!.parseCallbackUrl(input.callbackUrl, operation.redirectUri);
+        const callback = auth.parseCallbackUrl(input.callbackUrl, operation.redirectUri);
         const result = await completeCallback(operation, callback);
         if (!result.retryable) await closeCallbackServer(operation.server);
         return result;
       });
-      context.http.register('POST', '/sign-in/retry', async ({ body }: PluginHttpRequest) => {
+      context.http.register('POST', '/sign-in/retry', async (request: PluginHttpRequest) => {
+        const { id: instanceId } = requireInstance(request);
+        const { body } = request;
         if (!body || typeof body !== 'object' || Array.isArray(body)) {
           throw new Error('This ChatGPT sign-in cannot be retried. Start again.');
         }
@@ -363,7 +489,7 @@ export function createChatGptPlanPlugin(): PicoPlugin {
           throw new Error('This ChatGPT sign-in cannot be retried. Start again.');
         }
         const operation = callbackOperations.get(input.operationId);
-        if (!operation || !operation.retryCallback || operation.retryAttempted) {
+        if (!operation || operation.instanceId !== instanceId || !operation.retryCallback || operation.retryAttempted) {
           throw new Error('The ChatGPT token retry is no longer available. Start a new sign-in.');
         }
         operation.retryAttempted = true;
@@ -372,11 +498,15 @@ export function createChatGptPlanPlugin(): PicoPlugin {
         if (!result.retryable) await closeCallbackServer(operation.server);
         return result;
       });
-      context.http.register('DELETE', '/account', async () => await auth!.signOut());
+      context.http.register('DELETE', '/account', async (request) => await requireInstance(request).auth.signOut());
     },
     async deactivate() {
       await Promise.all([...callbackServers].map((server) => closeCallbackServer(server)));
-      auth = null;
+      authByInstance.clear();
+      instanceAvailable = () => false;
+      refreshCatalog = async () => undefined;
+      for (const secrets of instanceSharedSecrets.values()) secrets.close();
+      instanceSharedSecrets.clear();
       sharedOAuthSecrets?.close();
       sharedOAuthSecrets = null;
     },

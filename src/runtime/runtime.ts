@@ -1,3 +1,6 @@
+import { ModelCatalog } from './model-catalog.js';
+import { ResponsesModelAdapter } from './responses-model.js';
+import type { CatalogSelection } from '../contracts/model-catalog.js';
 import { ServiceError } from '../contracts/service-error.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { realpath, stat } from 'node:fs/promises';
@@ -67,7 +70,6 @@ import { builtinPlugins } from '../plugins/builtin.js';
 import { CommandRegistry, PluginHost, type CommandResult, type PluginCatalogEntry } from '../plugins/host.js';
 import type { PluginServices } from '../plugins/services.js';
 import { OpenAiCompatibleAdapter, type ModelAdapter } from './model.js';
-import { ModelProviderRegistry } from './provider-registry.js';
 import type {
   ModelPrompt,
   ModelRequestParameters,
@@ -121,6 +123,7 @@ interface StoredThreadToolSurface {
 interface PluginModelCallRequest {
   threadId?: string;
   projectId?: string;
+  pluginId?: string;
   purpose: string;
   idempotencyKey: string;
   prompt: ModelPrompt;
@@ -259,7 +262,9 @@ function validateModelParameters(value: unknown): ModelRequestParameters {
   }
   if (
     serialized === undefined ||
-    /"(?:api.?key|authorization|access.?token|refresh.?token|secret|password)"\s*:/i.test(serialized)
+    /"(?:api.?key|authorization|access.?token|refresh.?token|secret|password|token|key|headers|cookie)"\s*:/i.test(
+      serialized,
+    )
   ) {
     throw new Error('Model parameters must be non-sensitive JSON values.');
   }
@@ -272,37 +277,6 @@ function validateModelParameters(value: unknown): ModelRequestParameters {
   return {
     ...(parameters.temperature === undefined ? {} : { temperature: parameters.temperature as number | null }),
     fields,
-  };
-}
-
-function validateThreadSelectionParameters(value: unknown): ThreadModelSelection['parameters'] {
-  if (!value || typeof value !== 'object' || Array.isArray(value))
-    throw new Error('Thread model parameters must be an object.');
-  const source = value as { temperature?: unknown; options?: unknown };
-  if (
-    source.temperature !== undefined &&
-    source.temperature !== null &&
-    (typeof source.temperature !== 'number' ||
-      !Number.isFinite(source.temperature) ||
-      source.temperature < 0 ||
-      source.temperature > 2)
-  ) {
-    throw new Error('Temperature must be between 0 and 2.');
-  }
-  if (!source.options || typeof source.options !== 'object' || Array.isArray(source.options)) {
-    throw new Error('Thread model parameters must contain an options object.');
-  }
-  const json = JSON.stringify(source.options);
-  if (!json || /"(?:api.?key|authorization|access.?token|refresh.?token|secret|password)"\s*:/i.test(json)) {
-    throw new Error('Thread model options must be non-sensitive JSON values.');
-  }
-  const options = JSON.parse(json) as Record<string, unknown>;
-  if (Object.values(options).some((item) => !['string', 'number', 'boolean'].includes(typeof item))) {
-    throw new Error('Thread model options must contain only scalar values.');
-  }
-  return {
-    ...(source.temperature === undefined ? {} : { temperature: source.temperature as number | null }),
-    options: options as ThreadModelSelection['parameters']['options'],
   };
 }
 
@@ -807,6 +781,11 @@ function sanitizeRequestSummary(details: ProviderRequestSummary): ProviderReques
     ...(providerError ? { providerError } : {}),
     ...(eventCounts ? { eventCounts } : {}),
     ...(firstTextMs === undefined ? {} : { firstTextMs }),
+    ...(typeof details.outputTokensPerSecond === 'number' &&
+    Number.isFinite(details.outputTokensPerSecond) &&
+    details.outputTokensPerSecond >= 0
+      ? { outputTokensPerSecond: details.outputTokensPerSecond }
+      : {}),
     ...(deltaTextCharacters === undefined ? {} : { deltaTextCharacters }),
     ...(outputTextCharacters === undefined ? {} : { outputTextCharacters }),
     ...(outputItemCounts ? { outputItemCounts } : {}),
@@ -1007,7 +986,7 @@ export class PicoRuntime {
   readonly commands = new CommandRegistry();
   readonly plugins: PluginHost;
   private readonly model: ModelAdapter;
-  private readonly modelProviderRegistry = new ModelProviderRegistry();
+  readonly modelCatalog: ModelCatalog;
   private readonly additionalPlugins: PicoPlugin[];
   private readonly hostExecutor: HostExecutor;
   private readonly containerExecutor: ContainerExecutor;
@@ -1037,26 +1016,13 @@ export class PicoRuntime {
   constructor(store = new PicoStore(), options: RuntimeOptions = {}) {
     this.store = store;
     this.options = options;
+    this.modelCatalog = new ModelCatalog(store, () => this.publish({ type: 'model-catalog.updated' }));
     this.model = options.model ?? new OpenAiCompatibleAdapter();
     this.commands.register('pico.runtime', {
       name: 'compact',
       description: 'Summarize older completed turns while preserving Canonical History and recent context.',
       execute: (_args, commandContext) => this.compactThread(commandContext.thread),
     });
-    this.modelProviderRegistry.register(
-      'pico.core',
-      { id: 'openai-compatible', label: 'OpenAI-compatible API key', supportsImages: true },
-      (input, settings) =>
-        this.model.complete(
-          input.prompt,
-          settings,
-          input.signal,
-          input.onText,
-          input.requestTrace,
-          input.onEvent,
-          input.requestParameters,
-        ),
-    );
     this.additionalPlugins = [...(options.plugins ?? [])];
     this.hostExecutor = new HostExecutor(
       store,
@@ -1096,12 +1062,15 @@ export class PicoRuntime {
             if (parent.projectId !== projectId) throw new Error('Parent Thread must belong to the same Project');
           }
           const modelSelection =
-            options.modelSelection ??
+            (options.modelSelection ? this.validateThreadModelSelection(options.modelSelection) : undefined) ??
             (options.parentThreadId
               ? this.threadModelSelection(options.parentThreadId)
               : this.defaultThreadModelSelection());
           const result = this.store.transaction(() => {
-            const result = this.store.createThreadWithResult(projectId, executorKind, title, { ...options, modelSelection });
+            const result = this.store.createThreadWithResult(projectId, executorKind, title, {
+              ...options,
+              modelSelection,
+            });
             if (!result.created) return result;
             const created = result.thread;
             const hadToolSettings = this.hasStoredThreadToolSettings(created.id);
@@ -1187,7 +1156,7 @@ export class PicoRuntime {
         },
         onChange: (pluginId) => this.publish({ type: 'plugin.updated', pluginId }),
       },
-      this.modelProviderRegistry,
+      this.modelCatalog,
     );
   }
 
@@ -1224,6 +1193,7 @@ export class PicoRuntime {
       ),
     ]);
     await this.plugins.load([...builtinPlugins, ...this.additionalPlugins], [...disabled]);
+    await this.migrateLegacyProviderConfiguration();
     this.pluginLoadErrors = [...this.plugins.errors()];
     await this.mcpManager.startAutoStarted();
     // A Runtime restart confirms its own unfinished model stream was lost. Pause the
@@ -1709,7 +1679,8 @@ export class PicoRuntime {
     if (!toolName.trim()) throw new ServiceError(400, 'Tool name is required');
     if (typeof enabled !== 'boolean') throw new ServiceError(400, 'enabled must be a boolean');
     const tools = await this.listThreadTools(threadId);
-    if (!tools.some((tool) => tool.name === toolName)) throw new ServiceError(404, 'Tool is not available in this Thread');
+    if (!tools.some((tool) => tool.name === toolName))
+      throw new ServiceError(404, 'Tool is not available in this Thread');
 
     this.applyThreadToolOverrides(threadId, { [toolName]: enabled });
     const updated = await this.listThreadTools(threadId);
@@ -1865,6 +1836,9 @@ export class PicoRuntime {
         ...(providerError ? { providerError } : {}),
         ...(eventCounts ? { eventCounts } : {}),
         ...(firstTextMs === undefined ? {} : { firstTextMs }),
+        ...(typeof entry.detail.outputTokensPerSecond === 'number'
+          ? { outputTokensPerSecond: entry.detail.outputTokensPerSecond }
+          : {}),
         ...(deltaTextCharacters === undefined ? {} : { deltaTextCharacters }),
         ...(outputTextCharacters === undefined ? {} : { outputTextCharacters }),
         ...(outputItemCounts ? { outputItemCounts } : {}),
@@ -3181,99 +3155,174 @@ export class PicoRuntime {
   }
 
   private resolveModelSettings(selection: ThreadModelSelection): ModelSettings {
-    if (selection.connectionId !== 'default')
-      throw new Error(`Model connection "${selection.connectionId}" is unavailable.`);
-    if (!selection.model.trim()) {
-      throw new Error('No model is configured for this Thread. Choose a model in the composer or Settings.');
+    if (!selection.modelId) throw new ModelCallError('missing-model');
+    let resolved;
+    try {
+      resolved = this.modelCatalog.resolveSelection(selection);
+    } catch {
+      throw new ModelCallError('adapter-unavailable');
     }
-    const configured = this.getModelSettings();
     return {
-      ...configured,
-      provider: selection.provider,
-      model: selection.model,
+      provider: resolved.model.providerTypeId,
+      baseUrl: resolved.model.endpoint,
+      apiKey: '',
+      model: resolved.model.name,
       temperature: selection.parameters.temperature ?? defaultModelSettings.temperature,
-      ...(configured.provider === selection.provider ? {} : { baseUrl: '', apiKey: '' }),
     };
   }
 
-  /** Shared model-stage kernel for primary and plugin-owned auxiliary operations. */
+  /** One selected adapter within the shared model stage; all physical requests belong to the framework. */
   private async invokeModel(input: ModelStageInput, settings: ModelSettings): Promise<ModelResponse> {
+    const selection = structuredClone(input.modelSelection ?? this.threadModelSelection(input.thread.id));
+    const resolved = this.modelCatalog.resolveSelection(selection);
+    const fixedTarget = {
+      provider: resolved.model.providerTypeId,
+      connectionId: resolved.instance.id,
+      baseUrl: resolved.model.endpoint,
+      model: resolved.model.name,
+    };
     try {
       return await raceWithAbort(
         this.pipelines.run<ModelStageInput, ModelResponse>('model', input, async (candidate) => {
-          const target = candidate.modelTarget ?? {
-            provider: candidate.provider,
-            connectionId: 'default',
-            baseUrl: settings.baseUrl,
-            model: candidate.prompt.model,
-          };
-          if (candidate.provider !== target.provider) throw new ModelCallError('target-mismatch');
-          if ((target.connectionId ?? 'default') !== 'default') {
-            throw new ModelCallError('connection-unavailable');
-          }
-          const semanticOptions = candidate.selectionParameters?.options ?? {};
-          if (Object.values(semanticOptions).some((value) => value === null)) {
+          const target = candidate.modelTarget ?? fixedTarget;
+          if (
+            candidate.provider !== fixedTarget.provider ||
+            target.provider !== fixedTarget.provider ||
+            target.connectionId !== fixedTarget.connectionId ||
+            target.baseUrl !== fixedTarget.baseUrl ||
+            target.model !== fixedTarget.model ||
+            candidate.prompt.model !== fixedTarget.model
+          )
+            throw new ModelCallError('target-mismatch');
+          const requestParameters = validateModelParameters(resolved.requestParameters);
+          if (
+            Object.keys(requestParameters.fields).some((key) =>
+              [
+                'model',
+                'messages',
+                'input',
+                'tools',
+                'stream',
+                'store',
+                'previous_response_id',
+                'conversation',
+              ].includes(key),
+            )
+          )
             throw new ModelCallError('invalid-options');
-          }
-          try {
-            this.modelProviderRegistry.normalizeSelection(
-              {
-                provider: target.provider,
-                connectionId: target.connectionId ?? 'default',
-                model: target.model ?? candidate.prompt.model,
-                baseUrl: target.baseUrl,
-              },
-              semanticOptions,
+          let prompt = structuredClone(candidate.prompt);
+          // Replay is retained in Canonical history; only compatible adapter formats enter this request.
+          prompt.turns = prompt.turns.map((turn) => {
+            if (turn.kind === 'tool_result') return turn;
+            const { reasoningReplay, reasoningContent, reasoningReplaySource, ...ordinary } = turn;
+            const replay =
+              reasoningReplay && typeof reasoningReplay === 'object' && !Array.isArray(reasoningReplay)
+                ? (reasoningReplay as { format?: unknown; value?: unknown; modelId?: unknown })
+                : null;
+            const value = replay && typeof replay.format === 'string' ? replay.value : reasoningReplay;
+            const legacyCompatible =
+              replay?.modelId === undefined &&
+              resolved.adapter.replayCompatible?.(resolved.model, { value, source: reasoningReplaySource }) === true;
+            const compatible = Boolean(
+              value !== undefined &&
+              resolved.adapter.replayFormat &&
+              (replay?.modelId === selection.modelId || legacyCompatible) &&
+              (replay?.format === resolved.adapter.replayFormat || (!replay && legacyCompatible)),
             );
-          } catch {
-            throw new ModelCallError('unsupported-parameters');
-          }
-          if (!this.modelProviderRegistry.has(target.provider)) {
-            throw new ModelCallError('provider-unavailable');
-          }
-          const prompt =
-            target.model === candidate.prompt.model ? candidate.prompt : { ...candidate.prompt, model: target.model };
-          const requestParameters = candidate.requestParameters ?? { fields: {} };
-          const finalInput: ModelStageInput = {
-            ...candidate,
-            provider: target.provider,
-            modelTarget: { ...target },
-            prompt,
-            requestParameters,
-          };
-          finalInput.recordModelInput(prompt, target.provider, finalInput.projectionProvenance);
-          const resolvedSettings: ModelSettings = {
-            ...settings,
-            provider: target.provider,
-            baseUrl: target.baseUrl,
-            model: target.model,
-            temperature: requestParameters.temperature ?? prompt.temperature,
-            ...(target.provider === settings.provider &&
-            (target.connectionId ?? 'default') === 'default' &&
-            target.baseUrl.replace(/\/+$/, '') === settings.baseUrl.replace(/\/+$/, '')
-              ? {}
-              : { apiKey: '' }),
-          };
-          const endpoint = diagnosticEndpoint(target.baseUrl);
-          const invocationId =
-            candidate.invocationId ??
-            (candidate.pluginModelCall
-              ? `plugin:${candidate.pluginModelCall.pluginId}:${candidate.pluginModelCall.idempotencyKey ?? candidate.pluginModelCall.purpose}`
-              : randomUUID());
+            return {
+              ...ordinary,
+              ...(compatible ? { reasoningReplay: value } : {}),
+              ...(resolved.adapter.protocolTraits?.reasoningContent &&
+              reasoningContent !== undefined &&
+              (reasoningReplaySource?.modelId === selection.modelId || legacyCompatible)
+                ? { reasoningContent }
+                : {}),
+            };
+          });
+          if (resolved.adapter.transformPrompt) prompt = resolved.adapter.transformPrompt(prompt);
+          if (prompt.model !== fixedTarget.model) throw new ModelCallError('target-mismatch');
+          if (
+            prompt.turns.some((turn) => turn.kind === 'tool_result' && turn.images?.length) &&
+            !resolved.model.supportsImages
+          )
+            throw new ModelCallError('unsupported-images');
+          candidate.recordModelInput(prompt, fixedTarget.provider, candidate.projectionProvenance);
+          const invocationId = candidate.invocationId ?? randomUUID();
           this.store.recordModelInvocation(candidate.thread.id, invocationId, {
             ...(candidate.pluginModelCall
               ? { pluginModelCall: candidate.pluginModelCall }
               : { executionId: invocationId }),
-            provider: target.provider,
-            connectionId: target.connectionId ?? 'default',
-            endpoint,
-            model: target.model,
-            requestParameters: structuredClone(requestParameters),
+            ...fixedTarget,
+            modelId: selection.modelId,
+            adapterId: selection.adapterId,
+            parameters: structuredClone(selection.parameters),
+            requestParameters,
           });
-          Object.freeze(finalInput.modelTarget);
-          Object.freeze(finalInput.requestParameters);
-          Object.freeze(resolvedSettings);
-          return this.modelProviderRegistry.dispatch(finalInput, resolvedSettings);
+          const config = resolved.instance.config;
+          const authorize = (forceRefresh: boolean, signal: AbortSignal) =>
+            this.modelCatalog.authorizeInstance(resolved.instance.id, forceRefresh, signal);
+          const transport = {
+            authorize,
+            refreshOnUnauthorized: config.refreshOnUnauthorized === true,
+            fetchRetries: typeof config.fetchRetries === 'number' ? config.fetchRetries : 0,
+            retryDelayMs: typeof config.retryDelayMs === 'number' ? config.retryDelayMs : 2000,
+            ...(resolved.adapter.protocolTraits ? { protocolTraits: resolved.adapter.protocolTraits } : {}),
+          };
+          const finalInput = {
+            ...candidate,
+            modelTarget: Object.freeze(fixedTarget),
+            requestParameters: Object.freeze(requestParameters),
+            prompt,
+          };
+          let response: ModelResponse;
+          if (this.options.model || resolved.model.protocol === 'openai-chat-completions') {
+            response = await this.model.complete(
+              prompt,
+              { ...settings, ...fixedTarget, temperature: requestParameters.temperature ?? prompt.temperature },
+              finalInput.signal,
+              finalInput.onText,
+              finalInput.requestTrace,
+              finalInput.onEvent,
+              requestParameters,
+              transport,
+            );
+          } else if (resolved.model.protocol === 'openai-responses') {
+            const call = candidate.pluginModelCall;
+            const cacheKey = call
+              ? `pico-plugin:${createHash('sha256')
+                  .update(JSON.stringify([candidate.thread.id, call.pluginId, call.purpose]))
+                  .digest('hex')
+                  .slice(0, 52)}`
+              : candidate.thread.id;
+            response = await new ResponsesModelAdapter({
+              endpoint: fixedTarget.baseUrl,
+              provider: fixedTarget.provider,
+              authorization: transport,
+              fetchRetries: transport.fetchRetries,
+              retryDelayMs: transport.retryDelayMs,
+              chatgpt: config.chatgpt === true,
+            }).complete(
+              prompt,
+              candidate.signal,
+              candidate.onText,
+              candidate.requestTrace,
+              candidate.onEvent,
+              requestParameters,
+              candidate.thread.id,
+              cacheKey,
+            );
+          } else throw new ModelCallError('unsupported-protocol');
+          if (resolved.adapter.transformResponse) response = resolved.adapter.transformResponse(response);
+          if (response.reasoningReplay !== undefined)
+            response = {
+              ...response,
+              reasoningReplay: {
+                format: resolved.adapter.replayFormat ?? resolved.model.protocol,
+                modelId: selection.modelId,
+                value: response.reasoningReplay,
+              },
+            };
+          return response;
         }),
         input.signal,
       );
@@ -3303,7 +3352,12 @@ export class PicoRuntime {
       allRecords.filter((record) => record.seq <= through).map((record) => deepFreeze(record));
     const modelExecutionId = retryExecution?.id ?? randomUUID();
     const modelSelection = this.threadModelSelection(thread.id);
-    const modelSettings = this.resolveModelSettings(modelSelection);
+    let modelSettings: ModelSettings = {
+      ...defaultModelSettings,
+      model: modelSelection.model,
+      provider: modelSelection.provider,
+      apiKey: '',
+    };
     if (!retryExecution) {
       this.store.createModelExecution(
         modelExecutionId,
@@ -3322,6 +3376,7 @@ export class PicoRuntime {
     this.modelSignals.set(modelExecutionId, controller);
     let latestDraft = '';
     try {
+      modelSettings = this.resolveModelSettings(modelSelection);
       const ignoredLegacyFields = projectionRecords.flatMap((record) => {
         if (record.kind !== 'assistant') return [];
         const payload = objectValue(record.payload);
@@ -3387,7 +3442,7 @@ export class PicoRuntime {
           });
         },
         settled: (providerAttemptId, details) => {
-          if (controller.signal.aborted || !requestId || !providerAttemptId) return;
+          if (!requestId || !providerAttemptId) return;
           this.appendExecutionDiagnostic(modelExecutionId, 'provider-request-settled', {
             requestId,
             providerAttemptId,
@@ -3398,6 +3453,7 @@ export class PicoRuntime {
       const modelInput: ModelStageInput = {
         thread,
         invocationId: modelExecutionId,
+        modelSelection: structuredClone(modelSelection),
         provider: actualProvider,
         modelTarget: {
           provider: modelSelection.provider,
@@ -3430,9 +3486,7 @@ export class PicoRuntime {
       let response: ModelResponse;
       try {
         const hasImageInput = prompt.turns.some((turn) => turn.kind === 'tool_result' && Boolean(turn.images?.length));
-        const providerSupportsImages = this.modelProviderRegistry
-          .list()
-          .find((provider) => provider.id === modelSelection.provider)?.supportsImages;
+        const providerSupportsImages = this.modelCatalog.resolveSelection(modelSelection).model.supportsImages;
         if (hasImageInput && providerSupportsImages !== true) {
           throw new Error(
             `Model provider "${modelSelection.provider}" does not support image inputs; images were not sent.`,
@@ -3480,6 +3534,8 @@ export class PicoRuntime {
       });
       const batchId = calls.length > 0 ? `${modelExecutionId}:batch` : null;
       const payload: AssistantPayload = {
+        modelId: modelSelection.modelId,
+        adapterId: modelSelection.adapterId,
         content: response.content,
         provider: actualProvider,
         ...(response.reasoningSummary ? { reasoningSummary: response.reasoningSummary } : {}),
@@ -3661,14 +3717,12 @@ export class PicoRuntime {
     };
 
     const baseCallKey = `runtime-compact:${sourceHash}`;
-    const requestParameters = { temperature: 0, fields: {} };
     const preparedCall = this.preparePluginModelCall(thread, {
       threadId: thread.id,
       projectId: thread.projectId,
       purpose: 'runtime-compaction-summary',
       idempotencyKey: baseCallKey,
       prompt,
-      requestParameters,
     });
     const matchingCalls = this.store
       .listPluginModelCalls({ pluginId: 'pico.runtime', threadId: thread.id })
@@ -3707,7 +3761,6 @@ export class PicoRuntime {
         purpose: 'runtime-compaction-summary',
         idempotencyKey,
         prompt,
-        requestParameters,
       });
       const summary = call.response.content.trim();
       if (!summary || summary.length > RUNTIME_COMPACTION_MAX_SUMMARY_CHARS || call.response.toolCalls.length > 0) {
@@ -4005,38 +4058,26 @@ export class PicoRuntime {
   }
 
   private preparePluginModelCall(thread: Thread, request: PluginModelCallRequest): PreparedPluginModelCall {
-    const selection = this.threadModelSelection(thread.id);
-    const explicitTarget = request.modelTarget;
-    const effectiveSelection: ThreadModelSelection = structuredClone({
-      ...selection,
-      ...(explicitTarget?.provider ? { provider: explicitTarget.provider } : {}),
-      ...(explicitTarget?.connectionId ? { connectionId: explicitTarget.connectionId } : {}),
-      ...(explicitTarget?.model ? { model: explicitTarget.model } : {}),
-      parameters: selection.parameters,
-    });
+    if (request.modelTarget || request.requestParameters)
+      throw new ServiceError(400, 'Configure plugin models through framework model selection.');
+    const configured =
+      request.purpose === 'runtime-compaction-summary' ? null : this.pluginModelSelections()[request.pluginId ?? ''];
+    const effectiveSelection =
+      configured?.mode === 'fixed'
+        ? this.validateThreadModelSelection(configured.selection)
+        : this.threadModelSelection(thread.id);
     const settings = Object.freeze({ ...this.resolveModelSettings(effectiveSelection) });
-    const prompt: ModelPrompt = Object.freeze({
+    const prompt = Object.freeze({
       ...structuredClone(request.prompt),
       model: effectiveSelection.model,
-      temperature:
-        request.requestParameters?.temperature ??
-        effectiveSelection.parameters.temperature ??
-        request.prompt.temperature,
+      temperature: effectiveSelection.parameters.temperature ?? defaultModelSettings.temperature,
     });
     const requestFingerprint = modelCallRequestFingerprint({
+      version: 2,
       threadId: thread.id,
       projectId: thread.projectId,
       purpose: request.purpose,
-      prompt,
-      effectiveSelection,
-      explicitTarget: explicitTarget
-        ? {
-            provider: explicitTarget.provider ?? null,
-            connectionId: explicitTarget.connectionId ?? null,
-            model: explicitTarget.model ?? null,
-          }
-        : null,
-      requestParameters: request.requestParameters ?? null,
+      prompt: request.prompt,
     });
     return { effectiveSelection, settings, prompt, requestFingerprint };
   }
@@ -4065,8 +4106,15 @@ export class PicoRuntime {
       throw new Error('Plugin model call prompt is invalid.');
     }
 
-    const prepared = this.preparePluginModelCall(thread, request);
-    const { requestFingerprint } = prepared;
+    if (request.modelTarget || request.requestParameters)
+      throw new ServiceError(400, 'Configure plugin models through framework model selection.');
+    const requestFingerprint = modelCallRequestFingerprint({
+      version: 2,
+      threadId: thread.id,
+      projectId: thread.projectId,
+      purpose: request.purpose,
+      prompt: request.prompt,
+    });
 
     const key = `${pluginId}:${request.idempotencyKey}`;
     const inFlight = this.pluginModelCallsInFlight.get(key);
@@ -4074,7 +4122,7 @@ export class PicoRuntime {
       if (inFlight.requestFingerprint !== requestFingerprint) {
         throw new Error('Plugin model call idempotency key was reused for a different request.');
       }
-      return inFlight.promise;
+      return request.signal ? raceWithAbort(inFlight.promise, request.signal) : inFlight.promise;
     }
     const prior = this.store.findPluginModelCall(pluginId, request.idempotencyKey);
     if (prior) {
@@ -4092,8 +4140,10 @@ export class PicoRuntime {
       );
     }
 
+    const prepared = this.preparePluginModelCall(thread, { ...request, pluginId });
     const endOperation = this.beginThreadOperation(thread.id);
-    const pending = this.runPluginModelCall(pluginId, thread, request, prepared);
+    // Reserve the in-flight key before any interceptor can run (including synchronous short-circuit).
+    const pending = Promise.resolve().then(() => this.runPluginModelCall(pluginId, thread, request, prepared));
     const entry = { requestFingerprint, promise: pending };
     this.pluginModelCallsInFlight.set(key, entry);
     return pending.finally(() => {
@@ -4191,6 +4241,7 @@ export class PicoRuntime {
             fields: {},
           },
       selectionParameters: structuredClone(effectiveSelection.parameters),
+      modelSelection: structuredClone(effectiveSelection),
       pluginModelCall: { pluginId, purpose: request.purpose, idempotencyKey: request.idempotencyKey },
       invocationId: `plugin:${pluginId}:${request.idempotencyKey}`,
       prompt,
@@ -4247,98 +4298,126 @@ export class PicoRuntime {
     };
   }
 
+  private async migrateLegacyProviderConfiguration(): Promise<void> {
+    if (this.store.getSetting('provider-instances-migrated-v1', false)) return;
+    const old = this.store.getSetting<Partial<ModelSettings>>('model', {});
+    const oldApiModel =
+      old.provider === 'openai-compatible' || !old.provider
+        ? old.model
+        : this.store.getSetting<Record<string, string>>('provider-models', {})['openai-compatible'];
+    if (old.baseUrl && this.modelCatalog.listProviderTypes().some((type) => type.id === 'openai-compatible')) {
+      const instance = this.store.transaction(() => {
+        const instance = this.modelCatalog.addInstance('pico.openai-provider', 'openai-compatible', {
+          label: 'Imported API connection',
+          config: {
+            baseUrl: old.baseUrl,
+            protocol: 'openai-chat-completions',
+            models: oldApiModel ? [oldApiModel] : [],
+          },
+        });
+        if (old.apiKey) this.modelCatalog.getInstanceSecrets(instance.owner, instance.id).set('apiKey', old.apiKey);
+        this.store.setSetting('model', { ...old, apiKey: '' });
+        this.store.setSetting('provider-instances-migrated-v1', true);
+        return instance;
+      });
+      await this.modelCatalog.refreshInstance(instance.id);
+    } else if (!old.baseUrl) this.store.setSetting('provider-instances-migrated-v1', true);
+  }
+
   private defaultThreadModelSelection(): ThreadModelSelection {
-    const settings = this.getModelSettings();
-    const base: ThreadModelSelection = {
-      provider: settings.provider,
-      connectionId: 'default',
-      model: settings.model,
-      parameters: { temperature: settings.temperature, options: {} },
+    return { modelId: '', adapterId: '', provider: '', connectionId: '', model: '', parameters: { options: {} } };
+  }
+
+  private selectionView(selection: CatalogSelection): ThreadModelSelection {
+    const model = this.modelCatalog.listModels().find((entry) => entry.modelId === selection.modelId);
+    return {
+      ...structuredClone(selection),
+      provider: model?.providerTypeId ?? '',
+      connectionId: model?.instanceId ?? '',
+      model: model?.name ?? '',
     };
-    const options = this.modelProviderRegistry.initialSelection({
-      provider: base.provider,
-      connectionId: base.connectionId,
-      model: base.model,
-      baseUrl: settings.baseUrl,
-    });
-    return this.validateThreadModelSelection({ ...base, parameters: { ...base.parameters, options } }, true);
   }
 
   threadModelSelection(threadId: string): ThreadModelSelection {
-    if (!this.store.getThread(threadId)) throw new Error('Thread not found');
-    const globalSelection = this.defaultThreadModelSelection();
-    const storedSelection = this.store.getThreadModelSelection(threadId);
-    if (!storedSelection) return this.store.setThreadModelSelection(threadId, globalSelection);
-
-    const storedParameters = validateThreadSelectionParameters(storedSelection.parameters);
-    const sameTarget =
-      storedSelection.provider === globalSelection.provider && storedSelection.model === globalSelection.model;
-    return this.validateThreadModelSelection(
-      {
-        ...globalSelection,
-        parameters: {
-          ...globalSelection.parameters,
-          ...storedParameters,
-          options: sameTarget ? storedParameters.options : globalSelection.parameters.options,
-        },
-      },
-      true,
-    );
+    if (!this.store.getThread(threadId)) throw new ServiceError(404, 'Thread not found');
+    const saved = this.store.getThreadModelSelection(threadId);
+    if (!saved?.modelId || !saved.adapterId) return this.defaultThreadModelSelection();
+    const model = this.modelCatalog.listModels().find((entry) => entry.modelId === saved.modelId);
+    if (!model || model.availability === 'unavailable')
+      return {
+        ...this.defaultThreadModelSelection(),
+        unavailableReason: 'The saved model is unavailable. Choose a model.',
+      };
+    try {
+      return this.selectionView(this.modelCatalog.validateSelection(saved));
+    } catch {
+      return {
+        ...this.selectionView(saved),
+        unavailableReason: 'The saved adapter or parameters are unavailable. Select again.',
+      };
+    }
   }
 
-  updateThreadModelSelection(threadId: string, selection: ThreadModelSelection): ThreadModelSelection {
-    if (!this.store.getThread(threadId)) throw new Error('Thread not found');
-    const current = this.threadModelSelection(threadId);
-    const sameTarget = selection.provider === current.provider && selection.model === current.model;
-    const parameters = validateThreadSelectionParameters(selection.parameters);
-    const validated = this.validateThreadModelSelection({
-      ...current,
-      parameters: {
-        ...current.parameters,
-        ...parameters,
-        options: sameTarget ? parameters.options : current.parameters.options,
-      },
-    });
-    const saved = this.store.setThreadModelSelection(threadId, validated);
+  updateThreadModelSelection(threadId: string, selection: unknown): ThreadModelSelection {
+    this.requireUnarchivedThread(threadId);
+    const saved = this.store.setThreadModelSelection(threadId, this.validateThreadModelSelection(selection));
     this.publish({ type: 'thread.model-selection.updated', threadId, selection: saved });
     return saved;
   }
 
-  private validateThreadModelSelection(
-    selection: ThreadModelSelection,
-    allowUnconfiguredModel = false,
-  ): ThreadModelSelection {
-    if (!selection || typeof selection.provider !== 'string' || !this.modelProviderRegistry.has(selection.provider)) {
-      throw new Error(`Model provider ${String(selection?.provider ?? '')} is unavailable.`);
-    }
-    if (selection.connectionId !== 'default')
-      throw new Error('This Runtime only has the default model connection configured.');
-    if (
-      typeof selection.model !== 'string' ||
-      (!allowUnconfiguredModel && !selection.model.trim()) ||
-      selection.model.length > 240
-    ) {
-      throw new Error('A valid model name is required.');
-    }
-    const parameters = validateThreadSelectionParameters(selection.parameters);
-    const modelSettings = selection.model.trim()
-      ? this.resolveModelSettings({ ...selection, parameters })
-      : this.getModelSettings();
-    const options = this.modelProviderRegistry.normalizeSelection(
-      {
-        provider: selection.provider,
-        connectionId: selection.connectionId,
-        model: selection.model.trim(),
-        baseUrl: modelSettings.baseUrl,
-      },
-      parameters.options,
-    );
+  private validateThreadModelSelection(selection: unknown): ThreadModelSelection {
+    return this.selectionView(this.modelCatalog.validateSelection(selection as CatalogSelection));
+  }
+
+  modelCatalogView() {
     return {
-      provider: selection.provider,
-      connectionId: selection.connectionId,
-      model: selection.model.trim(),
-      parameters: { ...parameters, options },
+      providerTypes: this.modelCatalog.listProviderTypes(),
+      instances: this.modelCatalog.listInstances().map((instance) => ({ ...instance, config: {} })),
+      models: this.modelCatalog.listModels(),
     };
+  }
+
+  pluginModelSelections(): Record<string, { mode: 'thread' | 'fixed'; selection?: CatalogSelection }> {
+    return this.store.getSetting('plugin-model-selections', {});
+  }
+
+  pluginModelSelectionsView() {
+    return Object.fromEntries(
+      Object.entries(this.pluginModelSelections()).map(([id, config]) => {
+        if (config.mode !== 'fixed' || !config.selection) return [id, config];
+        try {
+          this.modelCatalog.validateSelection(config.selection);
+          return [id, config];
+        } catch {
+          return [
+            id,
+            {
+              ...config,
+              selection: {
+                ...config.selection,
+                unavailableReason: 'The saved model, adapter or parameters are unavailable. Select again.',
+              },
+            },
+          ];
+        }
+      }),
+    );
+  }
+
+  updatePluginModelSelection(pluginId: string, config: { mode: 'thread' | 'fixed'; selection?: CatalogSelection }) {
+    if (!this.plugins.catalog().some((plugin) => plugin.id === pluginId))
+      throw new ServiceError(404, 'Plugin not found');
+    if (!config || !['thread', 'fixed'].includes(config.mode))
+      throw new ServiceError(400, 'Invalid plugin model configuration');
+    const normalized =
+      config.mode === 'thread'
+        ? { mode: 'thread' as const }
+        : { mode: 'fixed' as const, selection: this.modelCatalog.validateSelection(config.selection!) };
+    if (normalized.mode === 'fixed' && !normalized.selection.modelId)
+      throw new ServiceError(400, 'Select a model and adapter');
+    this.store.setSetting('plugin-model-selections', { ...this.pluginModelSelections(), [pluginId]: normalized });
+    this.publish({ type: 'model-catalog.updated' });
+    return normalized;
   }
 
   publicModelSettings(): PublicSettings {
@@ -4354,42 +4433,6 @@ export class PicoRuntime {
         [settings.provider]: settings.model,
       },
     };
-  }
-
-  updateModelSettings(update: Partial<ModelSettings>): PublicSettings {
-    const current = this.getModelSettings();
-    const provider = update.provider ?? current.provider;
-    const providerModels = this.store.getSetting<Record<string, string>>('provider-models', {});
-    const next = {
-      ...current,
-      ...(provider !== current.provider ? { model: providerModels[provider] ?? '' } : {}),
-      ...update,
-    };
-    if (!this.plugins.modelProviders().some((provider) => provider.id === next.provider)) {
-      throw new Error(`Model provider ${next.provider} is not registered.`);
-    }
-    if (next.provider === 'openai-compatible') {
-      if (!next.baseUrl.trim()) throw new Error('Base URL is required');
-      try {
-        new URL(next.baseUrl);
-      } catch {
-        throw new Error('Base URL must be a valid http or https URL');
-      }
-      if (!/^https?:$/.test(new URL(next.baseUrl).protocol)) throw new Error('Base URL must use http or https');
-    }
-    if (!Number.isFinite(next.temperature) || next.temperature < 0 || next.temperature > 2) {
-      throw new Error('Temperature must be between 0 and 2');
-    }
-    this.store.transaction(() => {
-      this.store.setSetting('provider-models', {
-        ...providerModels,
-        [current.provider]: current.model,
-        [next.provider]: next.model,
-      });
-      this.store.setSetting('model', next);
-    });
-    this.publish({ type: 'settings.updated', settings: this.publicModelSettings() });
-    return this.publicModelSettings();
   }
 
   getContextManagementSettings(): ContextManagementSettings {

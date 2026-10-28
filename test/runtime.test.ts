@@ -10,7 +10,7 @@ import type { PicoPlugin } from '../src/plugins/host.js';
 import type { ModelAdapter, ModelPrompt } from '../src/runtime/model.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
 import { threadCanBeInterrupted } from '../src/web/thread-controls.js';
-import { assistantPayload, deferred, FakeModel, response, setupRuntime } from './helpers.js';
+import { assistantPayload, deferred, FakeModel, response, setupRuntime, setupTestCatalog } from './helpers.js';
 
 describe('durable Thread runtime invariants', () => {
   it('keeps framework compaction available without Rolling Context and rebuilds its projection after restart', async () => {
@@ -23,7 +23,7 @@ describe('durable Thread runtime invariants', () => {
     );
     const env = await setupRuntime(model, { disabledBuiltinPlugins: ['pico.rolling-context'] });
     let runtime = env.runtime;
-    const thread = env.runtime.createThread(env.project.id, 'runtime');
+    const thread = env.createThread('runtime');
     try {
       expect(runtime.commands.list()).toContainEqual(expect.objectContaining({ name: 'compact' }));
       runtime.updateContextManagementSettings({ keepRecentTokens: 1 });
@@ -43,7 +43,7 @@ describe('durable Thread runtime invariants', () => {
         });
       }
 
-      const compact = await runtime.submit(thread.id, 'compact-without-plugin', '/compact');
+      const compact = await runtime.executeCommand(thread.id, 'compact-without-plugin', '/compact');
       expect(compact.command?.text).toContain('Compacted 2 completed model invocation(s)');
       expect(env.store.listRecords(thread.id).filter((record) => record.kind === 'message')).toHaveLength(4);
       expect(
@@ -58,6 +58,7 @@ describe('durable Thread runtime invariants', () => {
         disabledBuiltinPlugins: ['pico.rolling-context'],
         pluginDirectory: join(env.directory, 'empty-plugins'),
       });
+      await setupTestCatalog(runtime);
       await runtime.initialize();
       expect(runtime.commands.list()).toContainEqual(expect.objectContaining({ name: 'compact' }));
       await runtime.submit(thread.id, 'continue-after-compact-restart', 'Continue from the recent work.');
@@ -187,7 +188,6 @@ describe('durable Thread runtime invariants', () => {
       },
     };
     const env = await setupRuntime(model);
-    env.runtime.updateModelSettings({ model: 'test-model' });
     const thread = env.createThread();
     const events: Array<Record<string, unknown>> = [];
     const unsubscribe = env.runtime.subscribe((event) => events.push(event));
@@ -241,15 +241,26 @@ describe('durable Thread runtime invariants', () => {
       },
     };
     const env = await setupRuntime(model);
-    env.runtime.updateModelSettings({ model: 'test-model' });
-    const thread = env.createThread();
+    env.runtime.modelCatalog.registerAdapter('pico.test', {
+      id: 'pico.test-replay',
+      label: 'Replay',
+      match: {},
+      controls: [],
+      temperature: { supported: true },
+      replayFormat: 'test-opaque',
+    });
+    const thread = env.createThread('runtime');
+    env.runtime.updateThreadModelSelection(thread.id, { ...env.catalog.select(), adapterId: 'pico.test-replay' });
     const events: Array<Record<string, unknown>> = [];
     const unsubscribe = env.runtime.subscribe((event) => events.push(event));
     try {
       await env.runtime.submit(thread.id, 'reasoning-first', 'First question.');
       await env.runtime.drain();
 
-      expect(env.store.modelOutputForThread(thread.id)?.payload).toMatchObject({ reasoningReplay });
+      expect(prompts.length, JSON.stringify(env.store.listExecutions(thread.id))).toBe(1);
+      expect(env.store.modelOutputForThread(thread.id)?.payload).toMatchObject({
+        reasoningReplay: { format: 'test-opaque', modelId: env.catalog.select().modelId, value: reasoningReplay },
+      });
       const firstSnapshot = env.runtime.getSnapshot(thread.id)!;
       expect(firstSnapshot.records.find((record) => record.kind === 'assistant')?.payload).not.toHaveProperty(
         'reasoningReplay',
@@ -384,8 +395,8 @@ describe('durable Thread runtime invariants', () => {
         : response('Received.'),
     );
     const env = await setupRuntime(model, { plugins: [collaborationPlugin] });
-    const sender = env.runtime.createThread(env.project.id, 'runtime', 'Chat sender');
-    const recipient = env.runtime.createThread(env.project.id, 'runtime', 'Chat recipient');
+    const sender = env.createThread('runtime', 'Chat sender');
+    const recipient = env.createThread('runtime', 'Chat recipient');
     recipientId = recipient.id;
     try {
       await env.runtime.submit(sender.id, 'chat-tool-message', 'Send a message to the other Thread.');
@@ -436,8 +447,9 @@ describe('durable Thread runtime invariants', () => {
     });
     await runtime.initialize();
     const project = await runtime.createProject('Model recovery', workspace);
-    runtime.updateModelSettings({ model: 'test-model' });
-    const thread = runtime.createThread(project.id, 'host');
+    const catalog = await setupTestCatalog(runtime);
+    const thread = runtime.createThread(project.id, 'runtime');
+    runtime.updateThreadModelSelection(thread.id, catalog.select());
     try {
       await runtime.submit(thread.id, 'model-shutdown-message', 'Please finish this response.');
       await modelStarted;
@@ -456,6 +468,7 @@ describe('durable Thread runtime invariants', () => {
         model: new FakeModel(() => response('Recovered from the durable Message.')),
         pluginDirectory: join(directory, 'empty-plugins'),
       });
+      await setupTestCatalog(runtime);
       await runtime.initialize();
       await runtime.drain();
 

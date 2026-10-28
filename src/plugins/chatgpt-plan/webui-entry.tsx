@@ -19,6 +19,10 @@ type ApiClient = ReturnType<typeof createPluginUiClient>;
 function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiClient }): ReactElement | null {
   const [settings, setSettings] = useState(init.settings);
   const [context, setContext] = useState(init.context as PluginUiContext);
+  const [instances, setInstances] = useState<Array<{ id: string; label: string }>>([]);
+  const [instanceId, setInstanceId] = useState('');
+  const [newLabel, setNewLabel] = useState('ChatGPT account');
+  const refreshVersion = useRef(0);
   const [status, setStatus] = useState<{ connected: boolean; accountLabel?: string | null } | null>(null);
   const [models, setModels] = useState<Array<{ slug: string; displayName: string }>>([]);
   const [busy, setBusy] = useState(false);
@@ -30,31 +34,46 @@ function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiCl
   const [retrySent, setRetrySent] = useState(false);
   const api = useCallback(
     <T,>(path: string, init?: { method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'; body?: string }) =>
-      client.props(settings, context).api<T>(`${apiRoot}${path}`, init),
-    [client, settings, context],
+      client
+        .props(settings, context)
+        .api<T>(
+          `${apiRoot}${path}${path === '/instances' ? '' : `?instanceId=${encodeURIComponent(instanceId)}`}`,
+          init,
+        ),
+    [client, settings, context, instanceId],
   );
 
   const refresh = useCallback(
     async (force = false) => {
+      const version = ++refreshVersion.current;
+      if (!instanceId) {
+        setStatus(null);
+        setModels([]);
+        return;
+      }
       setBusy(true);
       setError('');
       try {
         const next = await api<{ connected: boolean; accountLabel?: string | null }>('/status');
+        const nextModels = next.connected
+          ? await api<Array<{ slug: string; displayName: string }>>(
+              force ? '/models/refresh' : '/models',
+              force ? { method: 'POST' } : undefined,
+            )
+          : [];
+        if (version !== refreshVersion.current) return;
         setStatus(next);
-        setModels(
-          next.connected
-            ? await api(force ? '/models/refresh' : '/models', force ? { method: 'POST' } : undefined)
-            : [],
-        );
+        setModels(nextModels);
       } catch (reason) {
+        if (version !== refreshVersion.current) return;
         const message = errorText(reason);
         setError(message);
         client.props(settings, context).onError(message);
       } finally {
-        setBusy(false);
+        if (version === refreshVersion.current) setBusy(false);
       }
     },
-    [api, client, settings, context],
+    [api, client, settings, context, instanceId],
   );
   useEffect(() => client.subscribeSettings(setSettings), [client]);
   useEffect(() => client.subscribeContext((value) => setContext(value as PluginUiContext)), [client]);
@@ -63,13 +82,16 @@ function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiCl
     client.ready(init.attemptId);
   }, [client, init.attemptId]);
   useEffect(() => {
-    if (
-      init.viewType === 'page' ||
-      context.modelSelection?.provider === 'chatgpt-plan' ||
-      settings.provider === 'chatgpt-plan'
-    )
-      void refresh();
-  }, [init.viewType, context.modelSelection?.provider, settings.provider, refresh]);
+    void api<Array<{ id: string; label: string }>>('/instances')
+      .then((items) => {
+        setInstances(items);
+        setInstanceId((current) => (items.some((item) => item.id === current) ? current : (items[0]?.id ?? '')));
+      })
+      .catch((reason: unknown) => setError(errorText(reason)));
+  }, [client]);
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
   useEffect(
     () =>
       client.subscribeEvents((event) => {
@@ -83,8 +105,10 @@ function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiCl
           !['connected', 'failed'].includes(String(message.status))
         )
           return;
-        setOperationId(null);
-        expectedOperationId.current = null;
+        if (message.status === 'connected' || message.retryable !== true) {
+          setOperationId(null);
+          expectedOperationId.current = null;
+        }
         setCallbackUrl('');
         setRetryExchange(false);
         setRetrySent(false);
@@ -109,6 +133,36 @@ function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiCl
     () =>
       client.subscribeActions((action) => {
         const id = action.actionId;
+        if (id === 'instance.select') {
+          setInstanceId(String(action.value ?? ''));
+          setOperationId(null);
+          expectedOperationId.current = null;
+          setStatus(null);
+          setModels([]);
+          setError('');
+          return;
+        }
+        if (id === 'instance.label') {
+          setNewLabel(String(action.value ?? ''));
+          return;
+        }
+        if (id === 'instance.create') {
+          setBusy(true);
+          setError('');
+          void api<{ id: string; label: string }>('/instances', {
+            method: 'POST',
+            body: JSON.stringify({ label: newLabel }),
+          })
+            .then((instance) => {
+              setInstances((items) => [...items, instance]);
+              setInstanceId(instance.id);
+              setStatus(null);
+              setModels([]);
+            })
+            .catch((reason: unknown) => setError(errorText(reason)))
+            .finally(() => setBusy(false));
+          return;
+        }
         if (id === 'account.refresh') {
           void refresh(true);
           return;
@@ -240,56 +294,31 @@ function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiCl
             .finally(() => setBusy(false));
           return;
         }
-        if (id.startsWith('model:')) {
-          const model = String(action.value ?? '');
-          if (model)
-            void client
-              .props(settings, context)
-              .updateModelSettings({ provider: 'chatgpt-plan', model })
-              .catch((reason: unknown) => {
-                setError(errorText(reason));
-                client.props(settings, context).onError(errorText(reason));
-              });
-        }
       }),
-    [client, api, refresh, settings, context, operationId, callbackUrl, busy, retrySent],
+    [client, api, refresh, settings, context, operationId, callbackUrl, busy, retrySent, newLabel],
   );
 
-  if (init.viewType === 'component') {
-    const provider = context.modelSelection?.provider ?? settings.provider;
-    const selected = context.modelSelection?.model ?? settings.model;
-    const options = models.map((model) => ({ label: model.displayName, value: model.slug }));
-    const nodes: PluginUiNode[] =
-      provider === 'chatgpt-plan'
-        ? status?.connected
-          ? [
-              {
-                type: 'select',
-                label: 'Model',
-                value: options.some((x) => x.value === selected) ? selected : '',
-                actionId: 'model:select',
-                disabled: busy,
-                options: [{ label: busy ? 'Loading models…' : 'Choose model', value: '' }, ...options],
-              },
-            ]
-          : [
-              {
-                type: 'select',
-                label: 'Model',
-                value: '',
-                actionId: 'model:select',
-                disabled: true,
-                options: [{ label: busy ? 'Loading models…' : 'Connect ChatGPT account', value: '' }],
-              },
-              { type: 'button', label: 'Connect', actionId: 'account.connect', disabled: busy, externalAuth: true },
-            ]
-        : [];
-    client.render(nodes);
-    return null;
-  }
-
   const nodes: PluginUiNode[] = [
-    { type: 'heading', text: 'ChatGPT account' },
+    { type: 'heading', text: 'ChatGPT accounts' },
+    {
+      type: 'select',
+      label: 'Account',
+      value: instanceId,
+      actionId: 'instance.select',
+      disabled: busy || instances.length === 0,
+      options: instances.length
+        ? instances.map((item) => ({ label: item.label, value: item.id }))
+        : [{ label: 'No accounts', value: '' }],
+    },
+    {
+      type: 'textInput',
+      label: 'New account label',
+      value: newLabel,
+      actionId: 'instance.label',
+      maxLength: 120,
+      disabled: busy,
+    },
+    { type: 'button', label: 'Add account', actionId: 'instance.create', disabled: busy || !newLabel.trim() },
     {
       type: 'paragraph',
       text: 'Sign in with ChatGPT to use models available to your account. OAuth returns to 127.0.0.1. If the browser cannot reach Pico Runtime there, copy the full callback URL from the browser address bar and paste it below. Credentials remain with the Runtime.',
@@ -317,7 +346,7 @@ function Controller({ init, client }: { init: PluginUiInitMessage; client: ApiCl
         ],
       },
     );
-  else
+  else if (instanceId)
     nodes.push({
       type: 'button',
       label: busy ? 'Loading…' : 'Continue with ChatGPT',

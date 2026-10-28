@@ -558,6 +558,8 @@ describe('dynamic plugin UI boundary', () => {
     const threadA = { id: 'thread-a' } as PluginUiContext['thread'];
     const threadB = { id: 'thread-b' } as PluginUiContext['thread'];
     const selection = {
+      modelId: 'test-model-id',
+      adapterId: 'test-adapter',
       provider: 'openai-compatible',
       connectionId: 'default',
       model: 'first',

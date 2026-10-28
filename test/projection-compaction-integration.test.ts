@@ -19,7 +19,7 @@ describe('projected compaction', () => {
       rolling ? { plugins: [rollingContextPlugin] } : { disabledBuiltinPlugins: ['pico.rolling-context'] },
     );
     expect(env.runtime.plugins.list().some((plugin) => plugin.id === 'pico.rolling-context')).toBe(rolling);
-    const thread = env.runtime.createThread(env.project.id, 'runtime');
+    const thread = env.createThread('runtime');
     try {
       env.runtime.updateContextManagementSettings({ keepRecentTokens: 1 });
       for (let n = 1; n <= 4; n++) {
@@ -96,7 +96,7 @@ describe('context changes followed by projected compaction', () => {
   it.each(['restore', 'rewind'] as const)('preserves the active history after %s', async (action) => {
     const model = new FakeModel(() => response('Summary 1'));
     const env = await setupRuntime(model, { plugins: [rollingContextPlugin] });
-    const thread = env.runtime.createThread(env.project.id, 'runtime');
+    const thread = env.createThread('runtime');
     const append = (prefix: string, n: number) => {
       const user = env.store.appendCanonical(thread.id, `${prefix}-user-${n}`, 'message', {
         role: 'user',
@@ -217,7 +217,7 @@ it('respects an unknown plugin grouped boundary without summarizing plugin conte
   };
   const model = new FakeModel(() => response('Summary'));
   const env = await setupRuntime(model, { plugins: [plugin] });
-  const thread = env.runtime.createThread(env.project.id, 'runtime');
+  const thread = env.createThread('runtime');
   try {
     env.runtime.updateContextManagementSettings({ keepRecentTokens: 1 });
     for (let n = 1; n <= 4; n++) {
@@ -256,7 +256,7 @@ it('respects an unknown plugin grouped boundary without summarizing plugin conte
 it('compacts complete tool invocations inside a single user turn without splitting results', async () => {
   const model = new FakeModel(() => response('Summary'));
   const env = await setupRuntime(model);
-  const thread = env.runtime.createThread(env.project.id, 'runtime');
+  const thread = env.createThread('runtime');
   try {
     env.runtime.updateContextManagementSettings({ keepRecentTokens: 1 });
     const user = env.store.appendCanonical(thread.id, 'single-user', 'message', {

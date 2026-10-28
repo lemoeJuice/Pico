@@ -1,5 +1,5 @@
 // src/plugins/chatgpt-plan.ts
-import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
+import { randomUUID as randomUUID2 } from "node:crypto";
 import { createServer } from "node:http";
 import { join as join2 } from "node:path";
 
@@ -7,6 +7,7 @@ import { join as join2 } from "node:path";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+var databaseLocks = /* @__PURE__ */ new Map();
 function secureSidecars(databasePath) {
   for (const suffix of ["-wal", "-shm"]) {
     try {
@@ -17,9 +18,7 @@ function secureSidecars(databasePath) {
 }
 function createSharedChatGptOAuthSecrets(filename, owner) {
   const databasePath = resolve(filename);
-  const runtimeDatabasePath = resolve(
-    process.env.PICO_DB_PATH?.trim() || join(process.cwd(), "data", "pico.sqlite")
-  );
+  const runtimeDatabasePath = resolve(process.env.PICO_DB_PATH?.trim() || join(process.cwd(), "data", "pico.sqlite"));
   if (databasePath === runtimeDatabasePath) {
     throw new Error("PICO_CHATGPT_OAUTH_DB_PATH must point to a dedicated OAuth database.");
   }
@@ -60,22 +59,38 @@ function createSharedChatGptOAuthSecrets(filename, owner) {
     delete(key) {
       db.prepare("DELETE FROM private_secrets WHERE owner = ? AND key = ?").run(owner, key);
     },
+    clear() {
+      db.prepare("DELETE FROM private_secrets WHERE owner = ?").run(owner);
+    },
     async withLock(operation) {
-      db.exec("BEGIN IMMEDIATE");
+      const previous = databaseLocks.get(databasePath) ?? Promise.resolve();
+      let release;
+      const current = new Promise((resolve2) => {
+        release = resolve2;
+      });
+      const tail = previous.then(() => current);
+      databaseLocks.set(databasePath, tail);
+      await previous;
       try {
-        const result = await operation();
-        db.exec("COMMIT");
-        return result;
-      } catch (error) {
+        db.exec("BEGIN IMMEDIATE");
         try {
+          const result = await operation();
           db.exec("COMMIT");
-        } catch {
+          return result;
+        } catch (error) {
           try {
-            db.exec("ROLLBACK");
+            db.exec("COMMIT");
           } catch {
+            try {
+              db.exec("ROLLBACK");
+            } catch {
+            }
           }
+          throw error;
         }
-        throw error;
+      } finally {
+        release();
+        if (databaseLocks.get(databasePath) === tail) databaseLocks.delete(databasePath);
       }
     },
     close() {
@@ -710,909 +725,6 @@ var ChatGptPlanAuth = class {
   }
 };
 
-// src/contracts/model-error.ts
-var SAFE_PROVIDER_FAILURE_CODES = /* @__PURE__ */ new Set([
-  "aborted",
-  "auth",
-  "empty_output",
-  "empty_stream",
-  "fetch_failed",
-  "invalid_client",
-  "invalid_grant",
-  "incomplete_function_call",
-  "invalid_json",
-  "invalid_stream",
-  "invalid_scope",
-  "invalid_token_response",
-  "missing_completion",
-  "missing_function_name",
-  "protocol",
-  "provider_error",
-  "response_failed",
-  "server_error",
-  "temporarily_unavailable",
-  "timeout",
-  "transport",
-  "unauthorized_client",
-  "unsupported_grant_type"
-]);
-var SAFE_PROVIDER_NETWORK_CODES = /* @__PURE__ */ new Set([
-  "EACCES",
-  "ECONNABORTED",
-  "ECONNREFUSED",
-  "ECONNRESET",
-  "EAI_AGAIN",
-  "EHOSTUNREACH",
-  "ENETUNREACH",
-  "ENOTFOUND",
-  "EPIPE",
-  "ETIMEDOUT",
-  "UND_ERR_CONNECT_TIMEOUT",
-  "UND_ERR_HEADERS_TIMEOUT",
-  "UND_ERR_BODY_TIMEOUT",
-  "UND_ERR_SOCKET"
-]);
-function sanitizeProviderFailureCode(value) {
-  if (typeof value !== "string" || value.length > 80 || !/^[a-z0-9_.:-]+$/i.test(value)) return void 0;
-  if (/^http_[1-5][0-9]{2}$/i.test(value)) return value.toLowerCase();
-  const lower = value.toLowerCase();
-  if (SAFE_PROVIDER_FAILURE_CODES.has(lower)) return lower;
-  const upper = value.toUpperCase();
-  return SAFE_PROVIDER_NETWORK_CODES.has(upper) ? upper : void 0;
-}
-
-// src/plugins/chatgpt-plan/model.ts
-var responsesUrl = "https://api.openai.com/v1/responses";
-var FETCH_FAILED_RETRY_INTERVAL_MS = 2e3;
-var MAX_FETCH_FAILED_RETRIES = 5;
-var MAX_PROVIDER_ERROR_BODY_BYTES = 16 * 1024;
-var MAX_PROVIDER_ERROR_READ_MS = 2e3;
-var RETRYABLE_FETCH_ERROR_CODES = /* @__PURE__ */ new Set([
-  "ECONNREFUSED",
-  "ECONNRESET",
-  "EAI_AGAIN",
-  "EHOSTUNREACH",
-  "ENETUNREACH",
-  "ETIMEDOUT",
-  "UND_ERR_CONNECT_TIMEOUT",
-  "UND_ERR_SOCKET"
-]);
-function responseInput(prompt) {
-  const input = [];
-  for (let index = 0; index < prompt.turns.length; index += 1) {
-    const turn = prompt.turns[index];
-    if (turn.kind === "message") {
-      if (turn.role !== "assistant") {
-        input.push({ role: turn.role, content: turn.content });
-        continue;
-      }
-      const replay = reasoningItems(turn.reasoningReplay);
-      input.push(...replay, { role: turn.role, content: turn.content });
-      continue;
-    }
-    if (turn.kind === "assistant_tools") {
-      input.push(
-        ...reasoningItems(turn.reasoningReplay),
-        ...turn.content ? [{ role: "assistant", content: turn.content }] : [],
-        ...turn.calls.map((call) => ({
-          type: "function_call",
-          call_id: call.id,
-          name: call.name,
-          arguments: JSON.stringify(call.arguments)
-        }))
-      );
-      continue;
-    }
-    const batchId = turn.batchId;
-    const group = [turn];
-    while (index + 1 < prompt.turns.length) {
-      const next = prompt.turns[index + 1];
-      if (next.kind !== "tool_result") break;
-      if (batchId ? next.batchId !== batchId : Boolean(next.batchId)) break;
-      group.push(next);
-      index += 1;
-    }
-    input.push(
-      ...group.map((result) => ({
-        type: "function_call_output",
-        call_id: result.callId,
-        output: result.content
-      }))
-    );
-    for (const result of group) {
-      if (!result.images?.length) continue;
-      input.push({
-        role: "user",
-        content: [
-          { type: "input_text", text: `Images returned by tool ${result.toolName} (call id ${result.callId}).` },
-          ...result.images.map((image) => ({
-            type: "input_image",
-            image_url: `data:${image.mimeType};base64,${image.data}`
-          }))
-        ]
-      });
-    }
-  }
-  return input;
-}
-function reasoningItems(value) {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item) => {
-    const candidate = object(item);
-    return candidate?.type === "reasoning" ? [candidate] : [];
-  });
-}
-function responseTools(tools) {
-  return tools.map((tool) => ({
-    type: "function",
-    name: tool.name,
-    description: tool.description,
-    parameters: tool.parameters
-  }));
-}
-function object(value) {
-  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
-}
-function boundedString(value, maxLength) {
-  if (typeof value !== "string" || value.length > maxLength) return void 0;
-  const result = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
-  return result || void 0;
-}
-function providerErrorLabel(value) {
-  const label = boundedString(value, 80);
-  return label && /^[a-z0-9_.:-]+$/i.test(label) ? label : void 0;
-}
-function providerErrorParam(value) {
-  const param = boundedString(value, 160);
-  return param && /^[a-z0-9_.:-]+(?:\[[a-z0-9_.:-]*\][a-z0-9_.:-]*)*$/i.test(param) ? param : void 0;
-}
-function providerErrorReason(error) {
-  const diagnostic = `${typeof error.code === "string" ? error.code : ""} ${typeof error.message === "string" ? error.message : ""}`.replace(/[_-]+/g, " ").toLowerCase();
-  if (/unsupported\s+(?:request\s+)?parameter|parameter\s+(?:is\s+)?not\s+supported|unrecognized\s+(?:request\s+)?(?:parameter|argument)|unknown\s+parameter/i.test(
-    diagnostic
-  )) {
-    return "unsupported_parameter";
-  }
-  if (/missing\s+(?:required\s+)?parameter|required\s+(?:parameter|field)|(?:parameter|field)\s+is\s+required/i.test(
-    diagnostic
-  )) {
-    return "missing_parameter";
-  }
-  if (/invalid\s+type|expected\s+(?:a\s+|an\s+)?(?:string|number|integer|boolean|array|object)|must\s+be\s+(?:a\s+|an\s+)?(?:string|number|integer|boolean|array|object)/i.test(
-    diagnostic
-  )) {
-    return "invalid_type";
-  }
-  if (/invalid\s+value|unsupported\s+value|(?:must|expected)\s+be\s+one\s+of|not\s+one\s+of|valid\s+values?/i.test(
-    diagnostic
-  )) {
-    return "invalid_value";
-  }
-  return "unknown";
-}
-function providerHttpError(value) {
-  const payload = object(value);
-  if (!payload) return void 0;
-  const nestedError = object(payload.error);
-  const error = nestedError ?? payload;
-  const reason = providerErrorReason(error);
-  const type = providerErrorLabel(error.type);
-  const code = providerErrorLabel(error.code);
-  const param = providerErrorParam(error.param);
-  if (!type && !code && !param && reason === "unknown") return void 0;
-  const details = {
-    reason,
-    ...type ? { type } : {},
-    ...code ? { code } : {},
-    ...param ? { param } : {}
-  };
-  return details;
-}
-async function readProviderHttpError(response) {
-  const reader = response.body?.getReader();
-  if (!reader) return void 0;
-  const chunks = [];
-  let byteLength = 0;
-  let timeout;
-  const deadline = new Promise((_resolve, reject) => {
-    timeout = setTimeout(() => reject(new Error("Provider error body read timed out.")), MAX_PROVIDER_ERROR_READ_MS);
-  });
-  try {
-    while (true) {
-      const { done, value } = await Promise.race([reader.read(), deadline]);
-      if (done) break;
-      byteLength += value.byteLength;
-      if (byteLength > MAX_PROVIDER_ERROR_BODY_BYTES) {
-        void reader.cancel().catch(() => void 0);
-        return void 0;
-      }
-      chunks.push(value);
-    }
-  } catch {
-    void reader.cancel().catch(() => void 0);
-    return void 0;
-  } finally {
-    if (timeout) clearTimeout(timeout);
-    try {
-      reader.releaseLock();
-    } catch {
-    }
-  }
-  try {
-    const bytes = new Uint8Array(byteLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return providerHttpError(JSON.parse(new TextDecoder().decode(bytes)));
-  } catch {
-    return void 0;
-  }
-}
-function readUsage(value) {
-  const usage = object(value);
-  if (!usage) return null;
-  const input = typeof usage.input_tokens === "number" ? usage.input_tokens : void 0;
-  const output = typeof usage.output_tokens === "number" ? usage.output_tokens : void 0;
-  const total = typeof usage.total_tokens === "number" ? usage.total_tokens : void 0;
-  const inputDetails = object(usage.input_tokens_details);
-  const cached = typeof inputDetails?.cached_tokens === "number" ? inputDetails.cached_tokens : void 0;
-  const cacheWrite = typeof inputDetails?.cache_write_tokens === "number" ? inputDetails.cache_write_tokens : void 0;
-  if (input === void 0 && output === void 0 && total === void 0 && cached === void 0 && cacheWrite === void 0)
-    return null;
-  return {
-    ...input === void 0 ? {} : { inputTokens: input },
-    ...output === void 0 ? {} : { outputTokens: output },
-    ...total === void 0 ? {} : { totalTokens: total },
-    ...cached === void 0 ? {} : { cachedInputTokens: cached },
-    ...cacheWrite === void 0 ? {} : { cacheWriteTokens: cacheWrite }
-  };
-}
-function parseArguments(value, name) {
-  if (typeof value !== "string" || !value.trim()) return {};
-  let parsed;
-  try {
-    parsed = JSON.parse(value);
-  } catch {
-    throw new Error(`Model returned invalid arguments for tool ${name}.`);
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`Tool arguments for ${name} must be a JSON object.`);
-  }
-  return parsed;
-}
-function outputFrom(response, prompt) {
-  const output = Array.isArray(response.output) ? response.output : [];
-  let content = "";
-  const reasoningSummaryParts = [];
-  const reasoningReplay = [];
-  const toolCalls = [];
-  for (const rawItem of output) {
-    const item = object(rawItem);
-    if (!item) continue;
-    if (item.type === "reasoning") {
-      reasoningReplay.push(item);
-      if (Array.isArray(item.summary)) {
-        for (const rawPart of item.summary) {
-          const text = object(rawPart)?.text;
-          if (typeof text === "string" && text.length > 0) reasoningSummaryParts.push(text);
-        }
-      }
-    } else if (item.type === "message" && Array.isArray(item.content)) {
-      for (const rawContent of item.content) {
-        const part = object(rawContent);
-        if (part?.type === "output_text" && typeof part.text === "string") content += part.text;
-        if (part?.type === "refusal" && typeof part.refusal === "string") content += part.refusal;
-      }
-    } else if (item.type === "function_call" && typeof item.name === "string") {
-      toolCalls.push({
-        id: typeof item.call_id === "string" ? item.call_id : `call-${toolCalls.length}`,
-        name: item.name,
-        arguments: parseArguments(item.arguments, item.name)
-      });
-    }
-  }
-  const incomplete = object(response.incomplete_details);
-  const reasoningSummary = reasoningSummaryParts.join("\n\n");
-  return {
-    content,
-    ...reasoningSummary ? { reasoningSummary } : {},
-    ...reasoningReplay.length > 0 ? { reasoningReplay } : {},
-    toolCalls,
-    usage: readUsage(response.usage),
-    model: typeof response.model === "string" ? response.model : prompt.model,
-    finishReason: response.status === "incomplete" ? incomplete?.reason === "max_output_tokens" ? "length" : "incomplete" : toolCalls.length > 0 ? "tool_calls" : "stop"
-  };
-}
-function replayableReasoningItems(response, streamed) {
-  const output = Array.isArray(response.output) ? response.output : [];
-  const completedItems = output.flatMap((rawItem, outputIndex) => {
-    const item = object(rawItem);
-    if (item?.type !== "reasoning") return [];
-    const streamedItem = streamed.get(outputIndex);
-    if (!streamedItem) return [item];
-    const merged = { ...streamedItem, ...item };
-    if (typeof item.encrypted_content !== "string" && typeof streamedItem.encrypted_content === "string") {
-      merged.encrypted_content = streamedItem.encrypted_content;
-    }
-    return [merged];
-  });
-  const items = completedItems.length > 0 ? completedItems : [...streamed.entries()].sort(([left], [right]) => left - right).map(([, item]) => item);
-  return items.length > 0 ? items : void 0;
-}
-function finalFunctionCalls(response) {
-  if (!Array.isArray(response.output)) return [];
-  const calls = [];
-  for (const [outputIndex, rawItem] of response.output.entries()) {
-    const item = object(rawItem);
-    if (item?.type !== "function_call" || typeof item.name !== "string") continue;
-    calls.push({
-      ...typeof item.id === "string" ? { itemId: item.id } : {},
-      outputIndex,
-      ...typeof item.call_id === "string" ? { callId: item.call_id } : {},
-      ...typeof item.arguments === "string" ? { argumentsText: item.arguments } : {},
-      toolCallIndex: calls.length
-    });
-  }
-  return calls;
-}
-function errorCodeFrom(error) {
-  let current = error;
-  const visited = /* @__PURE__ */ new Set();
-  for (let depth = 0; depth < 5 && current && typeof current === "object" && !visited.has(current); depth += 1) {
-    visited.add(current);
-    const code = current.code;
-    if (typeof code === "string" && /^[a-z0-9_.:-]{1,80}$/i.test(code)) return code;
-    current = current.cause;
-  }
-  return void 0;
-}
-function isRetryableFetchFailure(error) {
-  const code = errorCodeFrom(error)?.toUpperCase();
-  if (code) return RETRYABLE_FETCH_ERROR_CODES.has(code);
-  return error instanceof TypeError && error.message.toLowerCase() === "fetch failed";
-}
-function waitForFetchRetry(signal) {
-  if (signal.aborted) return Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
-  return new Promise((resolve2, reject) => {
-    let timeout;
-    const onAbort = () => {
-      clearTimeout(timeout);
-      reject(new DOMException("The operation was aborted.", "AbortError"));
-    };
-    timeout = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve2();
-    }, FETCH_FAILED_RETRY_INTERVAL_MS);
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
-function withProviderErrorCode(error, code, phase) {
-  if (error instanceof Error && error.name === "AbortError") return error;
-  const resolvedCode = sanitizeProviderFailureCode(errorCodeFrom(error)) ?? sanitizeProviderFailureCode(code);
-  if (!resolvedCode) return error;
-  const source = object(error);
-  if (source?.code === resolvedCode && source.providerPhase === phase) return error;
-  const message = error instanceof Error ? error.message : "ChatGPT model request failed.";
-  const tagged = Object.assign(new Error(message), {
-    cause: error,
-    code: resolvedCode,
-    providerPhase: phase,
-    ...source?.providerStatus !== void 0 ? { providerStatus: source.providerStatus } : {},
-    ...source?.providerError !== void 0 ? { providerError: source.providerError } : {}
-  });
-  if (error instanceof Error) tagged.name = error.name;
-  return tagged;
-}
-function providerError(message, code, providerPhase) {
-  return Object.assign(new Error(message), { code, ...providerPhase ? { providerPhase } : {} });
-}
-function providerHttpResponseError(status, details) {
-  return Object.assign(providerError(`ChatGPT model request returned HTTP ${status}.`, `http_${status}`), {
-    providerStatus: status,
-    providerPhase: "responses_request",
-    ...details ? { providerError: details } : {}
-  });
-}
-function outputItemCounts(response) {
-  const counts = {};
-  if (!Array.isArray(response.output)) return counts;
-  for (const rawItem of response.output) {
-    const item = object(rawItem);
-    const type = typeof item?.type === "string" ? item.type : "unknown";
-    if (/^[a-z0-9_.:-]{1,80}$/i.test(type)) counts[type] = (counts[type] ?? 0) + 1;
-  }
-  return counts;
-}
-var ChatGptResponsesAdapter = class {
-  constructor(auth, fetcher = fetch) {
-    this.auth = auth;
-    this.fetcher = fetcher;
-  }
-  auth;
-  fetcher;
-  async complete(prompt, signal, onText, requestTrace, onEvent, requestParameters, threadId, promptCacheKey) {
-    if (!prompt.model.trim()) throw new Error("Choose a ChatGPT model in Settings before sending a message.");
-    const cacheKey = promptCacheKey ?? threadId;
-    const body = {
-      model: prompt.model,
-      instructions: prompt.system,
-      input: responseInput(prompt),
-      store: false,
-      stream: true,
-      parallel_tool_calls: true,
-      tools: responseTools(prompt.tools),
-      reasoning: { summary: "auto" },
-      ...requestParameters?.fields,
-      include: ["reasoning.encrypted_content"],
-      ...cacheKey ? { prompt_cache_key: cacheKey } : {}
-    };
-    let accessToken;
-    try {
-      accessToken = await this.auth.accessToken(false, requestTrace);
-    } catch (error) {
-      throw withProviderErrorCode(error, "auth", "oauth_token");
-    }
-    const retryState = { attempt: 0, retries: 0 };
-    let tracedRequest = await this.requestTraced(
-      body,
-      accessToken,
-      signal,
-      requestTrace,
-      retryState,
-      threadId,
-      cacheKey
-    );
-    if (tracedRequest.response.status === 401) {
-      await tracedRequest.response.body?.cancel().catch(() => void 0);
-      try {
-        accessToken = await this.auth.accessToken(true, requestTrace);
-      } catch (error) {
-        tracedRequest.settle({
-          outcome: "failed",
-          durationMs: Date.now() - tracedRequest.startedAt,
-          terminalEvent: "http_response",
-          errorCategory: "http",
-          errorCode: "http_401"
-        });
-        throw withProviderErrorCode(error, "http_401", "oauth_token");
-      }
-      tracedRequest.settle({
-        outcome: "retrying",
-        durationMs: Date.now() - tracedRequest.startedAt,
-        terminalEvent: "http_response",
-        errorCategory: "http",
-        errorCode: "http_401"
-      });
-      tracedRequest = await this.requestTraced(body, accessToken, signal, requestTrace, retryState, threadId, cacheKey);
-    }
-    const response = tracedRequest.response;
-    if (!response.ok) {
-      const errorDetails = await readProviderHttpError(response);
-      tracedRequest.settle({
-        outcome: "failed",
-        durationMs: Date.now() - tracedRequest.startedAt,
-        terminalEvent: "http_response",
-        errorCategory: "http",
-        errorCode: `http_${response.status}`,
-        ...errorDetails ? { providerError: errorDetails } : {}
-      });
-      throw providerHttpResponseError(response.status, errorDetails);
-    }
-    if (!response.body) {
-      tracedRequest.settle({
-        outcome: "failed",
-        durationMs: Date.now() - tracedRequest.startedAt,
-        terminalEvent: "http_response",
-        errorCategory: "protocol",
-        errorCode: "empty_stream"
-      });
-      throw providerError("ChatGPT returned an empty Responses stream.", "empty_stream", "responses_stream");
-    }
-    let reader;
-    try {
-      reader = response.body.getReader();
-    } catch (error) {
-      const interrupted = signal.aborted || error instanceof Error && error.name === "AbortError";
-      tracedRequest.settle({
-        outcome: interrupted ? "interrupted" : "failed",
-        durationMs: Date.now() - tracedRequest.startedAt,
-        errorCategory: interrupted ? "aborted" : "protocol",
-        errorCode: interrupted ? "aborted" : "invalid_stream"
-      });
-      throw withProviderErrorCode(error, interrupted ? void 0 : "invalid_stream", "responses_stream");
-    }
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let eventData = [];
-    let finalResponse = null;
-    let streamedReasoningSummary = "";
-    let previousReasoningSummaryKey = null;
-    let streamFailure = null;
-    let streamFailureCode;
-    let failureCategory;
-    let failureCode;
-    let terminalEvent;
-    const eventCounts = {};
-    let firstTextMs;
-    let deltaTextCharacters = 0;
-    let ended = false;
-    const streamedTextParts = /* @__PURE__ */ new Map();
-    const streamedFunctionCalls = [];
-    const streamedReasoningItems = /* @__PURE__ */ new Map();
-    const callsByItemId = /* @__PURE__ */ new Map();
-    const callsByOutputIndex = /* @__PURE__ */ new Map();
-    const getStreamedCall = (itemId, outputIndex) => {
-      const byItemId = itemId ? callsByItemId.get(itemId) : void 0;
-      const byOutputIndex = outputIndex === void 0 ? void 0 : callsByOutputIndex.get(outputIndex);
-      let call = byItemId ?? byOutputIndex;
-      if (byItemId && byOutputIndex && byItemId !== byOutputIndex) {
-        call = byItemId.order <= byOutputIndex.order ? byItemId : byOutputIndex;
-        const duplicate = call === byItemId ? byOutputIndex : byItemId;
-        if (call.itemId === void 0 && duplicate.itemId !== void 0) call.itemId = duplicate.itemId;
-        if (call.outputIndex === void 0 && duplicate.outputIndex !== void 0)
-          call.outputIndex = duplicate.outputIndex;
-        if (call.callId === void 0 && duplicate.callId !== void 0) call.callId = duplicate.callId;
-        if (call.name === void 0 && duplicate.name !== void 0) call.name = duplicate.name;
-        if (duplicate.argumentsComplete && !call.argumentsComplete) {
-          call.argumentsText = duplicate.argumentsText;
-        } else if (!call.argumentsText) {
-          call.argumentsText = duplicate.argumentsText;
-        }
-        call.argumentsComplete ||= duplicate.argumentsComplete;
-        call.order = Math.min(call.order, duplicate.order);
-        for (const [id, candidate] of callsByItemId) {
-          if (candidate === duplicate) callsByItemId.set(id, call);
-        }
-        for (const [index, candidate] of callsByOutputIndex) {
-          if (candidate === duplicate) callsByOutputIndex.set(index, call);
-        }
-        const duplicateIndex = streamedFunctionCalls.indexOf(duplicate);
-        if (duplicateIndex >= 0) streamedFunctionCalls.splice(duplicateIndex, 1);
-      }
-      if (!call) {
-        call = { argumentsText: "", argumentsComplete: false, order: streamedFunctionCalls.length };
-        streamedFunctionCalls.push(call);
-      }
-      if (itemId) {
-        call.itemId = itemId;
-        callsByItemId.set(itemId, call);
-      }
-      if (outputIndex !== void 0) {
-        call.outputIndex = outputIndex;
-        callsByOutputIndex.set(outputIndex, call);
-      }
-      return call;
-    };
-    const recordStreamedCall = (event, item, completeArguments = false) => {
-      const itemId = typeof event.item_id === "string" ? event.item_id : typeof item?.id === "string" ? item.id : void 0;
-      const outputIndex = typeof event.output_index === "number" && Number.isInteger(event.output_index) ? event.output_index : void 0;
-      const call = getStreamedCall(itemId, outputIndex);
-      if (typeof item?.call_id === "string") call.callId = item.call_id;
-      if (typeof item?.name === "string") call.name = item.name;
-      if (completeArguments && typeof event.arguments === "string") {
-        call.argumentsText = event.arguments;
-        call.argumentsComplete = true;
-      } else if (completeArguments && typeof item?.arguments === "string") {
-        call.argumentsText = item.arguments;
-        call.argumentsComplete = true;
-      }
-      return call;
-    };
-    const recordStreamedText = (event, text, append) => {
-      const outputIndex = typeof event.output_index === "number" && Number.isInteger(event.output_index) ? event.output_index : Number.MAX_SAFE_INTEGER;
-      const contentIndex = typeof event.content_index === "number" && Number.isInteger(event.content_index) ? event.content_index : Number.MAX_SAFE_INTEGER;
-      const key = `${outputIndex}:${contentIndex}`;
-      const existing = streamedTextParts.get(key);
-      streamedTextParts.set(key, {
-        outputIndex,
-        contentIndex,
-        order: existing?.order ?? streamedTextParts.size,
-        text: append ? `${existing?.text ?? ""}${text}` : text
-      });
-    };
-    const streamedText = () => [...streamedTextParts.values()].sort(
-      (left, right) => left.outputIndex - right.outputIndex || left.contentIndex - right.contentIndex || left.order - right.order
-    ).map((part) => part.text).join("");
-    const countEvent = (name) => {
-      if (/^[a-z0-9_.:-]{1,80}$/i.test(name)) eventCounts[name] = (eventCounts[name] ?? 0) + 1;
-    };
-    const consumeEvent = () => {
-      if (eventData.length === 0) return;
-      const data = eventData.join("\n");
-      eventData = [];
-      if (data === "[DONE]") {
-        countEvent("done");
-        terminalEvent = "done";
-        ended = true;
-        return;
-      }
-      let event;
-      try {
-        event = JSON.parse(data);
-      } catch {
-        failureCategory = "protocol";
-        failureCode = "invalid_json";
-        throw new Error("ChatGPT returned invalid streaming JSON.");
-      }
-      const value = object(event);
-      if (!value || typeof value.type !== "string") return;
-      countEvent(value.type);
-      if (value.type === "response.output_text.delta" && typeof value.delta === "string") {
-        if (value.delta.length > 0 && firstTextMs === void 0) firstTextMs = Date.now() - tracedRequest.startedAt;
-        deltaTextCharacters += value.delta.length;
-        recordStreamedText(value, value.delta, true);
-        onText(value.delta);
-      } else if (value.type === "response.reasoning_summary_text.delta" && typeof value.delta === "string") {
-        const outputIndex = typeof value.output_index === "number" ? value.output_index : 0;
-        const summaryIndex = typeof value.summary_index === "number" ? value.summary_index : 0;
-        const summaryKey = `${outputIndex}:${summaryIndex}`;
-        if (value.delta && previousReasoningSummaryKey !== null && previousReasoningSummaryKey !== summaryKey) {
-          streamedReasoningSummary += "\n\n";
-          onEvent?.({ type: "reasoning_summary.delta", delta: "\n\n" });
-        }
-        if (value.delta) previousReasoningSummaryKey = summaryKey;
-        streamedReasoningSummary += value.delta;
-        onEvent?.({ type: "reasoning_summary.delta", delta: value.delta });
-      } else if (value.type === "response.output_text.done" && typeof value.text === "string") {
-        recordStreamedText(value, value.text, false);
-      } else if (value.type === "response.output_item.added") {
-        const item = object(value.item);
-        if (item?.type === "function_call") {
-          const call = recordStreamedCall(value, item);
-          onEvent?.({
-            type: "tool_call.preview",
-            index: call.outputIndex ?? call.order,
-            ...call.callId ? { id: call.callId } : {},
-            ...call.name ? { name: call.name } : {},
-            argumentsText: call.argumentsText
-          });
-        }
-      } else if (value.type === "response.function_call_arguments.delta" && typeof value.delta === "string") {
-        const call = recordStreamedCall(value);
-        call.argumentsText += value.delta;
-        onEvent?.({
-          type: "tool_call.preview",
-          index: call.outputIndex ?? call.order,
-          ...call.callId ? { id: call.callId } : {},
-          ...call.name ? { name: call.name } : {},
-          argumentsText: call.argumentsText
-        });
-      } else if (value.type === "response.function_call_arguments.done") {
-        recordStreamedCall(value, void 0, true);
-      } else if (value.type === "response.output_item.done") {
-        const item = object(value.item);
-        if (item?.type === "function_call") recordStreamedCall(value, item, true);
-        if (item?.type === "reasoning" && typeof value.output_index === "number" && Number.isInteger(value.output_index)) {
-          streamedReasoningItems.set(value.output_index, item);
-        }
-      } else if (value.type === "response.completed") {
-        terminalEvent = value.type;
-        finalResponse = object(value.response);
-        ended = true;
-      } else if (value.type === "response.failed" || value.type === "error") {
-        const responseError = object(object(value.response)?.error);
-        const error = object(value.error) ?? responseError;
-        const code = typeof error?.code === "string" ? error.code : null;
-        streamFailureCode = code && /^[a-z0-9_.:-]{1,80}$/i.test(code) ? code : void 0;
-        streamFailure = streamFailureCode ? `ChatGPT model request failed (${streamFailureCode}).` : "ChatGPT model request failed.";
-        terminalEvent = value.type;
-        ended = true;
-      } else if (value.type === "response.incomplete") {
-        terminalEvent = value.type;
-        finalResponse = object(value.response);
-        ended = true;
-      }
-    };
-    const processLines = (final = false) => {
-      const lines = buffer.split(/\r?\n/);
-      buffer = final ? "" : lines.pop() ?? "";
-      for (const line of lines) {
-        if (!line) consumeEvent();
-        else if (line.startsWith("data:")) eventData.push(line.slice(5).trimStart());
-      }
-      if (final) consumeEvent();
-    };
-    try {
-      while (!ended) {
-        const { value, done } = await reader.read();
-        if (done) {
-          buffer += decoder.decode();
-          processLines(true);
-          break;
-        }
-        buffer += decoder.decode(value, { stream: true });
-        processLines();
-      }
-    } catch (error) {
-      await reader.cancel().catch(() => void 0);
-      const interrupted = signal.aborted || error instanceof Error && error.name === "AbortError";
-      tracedRequest.settle({
-        outcome: interrupted ? "interrupted" : "failed",
-        durationMs: Date.now() - tracedRequest.startedAt,
-        ...terminalEvent ? { terminalEvent } : {},
-        errorCategory: interrupted ? "aborted" : failureCategory ?? "transport",
-        ...(interrupted ? "aborted" : failureCode ?? errorCodeFrom(error)) ? { errorCode: interrupted ? "aborted" : failureCode ?? errorCodeFrom(error) } : {},
-        eventCounts,
-        ...firstTextMs === void 0 ? {} : { firstTextMs },
-        deltaTextCharacters
-      });
-      throw withProviderErrorCode(
-        error,
-        interrupted ? void 0 : sanitizeProviderFailureCode(failureCode) ?? "transport",
-        "responses_stream"
-      );
-    }
-    await reader.cancel().catch(() => void 0);
-    try {
-      if (streamFailure) {
-        failureCategory = "protocol";
-        failureCode = streamFailureCode ?? "response_failed";
-        throw new Error(streamFailure);
-      }
-      const completedResponse = finalResponse;
-      if (!completedResponse) {
-        failureCategory = "protocol";
-        failureCode = "missing_completion";
-        throw new Error("ChatGPT stream ended before the model step completed.");
-      }
-      if (completedResponse.status === "incomplete") {
-        const incomplete = object(completedResponse.incomplete_details);
-        if (incomplete?.reason !== "max_output_tokens") {
-          failureCategory = "protocol";
-          failureCode = typeof incomplete?.reason === "string" ? incomplete.reason : "incomplete";
-          throw new Error(`ChatGPT response was incomplete (${failureCode}).`);
-        }
-      }
-      const result = outputFrom(completedResponse, prompt);
-      const reasoningReplay = replayableReasoningItems(completedResponse, streamedReasoningItems);
-      if (reasoningReplay) result.reasoningReplay = reasoningReplay;
-      if (!result.reasoningSummary && streamedReasoningSummary) result.reasoningSummary = streamedReasoningSummary;
-      if (!result.content) result.content = streamedText();
-      const finalCalls = finalFunctionCalls(completedResponse);
-      for (const streamedCall of streamedFunctionCalls.sort((left, right) => left.order - right.order)) {
-        const finalCall = finalCalls.find(
-          (call) => streamedCall.callId !== void 0 && call.callId === streamedCall.callId || streamedCall.itemId !== void 0 && call.itemId === streamedCall.itemId || streamedCall.outputIndex !== void 0 && call.outputIndex === streamedCall.outputIndex
-        );
-        if (finalCall) {
-          const finalArguments = finalCall.argumentsText;
-          if ((!finalArguments || !finalArguments.trim()) && streamedCall.argumentsComplete) {
-            const name = streamedCall.name;
-            if (!name) {
-              failureCategory = "protocol";
-              failureCode = "missing_function_name";
-              throw new Error("ChatGPT completed a function call without a tool name.");
-            }
-            result.toolCalls[finalCall.toolCallIndex] = {
-              id: finalCall.callId ?? result.toolCalls[finalCall.toolCallIndex]?.id ?? streamedCall.callId ?? `call-${finalCall.toolCallIndex}`,
-              name,
-              arguments: parseArguments(streamedCall.argumentsText, name)
-            };
-          }
-          continue;
-        }
-        if (!streamedCall.argumentsComplete) {
-          failureCategory = "protocol";
-          failureCode = "incomplete_function_call";
-          throw new Error("ChatGPT streamed a function call without completing its arguments.");
-        }
-        if (!streamedCall.name) {
-          failureCategory = "protocol";
-          failureCode = "missing_function_name";
-          throw new Error("ChatGPT completed a function call without a tool name.");
-        }
-        result.toolCalls.push({
-          id: streamedCall.callId ?? `call-${result.toolCalls.length}`,
-          name: streamedCall.name,
-          arguments: parseArguments(streamedCall.argumentsText, streamedCall.name)
-        });
-      }
-      if (completedResponse.status !== "incomplete" && result.toolCalls.length > 0) {
-        result.finishReason = "tool_calls";
-      }
-      tracedRequest.settle({
-        outcome: "completed",
-        durationMs: Date.now() - tracedRequest.startedAt,
-        ...terminalEvent ? { terminalEvent } : {},
-        eventCounts,
-        ...firstTextMs === void 0 ? {} : { firstTextMs },
-        deltaTextCharacters,
-        outputTextCharacters: result.content.length,
-        outputItemCounts: outputItemCounts(completedResponse),
-        toolCallCount: result.toolCalls.length,
-        finishReason: result.finishReason,
-        ...typeof completedResponse.id === "string" ? { responseId: completedResponse.id } : {},
-        usage: result.usage
-      });
-      return result;
-    } catch (error) {
-      const interrupted = signal.aborted || error instanceof Error && error.name === "AbortError";
-      tracedRequest.settle({
-        outcome: interrupted ? "interrupted" : "failed",
-        durationMs: Date.now() - tracedRequest.startedAt,
-        ...terminalEvent ? { terminalEvent } : {},
-        errorCategory: interrupted ? "aborted" : failureCategory ?? "protocol",
-        ...(interrupted ? "aborted" : failureCode ?? errorCodeFrom(error)) ? { errorCode: interrupted ? "aborted" : failureCode ?? errorCodeFrom(error) } : {},
-        eventCounts,
-        ...firstTextMs === void 0 ? {} : { firstTextMs },
-        deltaTextCharacters
-      });
-      throw withProviderErrorCode(
-        error,
-        interrupted ? void 0 : sanitizeProviderFailureCode(failureCode) ?? "response_failed",
-        terminalEvent === "response.failed" || terminalEvent === "error" ? "responses_stream" : "response_validation"
-      );
-    }
-  }
-  async requestTraced(body, accessToken, signal, trace, retryState, threadId, promptCacheKey) {
-    while (true) {
-      const startedAt = Date.now();
-      const attempt = ++retryState.attempt;
-      const providerAttemptId = trace?.started({
-        provider: "chatgpt-plan",
-        protocol: "https+sse",
-        endpoint: responsesUrl,
-        attempt,
-        providerMetadata: { "pico.chatgpt-plan.fastMode": body.service_tier === "priority" }
-      }) ?? "";
-      let settled = false;
-      const settle = (summary) => {
-        if (settled) return;
-        settled = true;
-        if (providerAttemptId) trace?.settled(providerAttemptId, summary);
-      };
-      try {
-        const response = await this.request(body, accessToken, signal, threadId, promptCacheKey);
-        if (providerAttemptId) {
-          const providerRequestId = response.headers.get("x-request-id") ?? response.headers.get("openai-request-id");
-          trace?.response(providerAttemptId, {
-            status: response.status,
-            contentType: response.headers.get("content-type"),
-            ...providerRequestId ? { providerRequestId } : {}
-          });
-        }
-        return { response, startedAt, settle };
-      } catch (error) {
-        const interrupted = signal.aborted || error instanceof Error && error.name === "AbortError";
-        const retryableFetchFailure = isRetryableFetchFailure(error);
-        const shouldRetry = !interrupted && retryState.retries < MAX_FETCH_FAILED_RETRIES && retryableFetchFailure;
-        const errorCode = interrupted ? "aborted" : errorCodeFrom(error) ?? (retryableFetchFailure ? "fetch_failed" : void 0);
-        settle({
-          outcome: interrupted ? "interrupted" : shouldRetry ? "retrying" : "failed",
-          durationMs: Date.now() - startedAt,
-          errorCategory: interrupted ? "aborted" : "transport",
-          ...errorCode ? { errorCode } : {}
-        });
-        if (interrupted || !shouldRetry) {
-          throw withProviderErrorCode(
-            error,
-            interrupted ? void 0 : sanitizeProviderFailureCode(errorCode) ?? "transport",
-            "responses_request"
-          );
-        }
-        retryState.retries += 1;
-        await waitForFetchRetry(signal);
-      }
-    }
-  }
-  request(body, accessToken, signal, threadId, promptCacheKey) {
-    const sessionId = promptCacheKey ?? threadId;
-    return this.fetcher(responsesUrl, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${accessToken}`,
-        "content-type": "application/json",
-        accept: "text/event-stream",
-        ...sessionId ? { "session-id": sessionId } : {},
-        ...threadId ? { "thread-id": threadId } : {}
-      },
-      body: JSON.stringify(body),
-      signal
-    });
-  }
-};
-
 // src/plugins/chatgpt-plan.ts
 function callbackForRetry(callback) {
   const retry = new URLSearchParams();
@@ -1621,12 +733,6 @@ function callbackForRetry(callback) {
     if (values.length === 1 && values[0]) retry.set(name, values[0]);
   }
   return retry;
-}
-function promptCacheKeyFor(input) {
-  const call = input.pluginModelCall;
-  if (!call) return input.thread.id;
-  const digest = createHash2("sha256").update(JSON.stringify(["pico.chatgpt-plan.plugin-cache.v1", input.thread.id, call.pluginId, call.purpose])).digest("hex");
-  return `pico-plugin:${digest.slice(0, 52)}`;
 }
 function escapeHtml(value) {
   return value.replace(/[&<>"']/g, (character) => {
@@ -1661,9 +767,12 @@ function createChatGptPlanPlugin() {
   const callbackServers = /* @__PURE__ */ new Set();
   const callbackTimeouts = /* @__PURE__ */ new Map();
   const callbackOperations = /* @__PURE__ */ new Map();
-  let auth = null;
+  const authByInstance = /* @__PURE__ */ new Map();
   let sharedOAuthSecrets = null;
-  const closeCallbackServer = (server) => {
+  const instanceSharedSecrets = /* @__PURE__ */ new Map();
+  let instanceAvailable = () => false;
+  let refreshCatalog = async () => void 0;
+  const closeCallbackServer = (server, force = false) => {
     const timeout = callbackTimeouts.get(server);
     if (timeout) clearTimeout(timeout);
     callbackTimeouts.delete(server);
@@ -1672,9 +781,20 @@ function createChatGptPlanPlugin() {
       if (operation.server === server) callbackOperations.delete(operationId);
     }
     if (!server.listening) return Promise.resolve();
-    return new Promise((resolve2) => server.close(() => resolve2()));
+    return new Promise((resolve2) => {
+      server.close(() => resolve2());
+      if (force) server.closeAllConnections();
+    });
   };
   const completeCallback = async (operation, callback, retryExchange = false) => {
+    if (!instanceAvailable(operation.instanceId)) {
+      return {
+        status: "failed",
+        message: "This ChatGPT account instance no longer exists.",
+        retryable: false,
+        retryExchange: false
+      };
+    }
     if (operation.handlingCallback) {
       return {
         status: "failed",
@@ -1683,7 +803,7 @@ function createChatGptPlanPlugin() {
         retryExchange: Boolean(operation.retryCallback)
       };
     }
-    if (!auth.hasPendingAuthorization(callback.get("state"), operation.redirectUri)) {
+    if (!operation.auth.hasPendingAuthorization(callback.get("state"), operation.redirectUri)) {
       return {
         status: "failed",
         message: "This ChatGPT sign-in attempt expired or did not match. Start again.",
@@ -1694,9 +814,9 @@ function createChatGptPlanPlugin() {
     operation.handlingCallback = true;
     let result;
     try {
-      await auth.completeSignIn(callback, operation.redirectUri, { allowTransportRetry: !retryExchange });
+      await operation.auth.completeSignIn(callback, operation.redirectUri, { allowTransportRetry: !retryExchange });
       operation.retryCallback = null;
-      void auth.refreshModels().catch(() => void 0);
+      void operation.auth.refreshModels().then(() => refreshCatalog(operation.instanceId)).catch(() => void 0);
       result = {
         status: "connected",
         message: "ChatGPT is connected. Return to Pico.",
@@ -1704,7 +824,7 @@ function createChatGptPlanPlugin() {
         retryExchange: false
       };
     } catch (error) {
-      const pending = auth.hasPendingAuthorization(callback.get("state"), operation.redirectUri);
+      const pending = operation.auth.hasPendingAuthorization(callback.get("state"), operation.redirectUri);
       const canRetryExchange = !retryExchange && pending && error instanceof RetryableChatGptAuthorizationExchange && !operation.retryAttempted;
       operation.retryCallback = canRetryExchange ? callbackForRetry(callback) : null;
       result = {
@@ -1724,42 +844,136 @@ function createChatGptPlanPlugin() {
     activate(context) {
       const sharedOAuthPath = process.env.PICO_CHATGPT_OAUTH_DB_PATH?.trim() || (process.env.NODE_ENV === "production" ? join2(process.cwd(), "data", "chatgpt-oauth.sqlite") : null);
       sharedOAuthSecrets = sharedOAuthPath ? createSharedChatGptOAuthSecrets(sharedOAuthPath, "pico.chatgpt-plan") : null;
-      auth = new ChatGptPlanAuth(
-        context.state,
-        fetch,
-        Date.now,
-        sharedOAuthSecrets ?? context.secrets ?? context.state,
-        context.cache
-      );
-      const model = new ChatGptResponsesAdapter(auth);
-      context.models.registerProvider(
+      instanceAvailable = (id) => context.providers.get(id)?.typeId === "chatgpt-plan";
+      refreshCatalog = (id) => context.providers.refresh(id);
+      const providerConfig = { chatgpt: true, fetchRetries: 5, retryDelayMs: 2e3, refreshOnUnauthorized: true };
+      const sharedSecretsFor = (instance) => {
+        if (sharedOAuthSecrets && instance.config.legacyShared === true) return sharedOAuthSecrets;
+        if (!sharedOAuthPath) return null;
+        let secrets = instanceSharedSecrets.get(instance.id);
+        if (!secrets) {
+          secrets = createSharedChatGptOAuthSecrets(sharedOAuthPath, `pico.chatgpt-plan:instance:${instance.id}`);
+          instanceSharedSecrets.set(instance.id, secrets);
+        }
+        return secrets;
+      };
+      const secretsFor = (id) => {
+        const instance = context.providers.get(id);
+        if (!instance || instance.typeId !== "chatgpt-plan") throw new Error("ChatGPT account instance not found.");
+        const shared = sharedSecretsFor(instance);
+        const raw = shared ?? context.providers.secrets(id);
+        const ensureActive = () => {
+          if (!instanceAvailable(id)) throw new Error("ChatGPT account instance no longer exists.");
+        };
+        const guarded = {
+          get: (key, fallback) => {
+            ensureActive();
+            return raw.get(key, fallback);
+          },
+          set: (key, value) => {
+            ensureActive();
+            raw.set(key, value);
+          }
+        };
+        return shared ? {
+          ...guarded,
+          withLock: async (operation) => {
+            ensureActive();
+            return shared.withLock(async () => {
+              ensureActive();
+              return operation();
+            });
+          }
+        } : guarded;
+      };
+      const getAuth = (id) => {
+        const instance = context.providers.get(id);
+        if (!instance || instance.typeId !== "chatgpt-plan") throw new Error("ChatGPT account instance not found.");
+        let auth = authByInstance.get(id);
+        if (!auth) {
+          const prefix = `instance:${id}:`;
+          const cache = {
+            get: (key, fallback) => context.cache.get(prefix + key, fallback),
+            set: (key, value) => {
+              if (!instanceAvailable(id)) throw new Error("ChatGPT account instance no longer exists.");
+              context.cache.set(prefix + key, value);
+            }
+          };
+          auth = new ChatGptPlanAuth(context.state, fetch, Date.now, secretsFor(id), cache);
+          authByInstance.set(id, auth);
+        }
+        return auth;
+      };
+      const requireInstance = (request) => {
+        const values = request.query.getAll("instanceId");
+        if (values.length !== 1 || !values[0]) throw new Error("A ChatGPT account instance is required.");
+        return { id: values[0], auth: getAuth(values[0]) };
+      };
+      context.providers.registerType(
         {
           id: "chatgpt-plan",
           label: "ChatGPT account",
           description: "Use a ChatGPT plan account through OpenAI\u2019s Responses API.",
-          supportsImages: true
+          addPage: { pluginId: "pico.chatgpt-plan", pageId: "account" }
         },
-        async (input) => {
-          input.recordModelInput(input.prompt, input.provider, input.projectionProvenance);
-          return model.complete(
-            input.prompt,
-            input.signal,
-            input.onText,
-            input.requestTrace,
-            input.onEvent,
-            input.requestParameters,
-            input.thread.id,
-            promptCacheKeyFor(input)
-          );
+        {
+          listModels: async (instance) => (await getAuth(instance.id).listModels()).map((model) => ({
+            id: model.slug,
+            name: model.slug,
+            label: model.displayName,
+            protocol: "openai-responses",
+            supportsImages: true,
+            endpoint: "https://api.openai.com/v1/responses"
+          })),
+          authorize: async (instance, forceRefresh, signal) => {
+            if (signal?.aborted) throw new DOMException("The operation was aborted.", "AbortError");
+            return { authorization: `Bearer ${await getAuth(instance.id).accessToken(forceRefresh)}` };
+          },
+          disposeInstance: async (instance) => {
+            const operations = [...callbackOperations.values()].filter(
+              (operation) => operation.instanceId === instance.id
+            );
+            await Promise.all(operations.map((operation) => closeCallbackServer(operation.server, true)));
+            authByInstance.delete(instance.id);
+            context.cache.set(`instance:${instance.id}:modelCatalog`, null);
+            const secrets = sharedSecretsFor(instance);
+            if (secrets) {
+              try {
+                await secrets.withLock(async () => {
+                  secrets.clear();
+                });
+              } finally {
+                if (secrets !== sharedOAuthSecrets) {
+                  instanceSharedSecrets.delete(instance.id);
+                  secrets.close();
+                }
+              }
+            }
+            if (instance.config.legacyMigration === true) context.secrets?.delete("oauth");
+          }
         }
       );
+      const sharedLegacy = sharedOAuthSecrets?.get("oauth", null) ?? null;
+      const legacy = sharedLegacy ?? context.secrets?.get("oauth", null) ?? null;
+      const legacyId = context.state.get("legacyInstanceId", null);
+      if (legacy && !legacyId) {
+        const instance = context.providers.list().find((item) => item.typeId === "chatgpt-plan" && item.config.legacyMigration === true) ?? context.providers.add("chatgpt-plan", {
+          label: "ChatGPT account",
+          config: { ...providerConfig, legacyMigration: true, legacyShared: Boolean(sharedLegacy) }
+        });
+        const secrets = secretsFor(instance.id);
+        if (!secrets.get("oauth", null)) secrets.set("oauth", legacy);
+        const catalog = context.cache.get("modelCatalog", null) ?? context.state.get("modelCatalog", null);
+        if (catalog) context.cache.set(`instance:${instance.id}:modelCatalog`, catalog);
+        context.state.set("legacyInstanceId", instance.id);
+      }
       context.commands.register({
         name: "chatgpt-provider",
-        description: "Show whether the ChatGPT account provider is connected.",
+        description: "Show whether a ChatGPT account provider is connected.",
         execute() {
-          const status = auth?.status();
+          const connected = context.providers.list().filter((instance) => instance.typeId === "chatgpt-plan").some((instance) => getAuth(instance.id).status().connected);
           return {
-            text: status?.connected ? `ChatGPT account connected${status.accountLabel ? ` as ${status.accountLabel}` : ""}.` : "No ChatGPT account is connected. Open the ChatGPT plugin settings to connect one."
+            text: connected ? "A ChatGPT account is connected." : "No ChatGPT account is connected. Open the ChatGPT plugin settings to connect one."
           };
         }
       });
@@ -1770,26 +984,33 @@ function createChatGptPlanPlugin() {
         entry: "webui",
         externalAuthOrigins: ["https://auth.openai.com"]
       });
-      context.ui.contribute({
-        slot: "composer.model",
-        id: "model-controls",
-        label: "ChatGPT model controls",
-        description: "Choose the ChatGPT model, reasoning effort, and Fast mode for this provider.",
-        entry: "webui",
-        component: "ChatGptPlanComposerModel",
-        providers: ["chatgpt-plan"],
-        externalAuthOrigins: ["https://auth.openai.com"]
+      context.http.register(
+        "GET",
+        "/instances",
+        () => context.providers.list().filter((instance) => instance.typeId === "chatgpt-plan")
+      );
+      context.http.register("POST", "/instances", (request) => {
+        const body = request.body && typeof request.body === "object" && !Array.isArray(request.body) ? request.body : {};
+        const label = typeof body.label === "string" ? body.label.trim() : "";
+        if (!label || label.length > 120) throw new Error("Enter an account label.");
+        return context.providers.add("chatgpt-plan", { label, config: providerConfig });
       });
-      context.http.register("GET", "/status", () => auth.status());
-      context.http.register("GET", "/models", async () => await auth.listModels());
-      context.http.register("POST", "/models/refresh", async () => await auth.listModels(true));
+      context.http.register("GET", "/status", (request) => requireInstance(request).auth.status());
+      context.http.register("GET", "/models", async (request) => await requireInstance(request).auth.listModels());
+      context.http.register("POST", "/models/refresh", async (request) => {
+        const { id, auth } = requireInstance(request);
+        const models = await auth.listModels(true);
+        await context.providers.refresh(id);
+        return models;
+      });
       context.http.register("POST", "/sign-in", async (request) => {
+        const { id: instanceId, auth } = requireInstance(request);
         const uiOrigin = request.origin;
         if (!uiOrigin) throw new Error("ChatGPT sign-in must be started from the Pico Web UI.");
         const operationId = randomUUID2();
         let server;
         let operation = null;
-        let redirectUri = "";
+        let redirectUri;
         server = createServer((callbackRequest, callbackResponse) => {
           const callbackUrl = new URL(callbackRequest.url ?? "/", "http://127.0.0.1");
           if (callbackRequest.method !== "GET" || callbackUrl.pathname !== "/auth/callback") {
@@ -1841,6 +1062,8 @@ function createChatGptPlanPlugin() {
         redirectUri = `http://127.0.0.1:${address.port}/auth/callback`;
         operation = {
           operationId,
+          instanceId,
+          auth,
           redirectUri,
           server,
           handlingCallback: false,
@@ -1863,7 +1086,9 @@ function createChatGptPlanPlugin() {
           throw error;
         }
       });
-      context.http.register("POST", "/sign-in/complete", async ({ body }) => {
+      context.http.register("POST", "/sign-in/complete", async (request) => {
+        const { id: instanceId, auth } = requireInstance(request);
+        const { body } = request;
         if (!body || typeof body !== "object" || Array.isArray(body)) {
           throw new Error("Paste the full ChatGPT callback URL from the browser address bar.");
         }
@@ -1872,7 +1097,8 @@ function createChatGptPlanPlugin() {
           throw new Error("Paste the full ChatGPT callback URL from the browser address bar.");
         }
         const operation = callbackOperations.get(input.operationId);
-        if (!operation) throw new Error("This ChatGPT sign-in attempt is no longer active. Start again.");
+        if (!operation || operation.instanceId !== instanceId)
+          throw new Error("This ChatGPT sign-in attempt is no longer active. Start again.");
         if (operation.retryCallback) {
           return {
             status: "failed",
@@ -1886,7 +1112,9 @@ function createChatGptPlanPlugin() {
         if (!result.retryable) await closeCallbackServer(operation.server);
         return result;
       });
-      context.http.register("POST", "/sign-in/retry", async ({ body }) => {
+      context.http.register("POST", "/sign-in/retry", async (request) => {
+        const { id: instanceId } = requireInstance(request);
+        const { body } = request;
         if (!body || typeof body !== "object" || Array.isArray(body)) {
           throw new Error("This ChatGPT sign-in cannot be retried. Start again.");
         }
@@ -1895,7 +1123,7 @@ function createChatGptPlanPlugin() {
           throw new Error("This ChatGPT sign-in cannot be retried. Start again.");
         }
         const operation = callbackOperations.get(input.operationId);
-        if (!operation || !operation.retryCallback || operation.retryAttempted) {
+        if (!operation || operation.instanceId !== instanceId || !operation.retryCallback || operation.retryAttempted) {
           throw new Error("The ChatGPT token retry is no longer available. Start a new sign-in.");
         }
         operation.retryAttempted = true;
@@ -1904,11 +1132,15 @@ function createChatGptPlanPlugin() {
         if (!result.retryable) await closeCallbackServer(operation.server);
         return result;
       });
-      context.http.register("DELETE", "/account", async () => await auth.signOut());
+      context.http.register("DELETE", "/account", async (request) => await requireInstance(request).auth.signOut());
     },
     async deactivate() {
       await Promise.all([...callbackServers].map((server) => closeCallbackServer(server)));
-      auth = null;
+      authByInstance.clear();
+      instanceAvailable = () => false;
+      refreshCatalog = async () => void 0;
+      for (const secrets of instanceSharedSecrets.values()) secrets.close();
+      instanceSharedSecrets.clear();
       sharedOAuthSecrets?.close();
       sharedOAuthSecrets = null;
     }

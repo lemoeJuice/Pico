@@ -4,6 +4,38 @@ import { ModelCatalog } from '../src/runtime/model-catalog.js';
 import type { AdapterContribution, ProviderModel } from '../src/contracts/model-catalog.js';
 
 describe('model catalog', () => {
+  it('revokes an instance before external disposal and rejects credentials in public configuration', async () => {
+    const store = new PicoStore(':memory:');
+    try {
+      const catalog = new ModelCatalog(store);
+      let disposed = false;
+      catalog.registerProviderType(
+        'plugin',
+        { id: 'type', label: 'Type', addPage: { pluginId: 'plugin', pageId: 'add' } },
+        {
+          listModels: async () => [],
+          authorize: async () => ({}),
+          disposeInstance: async (instance) => {
+            expect(catalog.listInstances().some((item) => item.id === instance.id)).toBe(false);
+            expect(() => catalog.getInstanceSecrets('plugin', instance.id)).toThrow();
+            disposed = true;
+          },
+        },
+      );
+      for (const key of ['token', 'key', 'headers', 'cookie', 'accessToken']) {
+        expect(() =>
+          catalog.addInstance('plugin', 'type', { label: 'Invalid', config: { [key]: 'synthetic-private' } }),
+        ).toThrow();
+      }
+      expect(catalog.listInstances()).toHaveLength(0);
+      const instance = catalog.addInstance('plugin', 'type', { label: 'Instance', config: {} });
+      await catalog.removeInstance('plugin', instance.id);
+      expect(disposed).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
   it('isolates instances, caches failures, confirms removal, and resolves an explicit adapter', async () => {
     const store = new PicoStore(':memory:');
     try {
@@ -72,7 +104,7 @@ describe('model catalog', () => {
       expect(() => catalog.resolveSelection(selection)).toThrow('unavailable');
       catalog.removeOwner('plugin');
       expect(catalog.listInstances()).toHaveLength(2);
-      catalog.removeInstance('plugin', a.id);
+      await catalog.removeInstance('plugin', a.id);
       expect(store.getPrivateSecret('plugin', `model-catalog-instance:${a.id}`, null)).toBeNull();
       expect(catalog.listModels().some((model) => model.instanceId === a.id)).toBe(false);
     } finally {

@@ -30,7 +30,7 @@ describe('workflow plugin boundaries', () => {
         : response('The Runtime plugin tool ran in Chat mode.'),
     );
     const env = await setupRuntime(model, { plugins: [customRuntimeTool] });
-    const thread = env.runtime.createThread(env.project.id, 'runtime', 'Chat tools');
+    const thread = env.createThread('runtime', 'Chat tools');
     try {
       await env.runtime.submit(thread.id, 'chat-runtime-plugin-message', 'Run the Runtime plugin tool.');
       await env.runtime.drain();

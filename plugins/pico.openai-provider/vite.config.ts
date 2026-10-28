@@ -11,8 +11,8 @@ export default defineConfig({
     outDir: fileURLToPath(new URL('./webui/build/', import.meta.url)),
     emptyOutDir: true,
     lib: {
-      entry: resolve(process.cwd(), 'src/plugins/model-parameters/webui-entry.tsx'),
-      name: 'PicoModelParametersWebUi',
+      entry: resolve(process.cwd(), 'src/plugins/openai-provider/webui.tsx'),
+      name: 'PicoOpenAiProviderWebUi',
       formats: ['iife'],
       fileName: () => 'webui.js',
       cssFileName: 'webui',

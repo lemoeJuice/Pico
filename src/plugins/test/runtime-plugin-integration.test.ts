@@ -8,7 +8,7 @@ describe('First-party plugin Runtime integration', () => {
   it('runs Chat Threads on Runtime coordination tools without attaching a workspace Executor', async () => {
     const model = new FakeModel(() => response('Ready for a conversation.'));
     const env = await setupRuntime(model, { plugins: [projectContextPlugin, collaborationPlugin] });
-    const thread = env.runtime.createThread(env.project.id, 'runtime', 'Chat');
+    const thread = env.createThread('runtime', 'Chat');
     try {
       const status = await env.runtime.executorStatus(thread.id);
       await env.runtime.submit(thread.id, 'chat-mode-message', 'Hello');
@@ -21,6 +21,7 @@ describe('First-party plugin Runtime integration', () => {
         'project_memory_record',
         'project_memory_search',
         'spawn_thread',
+        'list_models',
         'send_thread_message',
         'list_child_threads',
         'read_thread_history',

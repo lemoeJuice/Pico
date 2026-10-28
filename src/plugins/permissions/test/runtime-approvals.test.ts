@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { PicoStore } from '../../../core/store.js';
 import { permissionPlugin } from '../../../plugins/permissions.js';
 import { PicoRuntime } from '../../../runtime/runtime.js';
-import { FakeModel, response, setupRuntime } from '../../../../test/helpers.js';
+import { FakeModel, response, setupRuntime, setupTestCatalog } from '../../../../test/helpers.js';
 
 interface PermissionApprovalForTest {
   executionId: string;
@@ -70,7 +70,9 @@ async function until(predicate: () => boolean, timeoutMs = 3_000): Promise<void>
 
 describe('Permissions Runtime integration', () => {
   it('lists coordination tools and registers permission controls in the Runtime UI', async () => {
-    const env = await setupRuntime(new FakeModel(() => response('unused')), { plugins: [permissionPlugin, projectContextPlugin, collaborationPlugin] });
+    const env = await setupRuntime(new FakeModel(() => response('unused')), {
+      plugins: [permissionPlugin, projectContextPlugin, collaborationPlugin],
+    });
     const thread = env.runtime.createThread(env.project.id, 'runtime', 'Permission tools');
     try {
       expect((await permissionView(env.runtime, thread.id)).tools.map((tool) => tool.name)).toEqual([
@@ -78,6 +80,7 @@ describe('Permissions Runtime integration', () => {
         'project_memory_record',
         'project_memory_search',
         'spawn_thread',
+        'list_models',
         'send_thread_message',
         'list_child_threads',
         'read_thread_history',
@@ -145,8 +148,9 @@ describe('Permissions Runtime integration', () => {
     });
     await runtime.initialize();
     const project = await runtime.createProject('Approval recovery', workspace);
-    runtime.updateModelSettings({ model: 'test-model' });
+    const catalog = await setupTestCatalog(runtime);
     const thread = runtime.createThread(project.id, 'host');
+    runtime.updateThreadModelSelection(thread.id, catalog.select());
     try {
       await runtime.submit(thread.id, 'approval-restart-message', 'Read the input file.');
       await untilAsync(async () =>
@@ -166,6 +170,7 @@ describe('Permissions Runtime integration', () => {
         pluginDirectory: join(directory, 'empty-plugins'),
         plugins: [permissionPlugin],
       });
+      await setupTestCatalog(runtime);
       await runtime.initialize();
       await untilAsync(async () => (await permissionView(runtime, thread.id)).approvals[0]?.status === 'pending');
       await decidePermission(runtime, approval.executionId, true);

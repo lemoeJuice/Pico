@@ -2,10 +2,9 @@ import { describe, expect, it } from 'vitest';
 import type { ModelAdapter, ModelPrompt, ModelResponse } from '../src/runtime/model.js';
 import type { PicoPlugin } from '../src/plugins/host.js';
 import type { ModelRequestParameters, ModelStreamEvent } from '../src/contracts/model.js';
-import type { ModelStageInput } from '../src/runtime/stages.js';
 import type { PluginModelCallRecord } from '../src/contracts/store.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
-import { deferred, response, setupRuntime } from './helpers.js';
+import { deferred, response, setupRuntime, setupTestCatalog } from './helpers.js';
 
 describe('Runtime model provider dispatch', () => {
   it('allows a Thread to be created before a default model is configured and reports it on send', async () => {
@@ -14,13 +13,15 @@ describe('Runtime model provider dispatch', () => {
         return response('unreachable');
       },
     });
-    env.runtime.updateModelSettings({ model: '' });
     const thread = env.runtime.createThread(env.project.id, 'runtime');
     try {
       expect(env.runtime.threadModelSelection(thread.id).model).toBe('');
       await env.runtime.submit(thread.id, 'unconfigured-model', 'Hello');
       await env.runtime.drain();
-      expect(env.runtime.getThread(thread.id)?.pauseReason).toContain('No model is configured for this Thread');
+      expect(env.runtime.getThread(thread.id)?.pauseRequested).toBe(true);
+      expect(env.store.listExecutions(thread.id)).toContainEqual(
+        expect.objectContaining({ status: 'failed', error: expect.stringMatching(/choose a model/i) }),
+      );
     } finally {
       await env.cleanup();
     }
@@ -32,14 +33,18 @@ describe('Runtime model provider dispatch', () => {
         return response('done');
       },
     });
-    const first = env.runtime.createThread(env.project.id, 'runtime');
-    const second = env.runtime.createThread(env.project.id, 'runtime');
+    const first = env.createThread('runtime');
+    const second = env.createThread('runtime');
     try {
       const firstSelection = env.runtime.threadModelSelection(first.id);
-      env.runtime.updateModelSettings({ model: 'new-default-model', temperature: 0.9 });
+      const newSelection = await env.catalog.addModel('new-default-model');
+      env.runtime.updateThreadModelSelection(second.id, {
+        ...newSelection,
+        parameters: { temperature: 0.9, options: {} },
+      });
       expect(env.runtime.threadModelSelection(first.id)).toEqual(firstSelection);
-      expect(env.runtime.threadModelSelection(second.id)).toEqual(firstSelection);
-      expect(env.runtime.publicModelSettings().model).toBe('new-default-model');
+      expect(env.runtime.threadModelSelection(second.id).model).toBe('new-default-model');
+      expect(env.runtime.threadModelSelection(second.id).modelId).not.toBe(firstSelection.modelId);
 
       expect(() =>
         env.runtime.updateThreadModelSelection(first.id, {
@@ -55,15 +60,40 @@ describe('Runtime model provider dispatch', () => {
 
   it('keeps a disabled Thread provider unavailable instead of calling the default adapter', async () => {
     const calls: string[] = [];
+    let selection:
+      | { modelId: string; adapterId: string; parameters: { options: Record<string, string | number | boolean> } }
+      | undefined;
     const provider: PicoPlugin = {
       id: 'test.provider',
       name: 'Test Provider',
       version: '1',
-      activate(context) {
-        context.models.registerProvider({ id: 'test-provider', label: 'Test provider' }, async () => {
-          calls.push('provider');
-          return response('provider result');
+      async activate(context) {
+        context.providers.registerType(
+          { id: 'provider-disabled', label: 'Provider', addPage: { pluginId: 'test.provider', pageId: 'add' } },
+          {
+            listModels: async () => [
+              {
+                id: 'model',
+                name: 'test-model',
+                label: 'Test',
+                protocol: 'openai-chat-completions',
+                endpoint: 'https://test.invalid/v1',
+                supportsImages: true,
+              },
+            ],
+            authorize: async () => ({}),
+          },
+        );
+        context.models.registerAdapter({
+          id: 'adapter-disabled',
+          label: 'Adapter',
+          match: { providerTypeIds: ['provider-disabled'] },
+          controls: [],
+          temperature: { supported: true },
         });
+        const instance = context.providers.add('provider-disabled', { label: 'Test', config: {} });
+        const models = await context.providers.refresh(instance.id);
+        selection = { modelId: models[0]!.modelId, adapterId: 'adapter-disabled', parameters: { options: {} } };
       },
     };
     const fake: ModelAdapter = {
@@ -73,14 +103,9 @@ describe('Runtime model provider dispatch', () => {
       },
     };
     const env = await setupRuntime(fake, { plugins: [provider] });
-    const thread = env.runtime.createThread(env.project.id, 'runtime');
+    const thread = env.createThread('runtime');
     try {
-      env.runtime.updateThreadModelSelection(thread.id, {
-        provider: 'test-provider',
-        connectionId: 'default',
-        model: 'test-model',
-        parameters: { options: {}, temperature: 0.3 },
-      });
+      env.runtime.updateThreadModelSelection(thread.id, selection!);
       await env.runtime.setPluginEnabled('test.provider', false);
       await env.runtime.submit(thread.id, 'disabled-provider', 'Run once');
       await env.runtime.drain();
@@ -97,76 +122,35 @@ describe('Runtime model provider dispatch', () => {
     }
   });
 
-  it('dispatches and records the model pipeline final target and request parameters', async () => {
-    const observed: Array<{
-      target: ModelStageInput['modelTarget'];
-      prompt: ModelPrompt;
-      parameters?: ModelRequestParameters;
-    }> = [];
-    const provider: PicoPlugin = {
-      id: 'test.router',
-      name: 'Test Router',
-      version: '1',
-      activate(context) {
-        context.models.registerProvider({ id: 'routed-provider', label: 'Routed provider' }, async (input) => {
-          observed.push({
-            target: input.modelTarget,
-            prompt: input.prompt,
-            ...(input.requestParameters ? { parameters: input.requestParameters } : {}),
-          });
-          return { ...response('routed result'), model: input.prompt.model };
-        });
-        context.pipelines.use('model', async (input, next) =>
-          next({
-            ...input,
-            provider: 'routed-provider',
-            modelTarget: {
-              provider: 'routed-provider',
-              connectionId: 'default',
-              baseUrl: 'https://models.example.test/v1',
-              model: 'routed-model',
-            },
-            prompt: { ...input.prompt, model: 'routed-model' },
-            requestParameters: { fields: { reasoning_effort: 'high' }, temperature: 0.4 },
-          }),
-        );
+  it('dispatches and records the selected model and request parameters', async () => {
+    const observed: Array<{ settings: Parameters<ModelAdapter['complete']>[1]; parameters?: ModelRequestParameters }> =
+      [];
+    const env = await setupRuntime({
+      async complete(_prompt, settings, _signal, _onText, _trace, _onEvent, parameters) {
+        observed.push({ settings, ...(parameters ? { parameters } : {}) });
+        return response('routed result');
       },
-    };
-    const env = await setupRuntime(
-      {
-        async complete() {
-          throw new Error('The default adapter must not run.');
-        },
-      },
-      { plugins: [provider] },
-    );
-    const thread = env.runtime.createThread(env.project.id, 'runtime');
+    });
+    const thread = env.createThread('runtime');
     try {
       await env.runtime.submit(thread.id, 'routed-request', 'Route this request');
       await env.runtime.drain();
-
       expect(observed.length).toBeGreaterThan(0);
       expect(observed[0]).toMatchObject({
-        target: {
-          provider: 'routed-provider',
-          connectionId: 'default',
-          baseUrl: 'https://models.example.test/v1',
-          model: 'routed-model',
-        },
-        prompt: { model: 'routed-model' },
-        parameters: { fields: { reasoning_effort: 'high' }, temperature: 0.4 },
+        settings: { model: 'test-model', baseUrl: 'https://test.invalid/v1' },
+        parameters: { fields: {}, temperature: 0.7 },
       });
       expect(env.store.modelOutputForThread(thread.id)?.payload).toMatchObject({
-        provider: 'routed-provider',
-        model: 'routed-model',
+        provider: 'pico.test-provider',
+        model: 'test-model',
       });
       const invocationFacts = env.store.db
         .prepare(
           "SELECT payload_json FROM canonical_records WHERE scope_key = ? AND payload_json LIKE '%model-invocation:%'",
         )
         .all(`workflow:thread:${thread.id}`) as Array<{ payload_json: string }>;
-      expect(invocationFacts.map((row) => row.payload_json).join('\n')).toContain('https://models.example.test/v1');
-      expect(invocationFacts.map((row) => row.payload_json).join('\n')).toContain('routed-provider');
+      expect(invocationFacts.map((row) => row.payload_json).join('\n')).toContain('https://test.invalid/v1');
+      expect(invocationFacts.map((row) => row.payload_json).join('\n')).toContain('pico.test-provider');
     } finally {
       await env.cleanup();
     }
@@ -179,10 +163,6 @@ describe('Runtime model provider dispatch', () => {
       name: 'Test Connection Router',
       version: '1',
       activate(context) {
-        context.models.registerProvider({ id: 'routed-provider', label: 'Routed provider' }, async () => {
-          providerCalls += 1;
-          return response('must not be called');
-        });
         context.pipelines.use('model', async (input, next) =>
           next({
             ...input,
@@ -206,7 +186,7 @@ describe('Runtime model provider dispatch', () => {
       },
       { plugins: [provider] },
     );
-    const thread = env.runtime.createThread(env.project.id, 'runtime');
+    const thread = env.createThread('runtime');
     try {
       await env.runtime.submit(thread.id, 'unknown-connection', 'Route this request');
       await env.runtime.drain();
@@ -216,8 +196,7 @@ describe('Runtime model provider dispatch', () => {
         env.store
           .listExecutions(thread.id)
           .some(
-            (execution) =>
-              execution.status === 'failed' && execution.error?.includes('model connection is unavailable'),
+            (execution) => execution.status === 'failed' && execution.error?.includes('target identity do not match'),
           ),
       ).toBe(true);
       const invocationFacts = env.store.db
@@ -261,12 +240,11 @@ describe('Runtime model provider dispatch', () => {
       },
     };
     const env = await setupRuntime(fake, { plugins: [plugin] });
-    const thread = env.runtime.createThread(env.project.id, 'runtime');
+    const thread = env.createThread('runtime');
     try {
+      const selected = await env.catalog.addModel('thread-model');
       env.runtime.updateThreadModelSelection(thread.id, {
-        provider: 'openai-compatible',
-        connectionId: 'default',
-        model: 'thread-model',
+        ...selected,
         parameters: { temperature: 0.25, options: {} },
       });
       const request = {
@@ -274,7 +252,6 @@ describe('Runtime model provider dispatch', () => {
         purpose: 'test-summary',
         idempotencyKey: 'stable-call',
         prompt: { system: 'Summarize', turns: [], tools: [], model: '', temperature: 0.2 },
-        requestParameters: { temperature: 0.7, fields: { max_tokens: 32 } },
         onEvent: (event: ModelStreamEvent) => {
           if (event.type === 'reasoning_summary.delta') events.push(event.delta);
         },
@@ -285,7 +262,7 @@ describe('Runtime model provider dispatch', () => {
 
       expect(observed).toHaveLength(1);
       expect(observed[0]?.settings.model).toBe('thread-model');
-      expect(observed[0]?.parameters).toEqual({ temperature: 0.7, fields: { max_tokens: 32 } });
+      expect(observed[0]?.parameters).toEqual({ temperature: 0.25, fields: {} });
       expect(events).toEqual(['event delivered']);
       expect(replay.response).toEqual(first.response);
       expect(env.store.listRecords(thread.id).filter((record) => record.kind === 'assistant')).toHaveLength(0);
@@ -327,17 +304,16 @@ describe('Runtime model provider dispatch', () => {
       },
     };
     const env = await setupRuntime(fake, { plugins: [plugin] });
-    const thread = env.runtime.createThread(env.project.id, 'runtime');
-    const otherThread = env.runtime.createThread(env.project.id, 'runtime');
+    const thread = env.createThread('runtime');
+    const otherThread = env.createThread('runtime');
     const selection = {
-      provider: 'openai-compatible',
-      connectionId: 'default',
-      model: 'fingerprint-model',
+      ...(await env.catalog.addModel('fingerprint-model')),
       parameters: { temperature: 0.3, options: {} },
     };
+    const changedSelection = await env.catalog.addModel('changed-selection');
     env.runtime.updateThreadModelSelection(thread.id, selection);
     env.runtime.updateThreadModelSelection(otherThread.id, selection);
-    env.runtime.updateModelSettings({ apiKey: 'credential-sentinel' });
+    env.store.setPrivateSecret('pico.test', 'credential', 'credential-sentinel');
     const request = {
       threadId: thread.id,
       purpose: 'fingerprint-review',
@@ -358,16 +334,16 @@ describe('Runtime model provider dispatch', () => {
           ...request,
           modelTarget: { provider: 'openai-compatible', connectionId: 'default', model: 'different-model' },
         }),
-      ).toThrow(/different request/);
+      ).toThrow(/framework model selection/);
       expect(() =>
         complete!({ ...request, requestParameters: { temperature: 0.9, fields: { max_tokens: 64 } } }),
-      ).toThrow(/different request/);
+      ).toThrow(/framework model selection/);
       expect(() => complete!({ ...request, signal: new AbortController().signal })).not.toThrow();
       const sameInFlight = complete!(request);
       expect(providerCalls).toBe(1);
       gate.resolve(response('fingerprinted result'));
       const [firstRaw, inFlightRaw] = await Promise.all([first, sameInFlight]);
-      const firstResult = firstRaw as { response: ModelResponse };
+      const firstResult = firstRaw as { id: string; response: ModelResponse };
       const inFlightResult = inFlightRaw as { response: ModelResponse };
       expect(inFlightResult.response).toEqual(firstResult.response);
 
@@ -378,8 +354,11 @@ describe('Runtime model provider dispatch', () => {
       expect(factText).not.toContain('private-prompt-sentinel');
       expect(factText).not.toContain('credential-sentinel');
 
-      env.runtime.updateThreadModelSelection(thread.id, { ...selection, model: 'changed-selection' });
-      expect(() => complete!(request)).toThrow(/different request/);
+      env.runtime.updateThreadModelSelection(thread.id, changedSelection);
+      const afterSelectionChange = (await complete!(request)) as { id: string; response: ModelResponse };
+      expect(afterSelectionChange.response).toEqual(firstResult.response);
+      expect(afterSelectionChange.id).toBe(firstResult.id);
+      expect(providerCalls).toBe(1);
       env.runtime.updateThreadModelSelection(thread.id, selection);
       expect(((await complete!(request)) as { response: ModelResponse }).response).toEqual(firstResult.response);
       expect(providerCalls).toBe(1);
@@ -392,6 +371,7 @@ describe('Runtime model provider dispatch', () => {
         pluginDirectory: `${env.directory}/empty-plugins`,
       });
       await restarted.initialize();
+      await setupTestCatalog(restarted, ['test-model', 'fingerprint-model', 'changed-selection']);
       expect(((await complete!(request)) as { response: ModelResponse }).response).toEqual(firstResult.response);
       expect(() => complete!({ ...request, purpose: 'after-restart-mismatch' })).toThrow(/different request/);
       expect(providerCalls).toBe(1);
@@ -405,7 +385,7 @@ describe('Runtime model provider dispatch', () => {
         projectId: thread.projectId,
         purpose: request.purpose,
         provider: 'openai-compatible',
-        model: selection.model,
+        model: 'fingerprint-model',
         prompt: null,
         status: 'completed',
         response: response('legacy result'),
@@ -431,7 +411,7 @@ describe('Runtime model provider dispatch', () => {
       },
     };
     const env = await setupRuntime(fake);
-    const thread = env.runtime.createThread(env.project.id, 'runtime');
+    const thread = env.createThread('runtime');
     const now = new Date().toISOString();
     const running: PluginModelCallRecord = {
       id: 'orphaned-call',
@@ -500,7 +480,7 @@ describe('Runtime model provider dispatch', () => {
       },
     };
     const env = await setupRuntime(fake, { plugins: [plugin] });
-    const thread = env.runtime.createThread(env.project.id, 'runtime');
+    const thread = env.createThread('runtime');
     const controller = new AbortController();
     try {
       const pending = complete!({

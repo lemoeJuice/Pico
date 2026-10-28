@@ -35,6 +35,8 @@ export interface CatalogModel extends ProviderModel {
   availability: 'available' | 'unknown' | 'unavailable';
 }
 export interface ProviderTypeDriver {
+  /** Release external instance-owned resources after its local registration is revoked. */
+  disposeInstance?(instance: ProviderInstance): Promise<void> | void;
   listModels(instance: ProviderInstance, signal?: AbortSignal): Promise<ProviderModel[]>;
   authorize(instance: ProviderInstance, forceRefresh: boolean, signal?: AbortSignal): Promise<Record<string, string>>;
 }

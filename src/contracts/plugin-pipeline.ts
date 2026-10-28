@@ -1,3 +1,4 @@
+import type { CatalogSelection } from './model-catalog.js';
 import type {
   AssistantPayload,
   CanonicalRecord,
@@ -47,6 +48,8 @@ export interface PluginModelCallScope {
 export interface ModelStageInput {
   thread: Thread;
   provider: ModelProvider;
+  /** Frozen complete model/adapter choice for this logical operation. */
+  modelSelection?: CatalogSelection;
   /** Present for auxiliary model calls initiated by a plugin. */
   pluginModelCall?: PluginModelCallScope;
   /** Stable primary Execution or namespaced plugin-call identity, used for invocation facts. */

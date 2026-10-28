@@ -6,6 +6,7 @@ const plugins = [
   ['pico.collaboration', 'src/plugins/collaboration.ts', 'collaborationPlugin'],
   ['pico.global-memory', 'src/plugins/global-memory.ts', 'globalMemoryPlugin'],
   ['pico.goal', 'src/plugins/goal.ts', 'goalPlugin'],
+  ['pico.openai-provider', 'src/plugins/openai-provider.ts', 'openAiProviderPlugin'],
   ['pico.model-parameters', 'src/plugins/model-parameters/index.ts', 'modelParametersPlugin'],
   ['pico.permissions', 'src/plugins/permissions.ts', 'permissionPlugin'],
   ['pico.project-context', 'src/plugins/project-context.ts', 'projectContextPlugin'],
@@ -43,5 +44,6 @@ await build({
   minify: false,
   footer: { js: 'export default createChatGptPlanPlugin();' },
 });
-await buildWebUi({ configFile: 'plugins/pico.model-parameters/vite.config.ts' });
 await buildWebUi({ configFile: 'plugins/pico.chatgpt-plan/vite.config.ts' });
+
+await buildWebUi({ configFile: 'plugins/pico.openai-provider/vite.config.ts' });

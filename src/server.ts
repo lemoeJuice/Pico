@@ -24,7 +24,6 @@ import {
   type ContextManagementSettings,
   type ExecutorKind,
   type MiscellaneousSettings,
-  type ModelSettings,
   type ThreadModelSelection,
 } from './core/types.js';
 
@@ -449,15 +448,29 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     response.json(await runtime.updateExecutor(request.params.threadId!));
   });
   app.get('/api/settings/model', (_request, response) => response.json(runtime.publicModelSettings()));
-  app.put('/api/settings/model', (request, response) => {
-    const body = bodyObject(request);
-    const update: Partial<ModelSettings> = {};
-    if (typeof body.baseUrl === 'string') update.baseUrl = body.baseUrl;
-    if (typeof body.model === 'string') update.model = body.model;
-    if (typeof body.apiKey === 'string') update.apiKey = body.apiKey;
-    if (typeof body.temperature === 'number') update.temperature = body.temperature;
-    if (typeof body.provider === 'string') update.provider = body.provider;
-    response.json(runtime.updateModelSettings(update));
+  app.get('/api/model-catalog', (_request, response) => response.json(runtime.modelCatalogView()));
+  app.get('/api/model-catalog/adapters', (request, response) => {
+    if (typeof request.query.modelId !== 'string') throw new ServiceError(400, 'modelId is required');
+    response.json({ adapters: runtime.modelCatalog.matchingAdapters(request.query.modelId) });
+  });
+  app.post('/api/provider-instances/:instanceId/refresh', async (request, response) => {
+    await runtime.modelCatalog.refreshInstance(request.params.instanceId!);
+    response.json(runtime.modelCatalogView());
+  });
+  app.delete('/api/provider-instances/:instanceId', async (request, response) => {
+    const instance = runtime.modelCatalog.listInstances().find((item) => item.id === request.params.instanceId);
+    if (!instance) throw new ServiceError(404, 'Provider instance unavailable');
+    await runtime.modelCatalog.removeInstance(instance.owner, instance.id);
+    response.json(runtime.modelCatalogView());
+  });
+  app.get('/api/plugins/model-selections', (_request, response) => response.json(runtime.pluginModelSelectionsView()));
+  app.put('/api/plugins/:pluginId/model-selection', (request, response) => {
+    response.json(
+      runtime.updatePluginModelSelection(
+        request.params.pluginId!,
+        bodyObject(request) as unknown as Parameters<PicoRuntime['updatePluginModelSelection']>[1],
+      ),
+    );
   });
   app.get('/api/settings/context-management', (_request, response) => {
     response.json(runtime.getContextManagementSettings());

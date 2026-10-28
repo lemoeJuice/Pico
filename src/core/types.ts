@@ -1,3 +1,4 @@
+import type { CatalogSelection } from '../contracts/model-catalog.js';
 export type ExecutorKind = 'container' | 'host' | 'runtime';
 export type ThreadState = 'idle' | 'running' | 'pausing' | 'paused';
 export type ExecutionKind = 'model' | 'tool';
@@ -84,6 +85,9 @@ export interface ToolCall {
 }
 
 export interface AssistantPayload {
+  /** Framework-selected origin, independent of provider-reported model aliases. */
+  modelId?: string;
+  adapterId?: string;
   content: string;
   /** Runtime-selected provider for this committed main-model response. */
   provider?: ModelProvider;
@@ -184,13 +188,12 @@ export interface ModelProviderContribution {
   supportsImages?: boolean;
 }
 
-/** Effective model selection; provider/model follow global Runtime settings while parameters may be Thread-specific. */
-export interface ThreadModelSelection {
+/** Persisted per-Thread selection, with resolved legacy display fields for existing consumers. */
+export interface ThreadModelSelection extends CatalogSelection {
   provider: ModelProvider;
   connectionId: string;
   model: string;
-  /** Semantic, non-wire parameter overrides for this Thread. */
-  parameters: { temperature?: number | null; options: Record<string, string | number | boolean> };
+  unavailableReason?: string;
 }
 
 export interface PublicSettings {

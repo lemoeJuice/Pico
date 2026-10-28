@@ -9,7 +9,7 @@ import { PicoStore } from '../src/core/store.js';
 import { startRemoteExecutorServer } from '../src/executor/remote-server.js';
 import { ToolCatalog } from '../src/executor/tool-catalog.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
-import { FakeModel, response, setupRuntime } from './helpers.js';
+import { FakeModel, response, setupRuntime, setupTestCatalog } from './helpers.js';
 
 const token = 'pico-test-remote-executor-token-0123456789abcdef';
 
@@ -84,7 +84,9 @@ describe('Remote Host Executor', () => {
       });
       expect(readAccepted.status).toBe(202);
       await waitForExecution(baseUrl, readId);
-      expect(await getJson<{ result: { contents: string } }>(`${baseUrl}/api/executions/${readId}`, token)).toMatchObject({
+      expect(
+        await getJson<{ result: { contents: string } }>(`${baseUrl}/api/executions/${readId}`, token),
+      ).toMatchObject({
         result: { contents: 'Remote tool read succeeded.' },
       });
 
@@ -95,7 +97,12 @@ describe('Remote Host Executor', () => {
         body: JSON.stringify({
           toolName: 'apply_patch',
           arguments: {
-            patch: ['*** Begin Patch', '*** Add File: remote-patch.txt', '+Remote patch succeeded.', '*** End Patch'].join('\n'),
+            patch: [
+              '*** Begin Patch',
+              '*** Add File: remote-patch.txt',
+              '+Remote patch succeeded.',
+              '*** End Patch',
+            ].join('\n'),
           },
           workspacePath: workspace,
         }),
@@ -258,6 +265,7 @@ describe('Remote Host Executor', () => {
         remoteWorkspace,
         'Remote task',
       );
+      env.runtime.updateThreadModelSelection(thread.id, env.catalog.select());
       expect(thread.executorRemote).toBe(true);
       expect(thread.workspacePath).toBe(remoteWorkspace);
       setToolPolicy(env.store, thread.id, 'read_file', 'allow');
@@ -326,6 +334,7 @@ describe('Remote Host Executor', () => {
         remoteWorkspace,
         'Existing work',
       );
+      env.runtime.updateThreadModelSelection(thread.id, env.catalog.select());
       const originalBinding = env.store.executorForThread(thread.id)!;
       await expect(
         env.runtime.updateRemoteExecutorConnection(connection.id, connection.name, 'http://127.0.0.1:1', token),
@@ -424,6 +433,7 @@ describe('Remote Host Executor', () => {
         remoteWorkspace,
         'Remote execution with a missing ledger entry',
       );
+      env.runtime.updateThreadModelSelection(thread.id, env.catalog.select());
       setToolPolicy(env.store, thread.id, 'shell', 'allow');
       const modelExecution = env.store.createModelExecution('lost-remote-model', thread.id, 0);
       env.store.transitionExecution(modelExecution.id, 'running');
@@ -490,6 +500,7 @@ describe('Remote Host Executor', () => {
         remoteWorkspace,
         'Reconnect after transient disconnects',
       );
+      env.runtime.updateThreadModelSelection(thread.id, env.catalog.select());
       setToolPolicy(env.store, thread.id, 'shell', 'allow');
 
       let acceptedRemoteSubmission = false;
@@ -579,8 +590,9 @@ describe('Remote Host Executor', () => {
       await runtime.initialize();
       const project = await runtime.createProject('Runtime restart', projectWorkspace);
       const connection = await runtime.addRemoteExecutorConnection('Build host', endpoint, token);
-      runtime.updateModelSettings({ model: 'test-model' });
+      const catalog = await setupTestCatalog(runtime);
       const thread = await runtime.createRemoteThread(project.id, connection.id, remoteWorkspace);
+      runtime.updateThreadModelSelection(thread.id, catalog.select());
       setToolPolicy(store, thread.id, 'shell', 'allow');
       await runtime.submit(thread.id, 'runtime-restart-message', 'Run a command that outlives this Runtime.');
       await until(() =>
@@ -602,6 +614,7 @@ describe('Remote Host Executor', () => {
       store = new PicoStore(databasePath);
       const resumedModel = new FakeModel(() => response('Resumed after Runtime restart.'));
       runtime = new PicoRuntime(store, { model: resumedModel, pluginDirectory: join(directory, 'empty-plugins') });
+      await setupTestCatalog(runtime);
       await runtime.initialize();
       expect(runtime.getThread(thread.id)?.state).toBe('running');
       await runtime.drain();
@@ -645,8 +658,9 @@ describe('Remote Host Executor', () => {
       await runtime.initialize();
       const project = await runtime.createProject('Paused Runtime restart', projectWorkspace);
       const connection = await runtime.addRemoteExecutorConnection('Build host', endpoint, token);
-      runtime.updateModelSettings({ model: 'test-model' });
+      const catalog = await setupTestCatalog(runtime);
       const thread = await runtime.createRemoteThread(project.id, connection.id, remoteWorkspace);
+      runtime.updateThreadModelSelection(thread.id, catalog.select());
       setToolPolicy(store, thread.id, 'shell', 'allow');
       await runtime.submit(thread.id, 'paused-runtime-restart-message', 'Run while the Runtime restarts.');
       await until(() =>
@@ -666,6 +680,7 @@ describe('Remote Host Executor', () => {
       store = new PicoStore(databasePath);
       const resumedModel = new FakeModel(() => response('Continued after explicit Continue.'));
       runtime = new PicoRuntime(store, { model: resumedModel, pluginDirectory: join(directory, 'empty-plugins') });
+      await setupTestCatalog(runtime);
       await runtime.initialize();
       await runtime.drain();
 
@@ -719,6 +734,7 @@ describe('Remote Host Executor', () => {
         remoteWorkspace,
         'Interrupt remote execution',
       );
+      env.runtime.updateThreadModelSelection(thread.id, env.catalog.select());
       setToolPolicy(env.store, thread.id, 'shell', 'allow');
       await env.runtime.submit(thread.id, 'remote-interrupt-message', 'Start then interrupt a command.');
       await until(() =>
@@ -772,6 +788,7 @@ describe('Remote Host Executor', () => {
         remoteWorkspace,
         'Interrupt after lost acknowledgement',
       );
+      env.runtime.updateThreadModelSelection(thread.id, env.catalog.select());
       setToolPolicy(env.store, thread.id, 'shell', 'allow');
 
       let acceptedSubmissionResponseWasLost = false;
@@ -855,6 +872,7 @@ describe('Remote Host Executor', () => {
         remoteWorkspace,
         'Interrupt after reordered submission',
       );
+      env.runtime.updateThreadModelSelection(thread.id, env.catalog.select());
       setToolPolicy(env.store, thread.id, 'shell', 'allow');
 
       globalThis.fetch = async (input, init) => {

@@ -2,6 +2,8 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
+const databaseLocks = new Map<string, Promise<void>>();
+
 interface SqlRow {
   value_json: unknown;
 }
@@ -20,6 +22,7 @@ export interface SharedChatGptOAuthSecrets {
   get<T>(key: string, fallback: T): T;
   set<T>(key: string, value: T): void;
   delete(key: string): void;
+  clear(): void;
   withLock<T>(operation: () => Promise<T>): Promise<T>;
   close(): void;
 }
@@ -27,9 +30,7 @@ export interface SharedChatGptOAuthSecrets {
 /** Opens a dedicated SQLite secret store shared by ChatGPT plugin instances. */
 export function createSharedChatGptOAuthSecrets(filename: string, owner: string): SharedChatGptOAuthSecrets {
   const databasePath = resolve(filename);
-  const runtimeDatabasePath = resolve(
-    process.env.PICO_DB_PATH?.trim() || join(process.cwd(), 'data', 'pico.sqlite'),
-  );
+  const runtimeDatabasePath = resolve(process.env.PICO_DB_PATH?.trim() || join(process.cwd(), 'data', 'pico.sqlite'));
   if (databasePath === runtimeDatabasePath) {
     throw new Error('PICO_CHATGPT_OAUTH_DB_PATH must point to a dedicated OAuth database.');
   }
@@ -52,9 +53,8 @@ export function createSharedChatGptOAuthSecrets(filename: string, owner: string)
 
   return {
     get<T>(key: string, fallback: T): T {
-      const row = db
-        .prepare('SELECT value_json FROM private_secrets WHERE owner = ? AND key = ?')
-        .get(owner, key) as SqlRow | undefined;
+      const row = db.prepare('SELECT value_json FROM private_secrets WHERE owner = ? AND key = ?').get(owner, key) as
+        SqlRow | undefined;
       if (!row || typeof row.value_json !== 'string') return fallback;
       try {
         return JSON.parse(row.value_json) as T;
@@ -74,24 +74,42 @@ export function createSharedChatGptOAuthSecrets(filename: string, owner: string)
     delete(key: string): void {
       db.prepare('DELETE FROM private_secrets WHERE owner = ? AND key = ?').run(owner, key);
     },
+    clear(): void {
+      db.prepare('DELETE FROM private_secrets WHERE owner = ?').run(owner);
+    },
     async withLock<T>(operation: () => Promise<T>): Promise<T> {
-      db.exec('BEGIN IMMEDIATE');
+      // SQLite write locks span the asynchronous refresh. Queue local connections first so
+      // a second instance cannot block the event loop while the first awaits the network.
+      const previous = databaseLocks.get(databasePath) ?? Promise.resolve();
+      let release!: () => void;
+      const current = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const tail = previous.then(() => current);
+      databaseLocks.set(databasePath, tail);
+      await previous;
       try {
-        const result = await operation();
-        db.exec('COMMIT');
-        return result;
-      } catch (error) {
-        // Unusable-token handling intentionally clears the stored credential before throwing.
+        db.exec('BEGIN IMMEDIATE');
         try {
+          const result = await operation();
           db.exec('COMMIT');
-        } catch {
+          return result;
+        } catch (error) {
+          // Unusable-token handling intentionally clears the stored credential before throwing.
           try {
-            db.exec('ROLLBACK');
+            db.exec('COMMIT');
           } catch {
-            // Preserve the OAuth error that caused the transaction to unwind.
+            try {
+              db.exec('ROLLBACK');
+            } catch {
+              /* Preserve the OAuth error. */
+            }
           }
+          throw error;
         }
-        throw error;
+      } finally {
+        release();
+        if (databaseLocks.get(databasePath) === tail) databaseLocks.delete(databasePath);
       }
     },
     close(): void {

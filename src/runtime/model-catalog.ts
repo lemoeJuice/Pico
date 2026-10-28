@@ -32,8 +32,9 @@ function publicConfig(value: unknown): boolean {
   if (typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) return false;
   return Object.entries(value).every(
     ([key, entry]) =>
-      !/(secret|password|credential|api.?key|access.?token|refresh.?token|authorization)/i.test(key) &&
-      publicConfig(entry),
+      !/(secret|password|credential|api.?key|access.?token|refresh.?token|authorization|cookie|^token$|^key$|^headers$)/i.test(
+        key,
+      ) && publicConfig(entry),
   );
 }
 function safeEndpoint(endpoint: string): string {
@@ -193,8 +194,9 @@ export class ModelCatalog {
       },
     };
   }
-  removeInstance(owner: string, id: string): void {
-    this.instance(owner, id);
+  async removeInstance(owner: string, id: string): Promise<void> {
+    const instance = this.instance(owner, id);
+    const driver = this.types.get(instance.typeId)?.driver;
     this.refreshing.set(id, (this.refreshing.get(id) ?? 0) + 1);
     this.store.transaction(() => {
       this.store.setPluginState(
@@ -210,6 +212,7 @@ export class ModelCatalog {
       this.store.deletePrivateSecret(owner, secretKey(id));
     });
     this.onChange?.();
+    await driver?.disposeInstance?.(clone(instance));
   }
   private cached(): CatalogModel[] {
     return this.store.getPluginCache<CatalogModel[]>(namespace, cacheKey, []);
@@ -347,6 +350,12 @@ export class ModelCatalog {
       if (!parameters.options || typeof parameters.options !== 'object' || Array.isArray(parameters.options))
         bad('Invalid model options.');
       for (const [key, value] of Object.entries(parameters.options)) {
+        if (
+          /^(?:api.?key|authorization|access.?token|refresh.?token|secret|password|token|key|headers|cookie)$/i.test(
+            key,
+          )
+        )
+          bad('Model parameters cannot contain credentials.');
         const control = controls.find((item) => item.id === key);
         if (
           !control ||

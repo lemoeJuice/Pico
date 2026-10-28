@@ -64,6 +64,8 @@ export type PromptTurn =
       reasoningContent?: string;
       /** Opaque provider replay state. Core and projections must pass it through without interpreting it. */
       reasoningReplay?: unknown;
+      /** Generic producer identity for legacy replay compatibility checks. */
+      reasoningReplaySource?: { model: string; provider?: string; modelId?: string; adapterId?: string };
     }
   | {
       kind: 'assistant_tools';
@@ -72,6 +74,8 @@ export type PromptTurn =
       reasoningContent?: string;
       /** Opaque provider replay state. Core and projections must pass it through without interpreting it. */
       reasoningReplay?: unknown;
+      /** Generic producer identity for legacy replay compatibility checks. */
+      reasoningReplaySource?: { model: string; provider?: string; modelId?: string; adapterId?: string };
     }
   | { kind: 'tool_result'; callId: string; toolName: string; content: string; batchId?: string; images?: ImageInput[] };
 

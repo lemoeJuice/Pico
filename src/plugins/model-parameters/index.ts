@@ -1,169 +1,342 @@
-import type { ModelParameterSelection, ModelParameterTarget } from './types.js';
+import type {
+  AdapterContribution,
+  AdapterControl,
+  AdapterTemperature,
+  CatalogModel,
+} from '../../contracts/model-catalog.js';
 import type { PicoPlugin } from '../host.js';
-import {
-  controlsForTarget,
-  profileForTarget,
-  sanitizeSelection,
-  serializeSelection,
-  temperatureForTarget,
-  validateSelection,
-} from './registry.js';
-import { modelParameterTargetFromRecord, modelParameterTargetFromSettings, modelParameterTargetKey } from './target.js';
+import type {
+  ModelParameterControl,
+  ModelParameterProfile,
+  ModelParameterTarget,
+  TemperatureCapability,
+} from './types.js';
+import { chatGptParameterProfile } from './providers/chatgpt.js';
+import { coreVendorProfiles } from './providers/core-vendors.js';
+import { asiaNewParameterProfile } from './providers/asia-new.js';
+import { asiaParameterProfiles } from './providers/asia-parameters.js';
+import { nvidiaMetaParameterProfile } from './providers/nvidia-meta.js';
+import { asiaCoreParameterProfiles } from './providers/asia-core.js';
 
-const PLUGIN_ID = 'pico.model-parameters';
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
-}
-
-function targetFromQuery(query: URLSearchParams): ModelParameterTarget | null {
-  return modelParameterTargetFromRecord({
-    provider: query.get('provider'),
-    endpoint: query.get('endpoint'),
-    protocol: query.get('protocol'),
-    model: query.get('model'),
-  });
-}
-
-export const modelParametersPlugin: PicoPlugin = {
-  id: PLUGIN_ID,
-  name: 'Model parameters',
-  version: '0.1.0',
-  pipelinePriority: { model: -100 },
-  activate({ pipelines, http, ui, threads, models, state }) {
-    for (const provider of ['openai-compatible', 'chatgpt-plan']) {
-      const targetFromSelection = (selectionTarget: Parameters<typeof modelParameterTargetFromSettings>[0]) =>
-        modelParameterTargetFromSettings(selectionTarget);
-      const initialSelection = (
-        selectionTarget: Parameters<typeof modelParameterTargetFromSettings>[0],
-      ): ModelParameterSelection => {
-        const target = targetFromSelection(selectionTarget);
-        const stored: unknown = state.get('selections', {});
-        if (isRecord(stored)) {
-          const saved = stored[modelParameterTargetKey(target)];
-          if (isRecord(saved)) return sanitizeSelection(target, saved);
+const CHAT = 'openai-chat-completions';
+const RESPONSES = 'openai-responses';
+const target = (model: CatalogModel, provider = 'openai-compatible'): ModelParameterTarget => ({
+  provider,
+  endpoint: model.endpoint,
+  protocol: model.protocol as ModelParameterTarget['protocol'],
+  model: model.name,
+});
+function control(value: ModelParameterControl): AdapterControl {
+  return {
+    id: value.id,
+    label: value.label,
+    type: value.kind === 'toggle' ? 'boolean' : value.kind === 'range' ? 'number' : 'string',
+    ...(value.options
+      ? {
+          choices: value.options.map((option) => option.value),
+          choiceLabels: Object.fromEntries(value.options.map((option) => [option.value, option.label])),
         }
-        if (target.provider === 'chatgpt-plan' && profileForTarget(target)?.id === 'openai.chatgpt-plan.responses') {
-          const legacy: unknown = state.get('legacyChatGptPreferences', null);
-          if (isRecord(legacy)) {
-            return sanitizeSelection(target, {
-              ...(typeof legacy.reasoningEffort === 'string' ? { reasoningEffort: legacy.reasoningEffort } : {}),
-              ...(typeof legacy.fastMode === 'boolean' ? { fastMode: legacy.fastMode } : {}),
-            });
-          }
-        }
-        return {};
-      };
-      models.registerSelectionNormalizer(
-        provider,
-        (selectionTarget, options) => {
-          const target = modelParameterTargetFromSettings(selectionTarget);
-          const validated = validateSelection(target, options);
-          if (validated) return validated;
-          if (Object.keys(options).length > 0) {
-            throw new Error(`The selected model does not support option(s): ${Object.keys(options).join(', ')}.`);
-          }
-          return {};
-        },
-        initialSelection,
+      : {}),
+    ...(value.defaultValue !== undefined ? { defaultValue: value.defaultValue } : {}),
+    ...(value.min !== undefined ? { min: value.min } : {}),
+    ...(value.max !== undefined ? { max: value.max } : {}),
+    ...(value.step !== undefined ? { step: value.step } : {}),
+    group: value.group,
+    ...(value.description ? { description: value.description } : {}),
+  };
+}
+function temperature(value: TemperatureCapability): AdapterTemperature {
+  if (value.mode === 'adjustable')
+    return {
+      supported: true,
+      min: value.min,
+      max: value.max,
+      step: value.step,
+      ...(value.description ? { description: value.description } : {}),
+    };
+  return {
+    supported: false,
+    ...(value.mode === 'fixed' ? { fixedValue: value.value } : {}),
+    ...(value.description ? { description: value.description } : {}),
+  };
+}
+function adapter(
+  profile: ModelParameterProfile,
+  match: AdapterContribution['match'],
+  provider = 'openai-compatible',
+  protocolTraits?: AdapterContribution['protocolTraits'],
+): AdapterContribution {
+  return {
+    id: profile.id,
+    label: profile.id,
+    replayFormat: 'openai-responses',
+    match,
+    controls: [],
+    temperature: { supported: false },
+    ...(protocolTraits ? { protocolTraits } : {}),
+    controlsForModel: (model) => profile.controls(target(model, provider)).map(control),
+    temperatureForModel: (model) => temperature(profile.temperature(target(model, provider))),
+    normalize(model, parameters) {
+      const defaults = Object.fromEntries(
+        profile
+          .controls(target(model, provider))
+          .filter((item) => item.defaultValue !== undefined)
+          .map((item) => [item.id, item.defaultValue!]),
       );
-    }
-
-    const profileView = (target: ModelParameterTarget, values: ModelParameterSelection = {}) => ({
-      profileId: profileForTarget(target)?.id ?? null,
-      controls: controlsForTarget(target),
-      temperature: temperatureForTarget(target),
-      values: sanitizeSelection(target, values),
-    });
-
-    http.register('GET', '/profile', ({ query }) => {
-      const target = targetFromQuery(query);
-      if (!target) throw new Error('A valid model provider, endpoint, protocol, and model are required.');
-      const threadId = query.get('threadId') ?? '';
-      if (!threadId) throw new Error('threadId is required.');
-      const selection = threads.modelSelection(threadId);
-      if (selection.provider !== target.provider || selection.model !== target.model)
-        throw new Error('Thread model selection changed.');
+      return { ...parameters, options: { ...defaults, ...parameters.options } };
+    },
+    serialize(model, parameters) {
+      const capability = profile.temperature(target(model, provider));
+      const temp =
+        capability.mode === 'adjustable'
+          ? parameters.temperature
+          : capability.mode === 'fixed'
+            ? capability.value
+            : null;
       return {
-        ...profileView(target, selection.parameters.options),
-        temperatureValue: selection.parameters.temperature,
+        fields: profile.serialize(target(model, provider), parameters.options, temp ?? 1),
+        ...(temp !== undefined ? { temperature: temp } : {}),
       };
-    });
-
-    http.register('PUT', '/selection', ({ body }) => {
-      if (!isRecord(body)) throw new Error('Model parameter selection must be an object.');
-      const target = modelParameterTargetFromRecord(body.target);
-      if (!target) throw new Error('A valid model parameter target is required.');
-      const threadId = typeof body.threadId === 'string' ? body.threadId : '';
-      if (!threadId) throw new Error('threadId is required.');
-      const selection = validateSelection(target, body.selection);
-      if (!selection) throw new Error('The selected values are not available for this model.');
-      const current = threads.modelSelection(threadId);
-      if (current.provider !== target.provider || current.model !== target.model)
-        throw new Error('Thread model selection changed.');
-      const saved = threads.validateModelSelection({
-        ...current,
-        parameters: { ...current.parameters, options: selection },
-      });
-      const updated = threads.updateModelSelection(threadId, saved);
-      return { ...profileView(target, updated.parameters.options), temperatureValue: updated.parameters.temperature };
-    });
-
-    pipelines.use('model', async (input, next) => {
-      if (!input.modelTarget) return next();
-      const target = modelParameterTargetFromSettings(input.modelTarget);
-      if (!target.endpoint) return next();
-      const semantic = input.selectionParameters?.options ?? {};
-      const normalized = validateSelection(target, semantic);
-      if (
-        (Object.keys(semantic).length > 0 && !normalized) ||
-        (!profileForTarget(target) && Object.keys(semantic).length > 0)
-      ) {
-        throw new Error('Thread model options are not supported by the selected provider and model.');
-      }
-      const capability = temperatureForTarget(target);
-      const selectionTemperature = input.selectionParameters?.temperature ?? input.prompt.temperature;
-      const requestedTemperature = input.requestParameters?.temperature;
-      const temperature =
-        requestedTemperature !== undefined
-          ? requestedTemperature
-          : capability.mode === 'adjustable'
-            ? Math.max(capability.min, Math.min(capability.max, selectionTemperature))
-            : capability.mode === 'fixed'
-              ? capability.value
-              : null;
-      const serializedSelection = profileForTarget(target)
-        ? serializeSelection(target, normalized ?? {}, selectionTemperature)
-        : undefined;
-      return next({
-        ...input,
-        requestParameters: {
-          fields: {
-            ...input.requestParameters?.fields,
-            ...(serializedSelection ?? {}),
-          },
-          temperature: requestedTemperature ?? temperature,
-        },
-      });
-    });
-
-    ui.contribute({
-      slot: 'composer.model',
-      id: 'model-parameters',
-      label: 'Model controls',
-      description: 'Model-specific reasoning controls.',
-      entry: 'webui',
-      component: 'ModelParameterComposer',
-    });
-    ui.contribute({
-      slot: 'composer.model',
-      id: 'model-parameters-others',
-      label: 'Others',
-      description: 'Additional model settings, including temperature when supported.',
-      entry: 'webui',
-      component: 'ModelParameterOthers',
-      supportsPopover: true,
-      providers: ['openai-compatible'],
-    });
+    },
+  };
+}
+const byId = (profiles: ModelParameterProfile[], id: string): ModelParameterProfile => {
+  const found = profiles.find((profile) => profile.id === id);
+  if (!found) throw new Error('Missing built-in model profile');
+  return found;
+};
+const standardAdapters: AdapterContribution[] = [
+  {
+    id: 'pico.chat-completions',
+    label: 'Generic Chat Completions',
+    match: { protocols: [CHAT] },
+    controls: [],
+    temperature: { supported: true, min: 0, max: 2, step: 0.1 },
+  },
+  {
+    id: 'pico.responses',
+    label: 'Generic Responses',
+    match: { protocols: [RESPONSES] },
+    controls: [],
+    temperature: { supported: true, min: 0, max: 2, step: 0.1 },
+    replayFormat: 'openai-responses',
+  },
+  adapter(chatGptParameterProfile, { providerTypeIds: ['chatgpt-plan'], protocols: [RESPONSES] }, 'chatgpt-plan'),
+  adapter(byId(coreVendorProfiles, 'openai.official.reasoning'), {
+    endpointOrigins: ['https://api.openai.com'],
+    endpointVersionedApiPath: true,
+    protocols: [CHAT, RESPONSES],
+    names: ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
+  }),
+  adapter(byId(coreVendorProfiles, 'anthropic.messages.adaptive-effort'), {
+    endpointOrigins: ['https://api.anthropic.com'],
+    endpointPaths: ['/v1'],
+    protocols: ['anthropic-messages'],
+    names: [
+      'claude-fable-5-1',
+      'claude-mythos-5-1',
+      'claude-fable-5',
+      'claude-mythos-5',
+      'claude-opus-5-5',
+      'claude-opus-5',
+      'claude-sonnet-5-5',
+      'claude-sonnet-5',
+      'claude-haiku-5-5',
+      'claude-opus-4-8',
+      'claude-opus-4-7',
+      'claude-opus-4-6',
+      'claude-sonnet-4-6',
+    ],
+  }),
+  adapter(byId(coreVendorProfiles, 'google.gemini.openai-compatible-thinking'), {
+    endpointOrigins: ['https://generativelanguage.googleapis.com'],
+    endpointVersionedApiPath: true,
+    protocols: [CHAT],
+    names: [
+      'gemini-3.1-pro-preview',
+      'gemini-3.1-flash-lite-preview',
+      'gemini-3-flash-preview',
+      'gemini-3.8-flash',
+      'gemini-3.5-flash',
+    ],
+  }),
+  adapter(byId(coreVendorProfiles, 'xai.grok.reasoning'), {
+    endpointOrigins: ['https://api.x.ai', 'https://us.api.x.ai'],
+    endpointVersionedApiPath: true,
+    protocols: [CHAT, RESPONSES],
+    names: ['grok-4.7', 'grok-4.6', 'grok-4.5', 'grok-4.20-multi-agent'],
+  }),
+  adapter(
+    byId(asiaCoreParameterProfiles, 'deepseek.official-api'),
+    {
+      endpointHosts: ['api.deepseek.com'],
+      endpointPathExcludedSuffixes: ['/responses', '/messages'],
+      endpointPathExcludes: ['/anthropic'],
+      protocols: [CHAT, RESPONSES],
+      names: ['deepseek-flash', 'deepseek-v4-pro'],
+    },
+    'openai-compatible',
+    { reasoningContent: true, cacheHitMissUsage: true },
+  ),
+  adapter(byId(asiaCoreParameterProfiles, 'alibaba.model-studio.qwen38'), {
+    endpointOrigins: ['https://dashscope.aliyuncs.com', 'https://dashscope-intl.aliyuncs.com'],
+    endpointPaths: ['/compatible-mode/v1', '/compatible-mode/v1/chat/completions'],
+    protocols: [CHAT],
+    names: ['qwen3.8-max', 'qwen3.8-max-0902', 'qwen3.8-flash'],
+  }),
+  adapter(byId(asiaCoreParameterProfiles, 'mistral.official-api'), {
+    endpointOrigins: ['https://api.mistral.ai'],
+    endpointPaths: ['/v1', '/v1/chat/completions'],
+    protocols: [CHAT],
+    names: ['mistral-small-latest', 'mistral-medium-3-5', 'mistral-large-4-0', 'zai-glm-5-3'],
+  }),
+  adapter(byId(asiaCoreParameterProfiles, 'alibaba.model-studio.deepseek-v41-flash'), {
+    endpointHostPatterns: [{ prefix: '', suffix: '.maas.aliyuncs.com' }],
+    endpointPaths: ['/compatible-mode/v1'],
+    protocols: [CHAT],
+    names: ['deepseek-v4.1-flash'],
+  }),
+  ...(() => {
+    const special = adapter(asiaNewParameterProfile, {});
+    const paths = ['/v1', '/v1/chat/completions'];
+    special.matchAny = [
+      {
+        endpointHosts: ['api.z.ai'],
+        endpointPaths: ['/api/paas/v4', '/api/paas/v4/chat/completions'],
+        protocols: [CHAT],
+        names: ['glm-5.3', 'glm-5.3-flash', 'glm-5.3-flashx', 'glm-5.2', 'glm-5.1', 'glm-5', 'glm-4.7', 'glm-4.6'],
+      },
+      {
+        endpointHosts: ['api.xiaomimimo.com'],
+        endpointPaths: paths,
+        protocols: [CHAT, RESPONSES],
+        names: ['mimo-v2.6-flash', 'mimo-v2.6-pro', 'mimo-v2.6-pro-ultraspeed', 'mimo-v2.5-pro', 'mimo-v2.5'],
+      },
+      {
+        endpointHosts: ['api.ant-ling.com'],
+        endpointPaths: paths,
+        protocols: [CHAT, RESPONSES, 'anthropic-messages'],
+        names: [
+          'Ling-3.1-flash',
+          'Ling-3.0-flash-VL',
+          'Ling-3.0-flash',
+          'Ling-3.0-tiny',
+          'Ling-2.6-1T',
+          'Ring-2.6-1T',
+          'Ling-2.6-flash',
+          'AntAngelMed',
+        ],
+      },
+      {
+        endpointHosts: ['api.moonshot.ai', 'api.moonshot.cn'],
+        endpointPaths: paths,
+        protocols: [CHAT, RESPONSES, 'anthropic-messages'],
+        names: ['kimi-k3', 'kimi-k2.6', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed'],
+      },
+      {
+        endpointHosts: ['api.stepfun.ai', 'api.stepfun.com'],
+        endpointPaths: paths,
+        protocols: [CHAT],
+        names: ['step-5-preview'],
+      },
+    ];
+    return [special];
+  })(),
+  ...(() => {
+    const tokenHosts = [
+      'tokenhub.tencentmaas.com',
+      'tokenhub-intl.tencentmaas.com',
+      'tokenhub.tencentmaas.cn',
+      'tokenhub-intl.tencentmaas.cn',
+    ];
+    const paths = ['/v1', '/v1/chat/completions'];
+    return [
+      adapter(byId(asiaParameterProfiles, 'tencent.tokenhub.hy-reasoning'), {
+        endpointHosts: tokenHosts,
+        endpointPaths: paths,
+        protocols: [CHAT],
+        names: ['hy3', 'hy4-preview'],
+      }),
+      adapter(byId(asiaParameterProfiles, 'minimax.m31-flash-preview'), {
+        endpointHosts: ['api.minimax.io'],
+        endpointSchemes: ['https:'],
+        endpointPaths: paths,
+        protocols: [CHAT],
+        names: ['MiniMax-M3.1-Flash-Preview'],
+      }),
+      adapter(byId(asiaParameterProfiles, 'tencent.tokenhub.minimax-thinking'), {
+        endpointHosts: tokenHosts,
+        endpointPaths: paths,
+        protocols: [CHAT],
+        names: ['minimax-m2.5', 'minimax-m2.7'],
+      }),
+      adapter(byId(asiaParameterProfiles, 'longcat.official-thinking'), {
+        endpointHosts: ['api.longcat.chat'],
+        endpointSchemes: ['https:'],
+        endpointPaths: ['/openai/v1', '/openai/v1/chat/completions'],
+        protocols: [CHAT],
+        names: ['LongCat-2.0'],
+      }),
+      adapter(byId(asiaParameterProfiles, 'volcengine.ark.seed-reasoning'), {
+        endpointHostPatterns: [{ prefix: 'ark.', suffix: '.volces.com', singleLabel: true }],
+        endpointSchemes: ['https:'],
+        endpointPaths: ['/api/v3', '/api/v3/chat/completions'],
+        protocols: [CHAT, RESPONSES],
+        names: [
+          'doubao-seed-evolving',
+          'doubao-seed-2-1-pro-260915',
+          'doubao-seed-2-1-lite-260915',
+          'doubao-seed-2-1-pro-260628',
+          'doubao-seed-2-1-turbo-260628',
+          'doubao-seed-2-0-lite-260428',
+        ],
+      }),
+    ];
+  })(),
+  ...(() => {
+    const special = adapter(nvidiaMetaParameterProfile, {});
+    special.matchAny = [
+      {
+        endpointHosts: ['integrate.api.nvidia.com'],
+        endpointSchemes: ['https:'],
+        endpointPaths: ['/v1', '/v1/chat/completions'],
+        protocols: [CHAT],
+        names: ['nvidia/nemotron-3-nano-omni-30b-a3b-reasoning'],
+      },
+      {
+        endpointHosts: ['localhost', '127.0.0.1', '[::1]'],
+        endpointPaths: ['/v1', '/v1/chat/completions'],
+        protocols: [CHAT],
+        names: [
+          'nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16',
+          'nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-FP8',
+          'nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4',
+          'meta-models/Muse-Spark-Open-816B-A42B-NVFP4',
+        ],
+      },
+      {
+        endpointHosts: ['api.meta.ai'],
+        endpointSchemes: ['https:'],
+        endpointPaths: ['/v1', '/v1/chat/completions'],
+        protocols: [CHAT, RESPONSES],
+        names: [
+          'muse-wonder-1.0',
+          'muse-spark-1.3',
+          'muse-spark-1.3-contributor',
+          'muse-spark-1.2',
+          'muse-spark-1.2-contributor',
+          'muse-spark-1.1',
+        ],
+      },
+    ];
+    return [special];
+  })(),
+];
+export const modelParametersPlugin: PicoPlugin = {
+  id: 'pico.model-parameters',
+  name: 'Model parameters',
+  version: '0.2.0',
+  activate({ models }) {
+    for (const contribution of standardAdapters) models.registerAdapter(contribution);
   },
 };

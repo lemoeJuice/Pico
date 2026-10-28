@@ -126,7 +126,7 @@ describe('workflow plugin boundaries', () => {
       disabledBuiltinPlugins: ['pico.permissions', 'pico.project-context'],
       plugins: [replacementPermissions, replacementProjectContext],
     });
-    const thread = env.runtime.createThread(env.project.id, 'runtime', 'Boundary thread');
+    const thread = env.createThread('runtime', 'Boundary thread');
     env.store.setPluginState('pico.project-context', 'byProject', {
       [env.project.id]: { text: legacyContext, revision: 1 },
     });
@@ -206,6 +206,7 @@ describe('workflow plugin boundaries', () => {
     try {
       const connection = await env.runtime.addRemoteExecutorConnection('Custom remote', remote.url, remoteToken);
       const thread = await env.runtime.createRemoteThread(env.project.id, connection.id, '/remote-workspaces/project');
+      env.runtime.updateThreadModelSelection(thread.id, env.catalog.select());
       env.store.setPluginState('pico.permissions', 'rules', { [thread.id]: { remote_custom: 'allow' } });
 
       await env.runtime.submit(thread.id, 'remote-custom-tool-message', 'Run the remote custom tool.');

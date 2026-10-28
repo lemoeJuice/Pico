@@ -13,6 +13,8 @@ function snapshot(
   return {
     thread: { id: threadId, projectId: 'project', state } as Thread,
     modelSelection: {
+      modelId: 'test-model-id',
+      adapterId: 'test-adapter',
       provider: 'openai-compatible',
       connectionId: 'default',
       model: 'test-model',

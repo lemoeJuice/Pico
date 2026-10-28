@@ -143,6 +143,8 @@ export interface ProviderRequestAttempt extends ProviderRequestStart {
   providerError?: ProviderHttpError;
   eventCounts?: Record<string, number>;
   firstTextMs?: number;
+  /** End-to-end output tokens / physical request seconds, including initial wait. */
+  outputTokensPerSecond?: number;
   deltaTextCharacters?: number;
   outputTextCharacters?: number;
   outputItemCounts?: Record<string, number>;

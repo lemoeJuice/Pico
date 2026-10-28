@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import type { PluginContext } from '../src/plugins/host.js';
 import { sanitizeModelCallError } from '../src/contracts/model-error.js';
 import { OpenAiCompatibleAdapter } from '../src/runtime/model.js';
 import { setupRuntime } from './helpers.js';
@@ -54,53 +53,32 @@ describe('shared Runtime model error boundary', () => {
   }, 20_000);
 
   it('filters an untrusted provider error code passed through trace callbacks', async () => {
-    const provider = {
-      id: 'test.trace-error-provider',
-      name: 'Trace error provider',
-      version: '1',
-      activate(context: PluginContext) {
-        context.models.registerProvider(
-          { id: 'trace-error-provider', label: 'Trace error provider' },
-          async (input) => {
-            const attemptId = input.requestTrace!.started({
-              provider: 'trace-error-provider',
-              protocol: 'test',
-              endpoint: 'https://models.example.test/v1',
-              attempt: 1,
-            });
-            input.requestTrace!.settled(attemptId, {
-              outcome: 'failed',
-              durationMs: 1,
-              errorCategory: 'http',
-              errorCode: canary,
-            });
-            throw new Error(canary);
-          },
-        );
+    let attempts = 0;
+    const env = await setupRuntime({
+      async complete(_prompt, _settings, _signal, _onText, trace) {
+        attempts += 1;
+        if (!trace) throw new Error('Trace is required for this test');
+        const attemptId = trace.started({
+          provider: 'pico.test-provider',
+          protocol: 'openai-chat-completions',
+          endpoint: 'https://test.invalid/v1',
+          attempt: 1,
+        });
+        trace.settled(attemptId, { outcome: 'failed', durationMs: 1, errorCategory: 'http', errorCode: canary });
+        throw new Error(canary);
       },
-    };
-    const env = await setupRuntime(
-      {
-        async complete() {
-          throw new Error('The default adapter must not run.');
-        },
-      },
-      { plugins: [provider] },
-    );
+    });
     try {
       const thread = env.createThread('host', 'Provider trace boundary');
-      const selection = env.runtime.threadModelSelection(thread.id);
-      env.runtime.updateThreadModelSelection(thread.id, {
-        ...selection,
-        provider: 'trace-error-provider',
-        model: 'trace-test-model',
-        parameters: { options: {} },
-      });
       await env.runtime.submit(thread.id, 'trace-error-boundary', 'Run once.');
       await env.runtime.drain();
 
       const execution = env.store.listExecutions(thread.id).find((item) => item.kind === 'model');
       expect(execution).toMatchObject({ status: 'failed', error: 'Model request failed (provider_error).' });
+      expect(attempts).toBe(1);
+      expect(execution && env.store.listExecutionLog(execution.id, 'provider-request-settled')).toEqual([
+        expect.objectContaining({ detail: expect.objectContaining({ outcome: 'failed', errorCategory: 'http' }) }),
+      ]);
       const diagnostics = execution && [
         ...env.store.listExecutionLog(execution.id, 'provider-request-settled'),
         ...env.store.listExecutionLog(execution.id, 'model-input-settled'),

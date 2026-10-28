@@ -1,3 +1,4 @@
+import type { CatalogSelection } from '../contracts/model-catalog.js';
 import type { Execution, ExecutorBinding, ExecutorKind, Project, Thread } from '../core/types.js';
 import type { ModelPrompt, ModelResponse, ModelStreamEvent } from '../contracts/model.js';
 import type { PluginModelCallRecord } from '../contracts/store.js';
@@ -13,8 +14,8 @@ export interface PluginServices {
   threads: {
     get(threadId: string): Thread | null;
     modelSelection(threadId: string): ThreadModelSelection;
-    validateModelSelection(selection: ThreadModelSelection): ThreadModelSelection;
-    updateModelSelection(threadId: string, selection: ThreadModelSelection): ThreadModelSelection;
+    validateModelSelection(selection: CatalogSelection): ThreadModelSelection;
+    updateModelSelection(threadId: string, selection: CatalogSelection): ThreadModelSelection;
     list(projectId?: string): Thread[];
     updateTitle(pluginId: string, threadId: string, title: string): Thread;
     tools(threadId: string): Promise<ThreadToolView[]>;
@@ -31,7 +32,7 @@ export interface PluginServices {
         remoteConnectionId?: string;
         workspacePath?: string;
         idempotencyKey?: string;
-        modelSelection?: ThreadModelSelection;
+        modelSelection?: CatalogSelection;
         /** Sparse per-tool visibility overrides applied when this Thread is first created. */
         toolOverrides?: Record<string, boolean>;
       },
@@ -47,11 +48,7 @@ export interface PluginServices {
       messageId: string;
     };
     /** Append an ordinary user Message and start the normal Thread loop without slash-command dispatch. */
-    submitUserMessage(
-      threadId: string,
-      messageId: string,
-      content: string,
-    ): { accepted: true; duplicate: boolean };
+    submitUserMessage(threadId: string, messageId: string, content: string): { accepted: true; duplicate: boolean };
     pause(threadId: string, reason: string): Thread;
     resume(threadId: string): Thread;
   };

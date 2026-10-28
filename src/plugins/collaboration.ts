@@ -1,5 +1,6 @@
 import type { PicoPlugin, PluginContext } from './host.js';
 import type { Thread, ThreadModelSelection } from '../core/types.js';
+import type { CatalogSelection, CatalogModel, AdapterContribution } from '../contracts/model-catalog.js';
 import { projectThreadHistoryIo } from '../contracts/canonical-projection.js';
 
 type CollaborationServices = Pick<PluginContext, 'threads'>;
@@ -9,7 +10,8 @@ type SpawnIndex = Record<
     threadId: string;
     prompt: string;
     createdAt: string;
-    modelSelection?: ThreadModelSelection;
+    modelSelection?: CatalogSelection;
+    requestedModel?: CatalogSelection | null;
     toolOverrides?: Record<string, boolean>;
   }
 >;
@@ -41,6 +43,17 @@ export const collaborationPlugin: PicoPlugin = {
   pipelinePriority: { projection: 60 },
   activate({ tools, pipelines, commands, http, state, ...context }) {
     const { threads } = context as typeof context & CollaborationServices;
+    const models = context.models as typeof context.models & {
+      catalog(): CatalogModel[];
+      matchingAdapters(modelId: string): AdapterContribution[];
+      validateSelection(selection: CatalogSelection): CatalogSelection;
+    };
+    const stable = (value: unknown): string =>
+      JSON.stringify(value, (_key, entry: unknown) =>
+        entry && typeof entry === 'object' && !Array.isArray(entry)
+          ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b)))
+          : entry,
+      );
     pipelines.use('projection', async (input, next) =>
       next({
         ...input,
@@ -64,16 +77,15 @@ export const collaborationPlugin: PicoPlugin = {
             model: {
               type: 'object',
               properties: {
-                provider: { type: 'string' },
-                connectionId: { type: 'string' },
-                model: { type: 'string' },
+                modelId: { type: 'string', minLength: 1 },
+                adapterId: { type: 'string', minLength: 1 },
                 parameters: {
                   type: 'object',
                   properties: { temperature: { type: ['number', 'null'] }, options: { type: 'object' } },
                   additionalProperties: false,
                 },
               },
-              required: ['provider', 'model'],
+              required: ['modelId', 'adapterId', 'parameters'],
               additionalProperties: false,
             },
             tool_settings: {
@@ -128,7 +140,9 @@ export const collaborationPlugin: PicoPlugin = {
           }
         }
         const normalizedToolOverrides = Object.keys(requestedToolOverrides).length
-          ? Object.fromEntries(Object.entries(requestedToolOverrides).sort(([left], [right]) => left.localeCompare(right)))
+          ? Object.fromEntries(
+              Object.entries(requestedToolOverrides).sort(([left], [right]) => left.localeCompare(right)),
+            )
           : undefined;
         if (normalizedToolOverrides) {
           const availableToolNames = new Set((await threads.tools(parent.id)).map((tool) => tool.name));
@@ -136,6 +150,27 @@ export const collaborationPlugin: PicoPlugin = {
           if (unknownTool) throw new Error(`Tool is not available in the parent Thread: ${unknownTool}`);
         }
 
+        let requestedModel: CatalogSelection | null = null;
+        if (args.model !== undefined) {
+          if (!args.model || typeof args.model !== 'object' || Array.isArray(args.model))
+            throw new Error('Invalid child model selection');
+          const requested = args.model as Record<string, unknown>;
+          if (
+            typeof requested.modelId !== 'string' ||
+            !requested.modelId ||
+            typeof requested.adapterId !== 'string' ||
+            !requested.adapterId ||
+            !requested.parameters ||
+            typeof requested.parameters !== 'object' ||
+            Array.isArray(requested.parameters)
+          )
+            throw new Error('Invalid child model selection');
+          requestedModel = {
+            modelId: requested.modelId,
+            adapterId: requested.adapterId,
+            parameters: requested.parameters as CatalogSelection['parameters'],
+          };
+        }
         const stableKey = toolContext.executionId;
         const index = readSpawnIndex(state.get);
         const previous = index[stableKey];
@@ -149,35 +184,14 @@ export const collaborationPlugin: PicoPlugin = {
         ) {
           throw new Error('This tool execution ID was already used with different Child Thread tool settings');
         }
+        if (previous && stable(previous.requestedModel ?? null) !== stable(requestedModel))
+          throw new Error('This tool execution ID was already used with a different model selection');
         if (!child) {
           let modelSelection = previous?.modelSelection;
           if (!modelSelection) {
-            const requested =
-              args.model && typeof args.model === 'object' && !Array.isArray(args.model)
-                ? (args.model as Record<string, unknown>)
-                : null;
-            const inherited = threads.modelSelection(parent.id);
-            modelSelection = requested
-              ? threads.validateModelSelection({
-                  provider: typeof requested.provider === 'string' ? requested.provider : inherited.provider,
-                  connectionId:
-                    typeof requested.connectionId === 'string' ? requested.connectionId : inherited.connectionId,
-                  model: typeof requested.model === 'string' ? requested.model : inherited.model,
-                  // A provider/model override is a new target. Options belong to the
-                  // old target and must be explicitly supplied again to cross it.
-                  parameters:
-                    requested.parameters === undefined
-                      ? requested.provider !== inherited.provider || requested.model !== inherited.model
-                        ? {
-                            ...(inherited.parameters.temperature === undefined
-                              ? {}
-                              : { temperature: inherited.parameters.temperature }),
-                            options: {},
-                          }
-                        : inherited.parameters
-                      : (requested.parameters as ThreadModelSelection['parameters']),
-                })
-              : inherited;
+            modelSelection = requestedModel
+              ? models.validateSelection(requestedModel)
+              : structuredClone(threads.modelSelection(parent.id) as unknown as CatalogSelection);
           }
           const binding = threads.binding(parent.id);
           const taskKey = `spawn:${parent.id}:${stableKey}`;
@@ -188,7 +202,7 @@ export const collaborationPlugin: PicoPlugin = {
               idempotencyKey: taskKey,
               ...(binding?.remoteConnectionId ? { remoteConnectionId: binding.remoteConnectionId } : {}),
               ...(parent.executorRemote ? { workspacePath: parent.workspacePath } : {}),
-              modelSelection,
+              modelSelection: modelSelection as unknown as ThreadModelSelection,
               ...(normalizedToolOverrides ? { toolOverrides: normalizedToolOverrides } : {}),
             });
             const current = readSpawnIndex(state.get);
@@ -199,6 +213,7 @@ export const collaborationPlugin: PicoPlugin = {
                 prompt,
                 createdAt: new Date().toISOString(),
                 modelSelection,
+                requestedModel,
                 ...(normalizedToolOverrides ? { toolOverrides: normalizedToolOverrides } : {}),
               },
             });
@@ -217,6 +232,30 @@ export const collaborationPlugin: PicoPlugin = {
           initialMessageDelivered: delivery.delivered,
         };
       },
+    );
+
+    tools.register(
+      {
+        name: 'list_models',
+        description: 'List available models, matching adapters and their controls for choosing a child Thread model.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+      },
+      () =>
+        models
+          .catalog()
+          .filter((model) => model.availability !== 'unavailable')
+          .map((model) => ({
+            ...model,
+            adapters: models
+              .matchingAdapters(model.modelId)
+              .map(({ id, label, description, controls, temperature }) => ({
+                id,
+                label,
+                ...(description ? { description } : {}),
+                controls,
+                temperature,
+              })),
+          })),
     );
 
     tools.register(

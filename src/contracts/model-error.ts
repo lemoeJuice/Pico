@@ -1,6 +1,10 @@
 import type { ProviderHttpError } from './model.js';
 
 type ModelCallErrorCode =
+  | 'missing-model'
+  | 'unsupported-images'
+  | 'unsupported-protocol'
+  | 'adapter-unavailable'
   | 'target-mismatch'
   | 'connection-unavailable'
   | 'missing-base-url'
@@ -86,6 +90,10 @@ export function modelRequestFailureMessage(code: unknown, phase?: unknown): stri
 }
 
 const modelCallErrorMessages: Record<ModelCallErrorCode, string> = {
+  'missing-model': 'Choose a model and adapter before sending a message.',
+  'unsupported-images': 'The selected model does not support image inputs.',
+  'unsupported-protocol': 'The selected model protocol is unsupported.',
+  'adapter-unavailable': 'The saved adapter or parameters are unavailable. Select again.',
   'target-mismatch': 'Model pipeline provider and target identity do not match.',
   'connection-unavailable': 'The selected model connection is unavailable.',
   'missing-base-url': 'Model API base URL is required.',

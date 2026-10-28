@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Thread } from '../../../core/types.js';
-import type { ThreadModelSelection } from '../../../core/types.js';
+import type { CatalogSelection } from '../../../contracts/model-catalog.js';
 import { ExecutionPipelines } from '../../../core/pipeline.js';
 import { collaborationPlugin } from '../../../plugins/collaboration.js';
 import type { PluginContext } from '../../../plugins/host.js';
@@ -27,13 +27,12 @@ function makeThread(id: string, projectId = 'project-1', parentThreadId: string 
 function setup() {
   const parent = makeThread('parent');
   const threadsById = new Map<string, Thread>([[parent.id, parent]]);
-  const selectionByThread = new Map<string, ThreadModelSelection>([
+  const selectionByThread = new Map<string, CatalogSelection>([
     [
       parent.id,
       {
-        provider: 'openai-compatible',
-        connectionId: 'default',
-        model: 'parent-model',
+        modelId: 'parent-model',
+        adapterId: 'parent-adapter',
         parameters: { temperature: 0.4, options: { reasoningEffort: 'high' } },
       },
     ],
@@ -52,11 +51,8 @@ function setup() {
     threads: {
       get: (id: string) => threadsById.get(id) ?? null,
       modelSelection: (id: string) => selectionByThread.get(id)!,
-      validateModelSelection: (selection: ThreadModelSelection) => {
-        if (selection.model === 'invalid') throw new Error('unsupported parameters');
-        return structuredClone(selection);
-      },
-      updateModelSelection: (id: string, selection: ThreadModelSelection) => {
+      validateModelSelection: (selection: CatalogSelection) => structuredClone(selection),
+      updateModelSelection: (id: string, selection: CatalogSelection) => {
         selectionByThread.set(id, structuredClone(selection));
         return selection;
       },
@@ -68,7 +64,7 @@ function setup() {
         projectId: string,
         _kind: Thread['executorKind'],
         title: string,
-        options: { parentThreadId?: string | null; idempotencyKey?: string; modelSelection?: ThreadModelSelection },
+        options: { parentThreadId?: string | null; idempotencyKey?: string; modelSelection?: CatalogSelection },
       ) => {
         const existing = options.idempotencyKey ? createByKey.get(options.idempotencyKey) : undefined;
         if (existing) return existing;
@@ -94,6 +90,14 @@ function setup() {
         const updated = { ...thread, state: 'idle' as const, pauseReason: null, pauseRequested: false };
         threadsById.set(id, updated);
         return updated;
+      },
+    },
+    models: {
+      catalog: () => [],
+      matchingAdapters: () => [],
+      validateSelection: (selection: { modelId: string }) => {
+        if (selection.modelId === 'invalid') throw new Error('unsupported parameters');
+        return structuredClone(selection);
       },
     },
     tools: {
@@ -249,9 +253,8 @@ describe('Collaboration plugin', () => {
     expect(inherited).toEqual(env.selectionByThread.get(env.parent.id));
 
     env.selectionByThread.set(env.parent.id, {
-      provider: 'chatgpt-plan',
-      connectionId: 'default',
-      model: 'new-parent-model',
+      modelId: 'new-parent-model',
+      adapterId: 'new-parent-adapter',
       parameters: { temperature: 0.1, options: { reasoningEffort: 'low' } },
     });
     const retry = (await spawn({ prompt: 'Inherited task' }, { thread: env.parent, executionId: 'stable-spawn' })) as {
@@ -263,19 +266,24 @@ describe('Collaboration plugin', () => {
     const override = (await spawn(
       {
         prompt: 'Override task',
-        model: { provider: 'chatgpt-plan', model: 'gpt-5' },
+        model: { modelId: 'gpt-5', adapterId: 'chatgpt', parameters: { options: {} } },
       },
       { thread: env.parent, executionId: 'override-spawn' },
     )) as { threadId: string };
     expect(env.selectionByThread.get(override.threadId)).toEqual({
-      provider: 'chatgpt-plan',
-      connectionId: 'default',
-      model: 'gpt-5',
-      parameters: { temperature: 0.1, options: {} },
+      modelId: 'gpt-5',
+      adapterId: 'chatgpt',
+      parameters: { options: {} },
     });
     await expect(
       spawn(
-        { prompt: 'Bad override', model: { provider: 'chatgpt-plan', model: 'invalid' } },
+        { prompt: 'Override task', model: { modelId: 'different', adapterId: 'chatgpt', parameters: { options: {} } } },
+        { thread: env.parent, executionId: 'override-spawn' },
+      ),
+    ).rejects.toThrow('different model selection');
+    await expect(
+      spawn(
+        { prompt: 'Bad override', model: { modelId: 'invalid', adapterId: 'chatgpt', parameters: { options: {} } } },
         {
           thread: env.parent,
           executionId: 'invalid-spawn',

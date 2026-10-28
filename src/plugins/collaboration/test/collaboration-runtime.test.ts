@@ -3,10 +3,9 @@ import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PicoStore } from '../../../core/store.js';
-import type { ThreadModelSelection } from '../../../core/types.js';
 import { collaborationPlugin } from '../../../plugins/collaboration.js';
 import { PicoRuntime } from '../../../runtime/runtime.js';
-import { FakeModel, response } from '../../../../test/helpers.js';
+import { FakeModel, response, setupTestCatalog } from '../../../../test/helpers.js';
 
 describe('collaboration Runtime persistence', () => {
   it('reuses the persisted child and its selection when a spawn is redelivered after view reconstruction', async () => {
@@ -26,13 +25,11 @@ describe('collaboration Runtime persistence', () => {
       await runtime.initialize();
       const project = await runtime.createProject('Spawn recovery', workspace);
       const parent = runtime.createThread(project.id, 'runtime', 'Parent');
-      const originalSelection: ThreadModelSelection = {
-        provider: 'openai-compatible',
-        connectionId: 'default',
-        model: 'parent-model-v1',
+      const catalog = await setupTestCatalog(runtime, ['parent-model-v1', 'parent-model-v2']);
+      const originalSelection = runtime.updateThreadModelSelection(parent.id, {
+        ...catalog.select('parent-model-v1'),
         parameters: { temperature: 0.4, options: {} },
-      };
-      runtime.updateThreadModelSelection(parent.id, originalSelection);
+      });
 
       const firstTool = runtime.tools.get('spawn_thread');
       if (!firstTool) throw new Error('spawn_thread was not registered');
@@ -59,12 +56,11 @@ describe('collaboration Runtime persistence', () => {
         pluginDirectory: join(directory, 'empty-plugins'),
       });
       await runtime.initialize();
-      const updatedParentSelection: ThreadModelSelection = {
-        ...originalSelection,
-        model: 'parent-model-v2',
+      const reloadedCatalog = await setupTestCatalog(runtime, ['parent-model-v1', 'parent-model-v2']);
+      const updatedParentSelection = runtime.updateThreadModelSelection(parent.id, {
+        ...reloadedCatalog.select('parent-model-v2'),
         parameters: { temperature: 0.1, options: {} },
-      };
-      runtime.updateThreadModelSelection(parent.id, updatedParentSelection);
+      });
 
       const retryTool = runtime.tools.get('spawn_thread');
       if (!retryTool) throw new Error('spawn_thread was not registered after restart');

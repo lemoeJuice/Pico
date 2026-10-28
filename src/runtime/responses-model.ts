@@ -97,6 +97,7 @@ function object(value: unknown): Record<string, unknown> | null {
 function boundedString(value: unknown, maxLength: number): string | undefined {
   if (typeof value !== 'string' || value.length > maxLength) return undefined;
   const result = value
+    // eslint-disable-next-line no-control-regex -- Remove C0 controls from safe diagnostic labels.
     .replace(/[\u0000-\u001f\u007f]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -516,19 +517,8 @@ export class ResponsesModelAdapter {
       throw providerError('ChatGPT returned an empty Responses stream.', 'empty_stream', 'responses_stream');
     }
 
-    let reader: ReadableStreamDefaultReader<Uint8Array>;
-    try {
-      reader = response.body.getReader();
-    } catch (error) {
-      const interrupted = signal.aborted || (error instanceof Error && error.name === 'AbortError');
-      tracedRequest.settle({
-        outcome: interrupted ? 'interrupted' : 'failed',
-        durationMs: Date.now() - tracedRequest.startedAt,
-        errorCategory: interrupted ? 'aborted' : 'protocol',
-        errorCode: interrupted ? 'aborted' : 'invalid_stream',
-      });
-      throw withProviderErrorCode(error, interrupted ? undefined : 'invalid_stream', 'responses_stream');
-    }
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    const isJson = /^application\/(?:[a-z0-9.+-]*\+)?json(?:\s*;|$)/i.test(response.headers.get('content-type') ?? '');
     const decoder = new TextDecoder();
     let buffer = '';
     let eventData: string[] = [];
@@ -750,18 +740,46 @@ export class ResponsesModelAdapter {
     };
 
     try {
-      while (!ended) {
-        const { value, done } = await reader.read();
-        if (done) {
-          buffer += decoder.decode();
-          processLines(true);
-          break;
+      if (isJson) {
+        let value: unknown;
+        try {
+          value = await response.json();
+        } catch (error) {
+          if (error instanceof SyntaxError) {
+            failureCategory = 'protocol';
+            failureCode = 'invalid_json';
+          }
+          throw error;
         }
-        buffer += decoder.decode(value, { stream: true });
-        processLines();
+        finalResponse = object(value);
+        if (finalResponse?.status === 'completed' || finalResponse?.status === 'incomplete') {
+          terminalEvent = finalResponse.status === 'completed' ? 'response.completed' : 'response.incomplete';
+        } else {
+          failureCategory = 'protocol';
+          failureCode = finalResponse?.status === 'failed' ? 'response_failed' : 'missing_completion';
+          throw new Error('Responses provider did not return a completed response.');
+        }
+      } else {
+        try {
+          reader = response.body.getReader();
+        } catch (error) {
+          failureCategory = 'protocol';
+          failureCode = 'invalid_stream';
+          throw error;
+        }
+        while (!ended) {
+          const { value, done } = await reader.read();
+          if (done) {
+            buffer += decoder.decode();
+            processLines(true);
+            break;
+          }
+          buffer += decoder.decode(value, { stream: true });
+          processLines();
+        }
       }
     } catch (error) {
-      await reader.cancel().catch(() => undefined);
+      await reader?.cancel().catch(() => undefined);
       const interrupted = signal.aborted || (error instanceof Error && error.name === 'AbortError');
       tracedRequest.settle({
         outcome: interrupted ? 'interrupted' : 'failed',
@@ -781,7 +799,7 @@ export class ResponsesModelAdapter {
         'responses_stream',
       );
     }
-    await reader.cancel().catch(() => undefined);
+    await reader?.cancel().catch(() => undefined);
     try {
       if (streamFailure) {
         failureCategory = 'protocol';
@@ -858,6 +876,7 @@ export class ResponsesModelAdapter {
       if (completedResponse.status !== 'incomplete' && result.toolCalls.length > 0) {
         result.finishReason = 'tool_calls';
       }
+      if (isJson && result.content) onText(result.content);
       // Deltas are transient until this complete result is returned to the Runtime.
       tracedRequest.settle({
         outcome: 'completed',

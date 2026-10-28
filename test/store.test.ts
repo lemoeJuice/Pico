@@ -129,6 +129,8 @@ describe('PicoStore execution transactions', () => {
       const project = store.createProject('Model selection replay', '/tmp');
       const thread = store.createThread(project.id, 'runtime');
       const selection = {
+        modelId: 'test-model-id',
+        adapterId: 'test-adapter',
         provider: 'openai-compatible',
         connectionId: 'default',
         model: 'pinned-model',

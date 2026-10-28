@@ -1,6 +1,5 @@
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { performance } from 'node:perf_hooks';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAiCompatibleAdapter, type ModelPrompt } from '../src/runtime/model.js';
 import type { ModelRequestTrace, ProviderRequestSummary } from '../src/contracts/model.js';
@@ -79,7 +78,7 @@ describe('OpenAI-compatible streaming adapter', () => {
     const events: Array<Record<string, unknown>> = [];
     const requestSummaries: ProviderRequestSummary[] = [];
     let now = 1_000;
-    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
     const requestTrace: ModelRequestTrace = {
       started: () => 'attempt-1',
       response: () => {
@@ -131,6 +130,46 @@ describe('OpenAI-compatible streaming adapter', () => {
     });
     expect(requestSummaries).toHaveLength(1);
     expect(requestSummaries[0]).toMatchObject({ outcome: 'completed', firstTextMs: 125, durationMs: 400 });
+  });
+
+  it('replays reasoning and reads cache usage from streamed responses when traits are enabled', async () => {
+    const frames = [
+      { choices: [{ delta: { reasoning_content: 'thinking' } }] },
+      { choices: [{ delta: { content: 'answer' }, finish_reason: 'stop' }] },
+      { choices: [], usage: { prompt_cache_hit_tokens: 3, prompt_cache_miss_tokens: 7, completion_tokens: 4 } },
+    ];
+    const fetcher = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        new Response(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n', {
+          headers: { 'content-type': 'text/event-stream' },
+        }),
+      );
+    const events: unknown[] = [];
+    const result = await new OpenAiCompatibleAdapter().complete(
+      {
+        system: '',
+        model: 'custom-name',
+        temperature: 1,
+        tools: [],
+        turns: [{ kind: 'message', role: 'assistant', content: 'old', reasoningContent: 'previous' }],
+      },
+      { baseUrl: 'https://example.test/v1', apiKey: '', model: 'custom-name', provider: 'test', temperature: 1 },
+      new AbortController().signal,
+      () => {},
+      undefined,
+      (event) => events.push(event),
+      undefined,
+      { protocolTraits: { reasoningContent: true, cacheHitMissUsage: true } },
+    );
+    const request = JSON.parse(String(fetcher.mock.calls[0]![1]!.body));
+    expect(request.messages[1].reasoning_content).toBe('previous');
+    expect(result).toMatchObject({
+      content: 'answer',
+      reasoningContent: 'thinking',
+      usage: { inputTokens: 10, cachedInputTokens: 3, outputTokens: 4 },
+    });
+    expect(events).toContainEqual({ type: 'reasoning_summary.delta', delta: 'thinking' });
   });
 
   it('closes a provider stream after the done marker even when the server keeps the connection open', async () => {

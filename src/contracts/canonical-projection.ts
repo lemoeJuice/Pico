@@ -741,6 +741,12 @@ export function canonicalBlockToPromptTurns(
     } else if (record.kind === 'assistant') {
       const assistant = record.payload as unknown as AssistantPayload;
       const assistantReasoning = reasoningContent(assistant);
+      const replaySource = {
+        model: assistant.model,
+        ...(assistant.provider ? { provider: assistant.provider } : {}),
+        ...(assistant.modelId ? { modelId: assistant.modelId } : {}),
+        ...(assistant.adapterId ? { adapterId: assistant.adapterId } : {}),
+      };
       if (assistant.toolCalls.length > 0) {
         turns.push({
           kind: 'assistant_tools',
@@ -748,6 +754,7 @@ export function canonicalBlockToPromptTurns(
           calls: assistant.toolCalls,
           ...(typeof assistantReasoning === 'string' ? { reasoningContent: assistantReasoning } : {}),
           ...(assistant.reasoningReplay === undefined ? {} : { reasoningReplay: assistant.reasoningReplay }),
+          ...(assistant.reasoningReplay !== undefined || typeof assistantReasoning === 'string' ? { reasoningReplaySource: replaySource } : {}),
         });
         for (const call of assistant.toolCalls) {
           const result = assistant.batchId ? results.get(`${assistant.batchId}:${call.id}`) : undefined;
@@ -773,6 +780,7 @@ export function canonicalBlockToPromptTurns(
           content: assistant.content,
           ...(typeof assistantReasoning === 'string' ? { reasoningContent: assistantReasoning } : {}),
           ...(assistant.reasoningReplay === undefined ? {} : { reasoningReplay: assistant.reasoningReplay }),
+          ...(assistant.reasoningReplay !== undefined || typeof assistantReasoning === 'string' ? { reasoningReplaySource: replaySource } : {}),
         });
       }
     } else if (record.kind === 'tool_result' && !consumedResults.has(record.id)) {
