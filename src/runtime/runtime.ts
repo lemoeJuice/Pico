@@ -303,6 +303,9 @@ function modelCallRequestFingerprint(identity: unknown): string {
 }
 
 export const THREAD_HISTORY_PAGE_SIZE = 100;
+const SNAPSHOT_HISTORY_CACHE_MAX_THREADS = 8;
+const SNAPSHOT_HISTORY_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+const SNAPSHOT_HISTORY_CACHE_MAX_THREAD_BYTES = 8 * 1024 * 1024;
 
 function redactPublicValue(value: unknown): unknown {
   if (isMultimodalToolResultEnvelope(value)) return redactMultimodalToolResult(value);
@@ -999,6 +1002,16 @@ export class PicoRuntime {
   private readonly executionListeners = new Set<(execution: Execution) => void>();
   private storeUnsubscribers: Array<() => void> = [];
   private readonly loops = new Map<string, Promise<void>>();
+  private readonly snapshotHistoryCache = new Map<string, {
+    seq: number;
+    settingsKey: string;
+    threadKey: string;
+    records: CanonicalRecord[];
+    contextUsage: ContextUsageEstimate;
+    projection: ReturnType<typeof runtimeConversationProjection>;
+    estimatedBytes: number;
+  }>();
+  private snapshotHistoryCacheBytes = 0;
   private readonly inFlightThreadOperations = new Map<string, number>();
   private readonly modelSignals = new Map<string, AbortController>();
   private readonly pluginModelCallsInFlight = new Map<
@@ -1589,9 +1602,45 @@ export class PicoRuntime {
         }
       }
     }
-    const allRecords = this.store.listRecords(threadId);
-    const contextUsage = this.estimateContextUsage(thread, allRecords);
-    const projection = runtimeConversationProjection(allRecords);
+    const latestSeq = this.store.latestCanonicalSeq(threadId);
+    const settingsKey = JSON.stringify(this.getContextManagementSettings());
+    const threadKey = JSON.stringify([thread.workspacePath, thread.executorKind, thread.parentThreadId]);
+    let history = this.snapshotHistoryCache.get(threadId);
+    if (!history || history.seq !== latestSeq || history.settingsKey !== settingsKey || history.threadKey !== threadKey) {
+      const records = this.store.listRecords(threadId);
+      // JSON character count is a cheap conservative proxy for retained objects,
+      // arrays, indexes and projection references (roughly 4 bytes per character).
+      const estimatedBytes = records.reduce((total, record) => total + JSON.stringify(record).length * 4, 0);
+      history = {
+        seq: latestSeq,
+        settingsKey,
+        threadKey,
+        records,
+        contextUsage: this.estimateContextUsage(thread, records),
+        projection: runtimeConversationProjection(records),
+        estimatedBytes,
+      };
+      this.evictSnapshotHistoryCache(threadId);
+      if (estimatedBytes <= SNAPSHOT_HISTORY_CACHE_MAX_THREAD_BYTES) {
+        this.snapshotHistoryCache.set(threadId, history);
+        this.snapshotHistoryCacheBytes += estimatedBytes;
+      }
+      while (
+        this.snapshotHistoryCacheBytes > SNAPSHOT_HISTORY_CACHE_MAX_BYTES ||
+        this.snapshotHistoryCache.size > SNAPSHOT_HISTORY_CACHE_MAX_THREADS
+      ) {
+        const oldestThreadId = this.snapshotHistoryCache.keys().next().value;
+        if (oldestThreadId === undefined) break;
+        this.evictSnapshotHistoryCache(oldestThreadId);
+      }
+    } else {
+      this.evictSnapshotHistoryCache(threadId);
+      this.snapshotHistoryCache.set(threadId, history);
+      this.snapshotHistoryCacheBytes += history.estimatedBytes;
+    }
+    const allRecords = history.records;
+    const contextUsage = history.contextUsage;
+    const projection = history.projection;
     const activePathRecords = projection.records;
     const activePathRecordIds = new Set(activePathRecords.map((record) => record.id));
     const activeRewindId = projection.historyBranches.find((branch) => branch.active)?.id ?? null;
@@ -1628,6 +1677,13 @@ export class PicoRuntime {
       hasEarlierRecords: page.hasEarlierRecords,
       historyPageSize: THREAD_HISTORY_PAGE_SIZE,
     };
+  }
+
+  private evictSnapshotHistoryCache(threadId: string): void {
+    const cached = this.snapshotHistoryCache.get(threadId);
+    if (!cached) return;
+    this.snapshotHistoryCacheBytes -= cached.estimatedBytes;
+    this.snapshotHistoryCache.delete(threadId);
   }
 
   async listThreadTools(threadId: string): Promise<ThreadToolView[]> {

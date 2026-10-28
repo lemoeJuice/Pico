@@ -1242,6 +1242,13 @@ export class PicoStore {
     ).map((row) => this.recordFromRow(row));
   }
 
+  latestCanonicalSeq(threadId: string): number {
+    const row = this.db
+      .prepare('SELECT COALESCE(MAX(seq), 0) AS seq FROM canonical_records WHERE thread_id = ?')
+      .get(threadId) as SqlRow;
+    return Number(row.seq);
+  }
+
   readCanonical(threadId: string, afterSeq = 0, limit = 100): CanonicalRecord[] {
     if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error('Invalid canonical cursor');
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000)
