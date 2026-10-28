@@ -14,6 +14,8 @@ import {
 import express, { type ErrorRequestHandler, type Request, type Response } from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
 import { PicoRuntime } from './runtime/runtime.js';
+import { ServiceError } from './contracts/service-error.js';
+import { errorResponse, parserError } from './server-errors.js';
 import type { McpServerInput } from './contracts/mcp.js';
 import { currentExecutorVersion } from './executor/bundle.js';
 import { PicoStore } from './core/store.js';
@@ -28,21 +30,21 @@ import {
 
 function bodyObject(request: Request): Record<string, unknown> {
   if (!request.body || typeof request.body !== 'object' || Array.isArray(request.body)) {
-    throw new Error('Request body must be a JSON object');
+    throw new ServiceError(400, 'Request body must be a JSON object');
   }
   return request.body as Record<string, unknown>;
 }
 
 function requiredText(body: Record<string, unknown>, key: string): string {
   const value = body[key];
-  if (typeof value !== 'string' || !value.trim()) throw new Error(`${key} is required`);
+  if (typeof value !== 'string' || !value.trim()) throw new ServiceError(400, `${key} is required`);
   return value;
 }
 
 function optionalBoolean(body: Record<string, unknown>, key: string): boolean | undefined {
   const value = body[key];
   if (value === undefined) return undefined;
-  if (typeof value !== 'boolean') throw new Error(`${key} must be a boolean`);
+  if (typeof value !== 'boolean') throw new ServiceError(400, `${key} must be a boolean`);
   return value;
 }
 
@@ -53,16 +55,16 @@ function parseMcpServerInput(body: Record<string, unknown>): McpServerInput {
   if (transport === 'stdio') {
     const args = body.args === undefined ? [] : body.args;
     if (!Array.isArray(args) || args.some((argument) => typeof argument !== 'string')) {
-      throw new Error('args must be an array of strings');
+      throw new ServiceError(400, 'args must be an array of strings');
     }
     const cwd = body.cwd;
-    if (cwd !== undefined && typeof cwd !== 'string') throw new Error('cwd must be a string');
+    if (cwd !== undefined && typeof cwd !== 'string') throw new ServiceError(400, 'cwd must be a string');
     const env = body.env;
     if (env !== undefined && (!env || typeof env !== 'object' || Array.isArray(env))) {
-      throw new Error('env must be an object of string values');
+      throw new ServiceError(400, 'env must be an object of string values');
     }
     if (env && typeof env === 'object' && Object.values(env).some((value) => typeof value !== 'string')) {
-      throw new Error('env must be an object of string values');
+      throw new ServiceError(400, 'env must be an object of string values');
     }
     return {
       name,
@@ -79,10 +81,10 @@ function parseMcpServerInput(body: Record<string, unknown>): McpServerInput {
     const clearBearerToken = optionalBoolean(body, 'clearBearerToken') ?? false;
     const confirmPrivateNetworkAccess = optionalBoolean(body, 'confirmPrivateNetworkAccess');
     if (bearerToken !== undefined && typeof bearerToken !== 'string') {
-      throw new Error('bearerToken must be a string');
+      throw new ServiceError(400, 'bearerToken must be a string');
     }
     if (clearBearerToken && typeof bearerToken === 'string' && bearerToken !== '') {
-      throw new Error('bearerToken cannot be set while clearBearerToken is true');
+      throw new ServiceError(400, 'bearerToken cannot be set while clearBearerToken is true');
     }
     const url = requiredText(body, 'url');
     return {
@@ -99,11 +101,11 @@ function parseMcpServerInput(body: Record<string, unknown>): McpServerInput {
       ...(autoStart === undefined ? {} : { autoStart }),
     };
   }
-  throw new Error('transport must be stdio or streamable-http');
+  throw new ServiceError(400, 'transport must be stdio or streamable-http');
 }
 
 function notFound(response: Response, message = 'Not found'): void {
-  response.status(404).json({ error: message });
+  response.status(404).json({ error: message, code: 'not_found' });
 }
 
 function pluginUiHeaders(request: Request, response: Response): void {
@@ -208,6 +210,10 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   app.disable('x-powered-by');
   if (trustProxy) app.set('trust proxy', 1);
   app.use(express.json({ limit: '2mb' }));
+  const jsonErrors: ErrorRequestHandler = (error, _request, _response, next) => {
+    next(parserError(error) ?? error);
+  };
+  app.use(jsonErrors);
   app.use('/api', (_request, response, next) => {
     response.setHeader('cache-control', 'no-store');
     next();
@@ -245,7 +251,7 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   app.get('/api/projects', (_request, response) => response.json(runtime.listProjects()));
   app.post('/api/projects', async (request, response) => {
     const body = bodyObject(request);
-    if (body.name !== undefined && typeof body.name !== 'string') throw new Error('name must be a string');
+    if (body.name !== undefined && typeof body.name !== 'string') throw new ServiceError(400, 'name must be a string');
     const project = await runtime.createProject(
       typeof body.name === 'string' ? body.name : undefined,
       requiredText(body, 'workspacePath'),
@@ -261,10 +267,10 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     const body = bodyObject(request);
     const kind = body.executorKind;
     if (kind !== 'container' && kind !== 'host' && kind !== 'runtime') {
-      throw new Error('executorKind must be container, host, or runtime');
+      throw new ServiceError(400, 'executorKind must be container, host, or runtime');
     }
     if (body.remoteConnectionId !== undefined && (typeof body.remoteConnectionId !== 'string' || kind !== 'host')) {
-      throw new Error('Remote Executor Threads must use Host execution kind.');
+      throw new ServiceError(400, 'Remote Executor Threads must use Host execution kind.');
     }
     const title = typeof body.title === 'string' ? body.title : DEFAULT_THREAD_TITLE;
     const thread =
@@ -326,14 +332,14 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
         ? (request.body as Record<string, unknown>)
         : {};
     if (configured.transport === 'stdio' && body.confirmLocalExecution !== true) {
-      throw new Error('Starting a local MCP process requires confirmLocalExecution: true');
+      throw new ServiceError(400, 'Starting a local MCP process requires confirmLocalExecution: true');
     }
     if (configured.transport === 'stdio') {
       if (
         typeof body.executionFingerprint !== 'string' ||
         body.executionFingerprint !== configured.executionFingerprint
       ) {
-        throw new Error('The local MCP configuration changed. Review the command and confirm it again.');
+        throw new ServiceError(400, 'The local MCP configuration changed. Review the command and confirm it again.');
       }
     }
     const server = await runtime.startMcpServer(
@@ -358,9 +364,12 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   app.get('/api/threads/:threadId', (request, response) => {
     const beforeSeqValue = request.query.beforeSeq;
     if (beforeSeqValue !== undefined && typeof beforeSeqValue !== 'string') {
-      throw new Error('beforeSeq must be a positive safe integer.');
+      throw new ServiceError(400, 'beforeSeq must be a positive safe integer.');
     }
     const beforeSeq = beforeSeqValue === undefined ? undefined : Number(beforeSeqValue);
+    if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 1)) {
+      throw new ServiceError(400, 'beforeSeq must be a positive safe integer.');
+    }
     const snapshot = runtime.getSnapshot(request.params.threadId!, beforeSeq);
     if (!snapshot) return notFound(response, 'Thread not found');
     response.json(snapshot);
@@ -395,7 +404,7 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   app.put('/api/threads/:threadId/tools', async (request, response) => {
     const body = bodyObject(request);
     const toolName = requiredText(body, 'name');
-    if (typeof body.enabled !== 'boolean') throw new Error('enabled must be a boolean');
+    if (typeof body.enabled !== 'boolean') throw new ServiceError(400, 'enabled must be a boolean');
     response.json({
       tools: await runtime.setThreadToolEnabled(request.params.threadId!, toolName, body.enabled),
     });
@@ -460,23 +469,26 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     const hasCompactionThresholdTokens = Object.hasOwn(body, 'compactionThresholdTokens');
     const hasKeepRecentTokens = Object.hasOwn(body, 'keepRecentTokens');
     if (!hasContextWindowTokens && !hasCompactionThresholdTokens && !hasKeepRecentTokens) {
-      throw new Error('Provide a context window, compaction threshold, or recent history budget to update.');
+      throw new ServiceError(
+        400,
+        'Provide a context window, compaction threshold, or recent history budget to update.',
+      );
     }
     if (hasContextWindowTokens) {
       if (typeof body.contextWindowTokens !== 'number') {
-        throw new Error('Context window must be a number of tokens.');
+        throw new ServiceError(400, 'Context window must be a number of tokens.');
       }
       update.contextWindowTokens = body.contextWindowTokens;
     }
     if (hasCompactionThresholdTokens) {
       if (typeof body.compactionThresholdTokens !== 'number') {
-        throw new Error('Compaction threshold must be a number of tokens.');
+        throw new ServiceError(400, 'Compaction threshold must be a number of tokens.');
       }
       update.compactionThresholdTokens = body.compactionThresholdTokens;
     }
     if (hasKeepRecentTokens) {
       if (typeof body.keepRecentTokens !== 'number') {
-        throw new Error('Recent history budget must be a number of tokens.');
+        throw new ServiceError(400, 'Recent history budget must be a number of tokens.');
       }
       update.keepRecentTokens = body.keepRecentTokens;
     }
@@ -488,7 +500,7 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   app.put('/api/settings/miscellaneous', (request, response) => {
     const body = bodyObject(request);
     if (typeof body.toolCardsExpandedByDefault !== 'boolean') {
-      throw new Error('Default tool card expansion must be a boolean.');
+      throw new ServiceError(400, 'Default tool card expansion must be a boolean.');
     }
     const update: Partial<MiscellaneousSettings> = { toolCardsExpandedByDefault: body.toolCardsExpandedByDefault };
     response.json(runtime.updateMiscellaneousSettings(update));
@@ -509,20 +521,12 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   app.put('/api/plugins/:pluginId', async (request, response) => {
     const body = bodyObject(request);
     if (typeof body.enabled !== 'boolean') {
-      return response.status(400).json({ error: 'Plugin updates require an enabled boolean.' });
+      throw new ServiceError(400, 'Plugin updates require an enabled boolean.');
     }
-    try {
-      return response.json(await runtime.setPluginEnabled(request.params.pluginId!, body.enabled));
-    } catch (error) {
-      return response.status(409).json({ error: error instanceof Error ? error.message : 'Plugin update failed.' });
-    }
+    return response.json(await runtime.setPluginEnabled(request.params.pluginId!, body.enabled));
   });
   app.post('/api/plugins/:pluginId/reload', async (request, response) => {
-    try {
-      return response.json(await runtime.reloadPlugin(request.params.pluginId!));
-    } catch (error) {
-      return response.status(409).json({ error: error instanceof Error ? error.message : 'Plugin reload failed.' });
-    }
+    return response.json(await runtime.reloadPlugin(request.params.pluginId!));
   });
   app.use('/_pico/plugin-ui', async (request, response) => {
     await servePluginUiAsset(runtime, request, response);
@@ -547,7 +551,7 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
           Boolean((request.socket as import('node:tls').TLSSocket).encrypted) || forwardedProto,
         ))
     ) {
-      throw new Error('Plugin state changes must come from the Pico Web UI.');
+      throw new ServiceError(400, 'Plugin state changes must come from the Pico Web UI.');
     }
     const requestUrl = new URL(request.originalUrl, `http://${request.headers.host ?? 'localhost'}`);
     const result = await route.handler({ body: request.body, query: requestUrl.searchParams, origin });
@@ -624,9 +628,8 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   app.use('/api', (_request, response) => notFound(response, 'API route not found'));
 
   const errors: ErrorRequestHandler = (error, _request, response, _next) => {
-    const message = error instanceof Error ? error.message : String(error);
-    const status = /not found/i.test(message) ? 404 : 400;
-    response.status(status).json({ error: message });
+    const result = errorResponse(error);
+    response.status(result.status).json({ error: result.message, code: result.code });
   };
   app.use(errors);
 

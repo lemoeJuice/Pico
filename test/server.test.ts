@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startServer } from '../src/server.js';
 import type { ThreadSnapshot } from '../src/runtime/runtime.js';
 import { assistantPayload } from './helpers.js';
@@ -248,6 +248,67 @@ describe('Pico server access boundary', () => {
         401,
       );
       expect(await upgradeStatus(wsUrl, cookieHeaders)).toBe(401);
+    } finally {
+      await server?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('classifies API failures without leaking internal details', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-api-errors-'));
+    let server: Awaited<ReturnType<typeof startServer>> | undefined;
+    try {
+      process.env.PICO_HOST = '127.0.0.1';
+      process.env.PICO_PORT = '0';
+      process.env.PICO_DB_PATH = join(directory, 'pico.sqlite');
+      delete process.env.PICO_ACCESS_TOKEN;
+      server = await startServer();
+      const project = await server.runtime.createProject('API errors', directory);
+      const thread = server.runtime.createThread(project.id, 'host');
+      const base = `http://127.0.0.1:${server.port}`;
+      const malformed = await fetch(`${base}/api/projects`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{"secret":',
+      });
+      expect(malformed.status).toBe(400);
+      expect(await malformed.json()).toEqual({ error: 'Invalid JSON request body.', code: 'invalid_request' });
+      const invalid = await fetch(`${base}/api/projects`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
+      expect(invalid.status).toBe(400);
+      const invalidMcp = await fetch(`${base}/api/mcp/servers`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'bad', transport: 'streamable-http', url: 'not-a-url' }),
+      });
+      expect(invalidMcp.status).toBe(400);
+      expect((await invalidMcp.json()).code).toBe('invalid_request');
+      const missingPlugin = await fetch(`${base}/api/plugins/missing/reload`, { method: 'POST' });
+      expect(missingPlugin.status).toBe(404);
+      expect((await missingPlugin.json()).code).toBe('not_found');
+      const invalidSettings = await fetch(`${base}/api/settings/context-management`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ contextWindowTokens: -1 }),
+      });
+      expect(invalidSettings.status).toBe(400);
+      expect((await invalidSettings.json()).code).toBe('invalid_request');
+      const missing = await fetch(`${base}/api/threads/missing`);
+      expect(missing.status).toBe(404);
+      const missingArchive = await fetch(`${base}/api/threads/missing/archive`, { method: 'POST' });
+      expect(missingArchive.status).toBe(404);
+      const conflict = await fetch(`${base}/api/threads/${thread.id}`, { method: 'DELETE' });
+      expect(conflict.status).toBe(409);
+      const spy = vi.spyOn(server.runtime, 'getSnapshot').mockImplementationOnce(() => {
+        throw new Error('database secret not found');
+      });
+      const failed = await fetch(`${base}/api/threads/${thread.id}`);
+      expect(failed.status).toBe(500);
+      expect(await failed.json()).toEqual({ error: 'Internal server error.', code: 'internal_error' });
+      spy.mockRestore();
     } finally {
       await server?.close();
       await rm(directory, { recursive: true, force: true });

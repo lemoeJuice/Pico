@@ -1,3 +1,4 @@
+import { ServiceError } from '../contracts/service-error.js';
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { accessSync, constants as fsConstants, realpathSync, statSync } from 'node:fs';
@@ -275,16 +276,16 @@ function validateHttpUrl(value: string): URL {
   try {
     url = new URL(value);
   } catch {
-    throw new Error('MCP server URL must be a valid HTTP or HTTPS URL.');
+    throw new ServiceError(400, 'MCP server URL must be a valid HTTP or HTTPS URL.');
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new Error('MCP server URL must use HTTP or HTTPS.');
+    throw new ServiceError(400, 'MCP server URL must use HTTP or HTTPS.');
   }
-  if (url.username || url.password) throw new Error('MCP server URLs cannot contain embedded credentials.');
-  if (url.hash) throw new Error('MCP server URLs cannot contain fragments.');
+  if (url.username || url.password) throw new ServiceError(400, 'MCP server URLs cannot contain embedded credentials.');
+  if (url.hash) throw new ServiceError(400, 'MCP server URLs cannot contain fragments.');
   for (const key of url.searchParams.keys()) {
     if (SENSITIVE_QUERY_KEY.test(key)) {
-      throw new Error('Put MCP authentication in the Bearer token field, not in the URL query string.');
+      throw new ServiceError(400, 'Put MCP authentication in the Bearer token field, not in the URL query string.');
     }
   }
   return url;
@@ -506,31 +507,31 @@ function createPinnedHttpFetch(endpoint: URL, allowPrivate: boolean) {
 }
 
 function validateInput(input: McpServerInput): McpServerInput {
-  if (!input || typeof input !== 'object') throw new Error('MCP server configuration is required.');
+  if (!input || typeof input !== 'object') throw new ServiceError(400, 'MCP server configuration is required.');
   const name = input.name.trim();
-  if (!name) throw new Error('MCP server name is required.');
-  if (name.length > 120) throw new Error('MCP server name must be 120 characters or fewer.');
+  if (!name) throw new ServiceError(400, 'MCP server name is required.');
+  if (name.length > 120) throw new ServiceError(400, 'MCP server name must be 120 characters or fewer.');
   if (input.autoStart !== undefined && typeof input.autoStart !== 'boolean') {
-    throw new Error('autoStart must be a boolean.');
+    throw new ServiceError(400, 'autoStart must be a boolean.');
   }
   if (input.visibleByDefault !== undefined && typeof input.visibleByDefault !== 'boolean') {
-    throw new Error('visibleByDefault must be a boolean.');
+    throw new ServiceError(400, 'visibleByDefault must be a boolean.');
   }
   if (input.transport === 'stdio') {
     const command = input.command.trim();
-    if (!command || command.includes('\0')) throw new Error('MCP server command is required.');
+    if (!command || command.includes('\0')) throw new ServiceError(400, 'MCP server command is required.');
     const args = input.args ?? [];
     if (!Array.isArray(args) || args.some((argument) => typeof argument !== 'string' || argument.includes('\0'))) {
-      throw new Error('MCP server arguments must be strings without NUL characters.');
+      throw new ServiceError(400, 'MCP server arguments must be strings without NUL characters.');
     }
     if (hasCredentialLikeStdioArguments(command, args)) {
-      throw new Error('Pass credentials to MCP stdio servers through environment variables, not command arguments.');
+      throw new ServiceError(400, 'Pass credentials to MCP stdio servers through environment variables, not command arguments.');
     }
     if (input.cwd !== undefined && (!input.cwd.trim() || input.cwd.includes('\0'))) {
-      throw new Error('MCP server working directory must be a non-empty path.');
+      throw new ServiceError(400, 'MCP server working directory must be a non-empty path.');
     }
     if (input.env !== undefined) {
-      if (!isRecord(input.env)) throw new Error('MCP server environment must be a string map.');
+      if (!isRecord(input.env)) throw new ServiceError(400, 'MCP server environment must be a string map.');
       for (const [key, value] of Object.entries(input.env)) {
         if (
           !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ||
@@ -538,7 +539,7 @@ function validateInput(input: McpServerInput): McpServerInput {
           value.includes('\0') ||
           value.length > 2_048
         ) {
-          throw new Error('MCP server environment variable names or values are invalid.');
+          throw new ServiceError(400, 'MCP server environment variable names or values are invalid.');
         }
       }
     }
@@ -547,20 +548,20 @@ function validateInput(input: McpServerInput): McpServerInput {
   if (input.transport === 'streamable-http') {
     const url = validateHttpUrl(input.url);
     if (input.confirmPrivateNetworkAccess !== undefined && typeof input.confirmPrivateNetworkAccess !== 'boolean') {
-      throw new Error('confirmPrivateNetworkAccess must be a boolean.');
+      throw new ServiceError(400, 'confirmPrivateNetworkAccess must be a boolean.');
     }
     if (
       input.bearerToken !== undefined &&
       (typeof input.bearerToken !== 'string' || input.bearerToken.length > 2_048)
     ) {
-      throw new Error('MCP Bearer token must be a string.');
+      throw new ServiceError(400, 'MCP Bearer token must be a string.');
     }
     if (url.protocol !== 'https:' && input.bearerToken) {
-      throw new Error('MCP Bearer tokens require HTTPS.');
+      throw new ServiceError(400, 'MCP Bearer tokens require HTTPS.');
     }
     return { ...input, name, url: url.toString() };
   }
-  throw new Error('MCP server transport is not supported.');
+  throw new ServiceError(400, 'MCP server transport is not supported.');
 }
 
 function hasCredentialLikeStdioArguments(command: string, args: string[]): boolean {
@@ -732,10 +733,10 @@ export class McpManager {
           validated.bearerToken === undefined &&
           previousSecret.bearerToken
         ) {
-          throw new Error('Clear or replace the Bearer token before changing the MCP server origin.');
+          throw new ServiceError(400, 'Clear or replace the Bearer token before changing the MCP server origin.');
         }
         if (validated.url.startsWith('http:') && nextSecret.bearerToken) {
-          throw new Error('MCP Bearer tokens require HTTPS.');
+          throw new ServiceError(400, 'MCP Bearer tokens require HTTPS.');
         }
       }
       const previousConsent =
@@ -1201,7 +1202,7 @@ export class McpManager {
 
   private requireConfig(id: string): StoredMcpServer {
     const config = configList(this.store).find((item) => item.id === id);
-    if (!config) throw new Error('MCP server not found.');
+    if (!config) throw new ServiceError(404, 'MCP server not found.');
     return config;
   }
 

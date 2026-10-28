@@ -1,3 +1,4 @@
+import { ServiceError } from '../contracts/service-error.js';
 import type { ExecutorPluginContext } from '../executor/plugin-host.js';
 import type { PipelineStage, StageInputs, StageOutputs } from '../contracts/plugin-pipeline.js';
 import { unavailablePluginServices, type PluginServices } from './services.js';
@@ -313,11 +314,11 @@ export class PluginHost {
   }
 
   private async applyEnabled(pluginId: string, enabled: boolean): Promise<PluginCatalogEntry[]> {
-    if (this.shutdownStarted) throw new Error('Plugin host is shutting down.');
+    if (this.shutdownStarted) throw new ServiceError(409, 'Plugin host is shutting down.');
     const candidate = this.candidates.get(pluginId);
-    if (!candidate) throw new Error(`Plugin ${pluginId} is not installed.`);
-    if (!enabled && this.requiredPlugins.has(pluginId)) throw new Error(`${pluginId} is required by Pico.`);
-    if (enabled && this.forcedDisabled.has(pluginId)) throw new Error(`${pluginId} is disabled by Runtime policy.`);
+    if (!candidate) throw new ServiceError(404, 'Plugin is not installed.');
+    if (!enabled && this.requiredPlugins.has(pluginId)) throw new ServiceError(409, 'This plugin is required by Pico.');
+    if (enabled && this.forcedDisabled.has(pluginId)) throw new ServiceError(409, 'This plugin is disabled by Runtime policy.');
     if (this.enablement.get(pluginId) === enabled) return this.catalog();
     this.assertLifecycleSafe();
     if (!enabled) {
@@ -349,10 +350,10 @@ export class PluginHost {
   }
 
   private async reloadUnlocked(pluginId: string): Promise<PluginCatalogEntry[]> {
-    if (this.shutdownStarted) throw new Error('Plugin host is shutting down.');
+    if (this.shutdownStarted) throw new ServiceError(409, 'Plugin host is shutting down.');
     const candidate = this.candidates.get(pluginId);
-    if (!candidate) throw new Error(`Plugin ${pluginId} is not installed.`);
-    if (!this.enablement.get(pluginId)) throw new Error(`${pluginId} is disabled.`);
+    if (!candidate) throw new ServiceError(404, 'Plugin is not installed.');
+    if (!this.enablement.get(pluginId)) throw new ServiceError(409, 'This plugin is disabled.');
     this.assertLifecycleSafe();
     const previous = candidate.plugin;
     await this.deactivatePlugin(pluginId);
@@ -388,7 +389,7 @@ export class PluginHost {
   private assertLifecycleSafe(): void {
     const result = this.options.canReload?.();
     if (result && !result.allowed)
-      throw new Error(result.reason ?? 'Plugins cannot be changed while Runtime executions are active.');
+      throw new ServiceError(409, result.reason ?? 'Plugins cannot be changed while Runtime executions are active.');
   }
 
   private async withLifecycleLock<T>(pluginId: string, operation: () => Promise<T>): Promise<T> {

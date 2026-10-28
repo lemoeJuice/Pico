@@ -1,3 +1,4 @@
+import { ServiceError } from '../contracts/service-error.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { realpath, stat } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
@@ -1469,14 +1470,14 @@ export class PicoRuntime {
 
   updateThreadTitle(threadId: string, title: string): Thread {
     const cleanedTitle = title.trim();
-    if (!cleanedTitle) throw new Error('Thread name is required.');
+    if (!cleanedTitle) throw new ServiceError(400, 'Thread name is required.');
     let changed = false;
     const thread = this.store.transaction(() => {
       const previous = this.store.getThread(threadId);
-      if (!previous) throw new Error('Thread not found');
+      if (!previous) throw new ServiceError(404, 'Thread not found');
       if (previous.title === cleanedTitle) return previous;
       const updated = this.store.updateThreadTitle(threadId, cleanedTitle);
-      if (!updated) throw new Error('Thread not found');
+      if (!updated) throw new ServiceError(404, 'Thread not found');
       changed = true;
       this.store.appendPluginRecord(threadId, 'pico.core', {
         action: 'thread-title-updated',
@@ -1492,14 +1493,14 @@ export class PicoRuntime {
 
   private updateThreadTitleFromPlugin(pluginId: string, threadId: string, title: string): Thread {
     const cleanedTitle = title.trim().replace(/\s+/g, ' ').slice(0, 100).trim();
-    if (!cleanedTitle) throw new Error('Thread name is required.');
+    if (!cleanedTitle) throw new ServiceError(400, 'Thread name is required.');
     let changed = false;
     const thread = this.store.transaction(() => {
       const previous = this.store.getThread(threadId);
-      if (!previous) throw new Error('Thread not found');
+      if (!previous) throw new ServiceError(404, 'Thread not found');
       if (previous.title === cleanedTitle) return previous;
       const updated = this.store.updateThreadTitle(threadId, cleanedTitle);
-      if (!updated) throw new Error('Thread not found');
+      if (!updated) throw new ServiceError(404, 'Thread not found');
       changed = true;
       this.store.appendPluginRecord(threadId, pluginId, {
         action: 'thread-title-updated',
@@ -1518,7 +1519,7 @@ export class PicoRuntime {
     accessToken: string,
   ): Promise<RemoteExecutorConnectionView> {
     const cleanedName = name.trim();
-    if (!cleanedName) throw new Error('Remote Executor name is required.');
+    if (!cleanedName) throw new ServiceError(400, 'Remote Executor name is required.');
     const normalizedUrl = normalizeRemoteExecutorUrl(endpointUrl);
     const info = await inspectRemoteExecutor(normalizedUrl, accessToken);
     return this.store.createRemoteExecutorConnection(cleanedName, normalizedUrl, accessToken, info.workspaceRoot);
@@ -1531,9 +1532,9 @@ export class PicoRuntime {
     accessToken?: string,
   ): Promise<RemoteExecutorConnectionView> {
     const current = this.store.getRemoteExecutorConnection(id);
-    if (!current) throw new Error('Remote Executor connection not found.');
+    if (!current) throw new ServiceError(404, 'Remote Executor connection not found.');
     const cleanedName = name.trim();
-    if (!cleanedName) throw new Error('Remote Executor name is required.');
+    if (!cleanedName) throw new ServiceError(400, 'Remote Executor name is required.');
     const normalizedUrl = normalizeRemoteExecutorUrl(endpointUrl);
     if (normalizedUrl !== current.endpointUrl) {
       throw new Error(
@@ -1555,9 +1556,9 @@ export class PicoRuntime {
     remoteWorkspacePath: string,
     title = DEFAULT_THREAD_TITLE,
   ): Promise<Thread> {
-    if (!this.store.getProject(projectId)) throw new Error('Project not found.');
+    if (!this.store.getProject(projectId)) throw new ServiceError(404, 'Project not found.');
     const connection = this.store.getRemoteExecutorConnection(connectionId);
-    if (!connection) throw new Error('Remote Executor connection not found.');
+    if (!connection) throw new ServiceError(404, 'Remote Executor connection not found.');
     const workspacePath = await validateRemoteWorkspace(
       connection.endpointUrl,
       connection.accessToken,
@@ -1602,8 +1603,8 @@ export class PicoRuntime {
 
   archiveThread(threadId: string): Thread {
     const current = this.store.getThread(threadId);
-    if (!current) throw new Error('Thread not found.');
-    if (current.deletedAt) throw new Error('This Thread is hidden and cannot be archived.');
+    if (!current) throw new ServiceError(404, 'Thread not found.');
+    if (current.deletedAt) throw new ServiceError(409, 'This Thread is hidden and cannot be archived.');
     const tree = this.store.listThreadTree(threadId);
     for (const candidate of tree) {
       if (!candidate.deletedAt) this.assertThreadNotRunning(candidate.id);
@@ -1614,18 +1615,18 @@ export class PicoRuntime {
       if (updated) this.publish({ type: 'thread.updated', thread: updated });
     }
     const updated = this.getThread(threadId);
-    if (!updated) throw new Error('Thread not found.');
+    if (!updated) throw new ServiceError(404, 'Thread not found.');
     return updated;
   }
 
   unarchiveThread(threadId: string): Thread {
     const current = this.store.getThread(threadId);
-    if (!current) throw new Error('Thread not found.');
-    if (current.deletedAt) throw new Error('This Thread is hidden and cannot be restored.');
+    if (!current) throw new ServiceError(404, 'Thread not found.');
+    if (current.deletedAt) throw new ServiceError(409, 'This Thread is hidden and cannot be restored.');
     this.assertThreadNotRunning(threadId);
     if (!current.archivedAt) return this.getThread(threadId)!;
     const thread = this.store.unarchiveThread(threadId);
-    if (!thread) throw new Error('Thread not found.');
+    if (!thread) throw new ServiceError(404, 'Thread not found.');
     const updated = this.getThread(threadId)!;
     this.publish({ type: 'thread.updated', thread: updated });
     return updated;
@@ -1633,13 +1634,13 @@ export class PicoRuntime {
 
   hideArchivedThread(threadId: string): Thread {
     const current = this.store.getThread(threadId);
-    if (!current) throw new Error('Thread not found.');
+    if (!current) throw new ServiceError(404, 'Thread not found.');
     if (!current.archivedAt || current.deletedAt) {
-      throw new Error('Only an archived Thread can be hidden.');
+      throw new ServiceError(409, 'Only an archived Thread can be hidden.');
     }
     this.assertThreadNotRunning(threadId);
     const thread = this.store.hideArchivedThread(threadId);
-    if (!thread?.deletedAt) throw new Error('Only an archived Thread can be hidden.');
+    if (!thread?.deletedAt) throw new ServiceError(409, 'Only an archived Thread can be hidden.');
     const hidden = this.getThread(threadId)!;
     this.publish({ type: 'thread.hidden', thread: hidden });
     return hidden;
@@ -1651,7 +1652,7 @@ export class PicoRuntime {
       this.store.listActiveExecutions(threadId).length > 0 ||
       (this.inFlightThreadOperations.get(threadId) ?? 0) > 0
     ) {
-      throw new Error('Wait for this Thread to stop running before changing its archive state.');
+      throw new ServiceError(409, 'Wait for this Thread to stop running before changing its archive state.');
     }
   }
 
@@ -1669,19 +1670,19 @@ export class PicoRuntime {
 
   private requireUnarchivedThread(threadId: string): Thread {
     const thread = this.store.getThread(threadId);
-    if (!thread) throw new Error('Thread not found');
+    if (!thread) throw new ServiceError(404, 'Thread not found');
     if (thread.deletedAt !== undefined && thread.deletedAt !== null) {
-      throw new Error('This Thread is hidden from Pico.');
+      throw new ServiceError(409, 'This Thread is hidden from Pico.');
     }
     if (thread.archivedAt !== undefined && thread.archivedAt !== null) {
-      throw new Error('This Thread is archived. Restore it before continuing.');
+      throw new ServiceError(409, 'This Thread is archived. Restore it before continuing.');
     }
     return thread;
   }
 
   getSnapshot(threadId: string, beforeSeq?: number): ThreadSnapshot | null {
     if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 1)) {
-      throw new Error('beforeSeq must be a positive safe integer.');
+      throw new ServiceError(400, 'beforeSeq must be a positive safe integer.');
     }
     const thread = this.getThread(threadId);
     if (!thread) return null;
@@ -1749,7 +1750,7 @@ export class PicoRuntime {
 
   async listThreadTools(threadId: string): Promise<ThreadToolView[]> {
     const thread = this.store.getThread(threadId);
-    if (!thread) throw new Error('Thread not found');
+    if (!thread) throw new ServiceError(404, 'Thread not found');
 
     const runtimeTools = this.tools.listBySource('runtime').map(({ definition }) => definition);
     const registeredMcpTools = this.registeredMcpTools();
@@ -1818,10 +1819,10 @@ export class PicoRuntime {
   }
 
   async setThreadToolEnabled(threadId: string, toolName: string, enabled: boolean): Promise<ThreadToolView[]> {
-    if (!toolName.trim()) throw new Error('Tool name is required');
-    if (typeof enabled !== 'boolean') throw new Error('enabled must be a boolean');
+    if (!toolName.trim()) throw new ServiceError(400, 'Tool name is required');
+    if (typeof enabled !== 'boolean') throw new ServiceError(400, 'enabled must be a boolean');
     const tools = await this.listThreadTools(threadId);
-    if (!tools.some((tool) => tool.name === toolName)) throw new Error('Tool is not available in this Thread');
+    if (!tools.some((tool) => tool.name === toolName)) throw new ServiceError(404, 'Tool is not available in this Thread');
 
     this.applyThreadToolOverrides(threadId, { [toolName]: enabled });
     const updated = await this.listThreadTools(threadId);
@@ -2094,7 +2095,7 @@ export class PicoRuntime {
 
   async executeCommand(threadId: string, id: string, commandText: string): Promise<SubmitResult> {
     const thread = this.requireUnarchivedThread(threadId);
-    if (!commandText.trimStart().startsWith('/')) throw new Error('Command text must start with /.');
+    if (!commandText.trimStart().startsWith('/')) throw new ServiceError(400, 'Command text must start with /.');
     const normalizedCommand = commandText.trim();
     const requestHash = createHash('sha256').update(`${threadId}\0${id}`).digest('hex');
     const commandHash = createHash('sha256').update(normalizedCommand).digest('hex');
@@ -2138,7 +2139,7 @@ export class PicoRuntime {
         });
         return { accepted: true, duplicate: false, command };
       }
-      throw new Error('No command handler accepted this command.');
+      throw new ServiceError(400, 'No command handler accepted this command.');
     } finally {
       endOperation();
     }
@@ -2380,7 +2381,7 @@ export class PicoRuntime {
 
   async interrupt(threadId: string): Promise<Thread> {
     const thread = this.store.getThread(threadId);
-    if (!thread) throw new Error('Thread not found');
+    if (!thread) throw new ServiceError(404, 'Thread not found');
     this.store.setPause(threadId, true, 'Interrupted by user. Continue when ready to inspect the current environment.');
     for (const [executionId, controller] of this.modelSignals) {
       const execution = this.store.getExecution(executionId);
@@ -4553,16 +4554,16 @@ export class PicoRuntime {
   updateContextManagementSettings(update: Partial<ContextManagementSettings>): ContextManagementSettings {
     const next = { ...this.getContextManagementSettings(), ...update };
     if (!Number.isSafeInteger(next.contextWindowTokens) || next.contextWindowTokens <= 0) {
-      throw new Error('Context window must be a positive whole number of tokens.');
+      throw new ServiceError(400, 'Context window must be a positive whole number of tokens.');
     }
     if (!Number.isSafeInteger(next.compactionThresholdTokens) || next.compactionThresholdTokens <= 0) {
-      throw new Error('Compaction threshold must be a positive whole number of tokens.');
+      throw new ServiceError(400, 'Compaction threshold must be a positive whole number of tokens.');
     }
     if (!Number.isSafeInteger(next.keepRecentTokens) || next.keepRecentTokens <= 0) {
-      throw new Error('Recent history budget must be a positive whole number of tokens.');
+      throw new ServiceError(400, 'Recent history budget must be a positive whole number of tokens.');
     }
     if (next.compactionThresholdTokens >= next.contextWindowTokens) {
-      throw new Error('Compaction threshold must be lower than the context window.');
+      throw new ServiceError(400, 'Compaction threshold must be lower than the context window.');
     }
     this.store.setSetting('context-management', next);
     return next;

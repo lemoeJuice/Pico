@@ -1,3 +1,4 @@
+import { ServiceError } from '../contracts/service-error.js';
 import { migrateLegacyPermissions } from './migrations/legacy-permissions.js';
 import { migrateLegacyChatGptPreferences } from './migrations/legacy-chatgpt-preferences.js';
 import { chmodSync, mkdirSync } from 'node:fs';
@@ -716,16 +717,16 @@ export class PicoStore {
     } = {},
   ): Thread {
     const project = this.getProject(projectId);
-    if (!project) throw new Error('Project not found');
+    if (!project) throw new ServiceError(404, 'Project not found');
     const remoteConnection = options.remoteConnectionId
       ? this.getRemoteExecutorConnection(options.remoteConnectionId)
       : null;
-    if (options.remoteConnectionId && !remoteConnection) throw new Error('Remote Executor connection not found');
+    if (options.remoteConnectionId && !remoteConnection) throw new ServiceError(404, 'Remote Executor connection not found');
     if (remoteConnection && executorKind !== 'host')
-      throw new Error('Remote Host Executor must use Host execution kind');
+      throw new ServiceError(400, 'Remote Host Executor must use Host execution kind');
     const workspacePath = executorKind === 'runtime' ? '' : (options.workspacePath ?? project.workspacePath);
     const idempotencyKey = options.idempotencyKey?.trim();
-    if (idempotencyKey && idempotencyKey.length > 240) throw new Error('Thread creation idempotency key is too long.');
+    if (idempotencyKey && idempotencyKey.length > 240) throw new ServiceError(400, 'Thread creation idempotency key is too long.');
     const requestHash = idempotencyKey
       ? createHash('sha256')
           .update(
@@ -762,7 +763,7 @@ export class PicoStore {
           .get(idempotencyKey) as SqlRow | undefined;
         if (existing) {
           if (existing.request_hash !== requestHash) {
-            throw new Error('Thread creation idempotency key was already used with different parameters.');
+            throw new ServiceError(409, 'Thread creation idempotency key was already used with different parameters.');
           }
           const previous = this.getThread(String(existing.thread_id));
           if (!previous) throw new Error('The Thread created for this idempotency key no longer exists.');
@@ -980,7 +981,7 @@ export class PicoStore {
       const result = this.db
         .prepare('UPDATE threads SET pause_requested = ?, pause_reason = ? WHERE id = ?')
         .run(paused ? 1 : 0, paused ? reason : null, threadId);
-      if (result.changes === 0) throw new Error('Thread not found');
+      if (result.changes === 0) throw new ServiceError(404, 'Thread not found');
       this.workflowFact(`thread:${threadId}`, `pause:${threadId}`, {
         pauseRequested: paused,
         pauseReason: paused ? reason : null,
@@ -1856,7 +1857,7 @@ export class PicoStore {
   }
 
   setThreadModelSelection(threadId: string, selection: ThreadModelSelection): ThreadModelSelection {
-    if (!this.getThread(threadId)) throw new Error('Thread not found');
+    if (!this.getThread(threadId)) throw new ServiceError(404, 'Thread not found');
     const serialized = JSON.stringify(selection);
     if (serialized === undefined) throw new Error('Thread ModelSelection must be JSON serializable');
     const updatedAt = isoNow();
@@ -2011,7 +2012,7 @@ export class PicoStore {
          SET name = ?, endpoint_url = ?, access_token = ?, workspace_root = ? WHERE id = ?`,
       )
       .run(name, endpointUrl, accessToken, workspaceRoot, id);
-    if (result.changes === 0) throw new Error('Remote Executor connection not found');
+    if (result.changes === 0) throw new ServiceError(404, 'Remote Executor connection not found');
     return this.listRemoteExecutorConnections().find((connection) => connection.id === id)!;
   }
 
