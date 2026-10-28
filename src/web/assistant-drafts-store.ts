@@ -18,7 +18,13 @@ export interface AssistantToolPreviewSlot {
 }
 
 type Listener = () => void;
+type ScheduleContentNotification = (callback: () => void) => void;
 const EMPTY_TOOL_SLOTS: readonly AssistantToolPreviewSlot[] = [];
+
+function scheduleContentNotification(callback: () => void): void {
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(callback);
+  else callback();
+}
 
 function toolSubscriptionKey(threadId: string, executionId: string, index: number): string {
   return `${threadId}\u0000${executionId}\u0000${index}`;
@@ -43,6 +49,9 @@ export class AssistantDraftStore {
   private readonly executionListeners = new Map<string, Set<Listener>>();
   private readonly toolListListeners = new Map<string, Set<Listener>>();
   private readonly toolListeners = new Map<string, Set<Listener>>();
+  private readonly pendingContentNotifications = new Map<string, object>();
+
+  constructor(private readonly scheduleContent: ScheduleContentNotification = scheduleContentNotification) {}
 
   getAll(): AssistantDrafts {
     return this.drafts;
@@ -83,7 +92,7 @@ export class AssistantDraftStore {
   }
 
   appendText(threadId: string, executionId: string, delta: string): void {
-    this.replaceDrafts(appendAssistantDraft(this.drafts, threadId, executionId, delta));
+    this.replaceDrafts(appendAssistantDraft(this.drafts, threadId, executionId, delta), true);
   }
 
   appendPreview(
@@ -116,7 +125,23 @@ export class AssistantDraftStore {
     for (const listener of registry.get(key) ?? []) listener();
   }
 
-  private replaceDrafts(next: AssistantDrafts): void {
+  private notifyContent(threadId: string, deferred: boolean): void {
+    if (!deferred) {
+      this.pendingContentNotifications.delete(threadId);
+      this.notify(this.contentListeners, threadId);
+      return;
+    }
+    if (this.pendingContentNotifications.has(threadId)) return;
+    const pending = {};
+    this.pendingContentNotifications.set(threadId, pending);
+    this.scheduleContent(() => {
+      if (this.pendingContentNotifications.get(threadId) !== pending) return;
+      this.pendingContentNotifications.delete(threadId);
+      this.notify(this.contentListeners, threadId);
+    });
+  }
+
+  private replaceDrafts(next: AssistantDrafts, deferContent = false): void {
     if (next === this.drafts) return;
     const previous = this.drafts;
     this.drafts = next;
@@ -140,7 +165,7 @@ export class AssistantDraftStore {
       ) {
         if (afterContent) this.contentSnapshots.set(threadId, afterContent);
         else this.contentSnapshots.delete(threadId);
-        this.notify(this.contentListeners, threadId);
+        this.notifyContent(threadId, deferContent);
       }
 
       if (before?.executionId !== after?.executionId) this.notify(this.executionListeners, threadId);

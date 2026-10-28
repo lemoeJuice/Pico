@@ -2,6 +2,38 @@ import { describe, expect, it, vi } from 'vitest';
 import { AssistantDraftStore } from '../src/web/assistant-drafts-store.js';
 
 describe('AssistantDraftStore', () => {
+  it('coalesces text notifications per frame while keeping the latest snapshot available', () => {
+    const frames: Array<() => void> = [];
+    const store = new AssistantDraftStore((callback) => frames.push(callback));
+    const changed = vi.fn();
+    store.subscribeContent('thread-a', changed);
+
+    store.appendText('thread-a', 'execution-a', 'first');
+    store.appendText('thread-a', 'execution-a', ' second');
+    expect(store.getContent('thread-a')?.text).toBe('first second');
+    expect(changed).not.toHaveBeenCalled();
+    expect(frames).toHaveLength(1);
+    frames.shift()!();
+    expect(changed).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let an old frame consume the notification for a replacement stream', () => {
+    const frames: Array<() => void> = [];
+    const store = new AssistantDraftStore((callback) => frames.push(callback));
+    const changed = vi.fn();
+    store.subscribeContent('thread-a', changed);
+
+    store.appendText('thread-a', 'execution-a', 'old');
+    store.clear('thread-a', 'execution-a');
+    expect(changed).toHaveBeenCalledTimes(1);
+    store.appendText('thread-a', 'execution-b', 'new');
+    frames.shift()!();
+    expect(changed).toHaveBeenCalledTimes(1);
+    frames.shift()!();
+    expect(changed).toHaveBeenCalledTimes(2);
+    expect(store.getContent('thread-a')?.text).toBe('new');
+  });
+
   it('notifies content without notifying tool cards or tool layout during text streaming', () => {
     const store = new AssistantDraftStore();
     const contentChanged = vi.fn();
