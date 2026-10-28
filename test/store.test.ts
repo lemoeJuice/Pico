@@ -291,8 +291,8 @@ describe('PicoStore execution transactions', () => {
       const thread = store.createThread(project.id, 'host');
       const modelExecution = store.createModelExecution('atomic-tool-source-model', thread.id, 0);
       store.transitionExecution(modelExecution.id, 'running');
-      store.db.exec(`CREATE TRIGGER fail_tool_source_log BEFORE INSERT ON execution_log
-        WHEN NEW.kind = 'tool-source'
+      store.db.exec(`CREATE TRIGGER fail_tool_source_log BEFORE INSERT ON canonical_records
+        WHEN NEW.payload_json LIKE '%tool-routing:%'
         BEGIN SELECT RAISE(ABORT, 'tool source write failed'); END;`);
       const call = { id: 'atomic-source-call', name: 'mcp_server_tool', arguments: {} };
 
@@ -307,6 +307,7 @@ describe('PicoStore execution transactions', () => {
               call,
               executionId: `${thread.id}:${modelExecution.id}:${call.id}`,
               source: 'mcp',
+              mcpTarget: { serverId: 'server', toolKey: 'tool' },
             },
           ],
         }),
@@ -319,6 +320,139 @@ describe('PicoStore execution transactions', () => {
       expect(store.getExecution(modelExecution.id)?.status).toBe('running');
     } finally {
       store.close();
+    }
+  });
+
+  it('persists and rebuilds immutable routing when all diagnostics fail', () => {
+    const store = new PicoStore(':memory:');
+    try {
+      const project = store.createProject('Routing', '/tmp/routing');
+      const thread = store.createThread(project.id, 'container');
+      const model = store.createModelExecution('routing-model', thread.id, 0);
+      store.transitionExecution(model.id, 'running');
+      store.db.exec(
+        `CREATE TRIGGER fail_all_logs BEFORE INSERT ON execution_log BEGIN SELECT RAISE(ABORT, 'diagnostics unavailable'); END;`,
+      );
+      const call = { id: 'call', name: 'shell', arguments: {} };
+      const input = {
+        assistantRecordId: 'routing-model:assistant',
+        modelExecutionId: model.id,
+        threadId: thread.id,
+        payload: assistantPayload({ batchId: 'routing-batch', toolCalls: [call] }),
+        toolCalls: [{ call, executionId: 'routing-tool', source: 'executor' as const }],
+      };
+      store.commitModelStep(input);
+      expect(store.getToolExecutionRouting('routing-tool')).toEqual({ source: 'executor' });
+      expect(() =>
+        store.commitModelStep({ ...input, toolCalls: [{ ...input.toolCalls[0]!, source: 'runtime' }] }),
+      ).toThrow(/routing changed/);
+      store.transitionExecution('routing-tool', 'running');
+      expect(store.listRunningContainerExecutorWorkspacePaths()).toContain('/tmp/routing');
+      store.rebuildWorkflowViews();
+      expect(store.getToolExecutionRouting('routing-tool')).toEqual({ source: 'executor' });
+      expect(store.listRunningContainerExecutorWorkspacePaths()).toContain('/tmp/routing');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rejects invalid MCP routes and changes to target identity on retry', () => {
+    const store = new PicoStore(':memory:');
+    try {
+      const project = store.createProject('MCP routing', '/');
+      const thread = store.createThread(project.id, 'host');
+      const model = store.createModelExecution('mcp-routing-model', thread.id, 0);
+      const call = { id: 'call', name: 'mcp_tool', arguments: {} };
+      const target = { serverId: 'server', toolKey: 'tool' };
+      const input = {
+        assistantRecordId: 'mcp-routing-model:assistant',
+        modelExecutionId: model.id,
+        threadId: thread.id,
+        payload: assistantPayload({ batchId: 'mcp-routing-batch', toolCalls: [call] }),
+        toolCalls: [{ call, executionId: 'mcp-routing-tool', source: 'mcp' as const, mcpTarget: target }],
+      };
+      expect(() =>
+        store.commitModelStep({ ...input, toolCalls: [{ call, executionId: 'mcp-tool', source: 'mcp' }] }),
+      ).toThrow(/valid MCP target/);
+      expect(() =>
+        store.commitModelStep({ ...input, toolCalls: [{ ...input.toolCalls[0]!, source: 'executor' }] }),
+      ).toThrow(/cannot have an MCP target/);
+      store.commitModelStep(input);
+      store.commitModelStep(input);
+      expect(() =>
+        store.commitModelStep({
+          ...input,
+          toolCalls: [{ ...input.toolCalls[0]!, mcpTarget: { ...target, toolKey: 'different' } }],
+        }),
+      ).toThrow(/routing changed/);
+      expect(store.getToolExecutionRouting('mcp-routing-tool')).toEqual({ source: 'mcp', mcpTarget: target });
+    } finally {
+      store.close();
+    }
+  });
+
+  it('imports legacy diagnostic routing once and reconstructs it without logs', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-routing-migration-'));
+    const path = join(directory, 'db.sqlite');
+    let store = new PicoStore(path);
+    try {
+      const project = store.createProject('Legacy route', directory);
+      const thread = store.createThread(project.id, 'container');
+      const model = store.createModelExecution('legacy-routing-model', thread.id, 0);
+      const call = { id: 'call', name: 'shell', arguments: {} };
+      const legacyTarget = { serverId: 'server', toolKey: 'tool', extra: 'discard-me' };
+      store.commitModelStep({
+        assistantRecordId: 'legacy-routing-model:assistant',
+        modelExecutionId: model.id,
+        threadId: thread.id,
+        payload: assistantPayload({ batchId: 'legacy-routing-batch', toolCalls: [call] }),
+        toolCalls: [
+          {
+            call,
+            executionId: 'legacy-routing-tool',
+            source: 'mcp',
+            mcpTarget: legacyTarget,
+          },
+        ],
+      });
+      store.close();
+      const db = new DatabaseSync(path);
+      db.exec(`DELETE FROM tool_execution_routes; DELETE FROM store_migrations WHERE name = 'tool-execution-routes-v1';
+        DROP TRIGGER canonical_records_no_delete;
+        DELETE FROM canonical_records WHERE payload_json LIKE '%tool-routing:legacy-routing-tool%';
+        CREATE TRIGGER canonical_records_no_delete BEFORE DELETE ON canonical_records BEGIN SELECT RAISE(ABORT, 'canonical records are append-only'); END;`);
+      db.close();
+      store = new PicoStore(path);
+      expect(store.getToolExecutionRouting('legacy-routing-tool')).toEqual({
+        source: 'mcp',
+        mcpTarget: { serverId: 'server', toolKey: 'tool' },
+      });
+      expect(
+        JSON.stringify(
+          store
+            .listScopedCanonical(`workflow:thread:${thread.id}`)
+            .filter((r) => JSON.stringify(r.payload).includes('tool-routing:legacy-routing-tool')),
+        ),
+      ).not.toContain('discard-me');
+      const count = store
+        .listScopedCanonical(`workflow:thread:${thread.id}`)
+        .filter((r) => JSON.stringify(r.payload).includes('tool-routing:legacy-routing-tool')).length;
+      store.close();
+      store = new PicoStore(path);
+      expect(
+        store
+          .listScopedCanonical(`workflow:thread:${thread.id}`)
+          .filter((r) => JSON.stringify(r.payload).includes('tool-routing:legacy-routing-tool')),
+      ).toHaveLength(count);
+      store.db.exec('DROP TRIGGER execution_log_no_delete; DELETE FROM execution_log;');
+      store.rebuildWorkflowViews();
+      expect(store.getToolExecutionRouting('legacy-routing-tool')).toEqual({
+        source: 'mcp',
+        mcpTarget: { serverId: 'server', toolKey: 'tool' },
+      });
+    } finally {
+      store.close();
+      await rm(directory, { recursive: true, force: true });
     }
   });
 

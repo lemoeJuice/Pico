@@ -129,16 +129,26 @@ describe('Runtime MCP manager', () => {
         modelExecutionId,
         threadId: thread.id,
         payload: assistantPayload({ toolCalls: [call], batchId: `${modelExecutionId}:batch` }),
-        toolCalls: [{ call, executionId, source: 'mcp' }],
+        toolCalls: [{ call, executionId, source: 'mcp', mcpTarget: { serverId: 'disconnected', toolKey: 'tool' } }],
       });
 
+      env.store.db.exec('DROP TRIGGER execution_log_no_delete; DELETE FROM execution_log;');
+      env.store.rebuildWorkflowViews();
       const runtime = env.runtime as unknown as {
         executeToolCall(thread: Thread, call: ToolCall): Promise<Execution>;
+        applyThreadToolOverrides(threadId: string, updates: Record<string, boolean>): void;
+        adapterFor: (...args: never[]) => never;
       };
+      runtime.applyThreadToolOverrides(thread.id, { [call.name]: true });
+      const adapter = vi.spyOn(runtime, 'adapterFor');
       const execution = await runtime.executeToolCall(thread, call);
       expect(execution.status).toBe('failed');
       expect(execution.error).toMatch(/MCP server.*no longer connected/);
-      expect(env.store.listExecutionLog(executionId, 'tool-source')).toMatchObject([{ detail: { source: 'mcp' } }]);
+      expect(adapter).not.toHaveBeenCalled();
+      expect(env.store.getToolExecutionRouting(executionId)).toEqual({
+        source: 'mcp',
+        mcpTarget: { serverId: 'disconnected', toolKey: 'tool' },
+      });
     } finally {
       await env.cleanup();
     }

@@ -203,6 +203,12 @@ export class PicoStore {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS tool_execution_routes (
+        execution_id TEXT PRIMARY KEY,
+        source TEXT NOT NULL CHECK (source IN ('runtime', 'executor', 'mcp')),
+        mcp_target_json TEXT
+      );
+      CREATE TABLE IF NOT EXISTS store_migrations (name TEXT PRIMARY KEY);
       CREATE INDEX IF NOT EXISTS executions_thread_status ON executions(thread_id, status);
       CREATE INDEX IF NOT EXISTS executions_batch ON executions(batch_id);
       CREATE TABLE IF NOT EXISTS execution_log (
@@ -294,6 +300,101 @@ export class PicoStore {
     migrateLegacyPermissions(this.db);
     migrateLegacyChatGptPreferences(this.db);
     this.importLegacyWorkflowViews();
+    this.migrateToolExecutionRoutes();
+  }
+
+  private migrateToolExecutionRoutes(): void {
+    this.transaction(() => {
+      if (this.db.prepare("SELECT 1 FROM store_migrations WHERE name = 'tool-execution-routes-v1'").get()) return;
+      const rows = this.db
+        .prepare(
+          `SELECT x.id, x.thread_id, l.detail_json, l.created_at
+        FROM executions x JOIN execution_log l ON l.execution_id = x.id AND l.kind = 'tool-source'
+        WHERE x.kind = 'tool' ORDER BY l.created_at DESC, l.id DESC`,
+        )
+        .all() as SqlRow[];
+      const seen = new Set<string>();
+      for (const row of rows) {
+        const id = String(row.id);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const detail = json<Record<string, unknown>>(row.detail_json, {});
+        if (detail.source !== 'runtime' && detail.source !== 'executor' && detail.source !== 'mcp') continue;
+        const target = detail.mcpTarget as McpToolTarget | undefined;
+        if (
+          detail.source === 'mcp' &&
+          (!target ||
+            typeof target.serverId !== 'string' ||
+            !target.serverId.trim() ||
+            typeof target.toolKey !== 'string' ||
+            !target.toolKey.trim())
+        )
+          continue;
+        if (detail.source !== 'mcp' && target) continue;
+        const normalizedTarget = target ? { serverId: target.serverId, toolKey: target.toolKey } : undefined;
+        this.saveToolExecutionRouting(
+          id,
+          String(row.thread_id),
+          detail.source,
+          normalizedTarget,
+          String(row.created_at),
+        );
+      }
+      this.db.prepare("INSERT INTO store_migrations (name) VALUES ('tool-execution-routes-v1')").run();
+    });
+  }
+
+  getToolExecutionRouting(
+    executionId: string,
+  ): { source: 'runtime' | 'executor' | 'mcp'; mcpTarget?: McpToolTarget } | null {
+    const row = this.db
+      .prepare('SELECT source, mcp_target_json FROM tool_execution_routes WHERE execution_id = ?')
+      .get(executionId) as SqlRow | undefined;
+    if (!row) return null;
+    const target = json<McpToolTarget | null>(row.mcp_target_json, null);
+    return {
+      source: row.source as 'runtime' | 'executor' | 'mcp',
+      ...(target ? { mcpTarget: { serverId: target.serverId, toolKey: target.toolKey } } : {}),
+    };
+  }
+
+  private saveToolExecutionRouting(
+    executionId: string,
+    threadId: string,
+    source: 'runtime' | 'executor' | 'mcp',
+    mcpTarget: McpToolTarget | undefined,
+    createdAt: string,
+  ): void {
+    if (source === 'mcp') {
+      if (
+        !mcpTarget ||
+        typeof mcpTarget.serverId !== 'string' ||
+        !mcpTarget.serverId.trim() ||
+        typeof mcpTarget.toolKey !== 'string' ||
+        !mcpTarget.toolKey.trim()
+      ) {
+        throw new Error(`Tool execution ${executionId} requires a valid MCP target.`);
+      }
+    } else if (mcpTarget) {
+      throw new Error(`Tool execution ${executionId} cannot have an MCP target for source ${source}.`);
+    }
+    const current = this.getToolExecutionRouting(executionId);
+    if (current) {
+      if (
+        current.source !== source ||
+        current.mcpTarget?.serverId !== mcpTarget?.serverId ||
+        current.mcpTarget?.toolKey !== mcpTarget?.toolKey
+      ) {
+        throw new Error(`Tool execution ${executionId} routing changed on retry.`);
+      }
+      return;
+    }
+    const normalizedTarget = mcpTarget ? { serverId: mcpTarget.serverId, toolKey: mcpTarget.toolKey } : undefined;
+    const value = { executionId, source, ...(normalizedTarget ? { mcpTarget: normalizedTarget } : {}) };
+    this.workflowFact(`thread:${threadId}`, `tool-routing:${executionId}`, value, randomUUID(), createdAt);
+    this.db
+      .prepare('INSERT INTO tool_execution_routes (execution_id, source, mcp_target_json) VALUES (?, ?, ?)')
+      .run(executionId, source, normalizedTarget ? JSON.stringify(normalizedTarget) : null);
   }
 
   private migrateCanonicalScopes(): void {
@@ -949,7 +1050,7 @@ export class PicoStore {
   rebuildWorkflowViews(): void {
     this.transaction(() => {
       this.db.exec(
-        'DELETE FROM executions; DELETE FROM plugin_state; DELETE FROM plugin_model_calls; DELETE FROM thread_model_selections;',
+        'DELETE FROM tool_execution_routes; DELETE FROM executions; DELETE FROM plugin_state; DELETE FROM plugin_model_calls; DELETE FROM thread_model_selections;',
       );
       this.db.prepare('UPDATE threads SET pause_requested = 0, pause_reason = NULL').run();
       const facts = this.db
@@ -1000,6 +1101,11 @@ export class PicoStore {
               e.createdAt,
               e.updatedAt,
             );
+        } else if (envelope.key.startsWith('tool-routing:')) {
+          const route = value as { executionId: string; source: string; mcpTarget?: McpToolTarget };
+          this.db
+            .prepare('INSERT INTO tool_execution_routes (execution_id, source, mcp_target_json) VALUES (?, ?, ?)')
+            .run(route.executionId, route.source, route.mcpTarget ? JSON.stringify(route.mcpTarget) : null);
         } else if (envelope.key.startsWith('plugin-state:')) {
           const s = value as { pluginId?: unknown; key?: unknown; value?: unknown };
           if (typeof s.pluginId !== 'string' || typeof s.key !== 'string') continue;
@@ -1268,33 +1374,10 @@ export class PicoStore {
         const existing = this.db.prepare('SELECT * FROM executions WHERE id = ?').get(executionId) as
           SqlRow | undefined;
         if (existing) {
-          if (source) {
-            const sourceRow = this.db
-              .prepare(
-                `SELECT detail_json FROM execution_log WHERE execution_id = ? AND kind = 'tool-source' ORDER BY created_at DESC, id DESC LIMIT 1`,
-              )
-              .get(executionId) as SqlRow | undefined;
-            if (sourceRow) {
-              const detail = JSON.parse(String(sourceRow.detail_json)) as {
-                source?: unknown;
-                mcpTarget?: McpToolTarget;
-              };
-              if (detail.source !== source) throw new Error(`Tool execution ${executionId} source changed on retry.`);
-              if (
-                JSON.stringify(detail.mcpTarget ?? null) !== JSON.stringify(mcpTarget ?? null) &&
-                (detail.mcpTarget !== undefined || mcpTarget !== undefined)
-              ) {
-                throw new Error(`Tool execution ${executionId} MCP target changed on retry.`);
-              }
-            } else {
-              this.insertExecutionLogStrict(
-                executionId,
-                'tool-source',
-                { source, ...(mcpTarget ? { mcpTarget } : {}) },
-                createdAt,
-              );
-            }
-          }
+          const routing = this.getToolExecutionRouting(executionId);
+          if (source && !routing) throw new Error(`Tool execution ${executionId} routing is missing on retry.`);
+          if (source) this.saveToolExecutionRouting(executionId, input.threadId, source, mcpTarget, createdAt);
+          else if (routing) throw new Error(`Tool execution ${executionId} routing changed on retry.`);
           continue;
         }
         this.db
@@ -1317,12 +1400,8 @@ export class PicoStore {
           );
         this.logExecution(executionId, 'created', { status: 'pending' }, createdAt);
         if (source) {
-          this.insertExecutionLogStrict(
-            executionId,
-            'tool-source',
-            { source, ...(mcpTarget ? { mcpTarget } : {}) },
-            createdAt,
-          );
+          this.saveToolExecutionRouting(executionId, input.threadId, source, mcpTarget, createdAt);
+          this.logExecution(executionId, 'tool-source', { source, ...(mcpTarget ? { mcpTarget } : {}) }, createdAt);
         }
         const createdExecution = this.getExecution(executionId);
         if (createdExecution) this.snapshotExecution(createdExecution);
@@ -1528,17 +1607,6 @@ export class PicoStore {
     }
   }
 
-  private insertExecutionLogStrict(
-    executionId: string,
-    kind: string,
-    detail: Record<string, unknown>,
-    createdAt: string,
-  ): void {
-    this.db
-      .prepare(`INSERT INTO execution_log (id, execution_id, kind, detail_json, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .run(randomUUID(), executionId, kind, JSON.stringify(detail), createdAt);
-  }
-
   appendExecutionLog(executionId: string, kind: string, detail: Record<string, unknown>): void {
     if (!this.getExecution(executionId)) throw new Error(`Execution ${executionId} not found`);
     try {
@@ -1713,22 +1781,17 @@ export class PicoStore {
     const rows = this.db
       .prepare(
         `
-      SELECT DISTINCT e.workspace_path, l.detail_json
+      SELECT DISTINCT e.workspace_path
       FROM executions x
       JOIN threads t ON t.id = x.thread_id
       JOIN executors e ON e.id = t.executor_id
-      JOIN execution_log l ON l.execution_id = x.id AND l.kind = 'tool-source'
+      LEFT JOIN tool_execution_routes r ON r.execution_id = x.id
       WHERE e.kind = 'container' AND x.kind = 'tool' AND x.status = 'running'
+        AND (r.source = 'executor' OR r.source IS NULL)
     `,
       )
       .all() as SqlRow[];
-    return [
-      ...new Set(
-        rows
-          .filter((row) => json<Record<string, unknown>>(row.detail_json, {}).source === 'executor')
-          .map((row) => String(row.workspace_path)),
-      ),
-    ];
+    return rows.map((row) => String(row.workspace_path));
   }
 
   private executionFromRow(row: SqlRow): Execution {

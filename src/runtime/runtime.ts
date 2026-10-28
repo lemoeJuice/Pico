@@ -3933,11 +3933,8 @@ export class PicoRuntime {
       this.ensureToolResult(thread.id, execution);
       return execution;
     }
-    const sourceEntry = this.store.listExecutionLog(executionId, 'tool-source').at(-1);
-    const loggedDetail = sourceEntry?.detail;
-    const loggedSource = loggedDetail?.source;
-    const persistedSource =
-      loggedSource === 'runtime' || loggedSource === 'executor' || loggedSource === 'mcp' ? loggedSource : null;
+    const routing = this.store.getToolExecutionRouting(executionId);
+    const persistedSource = routing?.source ?? null;
     if (!persistedSource) {
       const failed = this.store.transitionExecution(executionId, 'failed', {
         error: `Tool source for ${call.name} is missing; refusing to dispatch it. Submit a new request to retry.`,
@@ -3947,7 +3944,7 @@ export class PicoRuntime {
       this.ensureToolResult(thread.id, failed);
       return failed;
     }
-    const persistedMcpTarget = mcpTargetValue(loggedDetail?.mcpTarget);
+    const persistedMcpTarget = mcpTargetValue(routing?.mcpTarget);
     const registered =
       persistedSource === 'mcp' && persistedMcpTarget
         ? this.registeredMcpTools().find((tool) => sameMcpTarget(tool.target, persistedMcpTarget))
