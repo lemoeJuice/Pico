@@ -3110,16 +3110,49 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   />
                 ))}
                 {selectedThread.executorKind !== 'runtime' ? (
-                  <button
-                    type="button"
-                    className="button button-quiet plugin-action executor-update-toolbar"
-                    onClick={() => {
-                      setExecutorUpdateError('');
-                      setExecutorUpdateOpen(true);
-                    }}
-                  >
-                    Update
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      className="button button-quiet plugin-action executor-update-toolbar"
+                      onClick={() => {
+                        setExecutorUpdateError('');
+                        setExecutorUpdateOpen(true);
+                      }}
+                    >
+                      Update
+                    </button>
+                    <details
+                      className="mobile-toolbar-more"
+                      onBlur={(event) => {
+                        if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) {
+                          event.currentTarget.open = false;
+                        }
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Escape' && event.currentTarget.open) {
+                          event.preventDefault();
+                          event.currentTarget.open = false;
+                          event.currentTarget.querySelector('summary')?.focus();
+                        }
+                      }}
+                    >
+                      <summary className="button button-quiet">More</summary>
+                      <div className="mobile-toolbar-more-panel">
+                        <button
+                          type="button"
+                          className="button button-quiet"
+                          onClick={(event) => {
+                            const details = event.currentTarget.closest('details');
+                            if (details) details.open = false;
+                            setExecutorUpdateError('');
+                            setExecutorUpdateOpen(true);
+                          }}
+                        >
+                          Update
+                        </button>
+                      </div>
+                    </details>
+                  </>
                 ) : null}
               </div>
             </div>

@@ -18,3 +18,34 @@
   flex: 0 0 auto;
   white-space: nowrap;
 }
+.mobile-toolbar-more {
+  display: none;
+}
+@media (max-width: 680px) {
+  .conversation-actions > .button.executor-update-toolbar {
+    display: none;
+  }
+  .mobile-toolbar-more {
+    position: relative;
+    display: block;
+    margin-left: auto;
+  }
+  .mobile-toolbar-more > summary {
+    list-style: none;
+    white-space: nowrap;
+  }
+  .mobile-toolbar-more > summary::-webkit-details-marker {
+    display: none;
+  }
+  .mobile-toolbar-more-panel {
+    position: absolute;
+    z-index: 20;
+    top: calc(100% + 6px);
+    right: 0;
+    padding: 5px;
+    background: #fff;
+    border: 1px solid #d7e2d6;
+    border-radius: 10px;
+    box-shadow: 0 12px 30px rgba(45, 62, 51, 0.14);
+  }
+}
