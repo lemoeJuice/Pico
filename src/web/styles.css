@@ -20,6 +20,7 @@
 @import './styles/shared/plugin-data-disclosure.css';
 @import './styles/regions/plugin-embeds.css';
 @import './styles/regions/settings.css';
+@import './settings-navigation.css';
 @import './styles/regions/composer.css';
 @import './styles/regions/welcome.css';
 @import './styles/shared/modal-form.css';

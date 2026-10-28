@@ -46,6 +46,7 @@ import { isNearScrollEnd } from './scroll-follow.js';
 import { threadCanBeInterrupted } from './thread-controls.js';
 import { executorStatusFromProbe } from './executor-status.js';
 import { shouldCloseModalOnEscape } from './modal-behavior.js';
+import { SettingsNavigation } from './settings-navigation.js';
 import {
   assistantStreamsAfterDisconnect,
   canAppendAssistantDelta,
@@ -3523,7 +3524,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           error={error}
           onDismissError={() => setError('')}
         >
-          <nav className="plugin-settings-pages" aria-label="Settings pages">
+          <SettingsNavigation
+            currentPageLabel={
+              mcpManagerOpen ? 'MCP servers' : developerMenuOpen ? 'Developer' : archivedThreadsOpen ? 'Archived Threads'
+                : memoryManagerOpen ? 'Memory' : pluginManagerOpen ? 'Plugins' : contextManagerOpen ? 'Context management'
+                  : miscellaneousSettingsOpen ? 'General' : pluginPageSelection ? selectedPluginPage?.label ?? 'Plugin settings' : 'Provider'
+            }
+          >
             {pluginInfo ? (
               <>
                 <button
@@ -3688,7 +3695,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             >
               Developer
             </button>
-          </nav>
+          </SettingsNavigation>
           {mcpManagerOpen ? (
             <McpSettings request={api} refreshVersion={mcpServerRefreshVersion} />
           ) : developerMenuOpen ? (
