@@ -94,10 +94,18 @@ it('keeps Composer Usage on the current Thread when reports finish out of order'
   h.sendContext('thread-b');
   const reportB = h.requests[1];
   if (!reportB) throw new Error('Expected Thread B report');
-  h.respond(reportB, { totals: { inputTokens: 222, outputTokens: 1, cachedInputTokens: 0 }, coverage: {}, rows: [] });
+  h.respond(reportB, {
+    totals: { inputTokens: 222, outputTokens: 1, cachedInputTokens: 0 },
+    coverage: {},
+    rows: [{ usage: { inputTokens: 222, cachedInputTokens: 0 } }],
+  });
   await h.flush();
   expect(treeText(h.tree)).toContain('In 222');
-  h.respond(firstA, { totals: { inputTokens: 111, outputTokens: 1, cachedInputTokens: 0 }, coverage: {}, rows: [] });
+  h.respond(firstA, {
+    totals: { inputTokens: 111, outputTokens: 1, cachedInputTokens: 0 },
+    coverage: {},
+    rows: [{ usage: { inputTokens: 111, cachedInputTokens: 0 } }],
+  });
   await h.flush();
   expect(treeText(h.tree)).toContain('In 222');
   expect(treeText(h.tree)).not.toContain('In 111');
@@ -108,7 +116,11 @@ it('ignores stale failures and same-Thread refreshes, and clears the host tree w
   const firstA = h.requests[0]!;
   h.sendContext('thread-b');
   const reportB = h.requests[1]!;
-  h.respond(reportB, { totals: { inputTokens: 222, outputTokens: 1, cachedInputTokens: 0 }, coverage: {}, rows: [] });
+  h.respond(reportB, {
+    totals: { inputTokens: 222, outputTokens: 1, cachedInputTokens: 0 },
+    coverage: {},
+    rows: [{ usage: { inputTokens: 222, cachedInputTokens: 0 } }],
+  });
   await h.flush();
   h.reject(firstA);
   await h.flush();
@@ -118,9 +130,17 @@ it('ignores stale failures and same-Thread refreshes, and clears the host tree w
   const older = h.requests[2]!;
   h.sendContext('thread-b');
   const newer = h.requests[3]!;
-  h.respond(newer, { totals: { inputTokens: 333, outputTokens: 1, cachedInputTokens: 0 }, coverage: {}, rows: [] });
+  h.respond(newer, {
+    totals: { inputTokens: 333, outputTokens: 1, cachedInputTokens: 0 },
+    coverage: {},
+    rows: [{ usage: { inputTokens: 333, cachedInputTokens: 0 } }],
+  });
   await h.flush();
-  h.respond(older, { totals: { inputTokens: 444, outputTokens: 1, cachedInputTokens: 0 }, coverage: {}, rows: [] });
+  h.respond(older, {
+    totals: { inputTokens: 444, outputTokens: 1, cachedInputTokens: 0 },
+    coverage: {},
+    rows: [{ usage: { inputTokens: 444, cachedInputTokens: 0 } }],
+  });
   await h.flush();
   expect(treeText(h.tree)).toContain('In 333');
   expect(treeText(h.tree)).not.toContain('In 444');

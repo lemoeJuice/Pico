@@ -30,7 +30,7 @@ describe('formatUsageSummary', () => {
           { usage: { inputTokens: 250, cachedInputTokens: 75 } },
         ],
       }),
-    ).toEqual({ input: '1K', output: '240', cached: '250', cacheRate: '25.0%', cacheCoverage: '4/4' });
+    ).toEqual({ input: '750', output: '240', cached: '250', cacheRate: '25.0%', cacheCoverage: '4/4' });
   });
 
   it('reports the cache rate for known calls and shows its coverage', () => {
@@ -49,7 +49,7 @@ describe('formatUsageSummary', () => {
           { usage: { inputTokens: 20 } },
         ],
       }),
-    ).toEqual({ input: '≥100', output: '≥12', cached: '≥20', cacheRate: '25.0%', cacheCoverage: '2/3' });
+    ).toEqual({ input: '≥60', output: '≥12', cached: '≥20', cacheRate: '25.0%', cacheCoverage: '2/3' });
   });
 
   it('treats null totals and absent coverage as unknown', () => {
@@ -69,5 +69,21 @@ it('compacts token counts with K and M and shows zero cache coverage when there 
       totals: { inputTokens: 143224, outputTokens: 5592, cachedInputTokens: 1234567 },
       coverage: { inputTokens: { reported: 26, total: 30 } },
     }),
-  ).toEqual({ input: '≥143.2K', output: '5.6K', cached: '1.2M', cacheRate: '—', cacheCoverage: '0/0' });
+  ).toEqual({ input: '—', output: '5.6K', cached: '1.2M', cacheRate: '—', cacheCoverage: '0/0' });
+});
+
+it('only counts valid input and cache pairs and preserves a known zero', () => {
+  expect(
+    formatUsageSummary({
+      rows: [
+        { usage: { inputTokens: 10, cachedInputTokens: 10 } },
+        { usage: { inputTokens: 5, cachedInputTokens: 6 } },
+        { usage: { inputTokens: 20 } },
+        { usage: { inputTokens: -1, cachedInputTokens: 0 } },
+        { usage: { inputTokens: 5, cachedInputTokens: NaN } },
+      ],
+    }).input,
+  ).toBe('≥0');
+  expect(formatUsageSummary({ rows: [{ usage: { inputTokens: 5, cachedInputTokens: 6 } }] }).input).toBe('—');
+  expect(formatUsageSummary({ rows: [{ usage: { inputTokens: 10, cachedInputTokens: 10 } }] }).input).toBe('0');
 });

@@ -33,8 +33,13 @@
     });
     const input = cacheRows.reduce((total, row) => total + row.inputTokens, 0);
     const cached = cacheRows.reduce((total, row) => total + row.cachedInputTokens, 0);
+    const uncachedRows = cacheRows.filter((row) => row.cachedInputTokens <= row.inputTokens);
+    const uncachedInput = uncachedRows.reduce((total, row) => total + row.inputTokens - row.cachedInputTokens, 0);
+    const uncachedCount = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(
+      uncachedInput,
+    );
     return {
-      input: formatCount(report, 'inputTokens'),
+      input: uncachedRows.length === 0 ? '—' : `${uncachedRows.length < rows.length ? '≥' : ''}${uncachedCount}`,
       output: formatCount(report, 'outputTokens'),
       cached: formatCount(report, 'cachedInputTokens'),
       cacheRate: input > 0 ? `${((cached / input) * 100).toFixed(1)}%` : '—',
