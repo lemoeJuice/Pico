@@ -305,6 +305,7 @@ function modelCallRequestFingerprint(identity: unknown): string {
 }
 
 export const THREAD_HISTORY_PAGE_SIZE = 20;
+export type ThreadSnapshotView = 'full' | 'timeline';
 const SNAPSHOT_HISTORY_CACHE_MAX_THREADS = 8;
 const SNAPSHOT_HISTORY_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 const SNAPSHOT_HISTORY_CACHE_MAX_THREAD_BYTES = 8 * 1024 * 1024;
@@ -325,6 +326,25 @@ function redactReasoningReplay<T>(record: CanonicalRecord<T>): CanonicalRecord<T
   if (!payload || typeof payload !== 'object' || !('reasoningReplay' in payload)) return { ...record, payload };
   const { reasoningReplay: _reasoningReplay, ...publicPayload } = payload as Record<string, unknown>;
   return { ...record, payload: publicPayload as T };
+}
+
+function snapshotRecord<T>(record: CanonicalRecord<T>, view: ThreadSnapshotView): CanonicalRecord<T> {
+  if (view === 'timeline' && record.kind === 'plugin') {
+    const payload = objectValue(record.payload);
+    if (payload?.pluginId === 'pico.runtime' && payload.action === 'model-input-recorded') {
+      return {
+        ...record,
+        payload: {
+          pluginId: 'pico.runtime',
+          action: 'model-input-recorded',
+          ...(typeof payload.executionId === 'string' ? { executionId: payload.executionId } : {}),
+          ...(typeof payload.requestId === 'string' ? { requestId: payload.requestId } : {}),
+        } as T,
+      };
+    }
+  }
+  const safeRecord = redactReasoningReplay(record);
+  return safeRecord;
 }
 
 function redactExecutionImages(execution: Execution): Execution {
@@ -1598,7 +1618,12 @@ export class PicoRuntime {
     return thread;
   }
 
-  getSnapshot(threadId: string, beforeSeq?: number, boundedPage = false): ThreadSnapshot | null {
+  getSnapshot(
+    threadId: string,
+    beforeSeq?: number,
+    boundedPage = false,
+    view: ThreadSnapshotView = 'full',
+  ): ThreadSnapshot | null {
     if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 1)) {
       throw new ServiceError(400, 'beforeSeq must be a positive safe integer.');
     }
@@ -1686,7 +1711,7 @@ export class PicoRuntime {
       thread: snapshotThread,
       modelSelection: this.threadModelSelection(threadId),
       contextUsage,
-      records: page.records.map(redactReasoningReplay),
+      records: page.records.map((record) => snapshotRecord(record, view)),
       ...(hasInactiveHistory
         ? {
             activePathRecordIds: [...activePathRecordIds],
@@ -1702,7 +1727,11 @@ export class PicoRuntime {
     };
   }
 
-  getInitialSnapshot(threadId: string, beforeSeq?: number): ThreadInitialSnapshotResponse | null {
+  getInitialSnapshot(
+    threadId: string,
+    beforeSeq?: number,
+    view: ThreadSnapshotView = 'full',
+  ): ThreadInitialSnapshotResponse | null {
     if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 1)) {
       throw new ServiceError(400, 'beforeSeq must be a positive safe integer.');
     }
@@ -1714,7 +1743,7 @@ export class PicoRuntime {
       page: this.store.listRecordPage(threadId, beforeSeq, THREAD_HISTORY_PAGE_SIZE, false),
     }));
     if (initial.hasBranchFacts) {
-      const snapshot = this.getSnapshot(threadId, beforeSeq, true);
+      const snapshot = this.getSnapshot(threadId, beforeSeq, true, view);
       return snapshot ? { mode: 'complete', snapshot } : null;
     }
 
@@ -1734,7 +1763,7 @@ export class PicoRuntime {
         modelSelection: this.threadModelSelection(threadId),
         contextUsage: null,
         projectionStatus: 'not_loaded',
-        records: page.records.map(redactReasoningReplay),
+        records: page.records.map((record) => snapshotRecord(record, view)),
         executions: executions.map(redactExecutionImages),
         children: this.listThreads(thread.projectId).filter((candidate) => candidate.parentThreadId === threadId),
         hasEarlierRecords: page.hasEarlierRecords,

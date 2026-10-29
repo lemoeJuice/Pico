@@ -1266,7 +1266,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             const pending = { threadId: id, request: requestNumber, events: [] as InitialSnapshotEvent[], overflow: false };
             initialSnapshotEvents.current = pending;
             const initial = await fetchStableSnapshot(
-              () => api<ThreadInitialSnapshotResponse>(`/api/threads/${encodeURIComponent(id)}/initial-snapshot`),
+              () => api<ThreadInitialSnapshotResponse>(`/api/threads/${encodeURIComponent(id)}/initial-snapshot?view=timeline`),
               () => 0,
               current,
               { onRetry: ({ attempt }) => setSnapshotRetry({ threadId: id, attempt }) },
@@ -1287,7 +1287,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             }
           }
           value = await fetchStableSnapshot(
-            () => api<ThreadSnapshot>(`/api/threads/${encodeURIComponent(id)}`),
+            () => api<ThreadSnapshot>(`/api/threads/${encodeURIComponent(id)}?view=timeline`),
             () => snapshotVersions.current.get(id) ?? 0,
             () => requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current),
             {
@@ -2606,7 +2606,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     let hasEarlier = activeSnapshot?.hasEarlierRecords ?? false;
     while (!target && hasEarlier && beforeSeq !== undefined) {
       const result = await api<ThreadInitialSnapshotResponse>(
-        `/api/threads/${encodeURIComponent(targetThreadId)}/initial-snapshot?beforeSeq=${beforeSeq}`,
+        `/api/threads/${encodeURIComponent(targetThreadId)}/initial-snapshot?view=timeline&beforeSeq=${beforeSeq}`,
       );
       const page = result.snapshot;
       if (activeThreadId.current !== targetThreadId)
@@ -2633,7 +2633,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     if (!currentProjectId || !targetThreadId || targetThreadId.length > 200) {
       throw new Error('A Thread in the active Project must be selected.');
     }
-    const target = await api<ThreadSnapshot>(`/api/threads/${encodeURIComponent(targetThreadId)}`);
+    const target = await api<ThreadSnapshot>(`/api/threads/${encodeURIComponent(targetThreadId)}?view=timeline`);
     if (target.thread.projectId !== currentProjectId) {
       throw new Error('Plugin navigation is limited to Threads in the active Project.');
     }
@@ -2864,7 +2864,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     const previousScrollHeight = scroll?.scrollHeight ?? 0;
     try {
       const result = await api<ThreadInitialSnapshotResponse>(
-        `/api/threads/${encodeURIComponent(targetThreadId)}/initial-snapshot?beforeSeq=${beforeSeq}`,
+        `/api/threads/${encodeURIComponent(targetThreadId)}/initial-snapshot?view=timeline&beforeSeq=${beforeSeq}`,
       );
       const page = result.snapshot;
       if (activeThreadId.current !== targetThreadId) return;

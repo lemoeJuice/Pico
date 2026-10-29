@@ -377,6 +377,10 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     response.json({ threads: runtime.listArchivedThreads() });
   });
   app.get('/api/threads/:threadId/initial-snapshot', (request, response) => {
+    const view = request.query.view === 'timeline' ? 'timeline' : 'full';
+    if (request.query.view !== undefined && request.query.view !== 'timeline' && request.query.view !== 'full') {
+      throw new ServiceError(400, 'view must be timeline or full.');
+    }
     const beforeSeqValue = request.query.beforeSeq;
     if (beforeSeqValue !== undefined && typeof beforeSeqValue !== 'string') {
       throw new ServiceError(400, 'beforeSeq must be a positive safe integer.');
@@ -385,11 +389,15 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 1)) {
       throw new ServiceError(400, 'beforeSeq must be a positive safe integer.');
     }
-    const result = runtime.getInitialSnapshot(request.params.threadId!, beforeSeq);
+    const result = runtime.getInitialSnapshot(request.params.threadId!, beforeSeq, view);
     if (!result) return notFound(response, 'Thread not found');
     response.json(result);
   });
   app.get('/api/threads/:threadId', (request, response) => {
+    const view = request.query.view === 'timeline' ? 'timeline' : 'full';
+    if (request.query.view !== undefined && request.query.view !== 'timeline' && request.query.view !== 'full') {
+      throw new ServiceError(400, 'view must be timeline or full.');
+    }
     const beforeSeqValue = request.query.beforeSeq;
     if (beforeSeqValue !== undefined && typeof beforeSeqValue !== 'string') {
       throw new ServiceError(400, 'beforeSeq must be a positive safe integer.');
@@ -398,7 +406,7 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 1)) {
       throw new ServiceError(400, 'beforeSeq must be a positive safe integer.');
     }
-    const snapshot = runtime.getSnapshot(request.params.threadId!, beforeSeq);
+    const snapshot = runtime.getSnapshot(request.params.threadId!, beforeSeq, false, view);
     if (!snapshot) return notFound(response, 'Thread not found');
     response.json(snapshot);
   });

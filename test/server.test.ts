@@ -399,4 +399,96 @@ describe('Pico server access boundary', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it('serves model input diagnostics in full by default and omits them from timeline snapshots', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-timeline-snapshot-'));
+    let server: Awaited<ReturnType<typeof startServer>> | undefined;
+    try {
+      process.env.PICO_HOST = '127.0.0.1';
+      process.env.PICO_PORT = '0';
+      process.env.PICO_DB_PATH = join(directory, 'pico.sqlite');
+      delete process.env.PICO_ACCESS_TOKEN;
+      server = await startServer();
+      await setupTestCatalog(server.runtime, ['timeline-test-model']);
+      const project = await server.runtime.createProject('Timeline snapshots', directory);
+      const thread = server.runtime.createThread(project.id, 'host');
+      const largePrompt = 'private-prompt-canary-'.repeat(12_000);
+      server.runtime.store.appendMessage(thread.id, 'timeline-user', {
+        role: 'user',
+        content: 'Continue from here',
+        source: 'user',
+      });
+      server.runtime.store.appendPluginRecord(thread.id, 'pico.runtime', {
+        action: 'model-input-recorded',
+        executionId: 'model-execution-1',
+        requestId: 'model-request-1',
+        prompt: { system: largePrompt, turns: [{ content: largePrompt }] },
+        promptSummary: { model: 'timeline-test-model', characters: largePrompt.length },
+        projectionProvenance: [{ source: 'private-provenance-canary' }],
+      });
+
+      const base = `http://127.0.0.1:${server.port}/api/threads/${thread.id}`;
+      const initialFullResponse = await fetch(`${base}/initial-snapshot`);
+      const initialFull = await initialFullResponse.json();
+      expect(initialFull.snapshot.records.find((record: { kind: string; payload: { action?: string } }) =>
+        record.kind === 'plugin' && record.payload.action === 'model-input-recorded',
+      ).payload.prompt.system).toBe(largePrompt);
+      const initialTimelineResponse = await fetch(`${base}/initial-snapshot?view=timeline`);
+      const initialTimeline = await initialTimelineResponse.json();
+      expect(initialTimeline.mode).toBe('initial');
+      const initialCompact = initialTimeline.snapshot.records.find(
+        (record: { kind: string; payload: { action?: string } }) =>
+          record.kind === 'plugin' && record.payload.action === 'model-input-recorded',
+      );
+      expect(Object.keys(initialCompact.payload).sort()).toEqual(['action', 'executionId', 'pluginId', 'requestId']);
+      expect(JSON.stringify(initialTimeline)).not.toContain('private-prompt-canary');
+
+      server.runtime.rewindContextToMessage(thread.id, 'timeline-user');
+
+      const fullResponse = await fetch(`${base}/initial-snapshot`);
+      const full = await fullResponse.json();
+      const fullInputRecord = full.snapshot.records.find(
+        (record: { kind: string; payload: { action?: string } }) =>
+          record.kind === 'plugin' && record.payload.action === 'model-input-recorded',
+      );
+      expect(fullInputRecord.payload.prompt.system).toBe(largePrompt);
+      expect(fullInputRecord.payload.projectionProvenance).toEqual([{ source: 'private-provenance-canary' }]);
+
+      const timelineResponse = await fetch(`${base}/initial-snapshot?view=timeline`);
+      const timeline = await timelineResponse.json();
+      expect(timeline.mode).toBe('complete');
+      const compact = timeline.snapshot.records.find(
+        (record: { kind: string; payload: { action?: string } }) =>
+          record.kind === 'plugin' && record.payload.action === 'model-input-recorded',
+      );
+      expect(compact).toMatchObject({
+        id: expect.any(String),
+        seq: 2,
+        kind: 'plugin',
+        payload: {
+          pluginId: 'pico.runtime',
+          action: 'model-input-recorded',
+          executionId: 'model-execution-1',
+          requestId: 'model-request-1',
+        },
+      });
+      expect(Object.keys(compact.payload).sort()).toEqual(['action', 'executionId', 'pluginId', 'requestId']);
+      expect(JSON.stringify(timeline)).not.toContain('private-prompt-canary');
+      expect(JSON.stringify(timeline)).not.toContain('private-provenance-canary');
+
+      const fullSnapshotResponse = await fetch(`${base}`);
+      const fullSnapshot = await fullSnapshotResponse.json();
+      expect(fullSnapshot.records.find((record: { kind: string; payload: { action?: string } }) =>
+        record.kind === 'plugin' && record.payload.action === 'model-input-recorded',
+      ).payload.prompt.system).toBe(largePrompt);
+      const compactSnapshotResponse = await fetch(`${base}?view=timeline`);
+      const compactSnapshot = await compactSnapshotResponse.json();
+      expect(compactSnapshot.hasInactiveHistory).toBe(true);
+      expect(JSON.stringify(compactSnapshot)).not.toContain('private-prompt-canary');
+      expect(JSON.stringify(compactSnapshot)).not.toContain('private-provenance-canary');
+    } finally {
+      await server?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
