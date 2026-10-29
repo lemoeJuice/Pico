@@ -2,6 +2,7 @@ import {
   appendAssistantDraft,
   appendAssistantPreview,
   clearAssistantDraft,
+  type AssistantDraft,
   type AssistantDrafts,
   type ToolCallPreview,
 } from './assistant-drafts.js';
@@ -22,6 +23,7 @@ export interface AssistantToolPreviewSlot {
 type Listener = () => void;
 type ScheduleContentNotification = (callback: () => void) => void;
 const EMPTY_TOOL_SLOTS: readonly AssistantToolPreviewSlot[] = [];
+const EMPTY_CONTENTS: readonly AssistantDraftContent[] = [];
 
 function scheduleContentNotification(callback: () => void): void {
   if (typeof requestAnimationFrame === 'function') requestAnimationFrame(callback);
@@ -36,6 +38,15 @@ function toolListSubscriptionKey(threadId: string, executionId: string): string 
   return `${threadId}\u0000${executionId}`;
 }
 
+function sameContents(left: readonly AssistantDraftContent[], right: readonly AssistantDraftContent[]): boolean {
+  return left.length === right.length && left.every((item, index) => {
+    const other = right[index];
+    return item.executionId === other?.executionId && item.text === other.text &&
+      item.unconfirmed === other.unconfirmed && item.previewIncomplete === other.previewIncomplete &&
+      item.reasoningSummary === other.reasoningSummary;
+  });
+}
+
 function sameToolSlots(left: readonly AssistantToolPreviewSlot[], right: readonly AssistantToolPreviewSlot[]): boolean {
   return (
     left.length === right.length &&
@@ -45,7 +56,9 @@ function sameToolSlots(left: readonly AssistantToolPreviewSlot[], right: readonl
 
 export class AssistantDraftStore {
   private drafts: AssistantDrafts = {};
+  private readonly handoffs = new Map<string, Map<string, AssistantDraft>>();
   private readonly contentSnapshots = new Map<string, AssistantDraftContent>();
+  private readonly contentsSnapshots = new Map<string, readonly AssistantDraftContent[]>();
   private readonly toolSlots = new Map<string, { executionId: string; slots: readonly AssistantToolPreviewSlot[] }>();
   private readonly contentListeners = new Map<string, Set<Listener>>();
   private readonly executionListeners = new Map<string, Set<Listener>>();
@@ -63,18 +76,31 @@ export class AssistantDraftStore {
     return this.contentSnapshots.get(threadId) ?? null;
   }
 
+  getContentForExecution(threadId: string, executionId: string): AssistantDraftContent | null {
+    return this.contentsSnapshots.get(threadId)?.find((content) => content.executionId === executionId) ?? null;
+  }
+
+  getContents(threadId: string): readonly AssistantDraftContent[] {
+    return this.contentsSnapshots.get(threadId) ?? EMPTY_CONTENTS;
+  }
+
   getExecutionId(threadId: string): string | null {
     return this.drafts[threadId]?.executionId ?? null;
   }
 
   getToolSlots(threadId: string, executionId: string): readonly AssistantToolPreviewSlot[] {
-    const current = this.toolSlots.get(threadId);
-    return current?.executionId === executionId ? current.slots : EMPTY_TOOL_SLOTS;
+    const key = toolListSubscriptionKey(threadId, executionId);
+    const cached = this.toolSlots.get(key);
+    if (cached) return cached.slots;
+    const draft = this.findDraft(threadId, executionId);
+    const slots = draft?.tools?.map(({ index, name }) => ({ index, ...(name === undefined ? {} : { name }) })) ?? [];
+    if (slots.length > 0) this.toolSlots.set(key, { executionId, slots });
+    return slots.length > 0 ? slots : EMPTY_TOOL_SLOTS;
   }
 
   getToolPreview(threadId: string, executionId: string, index: number): ToolCallPreview | null {
-    const current = this.drafts[threadId];
-    return current?.executionId === executionId ? (current.tools?.find((call) => call.index === index) ?? null) : null;
+    const current = this.findDraft(threadId, executionId);
+    return current?.tools?.find((call) => call.index === index) ?? null;
   }
 
   subscribeContent(threadId: string, listener: Listener): () => void {
@@ -94,6 +120,7 @@ export class AssistantDraftStore {
   }
 
   appendText(threadId: string, executionId: string, delta: string): void {
+    this.preserveCurrentDraftForHandoff(threadId, executionId);
     this.replaceDrafts(appendAssistantDraft(this.drafts, threadId, executionId, delta), true);
   }
 
@@ -104,6 +131,7 @@ export class AssistantDraftStore {
   ): void {
     const current = this.drafts[threadId];
     if (current?.executionId === executionId && current.previewIncomplete) return;
+    this.preserveCurrentDraftForHandoff(threadId, executionId);
     this.replaceDrafts(appendAssistantPreview(this.drafts, threadId, executionId, preview));
   }
 
@@ -133,10 +161,18 @@ export class AssistantDraftStore {
   }
 
   clear(threadId: string, executionId?: string): void {
+    if (executionId === undefined) {
+      this.handoffs.delete(threadId);
+    } else {
+      const byExecution = this.handoffs.get(threadId);
+      byExecution?.delete(executionId);
+      if (byExecution?.size === 0) this.handoffs.delete(threadId);
+    }
     this.replaceDrafts(clearAssistantDraft(this.drafts, threadId, executionId));
   }
 
   clearAll(): void {
+    this.handoffs.clear();
     this.replaceDrafts({});
   }
 
@@ -146,6 +182,35 @@ export class AssistantDraftStore {
       next[threadId] = draft.unconfirmed ? draft : { ...draft, unconfirmed: true };
     }
     this.replaceDrafts(next);
+  }
+
+  private findDraft(threadId: string, executionId: string): AssistantDraft | null {
+    const active = this.drafts[threadId];
+    if (active?.executionId === executionId) return active;
+    return this.handoffs.get(threadId)?.get(executionId) ?? null;
+  }
+
+  private preserveCurrentDraftForHandoff(threadId: string, nextExecutionId: string): void {
+    const current = this.drafts[threadId];
+    if (!current || current.executionId === nextExecutionId) return;
+    const byExecution = this.handoffs.get(threadId) ?? new Map<string, AssistantDraft>();
+    byExecution.set(current.executionId, current);
+    this.handoffs.set(threadId, byExecution);
+  }
+
+  private toContent(draft: AssistantDraft): AssistantDraftContent {
+    return {
+      executionId: draft.executionId,
+      text: draft.text,
+      ...(draft.unconfirmed ? { unconfirmed: true } : {}),
+      ...(draft.previewIncomplete ? { previewIncomplete: true } : {}),
+      ...(draft.reasoningSummary === undefined ? {} : { reasoningSummary: draft.reasoningSummary }),
+    };
+  }
+
+  private allDraftsForThread(threadId: string, active = this.drafts[threadId]): AssistantDraft[] {
+    const previous = [...(this.handoffs.get(threadId)?.values() ?? [])];
+    return [...previous.filter((draft) => draft.executionId !== active?.executionId), ...(active ? [active] : [])];
   }
 
   private subscribe(registry: Map<string, Set<Listener>>, key: string, listener: Listener): () => void {
@@ -179,24 +244,21 @@ export class AssistantDraftStore {
   }
 
   private replaceDrafts(next: AssistantDrafts, deferContent = false): void {
-    if (next === this.drafts) return;
     const previous = this.drafts;
     this.drafts = next;
-    const threadIds = new Set([...Object.keys(previous), ...Object.keys(next)]);
+    const threadIds = new Set([
+      ...Object.keys(previous),
+      ...Object.keys(next),
+      ...this.handoffs.keys(),
+      ...this.contentsSnapshots.keys(),
+    ]);
 
     for (const threadId of threadIds) {
       const before = previous[threadId];
       const after = next[threadId];
+      let contentChanged = false;
       const beforeContent = this.contentSnapshots.get(threadId) ?? null;
-      const afterContent = after
-        ? {
-            executionId: after.executionId,
-            text: after.text,
-            ...(after.unconfirmed ? { unconfirmed: true } : {}),
-            ...(after.previewIncomplete ? { previewIncomplete: true } : {}),
-            ...(after.reasoningSummary === undefined ? {} : { reasoningSummary: after.reasoningSummary }),
-          }
-        : null;
+      const afterContent = after ? this.toContent(after) : null;
       if (
         beforeContent?.executionId !== afterContent?.executionId ||
         beforeContent?.text !== afterContent?.text ||
@@ -206,44 +268,42 @@ export class AssistantDraftStore {
       ) {
         if (afterContent) this.contentSnapshots.set(threadId, afterContent);
         else this.contentSnapshots.delete(threadId);
-        this.notifyContent(threadId, deferContent);
+        contentChanged = true;
       }
+
+      const allBefore = this.contentsSnapshots.get(threadId) ?? EMPTY_CONTENTS;
+      const allAfter = this.allDraftsForThread(threadId, after).map((draft) => this.toContent(draft));
+      if (!sameContents(allBefore, allAfter)) {
+        if (allAfter.length > 0) this.contentsSnapshots.set(threadId, allAfter);
+        else this.contentsSnapshots.delete(threadId);
+        contentChanged = true;
+      }
+      if (contentChanged) this.notifyContent(threadId, deferContent);
 
       if (before?.executionId !== after?.executionId) this.notify(this.executionListeners, threadId);
 
-      const afterSlots =
-        after?.tools?.map(({ index, name }) => ({ index, ...(name === undefined ? {} : { name }) })) ?? [];
-      const cachedSlots = this.toolSlots.get(threadId);
-      const previousSlots = cachedSlots?.slots ?? EMPTY_TOOL_SLOTS;
-      const previousExecutionId = cachedSlots?.executionId ?? before?.executionId;
-      if (previousExecutionId !== after?.executionId || !sameToolSlots(previousSlots, afterSlots)) {
-        if (after?.executionId && afterSlots.length > 0) {
-          const stableSlots = sameToolSlots(previousSlots, afterSlots) ? previousSlots : afterSlots;
-          this.toolSlots.set(threadId, { executionId: after.executionId, slots: stableSlots });
-        } else {
-          this.toolSlots.delete(threadId);
+      const beforeDrafts = this.allDraftsForThread(threadId, before);
+      const afterDrafts = this.allDraftsForThread(threadId, after);
+      const executionIds = new Set([...beforeDrafts, ...afterDrafts].map((draft) => draft.executionId));
+      for (const executionId of executionIds) {
+        const oldDraft = beforeDrafts.find((draft) => draft.executionId === executionId);
+        const newDraft = afterDrafts.find((draft) => draft.executionId === executionId);
+        const oldSlots = oldDraft?.tools?.map(({ index, name }) => ({ index, ...(name === undefined ? {} : { name }) })) ?? [];
+        const newSlots = newDraft?.tools?.map(({ index, name }) => ({ index, ...(name === undefined ? {} : { name }) })) ?? [];
+        const listKey = toolListSubscriptionKey(threadId, executionId);
+        if (!sameToolSlots(oldSlots, newSlots)) {
+          if (newSlots.length > 0) {
+            const cached = this.toolSlots.get(listKey)?.slots;
+            this.toolSlots.set(listKey, { executionId, slots: cached && sameToolSlots(cached, newSlots) ? cached : newSlots });
+          } else this.toolSlots.delete(listKey);
+          this.notify(this.toolListListeners, listKey);
         }
-        if (previousExecutionId)
-          this.notify(this.toolListListeners, toolListSubscriptionKey(threadId, previousExecutionId));
-        if (after?.executionId && after.executionId !== previousExecutionId) {
-          this.notify(this.toolListListeners, toolListSubscriptionKey(threadId, after.executionId));
-        }
-      } else if (after?.executionId && cachedSlots && cachedSlots.slots !== previousSlots) {
-        this.toolSlots.set(threadId, { executionId: after.executionId, slots: previousSlots });
-      }
-
-      const beforeTools = before?.tools ?? [];
-      const afterTools = after?.tools ?? [];
-      const indices = new Set([...beforeTools.map((call) => call.index), ...afterTools.map((call) => call.index)]);
-      for (const index of indices) {
-        const oldCall =
-          before?.executionId === after?.executionId ? beforeTools.find((call) => call.index === index) : undefined;
-        const newCall = afterTools.find((call) => call.index === index);
-        if (oldCall !== newCall || before?.executionId !== after?.executionId) {
-          const executionId = after?.executionId ?? before?.executionId;
-          if (executionId) this.notify(this.toolListeners, toolSubscriptionKey(threadId, executionId, index));
-          if (before?.executionId && before.executionId !== executionId) {
-            this.notify(this.toolListeners, toolSubscriptionKey(threadId, before.executionId, index));
+        const oldTools = oldDraft?.tools ?? [];
+        const newTools = newDraft?.tools ?? [];
+        const indices = new Set([...oldTools.map((call) => call.index), ...newTools.map((call) => call.index)]);
+        for (const index of indices) {
+          if (oldTools.find((call) => call.index === index) !== newTools.find((call) => call.index === index)) {
+            this.notify(this.toolListeners, toolSubscriptionKey(threadId, executionId, index));
           }
         }
       }

@@ -54,6 +54,7 @@ import {
   type AssistantStreamExecutions,
 } from './assistant-drafts.js';
 import { assistantDraftStore } from './assistant-drafts-store.js';
+import { shouldRenderAssistantDraft } from './assistant-draft-handoff.js';
 import { noticeForThread, withThreadNotice, withoutThreadNotice, type ThreadNotices } from './thread-notices.js';
 import { pluginUiContributionKey, toolResultForCall, uiContributionsAt } from './ui-contributions.js';
 import {
@@ -906,6 +907,18 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
   useEffect(() => setSelectedSlashCommand(null), [threadId]);
 
+  useEffect(() => {
+    if (!snapshot || snapshot.thread.id !== threadId || snapshot.thread.projectId !== projectId) return;
+    const visibleRecords = snapshot.hasInactiveHistory && snapshot.activePathRecordIds && preservedHistoryThreadId !== threadId
+      ? snapshot.records.filter((record) => snapshot.activePathRecordIds!.includes(record.id))
+      : snapshot.records;
+    for (const draft of assistantDraftStore.getContents(snapshot.thread.id)) {
+      if (!shouldRenderAssistantDraft(draft.executionId, visibleRecords)) {
+        assistantDraftStore.clear(snapshot.thread.id, draft.executionId);
+      }
+    }
+  }, [snapshot, threadId, projectId, preservedHistoryThreadId]);
+
   const toggleThinking = useCallback(
     (expanded: boolean, summary: HTMLElement): void => {
       if (expanded === thinkingExpanded) return;
@@ -1224,13 +1237,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             resumeModelDraft(id, execution.id);
           }
         }
-        const draftExecutionId = assistantDraftStore.getExecutionId(id);
-        if (draftExecutionId) {
-          const committed = value.records.some((record) => record.id === `${draftExecutionId}:assistant`);
+        for (const draft of assistantDraftStore.getContents(id)) {
           const failed = value.executions.some(
-            (execution) => execution.id === draftExecutionId && (execution.status === 'failed' || execution.status === 'interrupted'),
+            (execution) => execution.id === draft.executionId && (execution.status === 'failed' || execution.status === 'interrupted'),
           );
-          if (committed || failed) assistantDraftStore.clear(id, draftExecutionId);
+          if (failed) assistantDraftStore.clear(id, draft.executionId);
         }
         for (const record of value.records) {
           if (
@@ -1680,7 +1691,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           if (recordThreadId && record?.kind === 'assistant' && record.id.endsWith(':assistant')) {
             const executionId = record.id.slice(0, -':assistant'.length);
             settleModelExecution(executionId);
-            assistantDraftStore.clear(recordThreadId, executionId);
           }
         } else if (event.type === 'execution.updated') {
           const execution = event.execution as Execution | undefined;
@@ -1806,7 +1816,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         } else if (event.type === 'runtime.error') {
           const failedThreadId = typeof event.threadId === 'string' ? event.threadId : null;
           if (failedThreadId) {
-            assistantDraftStore.clear(failedThreadId);
+            const failedExecutionId = typeof event.executionId === 'string'
+              ? event.executionId
+              : assistantDraftStore.getExecutionId(failedThreadId);
+            if (failedExecutionId) assistantDraftStore.clear(failedThreadId, failedExecutionId);
           }
           if (failedThreadId === activeThreadId.current && event.source !== 'model-execution') {
             setError(String(event.message ?? 'Runtime error'));
@@ -3398,7 +3411,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       ),
                     )}
                     {selectedThreadCompacting ? <ContextCompactionProgressCard /> : null}
-                    <AssistantDraftMessage threadId={selectedThread.id} liveEntrances={liveEntrances} />
+                    <AssistantDraftMessages
+                      threadId={selectedThread.id}
+                      records={timelineRecords}
+                      liveEntrances={liveEntrances}
+                    />
                     {!activeSnapshot ? (
                       <div className="empty-thread" role="status">
                         {snapshotError?.threadId === selectedThread.id ? (
@@ -4989,9 +5006,61 @@ function useAssistantExecutionId(threadId: string) {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-function AssistantDraftMessage({ threadId, liveEntrances }: { threadId: string; liveEntrances: ReadonlySet<string> }) {
-  const draft = useAssistantDraftContent(threadId);
-  if (!draft) return null;
+function useAssistantDraftContents(threadId: string) {
+  const subscribe = useCallback(
+    (listener: () => void) => assistantDraftStore.subscribeContent(threadId, listener),
+    [threadId],
+  );
+  const getSnapshot = useCallback(() => assistantDraftStore.getContents(threadId), [threadId]);
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+function AssistantDraftMessages({
+  threadId,
+  records,
+  liveEntrances,
+}: {
+  threadId: string;
+  records: readonly CanonicalRecord[];
+  liveEntrances: ReadonlySet<string>;
+}) {
+  const drafts = useAssistantDraftContents(threadId);
+  return (
+    <>
+      {drafts.map((draft) => (
+        <AssistantDraftMessage
+          key={draft.executionId}
+          threadId={threadId}
+          executionId={draft.executionId}
+          records={records}
+          liveEntrances={liveEntrances}
+        />
+      ))}
+    </>
+  );
+}
+
+function AssistantDraftMessage({
+  threadId,
+  executionId,
+  records,
+  liveEntrances,
+}: {
+  threadId: string;
+  executionId: string;
+  records: readonly CanonicalRecord[];
+  liveEntrances: ReadonlySet<string>;
+}) {
+  const subscribe = useCallback(
+    (listener: () => void) => assistantDraftStore.subscribeContent(threadId, listener),
+    [threadId],
+  );
+  const getSnapshot = useCallback(
+    () => assistantDraftStore.getContentForExecution(threadId, executionId),
+    [threadId, executionId],
+  );
+  const draft = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  if (!draft || !shouldRenderAssistantDraft(draft.executionId, records)) return null;
   return (
     <div className={`assistant-message draft-message ${liveEntrances.has(`draft:${draft.executionId}`) ? 'live-content-entrance' : ''}`}>
       <div className="assistant-avatar">

@@ -161,4 +161,25 @@ describe('AssistantDraftStore', () => {
     expect(firstThreadChanged).toHaveBeenCalledTimes(1);
     expect(secondThreadChanged).not.toHaveBeenCalled();
   });
+
+  it('preserves an earlier execution draft until its own snapshot handoff completes', () => {
+    const store = new AssistantDraftStore();
+    store.appendText('thread-a', 'execution-a', 'first reply');
+
+    // A later execution starts before the earlier assistant record is visible.
+    store.appendText('thread-a', 'execution-b', 'second reply');
+
+    expect(store.getContents('thread-a')).toEqual([
+      { executionId: 'execution-a', text: 'first reply' },
+      { executionId: 'execution-b', text: 'second reply' },
+    ]);
+    expect(store.getContent('thread-a')).toMatchObject({ executionId: 'execution-b', text: 'second reply' });
+
+    store.clear('thread-a', 'execution-a');
+    expect(store.getContentForExecution('thread-a', 'execution-a')).toBeNull();
+    expect(store.getContents('thread-a')).toEqual([{ executionId: 'execution-b', text: 'second reply' }]);
+
+    store.clear('thread-a', 'execution-b');
+    expect(store.getContents('thread-a')).toEqual([]);
+  });
 });
