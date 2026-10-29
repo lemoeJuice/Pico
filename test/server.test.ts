@@ -346,14 +346,29 @@ describe('Pico server access boundary', () => {
       expect(latestResponse.status).toBe(200);
       const latest = (await latestResponse.json()) as ThreadSnapshot;
       expect(latest.modelSelection).toMatchObject({ modelId: '', adapterId: '', parameters: { options: {} } });
-      expect(latest.records).toHaveLength(100);
-      expect(latest.records[0]?.id).toBe('api-history-135');
+      expect(latest.records).toHaveLength(20);
+      expect(latest.records[0]?.id).toBe('api-history-215');
       expect(latest.hasEarlierRecords).toBe(true);
 
       const olderResponse = await fetch(`${base}/api/threads/${thread.id}?beforeSeq=${latest.records[0]!.seq}`);
       const older = (await olderResponse.json()) as ThreadSnapshot;
-      expect(older.records).toHaveLength(100);
-      expect(older.records.at(-1)?.id).toBe('api-history-134');
+      expect(older.records).toHaveLength(20);
+      expect(older.records.at(-1)?.id).toBe('api-history-214');
+
+      const initialResponse = await fetch(`${base}/api/threads/${thread.id}/initial-snapshot`);
+      expect(initialResponse.status).toBe(200);
+      const initial = await initialResponse.json();
+      expect(initial).toMatchObject({ mode: 'initial', snapshot: { projectionStatus: 'not_loaded', contextUsage: null } });
+      expect(initial.snapshot.records).toHaveLength(20);
+      expect(initial.snapshot.records[0]?.id).toBe('api-history-215');
+
+      const initialEarlierResponse = await fetch(
+        `${base}/api/threads/${thread.id}/initial-snapshot?beforeSeq=${initial.snapshot.records[0].seq}`,
+      );
+      const initialEarlier = await initialEarlierResponse.json();
+      expect(initialEarlier.mode).toBe('initial');
+      expect(initialEarlier.snapshot.records).toHaveLength(20);
+      expect(initialEarlier.snapshot.records.at(-1)?.id).toBe('api-history-214');
       expect(older.hasEarlierRecords).toBe(true);
 
       const invalidCursor = await fetch(`${base}/api/threads/${thread.id}?beforeSeq=not-a-number`);

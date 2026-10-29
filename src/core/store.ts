@@ -1279,7 +1279,25 @@ export class PicoStore {
     );
   }
 
-  listRecordPage(threadId: string, beforeSeq?: number, limit = 100): CanonicalRecordPage {
+  hasContextBranchFacts(threadId: string): boolean {
+    // Any matching marker triggers the full projection path. Search conservatively so even
+    // malformed or legacy payloads that mention a branch operation cannot be shown as active.
+    return Boolean(
+      this.db
+        .prepare(`SELECT 1 FROM canonical_records
+          WHERE thread_id = ? AND kind = 'plugin'
+            AND (instr(payload_json, 'context-rewound') > 0 OR instr(payload_json, 'context-restored') > 0)
+          LIMIT 1`)
+        .get(threadId),
+    );
+  }
+
+  listRecordPage(
+    threadId: string,
+    beforeSeq?: number,
+    limit = 100,
+    includeActiveBatchParents = true,
+  ): CanonicalRecordPage {
     const pageSize = Math.max(1, Math.min(Math.floor(limit), 500));
     const rows = (
       beforeSeq === undefined
@@ -1292,9 +1310,9 @@ export class PicoStore {
     ) as SqlRow[];
     let records = rows.reverse().map((row) => this.recordFromRow(row));
 
-    // Keep the parent Model Step visible when an old Tool Batch is still active.
-    // The range remains contiguous so the UI can continue paging from its first record.
-    if (beforeSeq === undefined && records.length > 0) {
+    // Full snapshots keep the parent Model Step visible when an old Tool Batch is active.
+    // The initial lightweight endpoint disables this compatibility behavior to stay bounded.
+    if (includeActiveBatchParents && beforeSeq === undefined && records.length > 0) {
       const activeBatches = this.db
         .prepare(
           `SELECT DISTINCT batch_id FROM executions

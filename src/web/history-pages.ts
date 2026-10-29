@@ -60,12 +60,15 @@ export function mergeEarlierSnapshot(current: ThreadSnapshot, earlier: ThreadSna
     activePathExecutionIds: _executionIds,
     hasInactiveHistory: _inactive,
     historyBranches: _branches,
+    projectionStatus: _projectionStatus,
     ...withoutProjection
   } = merged;
   return {
     ...withoutProjection,
     thread: current.thread,
     modelSelection: current.modelSelection,
+    contextUsage: current.contextUsage,
+    ...(current.projectionStatus ? { projectionStatus: current.projectionStatus } : {}),
     children: current.children,
     executions: mergeById(earlier.executions, current.executions, (execution) => execution.id),
     ...(current.activePathRecordIds ? { activePathRecordIds: current.activePathRecordIds } : {}),

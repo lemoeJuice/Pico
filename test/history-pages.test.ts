@@ -60,6 +60,14 @@ describe('Thread history page merging', () => {
     expect(merged.hasEarlierRecords).toBe(false);
   });
 
+  it('keeps resolved metadata when an earlier lightweight page has no context usage', () => {
+    const current = { ...snapshot('thread', records(11, 20), true), contextUsage: { inputTokens: 123, source: 'estimate' as const } };
+    const earlier = { ...snapshot('thread', records(1, 10), false), contextUsage: null, projectionStatus: 'not_loaded' as const };
+    const merged = mergeEarlierSnapshot(current, earlier);
+    expect(merged.contextUsage).toEqual(current.contextUsage);
+    expect(merged.projectionStatus).toBeUndefined();
+  });
+
   it('merges overlapping reconnect snapshots but never hides a missing record range', () => {
     const current = snapshot('thread', records(10, 20), true);
     const overlapping = snapshot('thread', records(15, 25), false, 'paused');

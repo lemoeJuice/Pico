@@ -32,7 +32,7 @@ import type {
   ToolResultPayload,
   UiContribution,
 } from '../core/types.js';
-import type { ModelInputAttempt, ThreadSnapshot, ThreadToolView } from '../contracts/runtime.js';
+import type { ModelInputAttempt, ThreadInitialSnapshotResponse, ThreadSnapshot, ThreadToolView } from '../contracts/runtime.js';
 import { isSessionExpired } from './session.js';
 import { pauseReasonIsError, visiblePauseReason } from './pause-reason.js';
 import { shouldSubmitOnEnter } from './composer-keys.js';
@@ -93,6 +93,7 @@ import type {
 } from '../contracts/model-catalog.js';
 import { DeveloperSettings } from './developer-settings.js';
 import { appendSnapshotExecution, appendSnapshotRecord, mergeEarlierSnapshot, mergeLatestSnapshot } from './history-pages.js';
+import { isHistoryBranchChange, reconcileInitialSnapshot, type InitialSnapshotEvent } from './initial-snapshot-events.js';
 import {
   Archive,
   ArrowUpRight,
@@ -878,6 +879,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const toolsMenuRef = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
   const snapshotRequest = useRef(0);
+  const snapshotLoad = useRef<{ threadId: string; request: number; promise: Promise<void> } | null>(null);
+  const initialSnapshotEvents = useRef<{ threadId: string; request: number; events: InitialSnapshotEvent[]; overflow: boolean } | null>(null);
   const projectThreadVersions = useRef(new Map<string, number>());
   const archivedThreadVersion = useRef(0);
   const activeProjectId = useRef(projectId);
@@ -1197,63 +1200,98 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   };
 
   const loadSnapshot = useCallback(
-    async (id: string) => {
-      if (!snapshotThreadIsSelected(id, activeThreadId.current)) return;
+    (id: string): Promise<void> => {
+      if (!snapshotThreadIsSelected(id, activeThreadId.current)) return Promise.resolve();
+      const existing = snapshotLoad.current;
+      if (existing?.threadId === id && existing.request === snapshotRequest.current) return existing.promise;
       const requestNumber = ++snapshotRequest.current;
-      setSnapshotError(null);
-      setSnapshotRetry(null);
-      const refreshTimer = window.setTimeout(() => {
-        if (requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current)) {
-          setSnapshotRefreshingThreadId(id);
-        }
-      }, 600);
-      let value: ThreadSnapshot | null;
-      try {
-        value = await fetchStableSnapshot(
-          () => api<ThreadSnapshot>(`/api/threads/${encodeURIComponent(id)}`),
-          () => snapshotVersions.current.get(id) ?? 0,
-          () => requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current),
-          {
-            onRetry: ({ attempt }) => setSnapshotRetry({ threadId: id, attempt }),
-          },
-        );
-      } catch (caught) {
-        if (requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current)) {
-          setSnapshotRetry(null);
-          setSnapshotError({ threadId: id, message: caught instanceof Error ? caught.message : String(caught) });
-        }
-        throw caught;
-      } finally {
-        window.clearTimeout(refreshTimer);
-        if (requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current)) {
-          setSnapshotRefreshingThreadId(null);
-        }
-      }
-      if (value && requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current)) {
+      const current = () => requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current);
+      const run = async (): Promise<void> => {
+        setSnapshotError(null);
         setSnapshotRetry(null);
-        observeModelExecutions(value.executions);
-        for (const execution of value.executions) {
-          if (execution.kind === 'model' && execution.status === 'running' && unavailableModelExecutions.current.has(execution.id)) {
-            resumeModelDraft(id, execution.id);
+        const refreshTimer = window.setTimeout(() => {
+          if (requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current)) {
+            setSnapshotRefreshingThreadId(id);
           }
-        }
-        for (const draft of assistantDraftStore.getContents(id)) {
-          const failed = value.executions.some(
-            (execution) => execution.id === draft.executionId && (execution.status === 'failed' || execution.status === 'interrupted'),
+        }, 600);
+        let value: ThreadSnapshot | null;
+        try {
+          if (snapshotRef.current?.thread.id !== id) {
+            const pending = { threadId: id, request: requestNumber, events: [] as InitialSnapshotEvent[], overflow: false };
+            initialSnapshotEvents.current = pending;
+            const initial = await fetchStableSnapshot(
+              () => api<ThreadInitialSnapshotResponse>(`/api/threads/${encodeURIComponent(id)}/initial-snapshot`),
+              () => 0,
+              current,
+              { onRetry: ({ attempt }) => setSnapshotRetry({ threadId: id, attempt }) },
+            );
+            if (initialSnapshotEvents.current === pending) initialSnapshotEvents.current = null;
+            if (initial && current()) {
+              const ready = pending.overflow ? null : reconcileInitialSnapshot(initial.snapshot, pending.events);
+              if (ready) {
+                observeModelExecutions(ready.executions);
+                for (const execution of ready.executions) {
+                  if (execution.kind === 'model' && execution.status === 'running' && unavailableModelExecutions.current.has(execution.id)) {
+                    resumeModelDraft(id, execution.id);
+                  }
+                }
+                setSnapshotRetry(null);
+                setSnapshot((previous) => mergeLatestSnapshot(previous, ready));
+              }
+            }
+          }
+          value = await fetchStableSnapshot(
+            () => api<ThreadSnapshot>(`/api/threads/${encodeURIComponent(id)}`),
+            () => snapshotVersions.current.get(id) ?? 0,
+            () => requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current),
+            {
+              onRetry: ({ attempt }) => setSnapshotRetry({ threadId: id, attempt }),
+            },
           );
-          if (failed) assistantDraftStore.clear(id, draft.executionId);
-        }
-        for (const record of value.records) {
-          if (
-            record.kind === 'message' &&
-            record.payload.source === 'user' &&
-            typeof record.payload.content === 'string'
-          ) {
-            acceptMessage(id, record.id, record.payload.content);
+        } catch (caught) {
+          if (requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current)) {
+            setSnapshotRetry(null);
+            setSnapshotError({ threadId: id, message: caught instanceof Error ? caught.message : String(caught) });
+          }
+          throw caught;
+        } finally {
+          if (initialSnapshotEvents.current?.request === requestNumber) initialSnapshotEvents.current = null;
+          window.clearTimeout(refreshTimer);
+          if (requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current)) {
+            setSnapshotRefreshingThreadId(null);
           }
         }
-        setSnapshot((current) => mergeLatestSnapshot(current, value));
-      }
+        if (value && requestNumber === snapshotRequest.current && snapshotThreadIsSelected(id, activeThreadId.current)) {
+          setSnapshotRetry(null);
+          observeModelExecutions(value.executions);
+          for (const execution of value.executions) {
+            if (execution.kind === 'model' && execution.status === 'running' && unavailableModelExecutions.current.has(execution.id)) {
+              resumeModelDraft(id, execution.id);
+            }
+          }
+          for (const draft of assistantDraftStore.getContents(id)) {
+            const failed = value.executions.some(
+              (execution) => execution.id === draft.executionId && (execution.status === 'failed' || execution.status === 'interrupted'),
+            );
+            if (failed) assistantDraftStore.clear(id, draft.executionId);
+          }
+          for (const record of value.records) {
+            if (
+              record.kind === 'message' &&
+              record.payload.source === 'user' &&
+              typeof record.payload.content === 'string'
+            ) {
+              acceptMessage(id, record.id, record.payload.content);
+            }
+          }
+          setSnapshot((current) => mergeLatestSnapshot(current, value));
+        }
+      };
+      const promise = run().finally(() => {
+        if (snapshotLoad.current?.request === requestNumber) snapshotLoad.current = null;
+      });
+      snapshotLoad.current = { threadId: id, request: requestNumber, promise };
+      return promise;
     },
     [acceptMessage, observeModelExecutions, resumeModelDraft],
   );
@@ -1576,6 +1614,28 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         } catch {
           return;
         }
+        const pendingInitial = initialSnapshotEvents.current;
+        if (pendingInitial && pendingInitial.request === snapshotRequest.current) {
+          let update: InitialSnapshotEvent | null = null;
+          if (event.type === 'record' && event.record && typeof event.record === 'object') {
+            const record = event.record as CanonicalRecord;
+            if (record.threadId === pendingInitial.threadId) update = { type: 'record', record };
+          } else if (event.type === 'execution.updated' && event.execution && typeof event.execution === 'object') {
+            const execution = event.execution as Execution;
+            if (execution.threadId === pendingInitial.threadId) update = { type: 'execution', execution };
+          } else if ((event.type === 'thread.created' || event.type === 'thread.updated' || event.type === 'thread.hidden') && event.thread && typeof event.thread === 'object') {
+            const changedThread = event.thread as Thread;
+            if (changedThread.id === pendingInitial.threadId || changedThread.parentThreadId === pendingInitial.threadId) {
+              update = { type: 'thread', thread: changedThread };
+            }
+          } else if (event.type === 'thread.model-selection.updated' && event.threadId === pendingInitial.threadId && event.selection && typeof event.selection === 'object') {
+            update = { type: 'modelSelection', selection: event.selection as ThreadModelSelection };
+          }
+          if (update) {
+            if (pendingInitial.events.length < 1000) pendingInitial.events.push(update);
+            else pendingInitial.overflow = true;
+          }
+        }
         if (
           event.type === 'model.resume.result' &&
           typeof event.threadId === 'string' &&
@@ -1671,9 +1731,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               acceptMessage(record.threadId, record.id, record.payload.content);
             }
           }
-          if (record?.threadId === activeThreadId.current) {
+          if (record?.threadId && record.threadId === activeThreadId.current) {
             noteSnapshotChange(record.threadId);
+            const changesBranch = isHistoryBranchChange(record);
             setSnapshot((current) => {
+              if (changesBranch && current?.thread.id === record.threadId) return null;
               if (
                 !current ||
                 current.thread.id !== record.threadId ||
@@ -1685,6 +1747,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 record,
                 Boolean(record.threadId && historyExpandedThreads.current.has(record.threadId)),
               );
+            });
+            if (changesBranch) void loadSnapshot(record.threadId).catch((caught: unknown) => {
+              setError(caught instanceof Error ? caught.message : String(caught));
             });
           }
           const recordThreadId = record?.threadId;
@@ -2464,11 +2529,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     let beforeSeq = activeSnapshot?.records[0]?.seq;
     let hasEarlier = activeSnapshot?.hasEarlierRecords ?? false;
     while (!target && hasEarlier && beforeSeq !== undefined) {
-      const page = await api<ThreadSnapshot>(
-        `/api/threads/${encodeURIComponent(targetThreadId)}?beforeSeq=${beforeSeq}`,
+      const result = await api<ThreadInitialSnapshotResponse>(
+        `/api/threads/${encodeURIComponent(targetThreadId)}/initial-snapshot?beforeSeq=${beforeSeq}`,
       );
+      const page = result.snapshot;
       if (activeThreadId.current !== targetThreadId)
         throw new Error('The active Thread changed before history loaded.');
+      if (result.mode === 'complete' && activeSnapshot?.projectionStatus === 'not_loaded') {
+        await loadSnapshot(targetThreadId);
+        if (activeThreadId.current !== targetThreadId) throw new Error('The active Thread changed before history loaded.');
+      }
       historyExpandedThreads.current.add(targetThreadId);
       setSnapshot((current) =>
         current && current.thread.id === targetThreadId ? mergeEarlierSnapshot(current, page) : current,
@@ -2711,10 +2781,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     const previousScrollTop = scroll?.scrollTop ?? 0;
     const previousScrollHeight = scroll?.scrollHeight ?? 0;
     try {
-      const page = await api<ThreadSnapshot>(
-        `/api/threads/${encodeURIComponent(targetThreadId)}?beforeSeq=${beforeSeq}`,
+      const result = await api<ThreadInitialSnapshotResponse>(
+        `/api/threads/${encodeURIComponent(targetThreadId)}/initial-snapshot?beforeSeq=${beforeSeq}`,
       );
+      const page = result.snapshot;
       if (activeThreadId.current !== targetThreadId) return;
+      if (result.mode === 'complete' && activeSnapshot?.projectionStatus === 'not_loaded') {
+        await loadSnapshot(targetThreadId);
+        if (activeThreadId.current !== targetThreadId) return;
+      }
       historyExpandedThreads.current.add(targetThreadId);
       setSnapshot((current) =>
         current && current.thread.id === targetThreadId ? mergeEarlierSnapshot(current, page) : current,
@@ -3609,7 +3684,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       status={latestModelExecution?.status ?? null}
                       request={api}
                   />
-                  {activeSnapshot?.thread.id === selectedThread.id && contextManagement ? (
+                  {activeSnapshot?.thread.id === selectedThread.id && activeSnapshot.contextUsage && contextManagement ? (
                     <span
                       className="composer-context-usage"
                       title={

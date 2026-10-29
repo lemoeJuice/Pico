@@ -10,7 +10,9 @@ import type {
 export interface ThreadSnapshot {
   thread: Thread;
   modelSelection: ThreadModelSelection;
-  contextUsage: ContextUsageEstimate;
+  contextUsage: ContextUsageEstimate | null;
+  /** Present only in the fast first-paint payload; full projection metadata is still loading. */
+  projectionStatus?: 'not_loaded';
   records: CanonicalRecord[];
   /** Full active projection membership, present when preserved inactive branches exist. */
   activePathRecordIds?: string[];
@@ -23,6 +25,16 @@ export interface ThreadSnapshot {
   hasEarlierRecords: boolean;
   historyPageSize: number;
 }
+
+/** First paint payload. Projection membership and context usage are resolved by the full snapshot. */
+export interface ThreadInitialSnapshot extends ThreadSnapshot {
+  contextUsage: null;
+  projectionStatus: 'not_loaded';
+}
+
+export type ThreadInitialSnapshotResponse =
+  | { mode: 'initial'; snapshot: ThreadInitialSnapshot }
+  | { mode: 'complete'; snapshot: ThreadSnapshot };
 
 export interface HistoryBranchSummary {
   id: string;

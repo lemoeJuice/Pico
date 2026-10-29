@@ -43,6 +43,7 @@ import type {
   ProviderRequestAttempt,
   SubmitResult,
   ThreadSnapshot,
+  ThreadInitialSnapshotResponse,
   ThreadToolView,
 } from '../contracts/runtime.js';
 import { ExecutionPipelines } from '../core/pipeline.js';
@@ -303,7 +304,7 @@ function modelCallRequestFingerprint(identity: unknown): string {
   return createHash('sha256').update(stableJson(identity)).digest('hex');
 }
 
-export const THREAD_HISTORY_PAGE_SIZE = 100;
+export const THREAD_HISTORY_PAGE_SIZE = 20;
 const SNAPSHOT_HISTORY_CACHE_MAX_THREADS = 8;
 const SNAPSHOT_HISTORY_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 const SNAPSHOT_HISTORY_CACHE_MAX_THREAD_BYTES = 8 * 1024 * 1024;
@@ -1597,7 +1598,7 @@ export class PicoRuntime {
     return thread;
   }
 
-  getSnapshot(threadId: string, beforeSeq?: number): ThreadSnapshot | null {
+  getSnapshot(threadId: string, beforeSeq?: number, boundedPage = false): ThreadSnapshot | null {
     if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 1)) {
       throw new ServiceError(400, 'beforeSeq must be a positive safe integer.');
     }
@@ -1669,7 +1670,7 @@ export class PicoRuntime {
     const hasInactiveHistory =
       activeRewindId !== null ||
       allRecords.some((record) => record.kind !== 'plugin' && !activePathRecordIds.has(record.id));
-    const page = this.store.listRecordPage(threadId, beforeSeq, THREAD_HISTORY_PAGE_SIZE);
+    const page = this.store.listRecordPage(threadId, beforeSeq, THREAD_HISTORY_PAGE_SIZE, !boundedPage);
     const executions = this.store.listSnapshotExecutions(threadId, page.records).map((execution) => {
       if (execution.kind !== 'model' || typeof execution.arguments?.model === 'string') return execution;
       const attempts = this.getModelInputAttempts(threadId, execution.id);
@@ -1698,6 +1699,47 @@ export class PicoRuntime {
       children: this.listThreads(thread.projectId).filter((candidate) => candidate.parentThreadId === threadId),
       hasEarlierRecords: page.hasEarlierRecords,
       historyPageSize: THREAD_HISTORY_PAGE_SIZE,
+    };
+  }
+
+  getInitialSnapshot(threadId: string, beforeSeq?: number): ThreadInitialSnapshotResponse | null {
+    if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 1)) {
+      throw new ServiceError(400, 'beforeSeq must be a positive safe integer.');
+    }
+    const thread = this.getThread(threadId);
+    if (!thread) return null;
+    // The branch check and page must describe the same database snapshot.
+    const initial = this.store.transaction(() => ({
+      hasBranchFacts: this.store.hasContextBranchFacts(threadId),
+      page: this.store.listRecordPage(threadId, beforeSeq, THREAD_HISTORY_PAGE_SIZE, false),
+    }));
+    if (initial.hasBranchFacts) {
+      const snapshot = this.getSnapshot(threadId, beforeSeq, true);
+      return snapshot ? { mode: 'complete', snapshot } : null;
+    }
+
+    const page = initial.page;
+    const executions = this.store.listSnapshotExecutions(threadId, page.records).map((execution) => {
+      if (execution.kind !== 'model' || typeof execution.arguments?.model === 'string') return execution;
+      const attempts = this.getModelInputAttempts(threadId, execution.id);
+      const model = attempts?.at(-1)?.promptSummary.model;
+      return typeof model === 'string' && model.trim()
+        ? { ...execution, arguments: { ...(execution.arguments ?? {}), model } }
+        : execution;
+    });
+    return {
+      mode: 'initial',
+      snapshot: {
+        thread,
+        modelSelection: this.threadModelSelection(threadId),
+        contextUsage: null,
+        projectionStatus: 'not_loaded',
+        records: page.records.map(redactReasoningReplay),
+        executions: executions.map(redactExecutionImages),
+        children: this.listThreads(thread.projectId).filter((candidate) => candidate.parentThreadId === threadId),
+        hasEarlierRecords: page.hasEarlierRecords,
+        historyPageSize: THREAD_HISTORY_PAGE_SIZE,
+      },
     };
   }
 

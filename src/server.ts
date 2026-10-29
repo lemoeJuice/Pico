@@ -376,6 +376,19 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   app.get('/api/threads/archived', (_request, response) => {
     response.json({ threads: runtime.listArchivedThreads() });
   });
+  app.get('/api/threads/:threadId/initial-snapshot', (request, response) => {
+    const beforeSeqValue = request.query.beforeSeq;
+    if (beforeSeqValue !== undefined && typeof beforeSeqValue !== 'string') {
+      throw new ServiceError(400, 'beforeSeq must be a positive safe integer.');
+    }
+    const beforeSeq = beforeSeqValue === undefined ? undefined : Number(beforeSeqValue);
+    if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 1)) {
+      throw new ServiceError(400, 'beforeSeq must be a positive safe integer.');
+    }
+    const result = runtime.getInitialSnapshot(request.params.threadId!, beforeSeq);
+    if (!result) return notFound(response, 'Thread not found');
+    response.json(result);
+  });
   app.get('/api/threads/:threadId', (request, response) => {
     const beforeSeqValue = request.query.beforeSeq;
     if (beforeSeqValue !== undefined && typeof beforeSeqValue !== 'string') {
