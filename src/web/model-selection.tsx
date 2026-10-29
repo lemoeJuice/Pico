@@ -497,9 +497,10 @@ export function ModelSelection({
             {activeLabel}
             {activeSource ? <small>{activeSource}</small> : null}
           </span>
-          <span className="model-selection-chevron" aria-hidden="true">
-            ⌄
-          </span>
+          <span
+            className={`plugin-ui-select-chevron${modelsOpen && mode === 'convenient' ? ' is-open' : ''}`}
+            aria-hidden="true"
+          />
         </button>
       ) : null}
       {selection?.unavailableReason || (adapterStatus === 'unavailable' && selection?.adapterId) ? (
