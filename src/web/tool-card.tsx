@@ -267,7 +267,8 @@ function displayValue(value: unknown): string {
 
 function getPartialStringField(text: string, field: string): string | null {
   const escapedField = field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = text.match(new RegExp(`"${escapedField}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)(?:"|$)`));
+  // Ignore a trailing backslash until the rest of its escape sequence arrives.
+  const match = text.match(new RegExp(`"${escapedField}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)(?:"|\\\\?$)`));
   if (!match) return null;
   const raw = match[1] ?? '';
   try {
