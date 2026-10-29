@@ -14,6 +14,9 @@ export interface ModelSelectionProps {
   models: CatalogModel[];
   instances: ProviderInstance[];
   selection: (CatalogSelection & { unavailableReason?: string }) | null;
+  selectionStatus?: 'loading' | 'error' | 'ready';
+  selectionError?: string;
+  onRetrySelection?(): void;
   loadAdapters(modelId: string): Promise<AdapterContribution[]>;
   onSave(selection: CatalogSelection): Promise<void>;
   convenient?: boolean;
@@ -205,6 +208,9 @@ export function ModelSelection({
   models,
   instances,
   selection,
+  selectionStatus = 'ready',
+  selectionError,
+  onRetrySelection,
   loadAdapters,
   onSave,
   convenient = true,
@@ -279,8 +285,9 @@ export function ModelSelection({
     () => setTemperatureDraft(String(selection?.parameters.temperature ?? '')),
     [selection?.modelId, selection?.adapterId, selection?.parameters.temperature],
   );
-  const activeLabel =
-    selectedModel &&
+  const activeLabel = selectionStatus === 'loading' && !selection
+    ? 'Loading model…'
+    : selectedModel &&
     selectedModel.availability !== 'unavailable' &&
     adapterStatus !== 'unavailable' &&
     !selection?.unavailableReason
@@ -500,6 +507,13 @@ export function ModelSelection({
           {selection.unavailableReason ?? 'Saved model or adapter is unavailable. Choose again.'}
         </span>
       ) : null}
+      {selectionStatus === 'loading' ? <span className="model-selection-status" role="status">Loading model selection…</span> : null}
+      {selectionStatus === 'error' ? (
+        <span className="model-selection-error" role="alert">
+          Model selection could not be loaded{selectionError ? `: ${selectionError}` : '.'}{' '}
+          <button type="button" onClick={onRetrySelection}>Retry</button>
+        </span>
+      ) : null}
       {convenient && selectedAdapter?.temperature.supported ? (
         <label className="model-selection-inline-parameter">
           <span>Temperature</span>
@@ -625,6 +639,15 @@ export function ModelSelection({
               {!convenientTarget && error ? (
                 <span className="model-selection-error" role="alert">
                   {error}
+                </span>
+              ) : null}
+              {!convenientTarget && selectionStatus === 'loading' ? (
+                <span className="model-selection-status" role="status">Loading model selection…</span>
+              ) : null}
+              {!convenientTarget && selectionStatus === 'error' ? (
+                <span className="model-selection-error" role="alert">
+                  Model selection could not be loaded{selectionError ? `: ${selectionError}` : '.'}{' '}
+                  <button type="button" onClick={onRetrySelection}>Retry</button>
                 </span>
               ) : null}
               <button

@@ -80,7 +80,7 @@ import { PluginWebView } from './plugin-web-view.js';
 import { PluginUiSelect } from './plugin-ui-tree.js';
 import { McpSettings } from './mcp-settings.js';
 import './mcp-settings.css';
-import { ModelSelection, selectionForActiveThread } from './model-selection.js';
+import { LatestModelRequest, ModelSelection } from './model-selection.js';
 import { ProviderSettings } from './provider-settings.js';
 import { ComposerTps } from './model-metrics.js';
 import { mergePluginSelectionRefresh } from './plugin-model-selection-state.js';
@@ -701,6 +701,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [threads, setThreads] = useState<Thread[]>([]);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<ThreadSnapshot | null>(null);
+  const [threadModelSelectionState, setThreadModelSelectionState] = useState<{
+    threadId: string;
+    selection: ThreadModelSelection | null;
+    status: 'loading' | 'error' | 'ready';
+    error?: string;
+  } | null>(null);
+  const threadModelSelectionStateRef = useRef(threadModelSelectionState);
+  threadModelSelectionStateRef.current = threadModelSelectionState;
+  const threadModelSelectionRequest = useRef(new LatestModelRequest());
+  const threadModelSelectionLoad = useRef<{ threadId: string; isCurrent: () => boolean } | null>(null);
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
   const [liveEntrances, setLiveEntrances] = useState<ReadonlySet<string>>(() => new Set());
@@ -907,6 +917,42 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const activeThreadId = useRef(threadId);
   activeThreadId.current = threadId;
   draftRef.current = { threadId, value: draft };
+
+  const commitThreadModelSelection = useCallback((targetThreadId: string, selection: ThreadModelSelection): void => {
+    if (activeThreadId.current !== targetThreadId) return;
+    threadModelSelectionRequest.current.invalidate();
+    setThreadModelSelectionState({ threadId: targetThreadId, selection, status: 'ready' });
+  }, []);
+
+  const loadThreadModelSelection = useCallback(async (targetThreadId: string, preserveCurrent = false): Promise<void> => {
+    const pending = threadModelSelectionLoad.current;
+    if (pending?.threadId === targetThreadId && pending.isCurrent()) return;
+    const isCurrent = threadModelSelectionRequest.current.begin();
+    const load = { threadId: targetThreadId, isCurrent };
+    threadModelSelectionLoad.current = load;
+    const previous = threadModelSelectionStateRef.current;
+    const selection = preserveCurrent && previous?.threadId === targetThreadId ? previous.selection : null;
+    setThreadModelSelectionState({ threadId: targetThreadId, selection, status: 'loading' });
+    try {
+      const selection = await api<ThreadModelSelection>(
+        `/api/threads/${encodeURIComponent(targetThreadId)}/model-selection`,
+      );
+      if (isCurrent() && activeThreadId.current === targetThreadId) {
+        setThreadModelSelectionState({ threadId: targetThreadId, selection, status: 'ready' });
+      }
+    } catch (caught) {
+      if (isCurrent() && activeThreadId.current === targetThreadId) {
+        setThreadModelSelectionState({
+          threadId: targetThreadId,
+          selection,
+          status: 'error',
+          error: caught instanceof Error ? caught.message : String(caught),
+        });
+      }
+    } finally {
+      if (threadModelSelectionLoad.current === load) threadModelSelectionLoad.current = null;
+    }
+  }, []);
 
   useEffect(() => setSelectedSlashCommand(null), [threadId]);
 
@@ -1356,11 +1402,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       void loadProjectThreads(projectId).catch((caught: unknown) =>
         setError(caught instanceof Error ? caught.message : String(caught)),
       );
-    if (threadId)
+    if (threadId) {
+      void loadThreadModelSelection(threadId, true);
       void loadSnapshot(threadId).catch((caught: unknown) =>
         setError(caught instanceof Error ? caught.message : String(caught)),
       );
-  }, [loadProjectThreads, loadSnapshot, projectId, threadId]);
+    }
+  }, [loadProjectThreads, loadSnapshot, loadThreadModelSelection, projectId, threadId]);
   const refreshSelectedRef = useRef(refreshSelected);
   refreshSelectedRef.current = refreshSelected;
 
@@ -1525,6 +1573,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       snapshotRequest.current += 1;
     };
   }, [threadId, projectId, loadSnapshot]);
+
+  useEffect(() => {
+    if (!threadId) {
+      threadModelSelectionRequest.current.invalidate();
+      setThreadModelSelectionState(null);
+      return;
+    }
+    void loadThreadModelSelection(threadId);
+    return () => threadModelSelectionRequest.current.invalidate();
+  }, [threadId, projectId, loadThreadModelSelection]);
 
   useEffect(() => {
     if (!threadId) {
@@ -1789,6 +1847,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         ) {
           const targetThreadId = event.threadId;
           const selection = event.selection as ThreadModelSelection;
+          commitThreadModelSelection(targetThreadId, selection);
           setSnapshot((current) =>
             current?.thread.id === targetThreadId ? { ...current, modelSelection: selection } : current,
           );
@@ -1957,6 +2016,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     };
   }, [
     acceptMessage,
+    commitThreadModelSelection,
     loadSnapshot,
     loadThreadTools,
     markLiveEntrance,
@@ -2498,7 +2558,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const updateModelSettingsFromPlugin: PluginUiProps['updateModelSettings'] = async (update, targetThreadId) => {
     if (!targetThreadId || update.provider !== undefined || update.model !== undefined || update.baseUrl !== undefined)
       throw new Error('Choose a model using the model selector.');
-    const current = await api<CatalogSelection>(`/api/threads/${encodeURIComponent(targetThreadId)}/model-selection`);
+    const isActiveTarget = activeThreadId.current === targetThreadId;
+    const isCurrentSelectionContext = isActiveTarget
+      ? threadModelSelectionRequest.current.begin()
+      : () => false;
+    try {
+      const current = await api<CatalogSelection>(`/api/threads/${encodeURIComponent(targetThreadId)}/model-selection`);
+      if (isActiveTarget && (!isCurrentSelectionContext() || activeThreadId.current !== targetThreadId)) {
+        throw new Error('The Thread model selection changed. Reopen the settings and try again.');
+      }
       const saved = await api<ThreadModelSelection>(
         `/api/threads/${encodeURIComponent(targetThreadId)}/model-selection`,
         {
@@ -2512,10 +2580,18 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           }),
         },
       );
-    if (activeThreadId.current === targetThreadId)
+      if (isCurrentSelectionContext() && activeThreadId.current === targetThreadId) {
+        commitThreadModelSelection(targetThreadId, saved);
         setSnapshot((snapshot) =>
           snapshot?.thread.id === targetThreadId ? { ...snapshot, modelSelection: saved } : snapshot,
         );
+      }
+    } catch (caught) {
+      if (isCurrentSelectionContext() && activeThreadId.current === targetThreadId) {
+        void loadThreadModelSelection(targetThreadId, true);
+      }
+      throw caught;
+    }
   };
 
   const openCanonicalMessage: PluginUiProps['openMessage'] = async (seq) => {
@@ -2610,9 +2686,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   };
 
   const activeModelSelection =
-    activeSnapshot && selectedThread && activeSnapshot.thread.id === selectedThread.id
-      ? activeSnapshot.modelSelection
+    selectedThread && threadModelSelectionState?.threadId === selectedThread.id
+      ? threadModelSelectionState.selection
       : undefined;
+  const activeModelSelectionStatus = selectedThread && threadModelSelectionState?.threadId === selectedThread.id
+    ? threadModelSelectionState.status
+    : 'loading';
+  const activeModelSelectionError = selectedThread && threadModelSelectionState?.threadId === selectedThread.id
+    ? threadModelSelectionState.error
+    : undefined;
   const viewContext: PluginUiContext = {
     thread: selectedThread,
     ...(activeModelSelection ? { modelSelection: activeModelSelection } : {}),
@@ -3646,16 +3728,35 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   models={modelCatalog.models}
                   instances={modelCatalog.instances}
                   selection={activeModelSelection ?? null}
+                  selectionStatus={activeModelSelectionStatus}
+                  {...(activeModelSelectionError ? { selectionError: activeModelSelectionError } : {})}
+                  onRetrySelection={() => {
+                    if (selectedThread) void loadThreadModelSelection(selectedThread.id, true);
+                  }}
                   loadAdapters={loadAdapters}
                   onSave={async (selection) => {
                     const targetThreadId = selectedThread.id;
-                    const saved = await api<ThreadModelSelection>(
-                      `/api/threads/${encodeURIComponent(targetThreadId)}/model-selection`,
-                      { method: 'PUT', body: JSON.stringify(selection) },
-                    );
-                    setSnapshot((current) =>
-                      selectionForActiveThread(current, activeThreadId.current, targetThreadId, saved),
-                    );
+                    const isActiveTarget = activeThreadId.current === targetThreadId;
+                    const isCurrentSelectionContext = isActiveTarget
+                      ? threadModelSelectionRequest.current.begin()
+                      : () => false;
+                    try {
+                      const saved = await api<ThreadModelSelection>(
+                        `/api/threads/${encodeURIComponent(targetThreadId)}/model-selection`,
+                        { method: 'PUT', body: JSON.stringify(selection) },
+                      );
+                      if (isCurrentSelectionContext() && activeThreadId.current === targetThreadId) {
+                        commitThreadModelSelection(targetThreadId, saved);
+                        setSnapshot((current) =>
+                          current?.thread.id === targetThreadId ? { ...current, modelSelection: saved } : current,
+                        );
+                      }
+                    } catch (caught) {
+                      if (isCurrentSelectionContext() && activeThreadId.current === targetThreadId) {
+                        void loadThreadModelSelection(targetThreadId, true);
+                      }
+                      throw caught;
+                    }
                   }}
                 />
                 {pluginUiContext &&

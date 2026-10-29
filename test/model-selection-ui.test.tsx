@@ -63,6 +63,14 @@ describe('model selection UI', () => {
     guard.invalidate();
     expect(second()).toBe(false);
   });
+  it('rejects an old save after the same Thread is selected again', () => {
+    const guard = new LatestModelRequest();
+    const firstThreadARequest = guard.begin();
+    guard.begin(); // Navigate to Thread B.
+    const secondThreadARequest = guard.begin(); // Return to Thread A and load its current selection.
+    expect(firstThreadARequest()).toBe(false);
+    expect(secondThreadARequest()).toBe(true);
+  });
   it('does not apply a completed save to another Thread after navigation', () => {
     const selected = { thread: { id: 'second' }, modelSelection: 'second-model' };
     expect(selectionForActiveThread(selected, 'second', 'first', 'first-model')).toBe(selected);
@@ -135,5 +143,45 @@ describe('model selection UI', () => {
     expect(providers).toContain('Provider type');
     expect(providers).toContain('Add Provider');
     expect(providers).not.toContain('secret-value');
+  });
+  it('shows independent model selection loading and retry states', () => {
+    const loading = renderToStaticMarkup(
+      <ModelSelection
+        models={[model]}
+        instances={[]}
+        selection={null}
+        selectionStatus="loading"
+        loadAdapters={async () => [adapter]}
+        onSave={async () => undefined}
+      />,
+    );
+    expect(loading).toContain('Loading model selection');
+    expect(loading).toContain('Loading model…');
+    const failed = renderToStaticMarkup(
+      <ModelSelection
+        models={[model]}
+        instances={[]}
+        selection={null}
+        selectionStatus="error"
+        selectionError="Network unavailable"
+        onRetrySelection={() => undefined}
+        loadAdapters={async () => [adapter]}
+        onSave={async () => undefined}
+      />,
+    );
+    expect(failed).toContain('Model selection could not be loaded: Network unavailable');
+    expect(failed).toContain('>Retry</button>');
+    const refreshing = renderToStaticMarkup(
+      <ModelSelection
+        models={[model]}
+        instances={[]}
+        selection={{ modelId: model.modelId, adapterId: adapter.id, parameters: { options: {} } }}
+        selectionStatus="loading"
+        loadAdapters={async () => [adapter]}
+        onSave={async () => undefined}
+      />,
+    );
+    expect(refreshing).toContain('class="model-selection-trigger-label">Model');
+    expect(refreshing).toContain('Loading model selection');
   });
 });
