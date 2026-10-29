@@ -51,6 +51,34 @@ describe('Markdown', () => {
     expect(html).not.toContain('<img');
   });
 
+  it('repairs bold literal URLs followed by Chinese punctuation', () => {
+    expect(render('访问 **http://localhost:4173**。在另一个终端可运行：')).toContain(
+      '<p>访问 <strong><a href="http://localhost:4173">http://localhost:4173</a></strong>。在另一个终端可运行：</p>',
+    );
+    expect(render('**https://example.com/中文路径**，接着是 **加粗**')).toContain(
+      '<strong><a href="https://example.com/%E4%B8%AD%E6%96%87%E8%B7%AF%E5%BE%84">https://example.com/中文路径</a></strong>，接着是 <strong>加粗</strong>',
+    );
+    expect(render('**http://one.test**。和 **https://two.test**！')).toContain(
+      '<strong><a href="http://one.test">http://one.test</a></strong>。和 <strong><a href="https://two.test">https://two.test</a></strong>！',
+    );
+    expect(render('“**https://example.com/path?q=1**”后续')).toContain(
+      '“<strong><a href="https://example.com/path?q=1">https://example.com/path?q=1</a></strong>”后续',
+    );
+  });
+
+  it('leaves code, escaped markers, and explicit links alone', () => {
+    expect(render('`**http://localhost:4173**。`')).toContain('<code>**http://localhost:4173**。</code>');
+    expect(render('```\n**http://localhost:4173**。\n```')).toContain('<code>**http://localhost:4173**。\n</code>');
+    expect(render('\\*\\*http://localhost:4173**。')).not.toContain('<strong>');
+    expect(render(String.raw`\**http://localhost:4173**。`)).not.toContain('<strong>');
+    expect(render(String.raw`\\**http://localhost:4173**。`)).toContain(
+      '<strong><a href="http://localhost:4173">http://localhost:4173</a></strong>。',
+    );
+    expect(render('[label](https://example.com/path**。)')).toContain(
+      '<a href="https://example.com/path**%E3%80%82">label</a>',
+    );
+  });
+
   it('omits links using unsafe protocols and keeps safe links', () => {
     const html = render(
       '[unsafe](javascript:alert%281%29) [data](data:text/html,evil) [safe](https://example.com) [relative](../guide)',
