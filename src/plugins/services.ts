@@ -5,6 +5,7 @@ import type { PluginModelCallRecord } from '../contracts/store.js';
 import type { ThreadModelSelection } from '../core/types.js';
 import type { McpServerStatus } from '../contracts/mcp.js';
 import type { ThreadToolView } from '../contracts/runtime.js';
+import type { ProjectionInput } from '../contracts/plugin-pipeline.js';
 
 /** Domain operations available to workflow plugins, independent of Runtime implementation. */
 export interface PluginServices {
@@ -14,6 +15,8 @@ export interface PluginServices {
   threads: {
     get(threadId: string): Thread | null;
     modelSelection(threadId: string): ThreadModelSelection;
+    /** Preview the current full model projection without starting a model step. */
+    previewModelInput(threadId: string): Promise<ProjectionInput>;
     validateModelSelection(selection: CatalogSelection): ThreadModelSelection;
     updateModelSelection(threadId: string, selection: CatalogSelection): ThreadModelSelection;
     list(projectId?: string): Thread[];
@@ -98,6 +101,7 @@ export const unavailablePluginServices: PluginServices = {
   threads: {
     get: unavailable,
     modelSelection: unavailable,
+    previewModelInput: unavailable,
     validateModelSelection: unavailable,
     updateModelSelection: unavailable,
     list: unavailable,

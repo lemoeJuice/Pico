@@ -43,6 +43,22 @@ describe('projection compaction mapping', () => {
     expect(projectedCompactionPrefix(records, input(), 3)).toEqual({
       throughSeq: 3,
       turns: [turn('summary a'), turn('summary b')],
+      segments: [
+        {
+          canonicalStartSeq: 1,
+          canonicalEndSeq: 2,
+          kind: 'rolling_segment',
+          disposition: 'summary',
+          turns: [turn('summary a'), turn('summary b')],
+        },
+        {
+          canonicalStartSeq: 3,
+          canonicalEndSeq: 3,
+          kind: 'rolling_segment',
+          disposition: 'omitted',
+          turns: [],
+        },
+      ],
     });
   });
   it('never cuts a multi-turn summary', () => {
@@ -67,6 +83,22 @@ describe('projection compaction mapping', () => {
     expect(projectedCompactionPrefix(records, value, 3)).toEqual({
       throughSeq: 3,
       turns: [turn('summary a'), turn('summary b')],
+      segments: [
+        {
+          canonicalStartSeq: 1,
+          canonicalEndSeq: 2,
+          kind: 'rolling_segment',
+          disposition: 'summary',
+          turns: [turn('summary a'), turn('summary b')],
+        },
+        {
+          canonicalStartSeq: 3,
+          canonicalEndSeq: 3,
+          kind: 'rolling_segment',
+          disposition: 'omitted',
+          turns: [],
+        },
+      ],
     });
   });
   it('fails closed when a plugin inserts an unaccounted turn or changes ordering', () => {

@@ -1,10 +1,14 @@
 (() => {
   const pluginId = 'pico.rolling-context';
   let port = null, seq = 0, context = { thread: null }, segments = [], inputs = [], visibleSegments = 30, visibleInputs = 20, pending = false, error = '';
+  let economics = null, economicsThreadId = null;
+  const emptyEconomics = () => ({ provider: '', model: '', inputPerMillion: '', cachedInputPerMillion: '', cacheWritePerMillion: '', expectedFutureCalls: '', charactersPerToken: '' });
+  let economicsDraft = emptyEconomics();
   const requests = new Map(), sourceById = new Map(), openDisclosures = new Set(['inputs']);
   const text = (text) => ({ type: 'text', text: String(text ?? '') });
   const para = (text) => ({ type: 'paragraph', text: String(text ?? '') });
   const button = (label, actionId, disabled = pending) => ({ type: 'button', label, actionId, disabled });
+  const input = (label, value, actionId, inputType = 'text') => ({ type: 'textInput', label, value: String(value ?? ''), actionId, inputType, ...(inputType === 'number' ? { min: 0, step: 'any' } : {}) });
   const api = (path, init) => request('api', { path, ...(init ? { init } : {}) });
   function request(action, payload = {}) { const id = `rolling-ui-${++seq}`; return new Promise((resolve, reject) => { requests.set(id, { resolve, reject }); port.postMessage({ type: 'pico:plugin-ui:request', id, action, ...payload }); }); }
   async function act(action, segmentId) {
@@ -16,15 +20,24 @@
   }
   function draw() {
     if (!context.thread?.id) { port?.postMessage({ type: 'pico:plugin-ui:render', tree: [{ type: 'heading', text: 'Rolling Context' }, para('Select a Thread to inspect its context.')] }); return; }
-    const nodes = [{ type: 'heading', text: `Rolling Context · ${segments.length} segment(s)` }, para('Canonical History stays intact. Tier review is skipped when Runtime cannot estimate complete net savings; Usage rates alone are insufficient. Segments stay hot; use manual compact to change tier.'),
-      { type: 'actions', children: [button('Refresh / summarize sealed turns', 'global:refresh'), button('Manual compact summaries', 'global:compact-all')] }];
+    const nodes = [{ type: 'heading', text: `Rolling Context · ${segments.length} model round(s)` }, para('User messages stay verbatim. Completed model rounds may be summarized when the next model step begins; the Agent can compact older rounds when the estimated cost permits. Canonical History stays intact.'),
+      { type: 'actions', children: [button('Refresh', 'global:refresh')] }];
+    nodes.push({ type: 'disclosure', label: 'Cost estimate settings', open: openDisclosures.has('economics'), actionId: 'disclosure:economics', children: [
+      para('Configure the current provider and model rates, expected future calls, and an estimated characters-per-token ratio. Estimates assume the old suffix is cached and the new suffix is written once, then read from cache; actual token counts and cache hits may differ.'),
+      input('Provider', economicsDraft.provider, 'economics:provider'),
+      input('Model', economicsDraft.model, 'economics:model'),
+      input('Input price / 1M tokens', economicsDraft.inputPerMillion, 'economics:inputPerMillion', 'number'),
+      input('Cache read price / 1M tokens', economicsDraft.cachedInputPerMillion, 'economics:cachedInputPerMillion', 'number'),
+      input('Cache write price / 1M tokens', economicsDraft.cacheWritePerMillion, 'economics:cacheWritePerMillion', 'number'),
+      input('Expected future model calls', economicsDraft.expectedFutureCalls, 'economics:expectedFutureCalls', 'number'),
+      input('Estimated characters per token', economicsDraft.charactersPerToken, 'economics:charactersPerToken', 'number'),
+      para(economics ? `Active estimate: ${economics.provider} / ${economics.model}.` : 'No estimate configured; Agent compaction cannot be evaluated.'),
+      { type: 'actions', children: [button('Save cost estimate', 'economics:save')] },
+    ] });
     if (error) nodes.push(para(error));
-    if (!segments.length) nodes.push(para('No sealed complete turn blocks yet. A turn becomes eligible after a later user turn closes it.'));
+    if (!segments.length) nodes.push(para('No summarized model rounds yet. A completed round becomes eligible when the next model step starts.'));
     for (const segment of [...segments].sort((a,b) => b.startSeq-a.startSeq).slice(0, visibleSegments)) {
       const actions = [];
-      if (segment.tier !== 'hot') actions.push(button('Pin hot', `action:pin:${segment.id}`));
-      if (segment.tier !== 'warm' && segment.summary) actions.push(button('Manual warm', `action:warm:${segment.id}`));
-      if (segment.tier === 'warm') actions.push(button('Move cold', `action:cold:${segment.id}`));
       if (segment.summaryStatus !== 'completed') actions.push(button('Retry summary', `action:retry-summary:${segment.id}`));
       actions.push(button('Jump to source', `open:${segment.startSeq}`, false));
       const children = [
@@ -55,8 +68,34 @@
     const [result, inputResult] = await Promise.all([api(`/api/plugins/${pluginId}/segments?threadId=${threadId}`), api(`/api/plugins/${pluginId}/inputs?threadId=${threadId}`)]);
     segments = Array.isArray(result.segments) ? result.segments : []; inputs = Array.isArray(inputResult.inputs) ? inputResult.inputs : []; draw();
   }
+  async function loadEconomics() {
+    const threadId = context.thread?.id;
+    if (!threadId || economicsThreadId === threadId) return;
+    economics = null; economicsDraft = emptyEconomics(); economicsThreadId = null;
+    const result = await api(`/api/plugins/${pluginId}/economics?threadId=${encodeURIComponent(threadId)}`);
+    if (context.thread?.id !== threadId) return;
+    economics = result?.economics ?? null;
+    if (economics) economicsDraft = Object.fromEntries(Object.keys(economicsDraft).map((key) => [key, String(economics[key] ?? '')]));
+    economicsThreadId = threadId; draw();
+  }
   async function handle(a) {
     const id = a.actionId;
+    if (id === 'economics:save') {
+      if (pending) return;
+      pending = true; error = ''; draw();
+      try {
+        const body = { ...economicsDraft, threadId: context.thread?.id };
+        for (const key of ['inputPerMillion', 'cachedInputPerMillion', 'cacheWritePerMillion', 'expectedFutureCalls', 'charactersPerToken']) {
+          if (!body[key].trim()) throw new Error(`Enter ${key}.`);
+          body[key] = Number(body[key]);
+        }
+        const result = await api(`/api/plugins/${pluginId}/economics`, { method: 'PUT', body: JSON.stringify(body) });
+        economics = result?.economics ?? null;
+      } catch (failure) { error = failure.message || String(failure); }
+      finally { pending = false; draw(); }
+      return;
+    }
+    if (id.startsWith('economics:')) { const key = id.slice('economics:'.length); if (Object.hasOwn(economicsDraft, key)) economicsDraft[key] = a.value ?? ''; return; }
     if (id === 'load-more') { visibleSegments += 30; visibleInputs += 20; draw(); return; }
     if (id.startsWith('disclosure:')) {
       const key = id.slice('disclosure:'.length);
@@ -81,8 +120,8 @@
     port.onmessage = ({ data }) => {
       if (data?.type === 'pico:plugin-ui:response' && requests.has(data.id)) { const request = requests.get(data.id); requests.delete(data.id); data.ok ? request.resolve(data.value) : request.reject(new Error(data.error)); }
       else if (data?.type === 'pico:plugin-ui:action') void handle(data);
-      else if (data?.type === 'pico:plugin-ui:context') { context = data.context || context; void refresh().catch((failure) => { error = failure.message; draw(); }); }
+      else if (data?.type === 'pico:plugin-ui:context') { context = data.context || context; void Promise.all([refresh(), loadEconomics()]).catch((failure) => { error = failure.message; draw(); }); }
     };
-    port.start(); draw(); if (typeof init.attemptId === 'string') port.postMessage({ type: 'pico:plugin-ui:ready', attemptId: init.attemptId }); void refresh().catch((failure) => { error = failure.message; draw(); });
+    port.start(); draw(); if (typeof init.attemptId === 'string') port.postMessage({ type: 'pico:plugin-ui:ready', attemptId: init.attemptId }); void Promise.all([refresh(), loadEconomics()]).catch((failure) => { error = failure.message; draw(); });
   });
 })();

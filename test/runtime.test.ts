@@ -85,11 +85,11 @@ describe('durable Thread runtime invariants', () => {
         callNumber === 1 ? 'Earlier turns summary: objective alpha; verified result beta.' : 'Continued safely.',
       ),
     );
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { disabledBuiltinPlugins: ['pico.rolling-context'] });
     const thread = env.createThread();
     try {
       env.runtime.updateContextManagementSettings({
-        contextWindowTokens: 2_000,
+        contextWindowTokens: 100_000,
         compactionThresholdTokens: 1_000,
         keepRecentTokens: 1,
       });

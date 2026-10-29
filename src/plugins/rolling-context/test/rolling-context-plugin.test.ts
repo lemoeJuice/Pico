@@ -204,7 +204,7 @@ describe('Rolling Context plugin', () => {
       },
       models: {
         complete: async () => {
-          throw new Error('Known hot segments do not require a summary call.');
+          return { id: 'summary', response: { content: JSON.stringify({ summary: 'Assistant response summary.' }) } };
         },
       },
       pipelines: {
@@ -226,6 +226,7 @@ describe('Rolling Context plugin', () => {
       systemPrompt: 'system',
       tools: [],
       turns: canonicalRecordsToPromptTurns(records, parent),
+      modelStep: true,
     };
     const projected = await projection!(input, async (value) => value);
 
@@ -233,7 +234,12 @@ describe('Rolling Context plugin', () => {
     expect(segment.sourceRecordIds).toEqual(block.map((item) => item.id));
     expect(projected.turns).toEqual([...expected, ...canonicalRecordsToPromptTurns([records.at(-1)!], parent)]);
     expect(projected.provenance).toContainEqual(
-      expect.objectContaining({ disposition: 'raw', canonicalStartSeq: 1, canonicalEndSeq: 8 }),
+      expect.objectContaining({
+        sourcePluginId: 'pico.core',
+        disposition: 'raw',
+        canonicalStartSeq: 1,
+        canonicalEndSeq: 7,
+      }),
     );
     expect(projected.turns).toEqual(
       expect.arrayContaining([
@@ -298,6 +304,24 @@ describe('Rolling Context plugin', () => {
     expect(processed.transitions).toEqual([]);
   });
 
+  it('rejects a summary response that also requests a tool', async () => {
+    const context = {
+      models: {
+        complete: async () => ({
+          id: 'summary-call',
+          response: {
+            content: JSON.stringify({ summary: 'An apparently valid summary.' }),
+            toolCalls: [{ id: 'call', name: 'unexpected', arguments: {} }],
+          },
+        }),
+      },
+    } as unknown as PluginContext;
+    const processed = await summarizeAndEvaluate(context, { id: 'thread-1' } as Thread, sampleSegment(), 'source');
+    expect(processed.summaryStatus).toBe('failed');
+    expect(processed.summary).toBeNull();
+    expect(processed.tier).toBe('hot');
+  });
+
   it('records manual tier transitions while preserving the original source hash', () => {
     const segment = sampleSegment();
     const warm = transition({ ...segment, summary: 'summary', summaryVersion: 'v1' }, 'warm', 'manual compact');
@@ -330,7 +354,7 @@ describe('Rolling Context plugin', () => {
     expect(contributions).toContain('rolling-context');
   });
 
-  it('uses one canonical snapshot to check every segment during compact-all', async () => {
+  it('summarizes only the last completed model round and rejects legacy compact-all bypass', async () => {
     const values = new Map<string, unknown>();
     const modelPurposes: string[] = [];
     const segmentCount = 4;
@@ -369,9 +393,10 @@ describe('Rolling Context plugin', () => {
         },
       },
       models: {
-        complete: async (request: { purpose: string }) => {
+        complete: async (request: { purpose: string; prompt?: { turns: Array<{ content: string }> } }) => {
           modelPurposes.push(request.purpose);
           if (request.purpose !== 'rolling-summary') throw new Error(`Unexpected model purpose: ${request.purpose}`);
+          expect(request.prompt?.turns[0]?.content).not.toContain('Fix the failing test.');
           return {
             id: request.purpose,
             response: { content: JSON.stringify({ summary: 'Verified result: the test passed (canonical seq 4).' }) },
@@ -410,27 +435,25 @@ describe('Rolling Context plugin', () => {
         { kind: 'message', role: 'assistant', content: 'The test passed after the fix.' },
         { kind: 'message', role: 'user', content: 'Continue with the next request.' },
       ],
+      modelStep: true,
     };
     const runProjection = () => projection!(input, async (value) => value);
     const automatic = await runProjection();
     expect(automatic.turns[0]).toMatchObject({ kind: 'message', role: 'user', content: 'Fix the failing test.' });
-    expect(automatic.provenance).toContainEqual(
-      expect.objectContaining({ disposition: 'raw', canonicalStartSeq: 1, canonicalEndSeq: 4 }),
-    );
-    expect(modelPurposes).toHaveLength(segmentCount);
+    expect(modelPurposes).toHaveLength(1);
     const action = compactAll as unknown as (request: { body: unknown }) => Promise<unknown>;
     canonicalListReads = 0;
-    await action({ body: { action: 'compact-all', threadId: thread.id } });
-    expect(canonicalListReads).toBe(2);
+    expect(await action({ body: { action: 'compact-all', threadId: thread.id } })).toMatchObject({
+      status: 'cannot_estimate',
+    });
+    expect(canonicalListReads).toBe(0);
     const manual = await runProjection();
     expect(manual.turns[0]).toMatchObject({ kind: 'message', role: 'user' });
-    expect(manual.turns[0]?.kind === 'message' && manual.turns[0].content).toContain(
-      'Verified result: the test passed',
+    expect(manual.turns[0]?.kind === 'message' && manual.turns[0].content).toBe('Fix the failing test.');
+    expect(manual.turns.some((turn) => turn.kind === 'message' && turn.content.includes('Verified result'))).toBe(
+      false,
     );
-    expect(manual.provenance).toContainEqual(
-      expect.objectContaining({ disposition: 'summary', canonicalStartSeq: 1, canonicalEndSeq: 4 }),
-    );
-    expect(modelPurposes).toHaveLength(segmentCount);
+    expect(modelPurposes).toHaveLength(1);
   });
 
   it('preserves the Runtime compaction prefix when projecting later turns', async () => {

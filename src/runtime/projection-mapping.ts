@@ -8,7 +8,18 @@ export function projectedCompactionPrefix(
   records: readonly CanonicalRecord[],
   projection: ProjectionInput,
   candidateThroughSeq: number,
-): { throughSeq: number; turns: PromptTurn[] } | null {
+): {
+  throughSeq: number;
+  turns: PromptTurn[];
+  segments: Array<{
+    canonicalStartSeq: number;
+    canonicalEndSeq: number;
+    kind: string;
+    disposition: string;
+    summaryVersion?: string;
+    turns: PromptTurn[];
+  }>;
+} | null {
   const sources = (projection.provenance ?? []).filter((item) => item.kind !== 'plugin');
   const conversation = canonicalConversationRecords(records);
   const containsConversationRecord = (start: number, end: number): boolean => {
@@ -22,7 +33,15 @@ export function projectedCompactionPrefix(
     return low < conversation.length && conversation[low]!.seq <= end;
   };
   const occupied = new Set<number>();
-  const mapping: Array<{ start: number; end: number; first: number; last: number }> = [];
+  const mapping: Array<{
+    start: number;
+    end: number;
+    first: number;
+    last: number;
+    kind: string;
+    disposition: string;
+    summaryVersion?: string;
+  }> = [];
   for (const source of sources) {
     const { canonicalStartSeq: start, canonicalEndSeq: end, turnStartIndex: first, turnEndIndex: last } = source;
     if (
@@ -39,7 +58,15 @@ export function projectedCompactionPrefix(
       if (occupied.has(i)) return null;
       occupied.add(i);
     }
-    mapping.push({ start: start!, end: end!, first: first!, last: last! });
+    mapping.push({
+      start: start!,
+      end: end!,
+      first: first!,
+      last: last!,
+      kind: source.kind,
+      disposition: source.disposition,
+      ...(source.summaryVersion ? { summaryVersion: source.summaryVersion } : {}),
+    });
   }
   mapping.sort((a, b) => a.start - b.start);
   for (let i = 1; i < mapping.length; i++) {
@@ -74,10 +101,84 @@ export function projectedCompactionPrefix(
   if (occupied.size !== projection.turns.length) return null;
   let throughSeq = 0;
   const turns: PromptTurn[] = [];
+  const segments: Array<{
+    canonicalStartSeq: number;
+    canonicalEndSeq: number;
+    kind: string;
+    disposition: string;
+    summaryVersion?: string;
+    turns: PromptTurn[];
+  }> = [];
   for (const entry of mapping) {
     if (entry.end > candidateThroughSeq) break;
     throughSeq = entry.end;
-    turns.push(...projection.turns.slice(entry.first, entry.last));
+    const sourceTurns = projection.turns.slice(entry.first, entry.last);
+    turns.push(...sourceTurns);
+    segments.push({
+      canonicalStartSeq: entry.start,
+      canonicalEndSeq: entry.end,
+      kind: entry.kind,
+      disposition: entry.disposition,
+      ...(entry.summaryVersion ? { summaryVersion: entry.summaryVersion } : {}),
+      turns: sourceTurns,
+    });
   }
-  return throughSeq > 0 && turns.length > 0 ? { throughSeq, turns } : null;
+  return throughSeq > 0 && turns.length > 0 ? { throughSeq, turns, segments } : null;
+}
+
+/** Render only projected turns paired with their exact provenance range. */
+export function projectedCompactionSourceText(
+  segments: readonly {
+    canonicalStartSeq: number;
+    canonicalEndSeq: number;
+    kind: string;
+    disposition: string;
+    summaryVersion?: string;
+    turns: readonly PromptTurn[];
+  }[],
+): string {
+  return segments
+    .map((segment) => {
+      const metadata = {
+        canonicalStartSeq: segment.canonicalStartSeq,
+        canonicalEndSeq: segment.canonicalEndSeq,
+        kind: segment.kind,
+        disposition: segment.disposition,
+        ...(segment.summaryVersion ? { summaryVersion: segment.summaryVersion } : {}),
+      };
+      const body = segment.turns
+        .map((turn, index) => {
+          if (turn.kind === 'message') {
+            return [
+              `Projected turn ${index + 1} (${turn.role}):`,
+              turn.content,
+              ...(turn.reasoningContent ? [`Reasoning content:\n${turn.reasoningContent}`] : []),
+            ].join('\n');
+          }
+          if (turn.kind === 'assistant_tools') {
+            const calls = turn.calls
+              .map((call) => `${call.name} (${call.id}) arguments:\n${JSON.stringify(call.arguments)}`)
+              .join('\n\n');
+            return [
+              `Projected turn ${index + 1} (assistant tool call):`,
+              turn.content,
+              ...(turn.reasoningContent ? [`Reasoning content:\n${turn.reasoningContent}`] : []),
+              ...(calls ? [`Tool calls:\n${calls}`] : []),
+            ].join('\n');
+          }
+          return [
+            `Projected turn ${index + 1} (tool result for ${turn.toolName}, call ${turn.callId}):`,
+            turn.content,
+            ...(turn.images?.length
+              ? [`[${turn.images.length} image attachment(s) omitted from the text summary input]`]
+              : []),
+          ].join('\n');
+        })
+        .join('\n\n');
+      return [
+        `Projection provenance: ${JSON.stringify(metadata)}`,
+        ...(body ? [body] : ['[No projected text; the Canonical source is omitted from Model Input.]']),
+      ].join('\n\n');
+    })
+    .join('\n\n');
 }

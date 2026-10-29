@@ -161,6 +161,116 @@ describe('context changes followed by projected compaction', () => {
   });
 });
 
+it('does not run Runtime fallback from stale usage after a much smaller full projection', async () => {
+  const rawFirstRound = `LARGE_FIRST_ROUND ${'A'.repeat(30_000)}`;
+  const rawSecondRound = `SECOND_ROUND ${'B'.repeat(2_000)}`;
+  let mainCalls = 0;
+  const withUsage = (content: string, toolCalls: ReturnType<typeof response>['toolCalls'], inputTokens: number) => ({
+    ...response(content, toolCalls),
+    usage: { inputTokens, outputTokens: 20, totalTokens: inputTokens + 20 },
+  });
+  const isRollingSummary = (prompt: { system: string }) =>
+    prompt.system.includes('Summarize exactly one sealed model-response round');
+  const isRuntimeSummary = (prompt: { system: string }) =>
+    prompt.system.includes("You are Pico Runtime's conversation compaction helper");
+  const model = new FakeModel((prompt) => {
+    if (isRollingSummary(prompt)) return response(JSON.stringify({ summary: 'FIRST_ROUND_WARM_SUMMARY' }));
+    mainCalls += 1;
+    if (mainCalls === 1) return withUsage(rawFirstRound, [], 100);
+    if (mainCalls === 2) return withUsage(rawSecondRound, [], 100);
+    if (mainCalls === 3)
+      return withUsage(
+        '',
+        [{ id: 'compact-large-round', name: 'rolling_compact', arguments: { keep_recent_rounds: 1 } }],
+        1_500,
+      );
+    return withUsage('Continued from the warm summary.', [], 100);
+  });
+  const env = await setupRuntime(model, { plugins: [rollingContextPlugin] });
+  const thread = env.createThread();
+  try {
+    env.runtime.updateContextManagementSettings({
+      contextWindowTokens: 1_000_000,
+      compactionThresholdTokens: 1_000,
+      keepRecentTokens: 1,
+    });
+    const selection = env.runtime.threadModelSelection(thread.id);
+    const route = env.runtime.pluginHttpRoute('pico.rolling-context', 'PUT', '/economics');
+    expect(route).toBeDefined();
+    await route!.handler({
+      body: {
+        threadId: thread.id,
+        provider: selection.provider,
+        model: selection.model,
+        inputPerMillion: 100,
+        cachedInputPerMillion: 100,
+        cacheWritePerMillion: 0,
+        expectedFutureCalls: 10,
+        charactersPerToken: 1,
+      },
+      query: new URLSearchParams(),
+      origin: null,
+    });
+
+    await env.runtime.submit(thread.id, 'fallback-small-projection-1', 'FIRST_USER_CAPSULE');
+    await env.runtime.drain();
+    await env.runtime.submit(thread.id, 'fallback-small-projection-2', 'SECOND_USER_CAPSULE');
+    await env.runtime.drain();
+    await env.runtime.submit(thread.id, 'fallback-small-projection-3', 'THIRD_USER_CAPSULE');
+    await env.runtime.drain();
+
+    const records = env.store.listRecords(thread.id);
+    expect(
+      records.some((record) => record.kind === 'tool_result' && record.payload.toolName === 'rolling_compact'),
+    ).toBe(true);
+    expect(
+      records.filter((record) => record.kind === 'plugin' && record.payload.action === 'context-compacted'),
+    ).toHaveLength(0);
+    expect(model.prompts.some(isRuntimeSummary)).toBe(false);
+    expect(env.runtime.getThread(thread.id)?.state).not.toBe('paused');
+    const continuation = model.prompts.filter((prompt) => !isRollingSummary(prompt)).at(-1)!;
+    const serializedTurns = JSON.stringify(continuation.turns);
+    expect(serializedTurns).toContain('FIRST_ROUND_WARM_SUMMARY');
+    expect(serializedTurns).not.toContain('LARGE_FIRST_ROUND');
+    expect(serializedTurns).toContain('SECOND_ROUND');
+    expect(serializedTurns).toContain('THIRD_USER_CAPSULE');
+  } finally {
+    await env.cleanup();
+  }
+});
+
+it('checks a large new user input against the full projected prompt without provider usage', async () => {
+  const model = new FakeModel(() => response('This request must not be sent.'));
+  const env = await setupRuntime(model);
+  const thread = env.createThread('runtime');
+  try {
+    const emptyProjection = await env.runtime['projectModelInput'](thread, [], 0);
+    const emptyRequestSize = JSON.stringify({
+      system: emptyProjection.systemPrompt,
+      tools: emptyProjection.tools,
+      turns: emptyProjection.turns,
+      model: env.runtime.threadModelSelection(thread.id).model,
+      temperature: env.runtime.threadModelSelection(thread.id).parameters.temperature ?? 0.7,
+    }).length;
+    const contextWindowTokens = emptyRequestSize + 1_000;
+    env.runtime.updateContextManagementSettings({
+      contextWindowTokens,
+      compactionThresholdTokens: contextWindowTokens - 1,
+      keepRecentTokens: 1,
+    });
+    await env.runtime.submit(thread.id, 'large-input-without-usage', `Large new request ${'X'.repeat(5_000)}`);
+    await env.runtime.drain();
+
+    expect(model.prompts).toHaveLength(0);
+    expect(env.runtime.getThread(thread.id)).toMatchObject({
+      state: 'paused',
+      pauseReason: expect.stringContaining('There are no completed model invocations'),
+    });
+  } finally {
+    await env.cleanup();
+  }
+});
+
 it('respects an unknown plugin grouped boundary without summarizing plugin context', async () => {
   const plugin: import('../src/plugins/host.js').PicoPlugin = {
     id: 'example.unknown-projector',
@@ -302,6 +412,60 @@ it('compacts complete tool invocations inside a single user turn without splitti
     const prompt = JSON.stringify(model.prompts[0]);
     expect(prompt).toContain('assistant 2');
     expect(prompt).not.toContain('assistant 3');
+  } finally {
+    await env.runtime.shutdown();
+    env.store.close();
+    await rm(env.directory, { recursive: true, force: true });
+  }
+});
+
+it('manual compaction summarizes the final plugin projection rather than Canonical source text', async () => {
+  const projector: import('../src/plugins/host.js').PicoPlugin = {
+    id: 'example.compaction-redactor',
+    name: 'Compaction redactor',
+    version: '1',
+    activate({ pipelines }) {
+      pipelines.use('projection', async (input, next) =>
+        next({
+          ...input,
+          turns: input.turns.map((turn) =>
+            turn.kind === 'message' && turn.content.includes('private canonical request')
+              ? { ...turn, content: 'safe projected request' }
+              : turn,
+          ),
+        }),
+      );
+    },
+  };
+  const model = new FakeModel(() => response('Summary based on safe projection'));
+  const env = await setupRuntime(model, { plugins: [projector] });
+  const thread = env.createThread('runtime');
+  try {
+    env.runtime.updateContextManagementSettings({ keepRecentTokens: 1 });
+    for (let n = 1; n <= 4; n++) {
+      const user = env.store.appendCanonical(thread.id, `manual-user-${n}`, 'message', {
+        role: 'user',
+        source: 'user',
+        content: n === 1 ? 'private canonical request' : `request ${n}`,
+      });
+      env.store.appendCanonical(thread.id, `manual-assistant-${n}`, 'assistant', {
+        content: `answer ${n}`,
+        toolCalls: [],
+        batchId: null,
+        projectionThrough: user.record.seq,
+        usage: null,
+        model: 'test-model',
+      });
+    }
+
+    const result = await env.runtime['compactThread'](thread);
+
+    expect(result.text).toContain('Compacted');
+    const prompt = JSON.stringify(
+      model.prompts.find((item) => item.system.startsWith("You are Pico Runtime's conversation compaction helper")),
+    );
+    expect(prompt).toContain('safe projected request');
+    expect(prompt).not.toContain('private canonical request');
   } finally {
     await env.runtime.shutdown();
     env.store.close();

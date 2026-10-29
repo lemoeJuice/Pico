@@ -31,6 +31,8 @@ export interface ProjectionInput {
   thread: Thread;
   records: readonly CanonicalRecord[];
   through: number;
+  /** True only when preparing the first projection for a new primary model step. */
+  modelStep?: boolean;
   systemPrompt: string;
   turns: ModelPrompt['turns'];
   tools: ToolDefinition[];
