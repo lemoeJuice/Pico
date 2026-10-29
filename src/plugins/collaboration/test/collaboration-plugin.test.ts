@@ -196,6 +196,41 @@ describe('Collaboration plugin', () => {
     await expect(spawn({ prompt: 'Different task' }, toolContext)).rejects.toThrow('already used');
   });
 
+  it('explains mixed history arguments and accepts separate page and chunk retries', () => {
+    const env = setup();
+    env.canonicalRecords.push({ ...env.canonicalRecords[0]!, id: 'record-2', seq: 2 });
+    const read = env.tools.get('read_thread_history')!;
+    const toolContext = { thread: env.parent, executionId: 'read-retry' };
+
+    expect(() => read({ after_seq: 0, limit: 10, record_seq: 1, offset: 0, chunk_chars: 8_000 }, toolContext)).toThrow(
+      'For a history page, omit record_seq, offset, and chunk_chars. For one record, omit after_seq and limit.',
+    );
+
+    const page = read({ after_seq: 0, limit: 1 }, toolContext) as {
+      records: Array<{ seq: number; output: string }>;
+      next_after_seq: number;
+      has_more: boolean;
+    };
+    expect(page).toEqual({
+      records: [{ seq: 1, output: 'Result is verified.' }],
+      next_after_seq: 1,
+      has_more: true,
+    });
+    expect(read({ after_seq: page.next_after_seq, limit: 1 }, toolContext)).toEqual({
+      records: [{ seq: 2, output: 'Result is verified.' }],
+      next_after_seq: 2,
+      has_more: false,
+    });
+
+    const chunk = read({ record_seq: 1, offset: 0, chunk_chars: 8_000 }, toolContext) as {
+      records: Array<{ chunk: { text: string }; next_offset: number | null; complete: boolean }>;
+      has_more: boolean;
+    };
+    expect(JSON.parse(chunk.records[0]!.chunk.text)).toEqual(page.records[0]);
+    expect(chunk.records[0]).toMatchObject({ next_offset: null, complete: true });
+    expect(chunk.has_more).toBe(false);
+  });
+
   it('bounds history pages and returns oversized records in bounded chunks', async () => {
     const env = setup();
     const oversized = 'a'.repeat(20_000);

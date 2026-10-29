@@ -6,6 +6,96 @@ import type { ModelPrompt, ModelRequestTrace } from '../../../runtime/model.js';
 describe('ChatGPT Responses adapter', () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it('preserves tool schemas with strict mode disabled and leaves returned arguments unchanged', async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    const paginationArguments = { after_seq: 12, limit: 5 };
+    vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const frames = [
+        {
+          type: 'response.completed',
+          response: {
+            status: 'completed',
+            output: [
+              {
+                type: 'function_call',
+                call_id: 'history-page',
+                name: 'read_thread_history',
+                arguments: JSON.stringify(paginationArguments),
+              },
+            ],
+          },
+        },
+      ];
+      return new Response(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''), {
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+    const adapter = new ChatGptResponsesAdapter({
+      accessToken: async () => 'oauth-access-token',
+    } as unknown as ChatGptPlanAuth);
+    const prompt: ModelPrompt = {
+      system: '',
+      model: 'selected-model',
+      temperature: 0.2,
+      turns: [],
+      tools: [
+        {
+          name: 'send_thread_message',
+          description: 'Send a message.',
+          parameters: {
+            type: 'object',
+            properties: {
+              thread_id: { type: 'string' },
+              message: { type: 'string' },
+            },
+            required: ['message'],
+            additionalProperties: false,
+          },
+        },
+        {
+          name: 'read_thread_history',
+          description: 'Read a page of Thread history.',
+          parameters: {
+            type: 'object',
+            properties: {
+              after_seq: { type: 'integer', minimum: 0 },
+              limit: { type: 'integer', minimum: 1, maximum: 100 },
+              record_seq: { type: 'integer', minimum: 1 },
+              offset: { type: 'integer', minimum: 0 },
+              chunk_chars: { type: 'integer', minimum: 1, maximum: 8000 },
+            },
+            additionalProperties: false,
+          },
+        },
+      ],
+    };
+
+    const originalTools = structuredClone(prompt.tools);
+    const result = await adapter.complete(prompt, new AbortController().signal, () => undefined);
+    const sentTools = requestBody?.tools as Array<Record<string, unknown>>;
+    expect(sentTools).toEqual([
+      {
+        type: 'function',
+        name: 'send_thread_message',
+        description: 'Send a message.',
+        parameters: originalTools[0]?.parameters,
+        strict: false,
+      },
+      {
+        type: 'function',
+        name: 'read_thread_history',
+        description: 'Read a page of Thread history.',
+        parameters: originalTools[1]?.parameters,
+        strict: false,
+      },
+    ]);
+    expect(prompt.tools).toEqual(originalTools);
+    expect(result.toolCalls).toEqual([
+      { id: 'history-page', name: 'read_thread_history', arguments: paginationArguments },
+    ]);
+  });
+
   it('streams transient text and maps completed function calls, usage, and settings', async () => {
     let requestBody: Record<string, unknown> | undefined;
     let authorization = '';

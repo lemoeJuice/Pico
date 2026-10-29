@@ -87,6 +87,8 @@ function responseTools(tools: ToolDefinition[]): Array<Record<string, unknown>> 
     name: tool.name,
     description: tool.description,
     parameters: tool.parameters,
+    // Keep optional tool arguments optional; Responses otherwise may normalize schemas to strict mode.
+    strict: false,
   }));
 }
 

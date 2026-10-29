@@ -338,16 +338,44 @@ export const collaborationPlugin: PicoPlugin = {
       {
         name: 'read_thread_history',
         description:
-          'Read input/output records from a Thread in this Project, indexed by Canonical seq. Omit thread_id to read the current Thread. Each page is limited to 16,000 JSON characters. Use next_after_seq from the result to continue; use a smaller limit if the page is too large. Nested read_thread_history outputs are omitted to prevent repeated history expansion. For one oversized record, call again with record_seq, offset, and chunk_chars (up to 8,000) to read its JSON in chunks. A successful result is shown to the Model once; later requests receive a placeholder, so preserve useful findings and seq references or call this tool again. When attaching same-Thread history as a reference, use the returned seq value. Plugin records and diagnostic metadata are omitted. This does not wait for or change another Thread.',
+          'Read input/output records from a Thread in this Project, indexed by Canonical seq. Omit thread_id to read the current Thread. ' +
+          'Choose exactly one mode; omit unused fields entirely rather than filling defaults or null. ' +
+          'PAGE mode: use after_seq and limit, for example {"after_seq":0,"limit":10}; never include record_seq, offset, or chunk_chars. ' +
+          'Each page is limited to 16,000 JSON characters. Continue with next_after_seq; if a page is too large, reduce limit with the same after_seq. ' +
+          'CHUNK mode: read one oversized record with record_seq, offset, and chunk_chars, for example {"record_seq":123,"offset":0,"chunk_chars":8000}; never include after_seq or limit. ' +
+          'Continue that record with next_offset until it is null, then resume pages with after_seq set to that record_seq and all chunk fields omitted. ' +
+          'Nested read_thread_history outputs, plugin records, and diagnostic metadata are omitted. A successful result is shown to the Model once; later requests receive a placeholder, so preserve useful findings and seq references or call again. Use the returned seq when attaching a same-Thread history reference. This does not wait for or change another Thread.',
         parameters: {
           type: 'object',
           properties: {
-            thread_id: { type: 'string', minLength: 1 },
-            after_seq: { type: 'integer', minimum: 0 },
-            limit: { type: 'integer', minimum: 1, maximum: 100 },
-            record_seq: { type: 'integer', minimum: 1 },
-            offset: { type: 'integer', minimum: 0 },
-            chunk_chars: { type: 'integer', minimum: 1, maximum: THREAD_HISTORY_MAX_CHUNK_CHARS },
+            thread_id: { type: 'string', minLength: 1, description: 'Omit to read the current Thread.' },
+            after_seq: {
+              type: 'integer',
+              minimum: 0,
+              description: 'PAGE mode only. Exclusive starting seq; defaults to 0. Omit in CHUNK mode.',
+            },
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100,
+              description: 'PAGE mode only. Maximum records to scan; defaults to 50. Omit in CHUNK mode.',
+            },
+            record_seq: {
+              type: 'integer',
+              minimum: 1,
+              description: 'CHUNK mode only. Exact seq of one record. Omit in PAGE mode.',
+            },
+            offset: {
+              type: 'integer',
+              minimum: 0,
+              description: 'CHUNK mode only; requires record_seq. Start at 0, then use next_offset. Omit in PAGE mode.',
+            },
+            chunk_chars: {
+              type: 'integer',
+              minimum: 1,
+              maximum: THREAD_HISTORY_MAX_CHUNK_CHARS,
+              description: 'CHUNK mode only; requires record_seq. Defaults to 8,000 characters. Omit in PAGE mode.',
+            },
           },
           additionalProperties: false,
         },
@@ -385,7 +413,11 @@ export const collaborationPlugin: PicoPlugin = {
         const recordSeq = hasRecordSeq ? (args.record_seq as number) : undefined;
         if (recordSeq !== undefined) {
           if (afterSeq !== undefined || Object.prototype.hasOwnProperty.call(args, 'limit')) {
-            throw new Error('Use record_seq chunk arguments separately from after_seq and limit.');
+            throw new Error(
+              'Use record_seq chunk arguments separately from after_seq and limit. ' +
+                'For a history page, omit record_seq, offset, and chunk_chars. For one record, omit after_seq and limit. ' +
+                'Omit unused fields entirely; changing limit does not resolve this conflict.',
+            );
           }
           const offset = typeof args.offset === 'number' ? args.offset : 0;
           const chunkChars = typeof args.chunk_chars === 'number' ? args.chunk_chars : THREAD_HISTORY_MAX_CHUNK_CHARS;
@@ -425,7 +457,7 @@ export const collaborationPlugin: PicoPlugin = {
           );
           if (oversized) {
             throw new Error(
-              `History record at seq ${oversized.seq} exceeds the ${THREAD_HISTORY_MAX_RESULT_CHARS}-character result limit by itself. Read it in chunks with record_seq=${oversized.seq}, offset=0, and chunk_chars=${THREAD_HISTORY_MAX_CHUNK_CHARS}; do not retry the same page unchanged.`,
+              `History record at seq ${oversized.seq} exceeds the ${THREAD_HISTORY_MAX_RESULT_CHARS}-character result limit by itself. Read it in chunks with record_seq=${oversized.seq}, offset=0, and chunk_chars=${THREAD_HISTORY_MAX_CHUNK_CHARS}; omit after_seq and limit. Do not retry the same page unchanged.`,
             );
           }
           throw new Error(
