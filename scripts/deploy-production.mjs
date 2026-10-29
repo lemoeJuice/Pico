@@ -36,6 +36,9 @@ import { prepareWebPublication } from './deploy/publish-web.mjs';
 import { compareInstalledLock } from './deploy/dependencies.mjs';
 import { runtimeArtifactHashes } from './deploy/artifacts.mjs';
 import { selectDeploymentScope } from './deploy/selection.mjs';
+import { acquireSystemdUnitReference, assertRestartableSystemdUnit } from './deploy/systemd.mjs';
+import { assertSystemdTokenSource } from './deploy/systemd-credentials.mjs';
+import { recoverStoppedSystemdUnit } from './deploy/systemd-recovery.mjs';
 
 const projectRoot = realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
 const runtimeLauncher = path.join(projectRoot, 'scripts/start-runtime.sh');
@@ -267,20 +270,32 @@ function verifySystemdTokenSource(context, token) {
   if (!context?.supported) {
     throw new Error('This systemd unit type cannot be safely restarted by the deployment script.');
   }
-  if (systemdShow(context, 'EnvironmentFiles')) {
-    throw new Error('The systemd unit uses EnvironmentFiles; verify its token source and restart it through that unit.');
+  const userManager = context.args.includes('--user');
+  let managerEnvironment = '';
+  if (userManager) {
+    const result = spawnSync('systemctl', ['--user', 'show-environment'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    if (result.error || result.status !== 0) throw new Error('Cannot safely inspect the systemd user manager environment; no Runtime was stopped.');
+    managerEnvironment = result.stdout;
   }
-  const unsetEnvironment = systemdShow(context, 'UnsetEnvironment').split(/\s+/);
-  if (unsetEnvironment.some((entry) => entry === '*' || entry === 'PICO_ACCESS_TOKEN' || entry.startsWith('PICO_ACCESS_TOKEN='))) {
-    throw new Error('The systemd unit removes PICO_ACCESS_TOKEN with UnsetEnvironment; no process was stopped.');
-  }
-  const configuredEnvironment = systemdShow(context, 'Environment').split(/\s+/);
-  if (!configuredEnvironment.includes(`PICO_ACCESS_TOKEN=${token}`)) {
-    throw new Error('The systemd unit does not contain the current Runtime token; no process was stopped.');
-  }
-  if (systemdShow(context, 'ExecStart').includes(token)) {
-    throw new Error('The systemd unit appears to pass a credential in ExecStart; refusing to expose it further.');
-  }
+  assertSystemdTokenSource({
+    unitEnvironment: systemdShow(context, 'Environment'),
+    managerEnvironment,
+    unsetEnvironment: systemdShow(context, 'UnsetEnvironment'),
+    environmentFiles: systemdShow(context, 'EnvironmentFiles'),
+    execStart: systemdShow(context, 'ExecStart'),
+    userManager,
+    token,
+  });
+}
+
+function verifyRestartableSystemdUnit(context) {
+  assertRestartableSystemdUnit(context, (property) => systemdShow(context, property), (file) => {
+    try {
+      return statSync(file).isFile();
+    } catch {
+      return false;
+    }
+  });
 }
 
 async function controlSystemdUnit(context, operation) {
@@ -499,7 +514,7 @@ async function runBuild(scriptName, sourceRoot = projectRoot) {
 async function runTests(sourceRoot, { runtime = false, changedChecks = [] } = {}) {
   const args = ['exec', '--', 'vitest', 'run'];
   const tests = new Set(runtime
-    ? ['test/deploy-plan.test.ts', 'test/deploy-selection.test.ts', 'test/deploy-cli.test.ts', 'test/deploy-dependencies.test.ts', 'test/deploy-artifacts.test.ts', 'test/deploy-publish-web.test.ts', 'test/deploy-server.test.ts',
+    ? ['test/deploy-plan.test.ts', 'test/deploy-selection.test.ts', 'test/deploy-cli.test.ts', 'test/deploy-dependencies.test.ts', 'test/deploy-artifacts.test.ts', 'test/deploy-publish-web.test.ts', 'test/deploy-server.test.ts', 'test/deploy-systemd.test.ts', 'test/deploy-systemd-credentials.test.ts', 'test/deploy-systemd-recovery.test.ts',
       'test/server.test.ts', 'test/server-auth.test.ts', 'test/server-errors.test.ts',
       'test/store.test.ts', 'test/plugin-host-lifecycle.test.ts']
     : ['test/plugin-ui.test.ts', 'test/ui-contributions.test.ts', 'test/model-selection-ui.test.tsx']);
@@ -890,7 +905,12 @@ async function deploy(plan, currentManifest, baseline, sourceRoot) {
   }
   if (!runtimeEnvironment.PATH) throw new Error('The live Runtime environment has no PATH; refusing to deploy.');
   const systemdContext = getSystemdContext(oldPid, runtimeEnvironment);
-  if (full && systemdContext) verifySystemdTokenSource(systemdContext, token);
+  let transientSystemdUnit = false;
+  if (full && systemdContext) {
+    verifyRestartableSystemdUnit(systemdContext);
+    verifySystemdTokenSource(systemdContext, token);
+    transientSystemdUnit = systemdShow(systemdContext, 'Transient') === 'yes';
+  }
   if (runtimeEnvironment.PICO_PLUGIN_DIR && path.resolve(projectRoot, runtimeEnvironment.PICO_PLUGIN_DIR) !== path.join(projectRoot, 'plugins') && (full || pluginIds.length)) {
     throw new Error('This Runtime uses a custom plugin directory; automatic plugin deployment does not manage that directory.');
   }
@@ -912,7 +932,12 @@ async function deploy(plan, currentManifest, baseline, sourceRoot) {
   let publicationCommitted = false;
   let publicationSucceeded = false;
   let oldProcessStopped = false;
+  let unitReference;
   try {
+    if (transientSystemdUnit) {
+      unitReference = await acquireSystemdUnitReference(systemdContext);
+      await unitReference.check();
+    }
     oldSession = await createSession(baseUrl, token);
     await verifyWorkspace(baseUrl, oldSession);
     await verifyWebUi(baseUrl);
@@ -995,6 +1020,14 @@ async function deploy(plan, currentManifest, baseline, sourceRoot) {
       throw new Error(`${finalActiveCount} Thread(s) became active before shutdown; current artifacts will be restored.`);
     }
     requireUnchangedPluginEntrypoints(currentManifest);
+    if (systemdContext) {
+      verifyRestartableSystemdUnit(systemdContext);
+      verifySystemdTokenSource(systemdContext, token);
+      if ((systemdShow(systemdContext, 'Transient') === 'yes') !== transientSystemdUnit) {
+        throw new Error('The systemd unit type changed during deployment; no Runtime was stopped.');
+      }
+      if (unitReference) await unitReference.check();
+    }
 
     await revokeSession(baseUrl, oldSession, true);
     oldSession = undefined;
@@ -1036,9 +1069,11 @@ async function deploy(plan, currentManifest, baseline, sourceRoot) {
     }
     writeBackupManifest(artifactBackup, 'old-stopped');
 
+    if (unitReference) await unitReference.check();
     installRuntimeArtifacts(sourceRoot);
     await publication.commit();
     publicationCommitted = true;
+    if (unitReference) await unitReference.check();
     if (systemdContext) await controlSystemdUnit(systemdContext, 'start');
     const child = systemdContext ? undefined : launchRuntime(runtimeEnvironment);
     const replacement = await waitForNewListener(oldPid, oldStartTime, child);
@@ -1065,6 +1100,41 @@ async function deploy(plan, currentManifest, baseline, sourceRoot) {
     artifactBackup = undefined;
     console.log(`部署完成：Runtime PID ${replacement.pid}，WebUI 与认证健康检查通过。日志：${logPath}`);
     if (receivedSignal) console.log(`部署期间收到 ${receivedSignal}；为避免服务停在中间状态，已完成替换。`);
+  } catch (error) {
+    // If replacement failed before a new listener appeared, restore the saved
+    // artifacts and try to restart the still-pinned unit. Never overwrite
+    // artifacts beneath a running replacement process.
+    if (oldProcessStopped && artifactBackup && systemdContext) {
+      try {
+        await recoverStoppedSystemdUnit({
+          readState: () => ({
+            listenerPids: listenerPids(),
+            oldProcessAlive: isPicoProcess(oldPid, oldStartTime),
+            activeState: systemdShow(systemdContext, 'ActiveState'),
+          }),
+          assertStopped: async () => { if (unitReference) await unitReference.check(); },
+          restore: () => restoreBuildArtifacts(artifactBackup, { discard: false }),
+          start: () => controlSystemdUnit(systemdContext, 'start'),
+          verify: async () => {
+            const recovered = await waitForNewListener(oldPid, oldStartTime);
+            requirePicoListener(recovered.pid, recovered.startTime);
+            if (readProcessEnvironment(recovered.pid).PICO_ACCESS_TOKEN !== token) throw new Error('Recovered Runtime token mismatch.', { cause: error });
+            const recoverySession = await createSession(baseUrl, token);
+            try {
+              const health = await getJson(baseUrl, recoverySession, '/api/health');
+              if (health?.ok !== true) throw new Error('Recovered Runtime health check failed.', { cause: error });
+              await verifyWorkspace(baseUrl, recoverySession);
+            } finally {
+              await revokeSession(baseUrl, recoverySession);
+            }
+          },
+        });
+        console.error('新版本未完成部署；已尝试恢复旧产物并确认 Runtime 健康，备份仍保留供核对。');
+      } catch {
+        console.error('自动恢复未完成；旧构建备份已保留，请检查服务及备份。');
+      }
+    }
+    throw error;
   } finally {
     if (publication && publicationCommitted && !publicationSucceeded && !oldProcessStopped) {
       await publication.rollback().catch(() => console.error('Could not roll back WebUI entrypoints.'));
@@ -1074,7 +1144,9 @@ async function deploy(plan, currentManifest, baseline, sourceRoot) {
         if (oldProcessStopped) {
           console.error(`部署未完成，旧构建备份已保留：${artifactBackup.backupRoot}`);
         } else {
-          restoreBuildArtifacts(artifactBackup);
+          // Full-deployment runtime artifacts are installed only after the old
+          // process exits. Re-copying the backup here would disrupt live files.
+          discardBuildBackup(artifactBackup);
         }
       } catch {
         console.error('Could not restore or clean up the temporary build backup; inspect .pico-deploy-backup-* in the project root.');
@@ -1085,6 +1157,7 @@ async function deploy(plan, currentManifest, baseline, sourceRoot) {
     if (publication && !publicationCommitted) {
       await publication.cleanupPrepared().catch(() => console.error('Could not remove an uncommitted WebUI release.'));
     }
+    if (unitReference) await unitReference.release().catch(() => console.error('Could not cleanly release the systemd unit reference.'));
   }
 }
 
