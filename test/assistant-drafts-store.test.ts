@@ -170,7 +170,7 @@ describe('AssistantDraftStore', () => {
     store.appendText('thread-a', 'execution-b', 'second reply');
 
     expect(store.getContents('thread-a')).toEqual([
-      { executionId: 'execution-a', text: 'first reply' },
+      { executionId: 'execution-a', text: 'first reply', settled: true },
       { executionId: 'execution-b', text: 'second reply' },
     ]);
     expect(store.getContent('thread-a')).toMatchObject({ executionId: 'execution-b', text: 'second reply' });
@@ -181,5 +181,17 @@ describe('AssistantDraftStore', () => {
 
     store.clear('thread-a', 'execution-b');
     expect(store.getContents('thread-a')).toEqual([]);
+  });
+
+  it('retains a settled visible draft until handoff and clears confirmed drafts when leaving', () => {
+    const store = new AssistantDraftStore();
+    store.appendText('thread-a', 'execution-a', 'finished reply');
+    store.markSettled('thread-a', 'execution-a', 12);
+    expect(store.getContents('thread-a')).toEqual([
+      { executionId: 'execution-a', text: 'finished reply', settled: true, committedSeq: 12 },
+    ]);
+    store.appendText('thread-a', 'execution-b', 'still writing');
+    store.clearCommitted('thread-a');
+    expect(store.getContents('thread-a')).toEqual([{ executionId: 'execution-b', text: 'still writing' }]);
   });
 });

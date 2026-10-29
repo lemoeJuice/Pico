@@ -434,6 +434,20 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   app.delete('/api/threads/:threadId', (request, response) => {
     response.json(runtime.hideArchivedThread(request.params.threadId!));
   });
+  app.post('/api/threads/:threadId/draft-handoff-state', (request, response) => {
+    const body = bodyObject(request);
+    const executionIds = body.executionIds;
+    if (
+      !Array.isArray(executionIds) ||
+      executionIds.length < 1 ||
+      executionIds.length > 50 ||
+      executionIds.some((id) => typeof id !== 'string' || !id.trim() || id.length > 256)
+    ) {
+      throw new ServiceError(400, 'executionIds must contain 1..50 non-empty strings of at most 256 characters');
+    }
+    if (!runtime.store.getThread(request.params.threadId!)) return notFound(response, 'Thread not found');
+    response.json({ executions: runtime.getDraftHandoffState(request.params.threadId!, executionIds as string[]) });
+  });
   app.get('/api/threads/:threadId/tools', async (request, response) => {
     response.json({ tools: await runtime.listThreadTools(request.params.threadId!) });
   });

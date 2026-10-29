@@ -32,7 +32,7 @@ import type {
   ToolResultPayload,
   UiContribution,
 } from '../core/types.js';
-import type { ModelInputAttempt, ThreadInitialSnapshotResponse, ThreadSnapshot, ThreadToolView } from '../contracts/runtime.js';
+import type { DraftHandoffExecutionState, ModelInputAttempt, ThreadInitialSnapshotResponse, ThreadSnapshot, ThreadToolView } from '../contracts/runtime.js';
 import { isSessionExpired } from './session.js';
 import { pauseReasonIsError, visiblePauseReason } from './pause-reason.js';
 import { shouldSubmitOnEnter } from './composer-keys.js';
@@ -54,7 +54,7 @@ import {
   type AssistantStreamExecutions,
 } from './assistant-drafts.js';
 import { assistantDraftStore } from './assistant-drafts-store.js';
-import { shouldRenderAssistantDraft } from './assistant-draft-handoff.js';
+import { observeCommittedDraft, reconcileDraftHandoffs, shouldRenderAssistantDraft } from './assistant-draft-handoff.js';
 import { noticeForThread, withThreadNotice, withoutThreadNotice, type ThreadNotices } from './thread-notices.js';
 import { pluginUiContributionKey, toolResultForCall, uiContributionsAt } from './ui-contributions.js';
 import {
@@ -959,16 +959,20 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   useEffect(() => setSelectedSlashCommand(null), [threadId]);
 
   useEffect(() => {
+    if (!threadId) return;
+    return () => {
+      if (activeThreadId.current !== threadId) assistantDraftStore.clearCommitted(threadId);
+    };
+  }, [threadId]);
+
+  useEffect(() => {
     if (!snapshot || snapshot.thread.id !== threadId || snapshot.thread.projectId !== projectId) return;
-    const visibleRecords = snapshot.hasInactiveHistory && snapshot.activePathRecordIds && preservedHistoryThreadId !== threadId
-      ? snapshot.records.filter((record) => snapshot.activePathRecordIds!.includes(record.id))
-      : snapshot.records;
     for (const draft of assistantDraftStore.getContents(snapshot.thread.id)) {
-      if (!shouldRenderAssistantDraft(draft.executionId, visibleRecords)) {
+      if (!shouldRenderAssistantDraft(draft.executionId, snapshot.records, draft.committedSeq)) {
         assistantDraftStore.clear(snapshot.thread.id, draft.executionId);
       }
     }
-  }, [snapshot, threadId, projectId, preservedHistoryThreadId]);
+  }, [snapshot, threadId, projectId]);
 
   const toggleThinking = useCallback(
     (expanded: boolean, summary: HTMLElement): void => {
@@ -1348,6 +1352,49 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     if (!threadId) return;
     snapshotVersions.current.set(threadId, (snapshotVersions.current.get(threadId) ?? 0) + 1);
   }, []);
+
+  // Recent history is paged, so older completed replies may not be in the
+  // returned page. Resolve retained drafts directly without loading that history.
+  useEffect(() => {
+    if (!threadId || snapshot?.thread.id !== threadId || snapshot.thread.projectId !== projectId) return;
+    let cancelled = false;
+    const executionIds = assistantDraftStore.getContents(threadId).map((draft) => draft.executionId);
+    const reconcile = async (): Promise<void> => {
+      for (let offset = 0; offset < executionIds.length; offset += 50) {
+        const result = await api<{ executions: DraftHandoffExecutionState[] }>(
+          `/api/threads/${encodeURIComponent(threadId)}/draft-handoff-state`,
+          { method: 'POST', body: JSON.stringify({ executionIds: executionIds.slice(offset, offset + 50) }) },
+        );
+        if (cancelled || activeThreadId.current !== threadId) return;
+        const current = snapshotRef.current;
+        if (!current || current.thread.id !== threadId || current.thread.projectId !== projectId) return;
+        reconcileDraftHandoffs(assistantDraftStore, threadId, current.records, result.executions);
+        const missingCommitted = result.executions.some((state) =>
+          state.status === 'completed' && state.assistantSeq !== null &&
+          shouldRenderAssistantDraft(state.executionId, current.records, state.assistantSeq),
+        );
+        if (missingCommitted) {
+          // A reply may have committed after the page was read while its WS event
+          // was missed. Invalidate any in-flight snapshot and fetch it again.
+          noteSnapshotChange(threadId);
+          await loadSnapshot(threadId);
+          if (cancelled || activeThreadId.current !== threadId) return;
+          const refreshed = snapshotRef.current;
+          if (refreshed?.thread.id === threadId && result.executions.some((state) =>
+            state.status === 'completed' && state.assistantSeq !== null &&
+            shouldRenderAssistantDraft(state.executionId, refreshed.records, state.assistantSeq),
+          )) {
+            await loadSnapshot(threadId);
+          }
+        }
+      }
+    };
+    void reconcile().catch(() => {
+      // Preserve unconfirmed drafts if the status query fails; a later snapshot
+      // or canonical event can still complete the handoff.
+    });
+    return () => { cancelled = true; };
+  }, [threadId, projectId, snapshot?.thread.id, loadSnapshot, noteSnapshotChange]);
 
   const loadProjectThreads = useCallback(async (id: string): Promise<Thread[] | null> => {
     projectThreadLoads.current.add(id);
@@ -1817,6 +1864,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           if (recordThreadId && record?.kind === 'assistant' && record.id.endsWith(':assistant')) {
             const executionId = record.id.slice(0, -':assistant'.length);
             settleModelExecution(executionId);
+            observeCommittedDraft(assistantDraftStore, recordThreadId, executionId, record.seq, recordThreadId === activeThreadId.current);
           }
         } else if (event.type === 'execution.updated') {
           const execution = event.execution as Execution | undefined;
@@ -1829,6 +1877,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             observeModelExecutions([execution]);
             if (execution.status === 'failed' || execution.status === 'interrupted') {
               assistantDraftStore.clear(execution.threadId, execution.id);
+            } else if (execution.status === 'completed') {
+              assistantDraftStore.markSettled(execution.threadId, execution.id);
             }
           }
           if (execution?.threadId === activeThreadId.current) {
@@ -3624,7 +3674,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     {selectedThreadCompacting ? <ContextCompactionProgressCard /> : null}
                     <AssistantDraftMessages
                       threadId={selectedThread.id}
-                      records={timelineRecords}
+                      records={records}
                       liveEntrances={liveEntrances}
                     />
                     {!activeSnapshot ? (
@@ -5290,7 +5340,7 @@ function AssistantDraftMessage({
     [threadId, executionId],
   );
   const draft = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-  if (!draft || !shouldRenderAssistantDraft(draft.executionId, records)) return null;
+  if (!draft || !shouldRenderAssistantDraft(draft.executionId, records, draft.committedSeq)) return null;
   return (
     <div className={`assistant-message draft-message ${liveEntrances.has(`draft:${draft.executionId}`) ? 'live-content-entrance' : ''}`}>
       <div className="assistant-avatar">
@@ -5298,7 +5348,7 @@ function AssistantDraftMessage({
       </div>
       <div className="message-body">
         <div className="message-author">
-          Pico <span className="typing-label">{draft.unconfirmed ? 'connection interrupted' : 'writing'}</span>
+          Pico <span className="typing-label">{draft.unconfirmed ? 'connection interrupted' : draft.settled ? 'finishing' : 'writing'}</span>
         </div>
         {draft.unconfirmed ? (
           <p className="projection-state" role="status">Partial text may be incomplete. Waiting for a confirmed reply.</p>
@@ -5307,7 +5357,7 @@ function AssistantDraftMessage({
         ) : null}
         {draft.reasoningSummary ? <Reasoning text={draft.reasoningSummary} /> : null}
         {draft.text ? <Markdown>{draft.text}</Markdown> : null}
-        {!draft.unconfirmed && !draft.previewIncomplete ? <AssistantToolPreviewSection threadId={threadId} executionId={draft.executionId} /> : null}
+        {!draft.unconfirmed && !draft.previewIncomplete ? <AssistantToolPreviewSection threadId={threadId} executionId={draft.executionId} generating={!draft.settled} /> : null}
       </div>
     </div>
   );
@@ -5351,9 +5401,11 @@ function NewContentControl({
 const AssistantToolPreviewSection = memo(function AssistantToolPreviewSection({
   threadId,
   executionId,
+  generating,
 }: {
   threadId: string;
   executionId: string;
+  generating: boolean;
 }) {
   const subscribe = useCallback(
     (listener: () => void) => assistantDraftStore.subscribeToolSlots(threadId, executionId, listener),
@@ -5372,9 +5424,10 @@ const AssistantToolPreviewSection = memo(function AssistantToolPreviewSection({
           threadId={threadId}
           executionId={executionId}
           index={slot.index}
+          generating={generating}
         />
       ))}
-      {!slots.some((slot) => slot.name === 'shell') ? <span className="cursor-block" /> : null}
+      {generating && !slots.some((slot) => slot.name === 'shell') ? <span className="cursor-block" /> : null}
     </>
   );
 });
@@ -5383,10 +5436,12 @@ const AssistantToolPreviewCard = memo(function AssistantToolPreviewCard({
   threadId,
   executionId,
   index,
+  generating,
 }: {
   threadId: string;
   executionId: string;
   index: number;
+  generating: boolean;
 }) {
   const subscribe = useCallback(
     (listener: () => void) => assistantDraftStore.subscribeToolPreview(threadId, executionId, index, listener),
@@ -5407,7 +5462,7 @@ const AssistantToolPreviewCard = memo(function AssistantToolPreviewCard({
       }}
       execution={undefined}
       result={undefined}
-      preview={{ argumentsText: call.argumentsText }}
+      preview={{ argumentsText: call.argumentsText, generating }}
       expansionKey={`${threadId}:${executionId}:${index}`}
     />
   );

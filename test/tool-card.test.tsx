@@ -17,6 +17,31 @@ it('keeps arguments and the pending result visible without disclosure controls',
   expect(html).toContain('tool-shell-output-pending');
 });
 
+it('keeps a finished preview visible without a generating label or blinking caret', () => {
+  const html = renderToStaticMarkup(
+    <ToolCard
+      call={{ id: 'preview-a', name: 'shell', arguments: {} }}
+      execution={undefined}
+      result={undefined}
+      preview={{ argumentsText: '{"command":"pwd"}', generating: false }}
+    />,
+  );
+
+  expect(html).toContain('pwd');
+  expect(html).not.toContain('Generating');
+  expect(html).toContain('data-phase="handoff"');
+  expect(html).toContain('Waiting for stable reply');
+  expect(html).not.toContain('tool-command-caret');
+});
+
+it('does not label an empty durable tool call as generating', () => {
+  const html = renderToStaticMarkup(
+    <ToolCard call={{ id: 'durable', name: 'custom_tool', arguments: {} }} execution={undefined} result={undefined} />,
+  );
+  expect(html).toContain('No input required.');
+  expect(html).not.toContain('Generating arguments');
+});
+
 it('uses the durable result status when execution history is outside the loaded page and escapes output', () => {
   const html = renderToStaticMarkup(
     <ToolCard

@@ -85,6 +85,13 @@ export interface SubmitResult {
   command?: { text?: string; openThreadId?: string; severity?: 'notice' | 'error' };
 }
 
+/** Minimal durable state used to reconcile a returned draft with canonical history. */
+export interface DraftHandoffExecutionState {
+  executionId: string;
+  status: Execution['status'] | null;
+  assistantSeq: number | null;
+}
+
 export interface ModelInputAttempt {
   id: string;
   prompt?: ModelInputPromptSnapshot;

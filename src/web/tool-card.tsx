@@ -283,7 +283,9 @@ function getPartialStringField(text: string, field: string): string | null {
   }
 }
 
-function previewArguments(call: ToolCall, preview?: { argumentsText: string }): JsonRecord {
+type ToolPreview = { argumentsText: string; generating?: boolean };
+
+function previewArguments(call: ToolCall, preview?: ToolPreview): JsonRecord {
   if (preview) {
     try {
       const parsed: unknown = JSON.parse(preview.argumentsText);
@@ -321,7 +323,7 @@ function previewArguments(call: ToolCall, preview?: { argumentsText: string }): 
   return isRecord(call.arguments) ? call.arguments : {};
 }
 
-function collapsedArgumentSummary(name: string, args: JsonRecord, preview?: { argumentsText: string }): string {
+function collapsedArgumentSummary(name: string, args: JsonRecord, preview?: ToolPreview): string {
   const preferredOrder: Record<string, string[]> = {
     shell: ['command'],
     read_file: ['path'],
@@ -349,7 +351,7 @@ function collapsedArgumentSummary(name: string, args: JsonRecord, preview?: { ar
   const order = preferredOrder[name] ?? [];
   const keys = [...order, ...Object.keys(args).filter((key) => !order.includes(key))];
   const key = keys.find((candidate) => args[candidate] !== undefined && args[candidate] !== '');
-  if (!key) return preview ? 'Generating arguments…' : 'No input required.';
+  if (!key) return preview && preview.generating !== false ? 'Generating arguments…' : 'No input required.';
 
   const value = args[key];
   const compact =
@@ -368,20 +370,21 @@ function collapsedArgumentSummary(name: string, args: JsonRecord, preview?: { ar
 function readableArguments(
   name: string,
   args: JsonRecord,
-  preview?: { argumentsText: string },
+  preview?: ToolPreview,
   previewScrollRef?: RefObject<HTMLPreElement | null>,
   onPreviewScroll?: (event: UIEvent<HTMLPreElement>) => void,
 ): ReactNode {
   if (name === 'shell') {
     const command = typeof args.command === 'string' ? args.command : '';
+    const generating = preview?.generating !== false;
     return (
       <pre
         ref={preview ? previewScrollRef : undefined}
         onScroll={preview ? onPreviewScroll : undefined}
         className="tool-command-preview"
       >
-        {command || (preview ? 'Generating command…' : 'No command provided')}
-        {preview ? <span className="tool-command-caret" aria-hidden="true" /> : null}
+        {command || (preview && generating ? 'Generating command…' : 'No command provided')}
+        {preview && generating ? <span className="tool-command-caret" aria-hidden="true" /> : null}
       </pre>
     );
   }
@@ -425,7 +428,7 @@ function readableArguments(
     ? [...order.filter((key) => key in args), ...Object.keys(args).filter((key) => !order.includes(key))]
     : Object.keys(args);
   if (keys.length === 0) {
-    return <div className="tool-empty-input">{preview ? 'Generating arguments…' : 'No input required.'}</div>;
+    return <div className="tool-empty-input">{preview && preview.generating !== false ? 'Generating arguments…' : 'No input required.'}</div>;
   }
   return (
     <div className="tool-readable-fields">
@@ -683,7 +686,7 @@ export function ToolCard({
   call: ToolCall;
   execution: Execution | undefined;
   result: ToolResultPayload | undefined;
-  preview?: { argumentsText: string };
+  preview?: ToolPreview;
   resultActions?: ReactNode;
   expansionKey?: string;
   defaultExpanded?: boolean;
@@ -814,7 +817,7 @@ export function ToolCard({
   return (
     <article
       className={`conversation-detail-card pico-ui-card tool-card tool-${status}${!expanded ? ' tool-card-collapsed' : ''}${hasError ? ' tool-has-error' : ''}${call.name === 'shell' ? ' tool-shell-card' : ''}`}
-      data-phase={preview ? 'generating' : status}
+      data-phase={preview?.generating === false ? 'handoff' : preview ? 'generating' : status}
       data-outcome={call.name === 'shell' ? shellOutcome : undefined}
     >
       <div className="tool-card-heading pico-ui-heading">
@@ -825,7 +828,7 @@ export function ToolCard({
               className={`tool-status pico-ui-status status-${shellExitFailure ? 'failed' : status}`}
               data-status={shellExitFailure ? 'failed' : status}
             >
-              {preview ? 'Generating' : shellExitFailure ? `Exit ${shellExitCode}` : status}
+              {preview?.generating === false ? 'Waiting for stable reply' : preview ? 'Generating' : shellExitFailure ? `Exit ${shellExitCode}` : status}
             </span>
             {(shellMeta ?? terminalTime) ? <span className="tool-card-meta">{shellMeta ?? terminalTime}</span> : null}
           </span>

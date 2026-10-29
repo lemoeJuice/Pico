@@ -4,6 +4,8 @@ export type ToolCallPreview = { index: number; id?: string; name?: string; argum
 export type AssistantDraft = {
   executionId: string;
   text: string;
+  settled?: boolean;
+  committedSeq?: number;
   unconfirmed?: boolean;
   previewIncomplete?: boolean;
   reasoningSummary?: string;

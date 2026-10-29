@@ -1781,6 +1781,33 @@ export class PicoStore {
     return row ? this.executionFromRow(row) : null;
   }
 
+  getModelExecutionHandoffStates(
+    threadId: string,
+    executionIds: string[],
+  ): Array<{
+    executionId: string;
+    status: ExecutionStatus | null;
+    assistantSeq: number | null;
+  }> {
+    if (executionIds.length > 50) throw new Error('At most 50 execution IDs may be queried');
+    const executionQuery = this.db.prepare(
+      "SELECT status FROM executions WHERE id = ? AND thread_id = ? AND kind = 'model'",
+    );
+    const assistantQuery = this.db.prepare(
+      "SELECT seq FROM canonical_records WHERE id = ? AND thread_id = ? AND kind = 'assistant'",
+    );
+    return executionIds.map((executionId) => {
+      const execution = executionQuery.get(executionId, threadId) as SqlRow | undefined;
+      if (!execution) return { executionId, status: null, assistantSeq: null };
+      const assistant = assistantQuery.get(`${executionId}:assistant`, threadId) as SqlRow | undefined;
+      return {
+        executionId,
+        status: execution.status as ExecutionStatus,
+        assistantSeq: assistant ? Number(assistant.seq) : null,
+      };
+    });
+  }
+
   listExecutions(threadId: string): Execution[] {
     return (
       this.db.prepare('SELECT * FROM executions WHERE thread_id = ? ORDER BY created_at, id').all(threadId) as SqlRow[]

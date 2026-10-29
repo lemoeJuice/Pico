@@ -226,6 +226,41 @@ describe('Pico server access boundary', () => {
         ],
       });
       const otherThread = server.runtime.createThread(project.id, 'host');
+      const handoffUrl = `${base}/api/threads/${thread.id}/draft-handoff-state`;
+      const handoffResponse = await fetch(handoffUrl, {
+        method: 'POST',
+        headers: { ...cookieHeaders, 'content-type': 'application/json' },
+        body: JSON.stringify({ executionIds: [modelExecution.id, `${thread.id}:unknown`] }),
+      });
+      expect(handoffResponse.status).toBe(200);
+      const handoff = await handoffResponse.json();
+      expect(handoff).toEqual({
+        executions: [
+          {
+            executionId: modelExecution.id,
+            status: 'completed',
+            assistantSeq: server.runtime.store.getCanonicalRecordById('approval-step:assistant')?.seq,
+          },
+          { executionId: `${thread.id}:unknown`, status: null, assistantSeq: null },
+        ],
+      });
+      expect(JSON.stringify(handoff)).not.toContain('Pico test system prompt');
+      expect(
+        (
+          await fetch(`${base}/api/threads/${otherThread.id}/draft-handoff-state`, {
+            method: 'POST',
+            headers: { ...cookieHeaders, 'content-type': 'application/json' },
+            body: JSON.stringify({ executionIds: [modelExecution.id] }),
+          }).then((response) => response.json())
+        ).executions[0],
+      ).toEqual({ executionId: modelExecution.id, status: null, assistantSeq: null });
+      expect(
+        await fetch(handoffUrl, {
+          method: 'POST',
+          headers: { ...cookieHeaders, 'content-type': 'application/json' },
+          body: JSON.stringify({ executionIds: Array.from({ length: 51 }, (_, index) => String(index)) }),
+        }).then((response) => response.status),
+      ).toBe(400);
       expect(
         await fetch(
           `${base}/api/threads/${otherThread.id}/executions/${encodeURIComponent(modelExecution.id)}/model-input`,

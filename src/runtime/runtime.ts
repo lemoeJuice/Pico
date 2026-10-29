@@ -97,6 +97,7 @@ import { resolveToolSurface } from './tool-surface.js';
 import { projectedCompactionPrefix } from './projection-mapping.js';
 import { ModelDraftBuffer, type ModelDraftReadResult } from './model-draft-buffer.js';
 import type { McpServerInput, McpServerView, StartMcpServerOptions } from '../contracts/mcp.js';
+import type { DraftHandoffExecutionState } from '../contracts/runtime.js';
 export type { McpServerInput, McpServerView, StartMcpServerOptions } from '../contracts/mcp.js';
 import type { PicoPlugin } from '../plugins/host.js';
 import {
@@ -1331,6 +1332,11 @@ export class PicoRuntime {
       return { status: 'unavailable' };
     }
     return this.modelDrafts.read(threadId, executionId, offset);
+  }
+
+  getDraftHandoffState(threadId: string, executionIds: string[]): DraftHandoffExecutionState[] {
+    if (!this.store.getThread(threadId)) return [];
+    return this.store.getModelExecutionHandoffStates(threadId, executionIds);
   }
 
   private publish(event: RuntimeEvent): void {

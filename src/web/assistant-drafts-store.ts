@@ -10,6 +10,8 @@ import {
 export interface AssistantDraftContent {
   executionId: string;
   text: string;
+  settled?: boolean;
+  committedSeq?: number;
   unconfirmed?: boolean;
   previewIncomplete?: boolean;
   reasoningSummary?: string;
@@ -42,6 +44,7 @@ function sameContents(left: readonly AssistantDraftContent[], right: readonly As
   return left.length === right.length && left.every((item, index) => {
     const other = right[index];
     return item.executionId === other?.executionId && item.text === other.text &&
+      item.settled === other.settled && item.committedSeq === other.committedSeq &&
       item.unconfirmed === other.unconfirmed && item.previewIncomplete === other.previewIncomplete &&
       item.reasoningSummary === other.reasoningSummary;
   });
@@ -176,6 +179,25 @@ export class AssistantDraftStore {
     this.replaceDrafts({});
   }
 
+  /** A settled preview stays available until its canonical record can take over. */
+  markSettled(threadId: string, executionId: string, committedSeq?: number): void {
+    const current = this.findDraft(threadId, executionId);
+    if (!current || (current.settled && (committedSeq === undefined || current.committedSeq === committedSeq))) return;
+    const updated = { ...current, settled: true, ...(committedSeq === undefined ? {} : { committedSeq }) };
+    if (this.drafts[threadId]?.executionId === executionId) {
+      this.replaceDrafts({ ...this.drafts, [threadId]: updated });
+    } else {
+      this.handoffs.get(threadId)?.set(executionId, updated);
+      this.replaceDrafts(this.drafts);
+    }
+  }
+
+  clearCommitted(threadId: string): void {
+    for (const draft of this.getContents(threadId)) {
+      if (draft.committedSeq !== undefined) this.clear(threadId, draft.executionId);
+    }
+  }
+
   markDisconnected(): void {
     const next: AssistantDrafts = {};
     for (const [threadId, draft] of Object.entries(this.drafts)) {
@@ -194,7 +216,7 @@ export class AssistantDraftStore {
     const current = this.drafts[threadId];
     if (!current || current.executionId === nextExecutionId) return;
     const byExecution = this.handoffs.get(threadId) ?? new Map<string, AssistantDraft>();
-    byExecution.set(current.executionId, current);
+    byExecution.set(current.executionId, { ...current, settled: true });
     this.handoffs.set(threadId, byExecution);
   }
 
@@ -202,6 +224,8 @@ export class AssistantDraftStore {
     return {
       executionId: draft.executionId,
       text: draft.text,
+      ...(draft.settled ? { settled: true } : {}),
+      ...(draft.committedSeq === undefined ? {} : { committedSeq: draft.committedSeq }),
       ...(draft.unconfirmed ? { unconfirmed: true } : {}),
       ...(draft.previewIncomplete ? { previewIncomplete: true } : {}),
       ...(draft.reasoningSummary === undefined ? {} : { reasoningSummary: draft.reasoningSummary }),
@@ -262,6 +286,8 @@ export class AssistantDraftStore {
       if (
         beforeContent?.executionId !== afterContent?.executionId ||
         beforeContent?.text !== afterContent?.text ||
+        beforeContent?.settled !== afterContent?.settled ||
+        beforeContent?.committedSeq !== afterContent?.committedSeq ||
         beforeContent?.unconfirmed !== afterContent?.unconfirmed ||
         beforeContent?.previewIncomplete !== afterContent?.previewIncomplete ||
         beforeContent?.reasoningSummary !== afterContent?.reasoningSummary
