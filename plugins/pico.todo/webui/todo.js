@@ -4,22 +4,30 @@
   let port = null;
   let context = { thread: null };
   let items = [];
+  let revision = 0;
   let openCount = 0;
   let busy = false;
   let loading = false;
   let error = '';
   let notice = '';
-  let showCompleted = false;
+  let showDone = true;
+  let rootPage = 0;
+  let phasePage = 0;
+  const childPages = new Map();
+  let pendingBlockedId = '';
+  let blockerDraft = '';
+  let blockerRevision = 0;
+  let form = { type: 'phase', title: '', phaseId: '', note: '', nextAction: '', blocker: '' };
   let editingId = '';
-  let editValue = '';
-  let addingChildId = '';
-  let childValue = '';
-  let newValue = '';
+  let edit = {};
+  let editingRevision = 0;
   let sequence = 0;
   let refreshGeneration = 0;
   let contextGeneration = 0;
   const pending = new Map();
-  const text = (value) => ({ type: 'text', text: String(value ?? '') });
+  const ROOT_PAGE_SIZE = 4;
+  const CHILD_PAGE_SIZE = 4;
+  const PHASE_OPTION_PAGE_SIZE = 10;
   const paragraph = (value) => ({ type: 'paragraph', text: String(value ?? '') });
   const group = (...children) => {
     const layouts = ['row', 'spread', 'form-row', 'grid-2', 'grid-compact', 'grid-standard', 'stack-compact'];
@@ -28,6 +36,12 @@
   };
   const card = (...children) => ({ type: 'card', children: [group(...children, 'stack-compact')] });
   const button = (label, actionId, options = {}) => ({ type: 'button', label, actionId, ...options });
+  const input = (label, value, actionId, placeholder = '') => ({ type: 'textInput', label, value: String(value ?? ''), placeholder, actionId, maxLength: 240, disabled: busy });
+  const area = (label, value, actionId) => ({ type: 'textArea', label, value: String(value ?? ''), actionId, rows: 'compact', maxLength: 4000, disabled: busy });
+  const preview = (value) => {
+    const content = String(value ?? '');
+    return content.length > 500 ? `${content.slice(0, 500)}…` : content;
+  };
 
   function send(action, payload = {}) {
     if (!port) return Promise.reject(new Error('Pico plugin UI is not connected.'));
@@ -37,378 +51,226 @@
       port.postMessage({ type: 'pico:plugin-ui:request', id, action, ...payload });
     });
   }
-
   function api(path, method = 'GET', body) {
-    return send('api', {
-      path: `/api/plugins/${pluginId}${path}`,
-      ...(method === 'GET' ? {} : { init: { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) } }),
-    });
+    return send('api', { path: `/api/plugins/${pluginId}${path}`, ...(method === 'GET' ? {} : { init: { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) } }) });
   }
-
-  function itemDepth(item, status) {
-    const byId = new Map(items.map((entry) => [entry.id, entry]));
-    let depth = 0;
-    let parentId = item.parentId;
-    const seen = new Set([item.id]);
-    while (parentId && !seen.has(parentId)) {
-      seen.add(parentId);
-      const parent = byId.get(parentId);
-      if (!parent) break;
-      if (parent.status === status) depth += 1;
-      parentId = parent.parentId;
-    }
-    return Math.min(depth, 8);
+  function phaseItems() { return items.filter((item) => item.type === 'phase'); }
+  function taskItems(phaseId) { return items.filter((item) => item.type === 'task' && (item.phaseId ?? '') === phaseId); }
+  function statusLabel(item) { return item.status.replace('_', ' '); }
+  function completed(item) { return item.status === 'done'; }
+  function rootItems() { return items.filter((item) => item.type === 'phase' || !item.phaseId); }
+  function siblings(item) { return item.phaseId ? taskItems(item.phaseId) : rootItems(); }
+  function move(item, direction) {
+    const list = siblings(item);
+    const index = list.findIndex((entry) => entry.id === item.id);
+    const target = list[index + direction];
+    if (!target) return;
+    const beforeId = direction < 0 ? target.id : (list[index + 2]?.id ?? null);
+    void mutate([{ action: 'move', id: item.id, ...(item.type === 'task' ? { phaseId: item.phaseId ?? null } : {}), beforeId }]);
   }
-
-  function todoRow(item) {
-    const id = item.id;
-    const indent = `${'↳ '.repeat(itemDepth(item, item.status))}`;
+  function itemNode(item, siblingIndex, siblingCount) {
+    const isEditing = editingId === item.id;
+    const details = [item.note && `Note: ${preview(item.note)}`, item.nextAction && `Next: ${preview(item.nextAction)}`, item.blocker && `Blocked: ${preview(item.blocker)}`].filter(Boolean);
     const controls = [
-      {
-        type: 'checkbox',
-        label: `${indent}${item.title}`,
-        checked: item.status === 'done',
-        actionId: `toggle:${id}`,
-        disabled: busy,
-      },
+      button('↑', `move-up:${item.id}`, { tone: 'quiet', disabled: busy || siblingIndex === 0 }),
+      button('↓', `move-down:${item.id}`, { tone: 'quiet', disabled: busy || siblingIndex === siblingCount - 1 }),
+      button('Edit', `edit:${item.id}`, { tone: 'quiet', disabled: busy }),
+      button('Delete', `delete:${item.id}`, { tone: 'danger', disabled: busy }),
     ];
-    if (editingId === id) {
-      controls.push(
-        {
-          type: 'textInput',
-          label: 'Todo result',
-          value: editValue,
-          actionId: 'edit.value',
-          maxLength: 240,
-          disabled: busy,
-        },
-        group(
-          button('Save', `save:${id}`, { tone: 'primary', disabled: busy || !editValue.trim() }),
-          button('Cancel', 'edit.cancel', { disabled: busy }),
-          'row',
-        ),
-      );
+    const nodes = [
+      ...(item.type === 'task' ? [{ type: 'heading', text: item.title, level: 4 }] : []),
+      group(...controls, 'row'),
+    ];
+    if (details.length) nodes.push(paragraph(details.join(' · ')));
+    if (item.type === 'task') {
+      nodes.push(group(
+        { type: 'select', label: 'Status', value: item.status, actionId: `status:${item.id}`, disabled: busy, options: [
+          { label: 'Open', value: 'open' }, { label: 'In progress', value: 'in_progress' }, { label: 'Blocked', value: 'blocked' }, { label: 'Done', value: 'done' },
+        ] },
+        { type: 'select', label: 'Phase', value: item.phaseId ?? '', actionId: `phase:${item.id}`, disabled: busy, options: phaseOptions(item.phaseId) },
+        'grid-2'));
     } else {
-      controls.push(
-        group(
-          button('Edit', `edit:${id}`, { tone: 'quiet', disabled: busy }),
-          button('Add subitem', `child:${id}`, { tone: 'quiet', disabled: busy }),
-          button('Delete', `delete:${id}`, { tone: 'danger', disabled: busy }),
-          'row',
-        ),
-      );
+      nodes.push(group({ type: 'select', label: 'Status', value: item.status, actionId: `status:${item.id}`, disabled: busy, options: [{ label: 'Open', value: 'open' }, { label: 'Done', value: 'done' }] }, 'row'));
     }
-    if (addingChildId === id) {
-      controls.push(
-        {
-          type: 'textInput',
-          label: 'Subitem result',
-          value: childValue,
-          placeholder: 'Describe the result to finish',
-          actionId: 'child.value',
-          maxLength: 240,
-          disabled: busy,
-        },
-        group(
-          button('Add subitem', `child-add:${id}`, { tone: 'primary', disabled: busy || !childValue.trim() }),
-          button('Cancel', 'child.cancel', { disabled: busy }),
-          'row',
-        ),
-      );
+    if (isEditing) {
+      nodes.push(input('Title', edit.title, 'edit.title'), area('Note', edit.note, 'edit.note'));
+      if (item.type === 'task') nodes.push(area('Next action', edit.nextAction, 'edit.nextAction'), area('Blocker', edit.blocker, 'edit.blocker'));
+      nodes.push(group(button('Save', `save:${item.id}`, { tone: 'primary', disabled: busy || !String(edit.title ?? '').trim() || (item.type === 'task' && item.status === 'blocked' && !String(edit.blocker ?? '').trim()) }), button('Cancel', 'cancel-edit', { disabled: busy }), 'row'));
     }
-    return group(...controls, 'stack-compact');
+    if (item.type === 'task' && pendingBlockedId === item.id) {
+      nodes.push(area('Blocker required to mark blocked', blockerDraft, 'blocked.value'));
+      nodes.push(group(button('Set blocked', `blocked.save:${item.id}`, { tone: 'primary', disabled: busy || !blockerDraft.trim() }), button('Cancel', 'blocked.cancel', { disabled: busy }), 'row'));
+    }
+    return card(...nodes);
   }
-
+  function phaseOptions(selectedId = '') {
+    const phases = phaseItems();
+    const start = phasePage * PHASE_OPTION_PAGE_SIZE;
+    const page = phases.slice(start, start + PHASE_OPTION_PAGE_SIZE);
+    const selected = phases.find((phase) => phase.id === selectedId);
+    return [{ label: 'No phase', value: '' }, ...page.map((phase) => ({ label: phase.title, value: phase.id })), ...(selected && !page.includes(selected) ? [{ label: `Current: ${selected.title}`, value: selected.id }] : [])];
+  }
+  function phaseOptionPager() {
+    const pages = Math.max(1, Math.ceil(phaseItems().length / PHASE_OPTION_PAGE_SIZE));
+    return group(
+      button('Previous phases', 'phase-page:prev', { tone: 'quiet', disabled: busy || phasePage <= 0 }),
+      { type: 'text', text: `Phase choices ${Math.min(phaseItems().length, phasePage * PHASE_OPTION_PAGE_SIZE + 1)}–${Math.min(phaseItems().length, (phasePage + 1) * PHASE_OPTION_PAGE_SIZE)} of ${phaseItems().length}` },
+      button('Next phases', 'phase-page:next', { tone: 'quiet', disabled: busy || phasePage + 1 >= pages }),
+      'spread');
+  }
+  function phaseNode(phase, index) {
+    const allTasks = taskItems(phase.id).filter((item) => showDone || !completed(item));
+    const page = Math.min(childPages.get(phase.id) ?? 0, Math.max(0, Math.ceil(allTasks.length / CHILD_PAGE_SIZE) - 1));
+    childPages.set(phase.id, page);
+    const tasks = allTasks.slice(page * CHILD_PAGE_SIZE, (page + 1) * CHILD_PAGE_SIZE);
+    const pages = Math.max(1, Math.ceil(allTasks.length / CHILD_PAGE_SIZE));
+    return card(
+      group({ type: 'heading', text: phase.title, level: 3 }, 'spread'),
+      itemNode(phase, rootItems().indexOf(phase), rootItems().length),
+      ...(tasks.length ? tasks.map((task) => itemNode(task, taskItems(phase.id).indexOf(task), taskItems(phase.id).length)) : [paragraph('No tasks in this phase.')]),
+      ...(allTasks.length > CHILD_PAGE_SIZE ? [group(button('Previous tasks', `child-page:${phase.id}:prev`, { tone: 'quiet', disabled: busy || page === 0 }), { type: 'text', text: `Tasks ${page * CHILD_PAGE_SIZE + 1}–${Math.min(allTasks.length, (page + 1) * CHILD_PAGE_SIZE)} of ${allTasks.length}` }, button('Next tasks', `child-page:${phase.id}:next`, { tone: 'quiet', disabled: busy || page + 1 >= pages }), 'spread')] : []),
+      group(button('Add task', `add-task:${phase.id}`, { tone: 'quiet', disabled: busy }), 'row'),
+    );
+  }
   function draw() {
     if (!context.thread) {
-      port?.postMessage({
-        type: 'pico:plugin-ui:render',
-        tree: [card(paragraph('Select a Thread to manage its Todo items.'))],
-      });
+      port?.postMessage({ type: 'pico:plugin-ui:render', tree: [card(paragraph('Select a Thread to manage its Todo plan.'))] });
       return;
     }
-    const openItems = items.filter((item) => item.status === 'open');
-    const doneItems = items.filter((item) => item.status === 'done');
-    const nodes = [
-      card(
-        group(
-          { type: 'heading', text: 'Todo' },
-          {
-            type: 'status',
-            text: loading ? 'Loading…' : `${openCount} unfinished`,
-            tone: loading ? 'neutral' : openCount ? 'neutral' : 'success',
-          },
-          'spread',
-        ),
-        group(
-          {
-            type: 'textInput',
-            label: 'New Todo result',
-            value: newValue,
-            placeholder: 'What result still needs to be completed?',
-            actionId: 'new.value',
-            maxLength: 240,
-            disabled: busy,
-          },
-          button('Add', 'add', { tone: 'primary', disabled: busy || !newValue.trim() }),
-          'form-row',
-        ),
-        ...(loading
-          ? [paragraph('Loading Todo items…')]
-          : openItems.length
-            ? [{ type: 'list', ordered: false, items: openItems.map(todoRow) }]
-            : [paragraph('No unfinished items.')]),
-        ...(!loading && doneItems.length
-          ? [
-              {
-                type: 'disclosure',
-                label: `Completed (${doneItems.length})`,
-                open: showCompleted,
-                actionId: 'completed.toggle',
-                children: showCompleted ? [{ type: 'list', ordered: false, items: doneItems.map(todoRow) }] : [],
-              },
-            ]
-          : []),
-        ...(notice ? [{ type: 'status', text: notice, tone: 'success' }] : []),
-        ...(error ? [{ type: 'status', text: error, tone: 'danger' }] : []),
-      ),
-    ];
+    const phases = phaseItems();
+    phasePage = Math.min(phasePage, Math.max(0, Math.ceil(phases.length / PHASE_OPTION_PAGE_SIZE) - 1));
+    const roots = rootItems().filter((item) => showDone || !completed(item) || (item.type === 'phase' && taskItems(item.id).some((task) => !completed(task))));
+    const pageCount = Math.max(1, Math.ceil(roots.length / ROOT_PAGE_SIZE));
+    rootPage = Math.min(rootPage, pageCount - 1);
+    const visibleRoots = roots.slice(rootPage * ROOT_PAGE_SIZE, (rootPage + 1) * ROOT_PAGE_SIZE);
+    const nodes = [card(
+      group({ type: 'heading', text: 'Todo' }, { type: 'status', text: loading ? 'Loading…' : `${openCount} unfinished`, tone: openCount ? 'neutral' : 'success' }, 'spread'),
+      group({ type: 'select', label: 'Add item type', value: form.type, actionId: 'form.type', disabled: busy, options: [{ label: 'Phase', value: 'phase' }, { label: 'Independent task', value: 'task' }, { label: 'Task in phase', value: 'phase-task' }] },
+        ...(form.type === 'phase-task' ? [{ type: 'select', label: 'Phase', value: form.phaseId, actionId: 'form.phase', disabled: busy, options: phaseOptions(form.phaseId) }] : []), 'grid-2'),
+      ...(form.type === 'phase-task' || items.some((item) => item.type === 'task') ? [phaseOptionPager()] : []),
+      input('Title', form.title, 'form.title', 'Describe the outcome'),
+      group(button('Add', 'add', { tone: 'primary', disabled: busy || !form.title.trim() || (form.type === 'phase-task' && !form.phaseId) }), 'row'),
+      group({ type: 'switch', label: 'Show completed', checked: showDone, actionId: 'show-done', disabled: busy }, 'row'),
+      ...(loading ? [paragraph('Loading Todo items…')] : visibleRoots.map((item) => item.type === 'phase'
+        ? phaseNode(item, roots.indexOf(item))
+        : itemNode(item, rootItems().indexOf(item), rootItems().length))),
+      ...(roots.length > ROOT_PAGE_SIZE ? [group(button('Previous items', 'root-page:prev', { tone: 'quiet', disabled: busy || rootPage === 0 }), { type: 'text', text: `Items ${rootPage * ROOT_PAGE_SIZE + 1}–${Math.min(roots.length, (rootPage + 1) * ROOT_PAGE_SIZE)} of ${roots.length}` }, button('Next items', 'root-page:next', { tone: 'quiet', disabled: busy || rootPage + 1 >= pageCount }), 'spread')] : []),
+      ...(notice ? [{ type: 'status', text: notice, tone: 'success' }] : []),
+      ...(error ? [{ type: 'status', text: error, tone: 'danger' }] : []),
+    )];
     port?.postMessage({ type: 'pico:plugin-ui:render', tree: nodes });
   }
-
   async function refresh() {
     const threadId = context.thread?.id;
     const generation = ++refreshGeneration;
-    if (!threadId) {
-      items = [];
-      openCount = 0;
-      loading = false;
-      error = '';
-      notice = '';
-      draw();
-      return;
-    }
-    loading = true;
-    draw();
+    if (!threadId) { items = []; revision = 0; openCount = 0; loading = false; error = ''; notice = ''; draw(); return false; }
+    loading = true; draw();
     try {
       const result = await api(`/threads?threadId=${encodeURIComponent(threadId)}`);
       if (generation !== refreshGeneration || context.thread?.id !== threadId) return;
       items = Array.isArray(result.items) ? result.items : [];
-      openCount = Number.isSafeInteger(result.openCount)
-        ? result.openCount
-        : items.filter((item) => item.status === 'open').length;
+      revision = Number.isSafeInteger(result.revision) ? result.revision : 0;
+      openCount = Number.isSafeInteger(result.openCount) ? result.openCount : items.filter((item) => item.status !== 'done').length;
       error = '';
-    } catch (reason) {
-      if (generation !== refreshGeneration) return;
-      error = reason instanceof Error ? reason.message : String(reason);
-    } finally {
-      if (generation === refreshGeneration) {
-        loading = false;
-        draw();
-      }
-    }
+      return true;
+    } catch (reason) { if (generation === refreshGeneration) error = reason instanceof Error ? reason.message : String(reason); return false; }
+    finally { if (generation === refreshGeneration) { loading = false; draw(); } }
   }
-
-  async function mutate(run, onSuccess) {
-    if (busy) return;
+  async function mutate(operations, onSuccess, expectedRevision = revision) {
+    if (busy || !context.thread) return;
     const generation = contextGeneration;
-    busy = true;
-    error = '';
-    notice = '';
-    draw();
+    busy = true; error = ''; notice = ''; draw();
     try {
-      const result = await run();
+      const result = await api('/edit', 'POST', { threadId: context.thread.id, expectedRevision, operations });
       if (generation !== contextGeneration) return;
-      if (onSuccess) onSuccess(result);
+      if (Number.isSafeInteger(result.revision)) revision = result.revision;
+      onSuccess?.(result);
       await refresh();
     } catch (reason) {
-      if (generation === contextGeneration) error = reason instanceof Error ? reason.message : String(reason);
-    } finally {
       if (generation === contextGeneration) {
-        busy = false;
-        draw();
+        const message = reason instanceof Error ? reason.message : String(reason);
+        if (/409|conflict|revision/i.test(message)) {
+          const refreshed = await refresh();
+          if (refreshed) notice = 'Todo changed elsewhere. The latest version has been loaded.';
+        }
+        else error = message;
       }
-    }
+    } finally { if (generation === contextGeneration) { busy = false; draw(); } }
   }
-
   function act(action) {
     const id = action.actionId;
     const value = String(action.value ?? '');
-    if (id === 'new.value') {
-      newValue = value;
-      draw();
-      if (action.event === 'submit') void act({ actionId: 'add' });
-      return;
-    }
-    if (id === 'edit.value') {
-      editValue = value;
-      draw();
-      if (action.event === 'submit' && editingId) void act({ actionId: `save:${editingId}` });
-      return;
-    }
-    if (id === 'child.value') {
-      childValue = value;
-      draw();
-      if (action.event === 'submit' && addingChildId) void act({ actionId: `child-add:${addingChildId}` });
-      return;
-    }
+    if (id.startsWith('form.')) { const key = id.slice(5); if (key === 'type') form.type = value; else if (key === 'phase') form.phaseId = value; else form[key] = value; draw(); return; }
+    if (id.startsWith('edit.')) { edit[id.slice(5)] = value; draw(); return; }
+    if (id === 'blocked.value') { blockerDraft = value; draw(); return; }
     if (busy) return;
-    if (id === 'completed.toggle') {
-      showCompleted = !showCompleted;
-      draw();
-      return;
+    if (id === 'show-done') { showDone = !showDone; draw(); return; }
+    if (id === 'root-page:prev') { rootPage = Math.max(0, rootPage - 1); draw(); return; }
+    if (id === 'root-page:next') { rootPage += 1; draw(); return; }
+    if (id === 'phase-page:prev') { phasePage = Math.max(0, phasePage - 1); draw(); return; }
+    if (id === 'phase-page:next') { phasePage += 1; draw(); return; }
+    if (id.startsWith('child-page:')) {
+      const [, phaseId, direction] = id.split(':');
+      childPages.set(phaseId, Math.max(0, (childPages.get(phaseId) ?? 0) + (direction === 'next' ? 1 : -1)));
+      draw(); return;
     }
-    if (id === 'edit.cancel') {
-      editingId = '';
-      editValue = '';
-      draw();
-      return;
-    }
-    if (id === 'child.cancel') {
-      addingChildId = '';
-      childValue = '';
-      draw();
+    if (id === 'blocked.cancel') { pendingBlockedId = ''; blockerDraft = ''; draw(); return; }
+    if (id.startsWith('blocked.save:')) {
+      const itemId = id.slice('blocked.save:'.length);
+      if (!blockerDraft.trim()) return;
+      void mutate([{ action: 'set_status', id: itemId, status: 'blocked', blocker: blockerDraft.trim() }], () => { pendingBlockedId = ''; blockerDraft = ''; }, blockerRevision);
       return;
     }
     if (id === 'add') {
-      const title = newValue.trim();
-      if (!title || !context.thread) return;
-      const threadId = context.thread.id;
-      void mutate(
-        () => api('/items', 'POST', { threadId, title }),
-        () => {
-          newValue = '';
-        },
-      );
-      return;
-    }
-    if (id.startsWith('toggle:')) {
-      const item = items.find((entry) => entry.id === id.slice(7));
-      if (!item || !context.thread) return;
-      const threadId = context.thread.id;
-      void mutate(() =>
-        api('/items', 'PATCH', {
-          threadId,
-          id: item.id,
-          status: item.status === 'done' ? 'open' : 'done',
-        }),
-      );
-      return;
+      const title = form.title.trim(); if (!title) return;
+      const type = form.type === 'phase' ? 'phase' : 'task';
+      void mutate([{ action: 'add', type, title, ...(form.type === 'phase-task' ? { phaseId: form.phaseId } : {}) }], () => { form = { ...form, title: '' }; }); return;
     }
     if (id.startsWith('edit:')) {
-      const item = items.find((entry) => entry.id === id.slice(5));
-      if (!item) return;
-      editingId = item.id;
-      editValue = item.title;
-      addingChildId = '';
-      draw();
-      return;
+      const item = items.find((entry) => entry.id === id.slice(5)); if (!item) return;
+      editingId = item.id; editingRevision = revision; edit = { title: item.title, note: item.note ?? '', nextAction: item.nextAction ?? '', blocker: item.blocker ?? '' }; draw(); return;
     }
+    if (id === 'cancel-edit') { editingId = ''; edit = {}; draw(); return; }
     if (id.startsWith('save:')) {
-      const itemId = id.slice(5);
-      const title = editValue.trim();
-      if (!title || !context.thread) return;
-      const threadId = context.thread.id;
-      void mutate(
-        () => api('/items', 'PATCH', { threadId, id: itemId, title }),
-        () => {
-          editingId = '';
-          editValue = '';
-        },
-      );
-      return;
+      const itemId = id.slice(5); const item = items.find((entry) => entry.id === itemId); if (!item || !String(edit.title ?? '').trim()) return;
+      const op = { action: 'update', id: itemId, title: edit.title.trim(), note: edit.note ?? '' };
+      if (item.type === 'task') Object.assign(op, { nextAction: edit.nextAction ?? '', blocker: edit.blocker ?? '' });
+      void mutate([op], () => { editingId = ''; edit = {}; }, editingRevision); return;
     }
-    if (id.startsWith('child:')) {
-      addingChildId = id.slice(6);
-      childValue = '';
-      editingId = '';
-      draw();
-      return;
+    if (id.startsWith('done:')) {
+      const item = items.find((entry) => entry.id === id.slice(5)); if (!item) return;
+      void mutate([{ action: 'set_status', id: item.id, status: item.status === 'done' ? 'open' : 'done' }]); return;
     }
-    if (id.startsWith('child-add:')) {
-      const parentId = id.slice(10);
-      const title = childValue.trim();
-      if (!title || !context.thread) return;
-      const threadId = context.thread.id;
-      void mutate(
-        () => api('/items', 'POST', { threadId, parentId, title }),
-        () => {
-          addingChildId = '';
-          childValue = '';
-        },
-      );
-      return;
+    if (id.startsWith('status:')) {
+      const item = items.find((entry) => entry.id === id.slice(7)); if (!item) return;
+      if (value === 'blocked' && item.type === 'task') { pendingBlockedId = item.id; blockerRevision = revision; blockerDraft = item.blocker ?? ''; draw(); return; }
+      void mutate([{ action: 'set_status', id: item.id, status: value }]); return;
     }
+    if (id.startsWith('phase:')) { const item = items.find((entry) => entry.id === id.slice(6)); if (!item) return; void mutate([{ action: 'move', id: item.id, phaseId: value || null, beforeId: null }]); return; }
+    if (id.startsWith('move-up:') || id.startsWith('move-down:')) { const item = items.find((entry) => entry.id === id.slice(id.indexOf(':') + 1)); if (item) move(item, id.startsWith('move-up:') ? -1 : 1); return; }
+    if (id.startsWith('add-task:')) { form.type = 'phase-task'; form.phaseId = id.slice(9); draw(); return; }
     if (id.startsWith('delete:')) {
       const itemId = id.slice(7);
-      if (!context.thread) return;
-      const threadId = context.thread.id;
-      void mutate(
-        () => api('/items', 'DELETE', { threadId, id: itemId }),
-        (result) => {
-          const kept = Number.isSafeInteger(result.keptSubitemCount) ? result.keptSubitemCount : 0;
-          notice = kept ? `Todo item deleted; kept ${kept} subitem${kept === 1 ? '' : 's'}.` : 'Todo item deleted.';
-        },
-      );
+      const item = items.find((entry) => entry.id === itemId);
+      const retained = item?.type === 'phase' ? taskItems(item.id).length : 0;
+      void mutate([{ action: 'delete', id: itemId }], () => { if (item?.type === 'phase') notice = `Phase deleted; ${retained} task${retained === 1 ? '' : 's'} retained as independent tasks.`; });
     }
   }
-
   function accept(message) {
     if (!message || typeof message !== 'object') return;
-    if (message.type === 'pico:plugin-ui:response') {
-      const handler = pending.get(message.id);
-      if (!handler) return;
-      pending.delete(message.id);
-      message.ok ? handler.resolve(message.value) : handler.reject(new Error(message.error));
-    } else if (message.type === 'pico:plugin-ui:action') {
-      act(message);
-    } else if (message.type === 'pico:plugin-ui:context') {
+    if (message.type === 'pico:plugin-ui:response') { const handler = pending.get(message.id); if (!handler) return; pending.delete(message.id); message.ok ? handler.resolve(message.value) : handler.reject(new Error(message.error)); }
+    else if (message.type === 'pico:plugin-ui:action') act(message);
+    else if (message.type === 'pico:plugin-ui:context') {
       const next = message.context ?? { thread: null };
-      if (context.thread?.id !== next.thread?.id) {
-        contextGeneration += 1;
-        items = [];
-        openCount = 0;
-        busy = false;
-        loading = Boolean(next.thread);
-        error = '';
-        notice = '';
-        showCompleted = false;
-        editingId = '';
-        addingChildId = '';
-        editValue = '';
-        childValue = '';
-        newValue = '';
-      }
-      context = next;
-      draw();
-      void refresh();
-    } else if (
-      message.type === 'pico:plugin-ui:event' &&
-      message.event?.type === 'plugin.updated' &&
-      message.event.pluginId === pluginId
-    ) {
-      void refresh();
-    }
+      if (context.thread?.id !== next.thread?.id) { contextGeneration++; items = []; revision = 0; openCount = 0; busy = false; loading = Boolean(next.thread); error = ''; notice = ''; editingId = ''; edit = {}; rootPage = 0; phasePage = 0; childPages.clear(); pendingBlockedId = ''; blockerDraft = ''; form = { type: 'phase', title: '', phaseId: '', note: '', nextAction: '', blocker: '' }; }
+      context = next; draw(); void refresh();
+    } else if (message.type === 'pico:plugin-ui:event' && message.event?.type === 'plugin.updated' && message.event.pluginId === pluginId) void refresh();
   }
-
   window.addEventListener('message', (event) => {
     const init = event.data;
-    if (
-      event.source !== window.parent ||
-      init?.type !== 'pico:plugin-ui:init' ||
-      init.protocolVersion !== 1 ||
-      init.pluginId !== pluginId ||
-      init.entry !== 'webui' ||
-      event.ports.length !== 1
-    )
-      return;
-    context = init.context ?? { thread: null };
-    port = event.ports[0];
-    port.onmessage = (portEvent) => accept(portEvent.data);
-    port.start();
-    draw();
-    if (typeof init.attemptId === 'string')
-      port.postMessage({ type: 'pico:plugin-ui:ready', attemptId: init.attemptId });
+    if (event.source !== window.parent || init?.type !== 'pico:plugin-ui:init' || init.protocolVersion !== 1 || init.pluginId !== pluginId || init.entry !== 'webui' || event.ports.length !== 1) return;
+    context = init.context ?? { thread: null }; port = event.ports[0]; port.onmessage = (portEvent) => accept(portEvent.data); port.start(); draw();
+    if (typeof init.attemptId === 'string') port.postMessage({ type: 'pico:plugin-ui:ready', attemptId: init.attemptId });
     void refresh();
   });
 })();

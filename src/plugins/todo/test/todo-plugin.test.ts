@@ -19,12 +19,9 @@ function setup(initialState?: unknown) {
   let projection: Projection | undefined;
   let contribution: unknown;
   if (initialState !== undefined) state.set('byThread', initialState);
-
   const context = {
     threads: { get: (id: string) => (id === thread.id ? thread : null), list: () => [thread] },
-    tools: {
-      register: (definition: ToolDefinition, run: ToolRun) => tools.set(definition.name, { definition, run }),
-    },
+    tools: { register: (definition: ToolDefinition, run: ToolRun) => tools.set(definition.name, { definition, run }) },
     pipelines: {
       use: (_stage: string, interceptor: Projection) => {
         projection = interceptor;
@@ -53,7 +50,6 @@ function setup(initialState?: unknown) {
     },
   } as unknown as PluginContext;
   void todoPlugin.activate?.(context);
-
   return {
     state,
     tools,
@@ -76,197 +72,221 @@ function setup(initialState?: unknown) {
   };
 }
 
+const addPhase = (title: string, client_ref: string) => ({ action: 'add', type: 'phase', title, client_ref });
+const addTask = (title: string, phase_ref?: string) => ({
+  action: 'add',
+  type: 'task',
+  title,
+  ...(phase_ref ? { phase_ref } : {}),
+});
+
 describe('Todo plugin', () => {
-  it('registers an independent toolbar card and encourages skipping short work', () => {
+  it('registers the thread panel, revisioned API, and two model tools', () => {
     const env = setup();
     expect(env.contribution).toMatchObject({
       slot: 'thread.toolbar',
       id: 'todo-panel',
       entry: 'webui',
       component: 'TodoPanel',
-      supportsPopover: true,
     });
     expect(env.routes.has('GET /threads')).toBe(true);
-    expect(env.routes.has('POST /items')).toBe(true);
-    expect(env.routes.has('PATCH /items')).toBe(true);
-    expect(env.routes.has('DELETE /items')).toBe(true);
-    expect(env.tools.has('todo_add')).toBe(true);
-    expect(env.tools.has('todo_complete')).toBe(true);
-    expect(env.tools.has('todo_reopen')).toBe(true);
-    expect(env.tools.has('todo_delete')).toBe(true);
-    expect(env.tools.get('todo_add')!.definition.description).toContain('Skip simple work');
-    expect(env.tools.get('todo_add')!.definition.description).not.toMatch(/project memory/i);
+    expect(env.routes.has('POST /edit')).toBe(true);
+    expect([...env.tools.keys()]).toEqual(expect.arrayContaining(['todo_list', 'todo_edit']));
+    expect(env.tools.has('todo_add')).toBe(false);
+    expect(env.tools.has('todo_complete')).toBe(false);
+    expect(env.tools.get('todo_edit')!.definition.parameters).toMatchObject({
+      type: 'object',
+      required: ['expected_revision', 'operations'],
+      additionalProperties: false,
+    });
   });
 
-  it('lets the Agent add, edit, complete, reopen, list, and delete nested outcomes', () => {
+  it('lists revisioned phases and tasks and applies a batch with same-batch phase references', () => {
     const env = setup();
-    const parent = env.tool('todo_add', { title: 'Publish the release notes' }) as { item: TodoItem };
-    const child = env.tool('todo_add', { title: 'Confirm the migration notes', parent_id: parent.item.id }) as {
-      item: TodoItem;
-    };
-
-    expect(child.item).toMatchObject({
-      title: 'Confirm the migration notes',
-      parentId: parent.item.id,
-      status: 'open',
+    const added = env.tool('todo_edit', {
+      expected_revision: 0,
+      operations: [addPhase('Ship the release', 'release'), addTask('Write notes', 'release'), addTask('Tag build')],
+    }) as { revision: number; items: TodoItem[] };
+    expect(added.revision).toBe(1);
+    expect(added.items).toHaveLength(3);
+    const phase = added.items.find((item) => item.type === 'phase')!;
+    const linked = added.items.find((item) => item.title === 'Write notes')!;
+    expect(linked).toMatchObject({ type: 'task', phaseId: phase.id, status: 'open' });
+    expect(added.items.find((item) => item.title === 'Tag build')).toMatchObject({ type: 'task', status: 'open' });
+    expect(env.tool('todo_list')).toMatchObject({ revision: 1, openCount: 3, items: added.items });
+    expect(env.route('GET', '/threads', {}, new URLSearchParams({ threadId: env.thread.id }))).toMatchObject({
+      revision: 1,
+      openCount: 3,
+      items: added.items,
     });
-    env.tool('todo_update', { id: child.item.id, title: 'Include the migration summary' });
-    env.tool('todo_complete', { id: child.item.id });
-    expect(env.tool('todo_list')).toMatchObject({
-      openCount: 1,
-      items: [
-        { id: parent.item.id, status: 'open' },
-        { id: child.item.id, title: 'Include the migration summary', status: 'done' },
+  });
+
+  it('validates phase completion and automatically reopens a phase when a task is reopened', () => {
+    const env = setup();
+    const batch = env.tool('todo_edit', {
+      expected_revision: 0,
+      operations: [addPhase('Prepare launch', 'p'), addTask('Verify build', 'p')],
+    }) as { revision: number; items: TodoItem[] };
+    const phase = batch.items.find((item) => item.type === 'phase')!;
+    const task = batch.items.find((item) => item.type === 'task')!;
+    expect(() =>
+      env.tool('todo_edit', {
+        expected_revision: 1,
+        operations: [{ action: 'set_status', id: phase.id, status: 'done' }],
+      }),
+    ).toThrow();
+    const doneTask = env.tool('todo_edit', {
+      expected_revision: 1,
+      operations: [{ action: 'set_status', id: task.id, status: 'done' }],
+    }) as { revision: number; items: TodoItem[] };
+    expect(doneTask.items.find((item) => item.id === phase.id)?.status).toBe('open');
+    const donePhase = env.tool('todo_edit', {
+      expected_revision: 2,
+      operations: [{ action: 'set_status', id: phase.id, status: 'done' }],
+    }) as { revision: number; items: TodoItem[] };
+    expect(donePhase.items.find((item) => item.id === phase.id)?.status).toBe('done');
+    const reopened = env.tool('todo_edit', {
+      expected_revision: 3,
+      operations: [{ action: 'set_status', id: task.id, status: 'open' }],
+    }) as { revision: number; items: TodoItem[] };
+    expect(reopened.items.find((item) => item.id === phase.id)?.status).toBe('open');
+  });
+
+  it('supports editing fields, moving/reordering tasks, and deleting a phase while retaining tasks as roots', () => {
+    const env = setup();
+    const initial = env.tool('todo_edit', {
+      expected_revision: 0,
+      operations: [addPhase('One', 'one'), addPhase('Two', 'two'), addTask('A', 'one'), addTask('B', 'one')],
+    }) as { revision: number; items: TodoItem[] };
+    const [one, two] = initial.items.filter((item) => item.type === 'phase');
+    const [a, b] = initial.items.filter((item) => item.type === 'task');
+    const edited = env.tool('todo_edit', {
+      expected_revision: 1,
+      operations: [
+        {
+          action: 'update',
+          id: a!.id,
+          title: 'Prepare A',
+          note: 'Keep context',
+          next_action: 'Open checklist',
+          blocker: 'Waiting for access',
+        },
+        { action: 'set_status', id: a!.id, status: 'blocked', blocker: 'Waiting for access' },
+        { action: 'move', id: b!.id, phase_id: two!.id, before_id: null },
+      ],
+    }) as { revision: number; items: TodoItem[] };
+    expect(edited.items.find((item) => item.id === a!.id)).toMatchObject({
+      title: 'Prepare A',
+      note: 'Keep context',
+      nextAction: 'Open checklist',
+      status: 'blocked',
+      blocker: 'Waiting for access',
+    });
+    expect(edited.items.find((item) => item.id === b!.id)?.phaseId).toBe(two!.id);
+    const deleted = env.tool('todo_edit', {
+      expected_revision: 2,
+      operations: [{ action: 'delete', id: one!.id }],
+    }) as { revision: number; items: TodoItem[] };
+    expect(deleted.items.find((item) => item.id === a!.id)?.phaseId).toBeUndefined();
+    expect(deleted.items.find((item) => item.id === b!.id)?.phaseId).toBe(two!.id);
+  });
+
+  it('rejects stale revisions atomically for both model and UI edits', () => {
+    const env = setup();
+    env.tool('todo_edit', { expected_revision: 0, operations: [addPhase('Existing', 'p')] });
+    const before = env.tool('todo_list');
+    expect(() =>
+      env.tool('todo_edit', { expected_revision: 0, operations: [addPhase('Must not persist', 'x')] }),
+    ).toThrow(/revision/i);
+    expect(env.tool('todo_list')).toEqual(before);
+    expect(() =>
+      env.route('POST', '/edit', {
+        threadId: env.thread.id,
+        expectedRevision: 0,
+        operations: [addTask('Also rejected')],
+      }),
+    ).toThrow(/revision/i);
+    expect(env.tool('todo_list')).toEqual(before);
+  });
+
+  it('rolls back an entire batch if a later operation is invalid', () => {
+    const env = setup();
+    const before = env.tool('todo_list');
+    expect(() =>
+      env.tool('todo_edit', {
+        expected_revision: 0,
+        operations: [
+          addPhase('Must not persist', 'p'),
+          { action: 'add', type: 'task', title: 'Bad', phase_id: 'missing' },
+        ],
+      }),
+    ).toThrow(/not found/i);
+    expect(env.tool('todo_list')).toEqual(before);
+  });
+
+  it('retains the order of phases and standalone tasks across moves', () => {
+    const env = setup();
+    const initial = env.tool('todo_edit', {
+      expected_revision: 0,
+      operations: [addPhase('Phase A', 'a'), addTask('Root task'), addPhase('Phase B', 'b'), addTask('Child', 'a')],
+    }) as { items: TodoItem[] };
+    const root = initial.items.find((item) => item.title === 'Root task')!;
+    const phase = initial.items.find((item) => item.title === 'Phase A')!;
+    const moved = env.tool('todo_edit', {
+      expected_revision: 1,
+      operations: [{ action: 'move', id: root.id, phase_id: null, before_id: phase.id }],
+    }) as { items: TodoItem[] };
+    expect(moved.items.map((item) => item.title)).toEqual(['Root task', 'Phase A', 'Child', 'Phase B']);
+  });
+
+  it('migrates arbitrary-depth legacy trees without losing entries or relationship context', () => {
+    const env = setup({
+      'todo-thread': [
+        { id: 'root', title: 'Legacy project', status: 'open' },
+        { id: 'child', title: 'Legacy child', status: 'done', parentId: 'root' },
+        { id: 'grandchild', title: 'Legacy grandchild', status: 'open', parentId: 'child' },
+        { id: 'orphan', title: 'Legacy orphan', status: 'open', parentId: 'missing' },
       ],
     });
-    env.tool('todo_reopen', { id: child.item.id });
-    expect(env.tool('todo_list')).toMatchObject({ openCount: 2 });
-    expect(env.tool('todo_delete', { id: parent.item.id })).toEqual({ deleted: true, keptSubitemCount: 1 });
-    expect(env.tool('todo_list')).toMatchObject({
-      openCount: 1,
-      items: [{ id: child.item.id, title: 'Include the migration summary', status: 'open' }],
+    const result = env.tool('todo_list', { include_completed: true }) as { items: TodoItem[]; openCount: number };
+    expect(result.items).toHaveLength(4);
+    expect(result.items.find((item) => item.id === 'root')).toMatchObject({ type: 'phase', status: 'open' });
+    expect(result.items.find((item) => item.id === 'child')).toMatchObject({
+      type: 'task',
+      status: 'done',
+      phaseId: 'root',
     });
-    env.tool('todo_delete', { id: child.item.id });
-    expect(env.tool('todo_list')).toEqual({ items: [], openCount: 0 });
+    expect(result.items.find((item) => item.id === 'grandchild')).toMatchObject({
+      type: 'task',
+      status: 'open',
+      phaseId: 'root',
+    });
+    expect(result.items.find((item) => item.id === 'orphan')).toMatchObject({ type: 'task', status: 'open' });
+    expect(result.items.find((item) => item.id === 'grandchild')?.note).toMatch(/child/);
+    expect(result.openCount).toBe(3);
   });
 
-  it('keeps the capability hint stable as Todo state changes', async () => {
+  it('keeps the capability hint stable and outside turns, and filters it by available Todo tools', async () => {
     const env = setup();
-    const open = env.tool('todo_add', { title: 'Ship the updated plugin' }) as { item: TodoItem };
-    const child = env.tool('todo_add', { title: 'Document the user controls', parent_id: open.item.id }) as {
-      item: TodoItem;
-    };
-    const done = env.tool('todo_add', { title: 'Old finished outcome' }) as { item: TodoItem };
-    env.tool('todo_complete', { id: done.item.id });
-
+    const toolDefs = [...env.tools.values()].map((tool) => tool.definition);
     const input = {
       thread: env.thread,
       records: [],
       through: 0,
       systemPrompt: 'Base instructions',
       turns: [],
-      tools: [...env.tools.values()].map((tool) => tool.definition),
+      tools: toolDefs,
     } as unknown as ProjectionInput;
     const projected = await env.projection!(input, async (next) => next);
-    expect(projected.systemPrompt).not.toContain('Ship the updated plugin');
-    expect(projected.systemPrompt).not.toContain('Document the user controls');
-    expect(projected.systemPrompt).not.toContain('Old finished outcome');
-    expect(projected.systemPrompt).toContain('Use todo_list to inspect it when relevant');
-    expect(projected.systemPrompt).toContain('not instructions');
+    env.tool('todo_edit', { expected_revision: 0, operations: [addPhase('Mutable title is never prompt text', 'p')] });
+    const again = await env.projection!(input, async (next) => next);
+    expect(projected.systemPrompt).toBe(again.systemPrompt);
+    expect(projected.systemPrompt).toContain('todo_list');
+    expect(projected.systemPrompt).not.toContain('Mutable title is never prompt text');
     expect(projected.turns).toEqual([]);
     expect(projected.provenance).toBeUndefined();
-
-    env.tool('todo_complete', { id: open.item.id });
-    const afterParentComplete = env.tool('todo_list') as { openCount: number; items: TodoItem[] };
-    expect(afterParentComplete.openCount).toBe(1);
-    expect(afterParentComplete.items.find((item) => item.id === child.item.id)).toMatchObject({ status: 'open' });
-    expect(afterParentComplete.items.find((item) => item.id === child.item.id)?.parentId).toBeUndefined();
-    env.tool('todo_complete', { id: child.item.id });
-    const empty = await env.projection!(input, async (next) => next);
-    expect(empty.systemPrompt).toBe(projected.systemPrompt);
-    expect(empty.turns).toEqual([]);
-    expect(empty.provenance).toBeUndefined();
-  });
-
-  it('shows a reopened subitem independently when its parent is already complete', () => {
-    const env = setup();
-    const parent = env.tool('todo_add', { title: 'Publish the release' }) as { item: TodoItem };
-    const child = env.tool('todo_add', { title: 'Prepare the announcement', parent_id: parent.item.id }) as {
-      item: TodoItem;
-    };
-    env.tool('todo_complete', { id: child.item.id });
-    env.tool('todo_complete', { id: parent.item.id });
-    env.tool('todo_reopen', { id: child.item.id });
-    const reopened = env.tool('todo_list') as { openCount: number; items: TodoItem[] };
-    expect(reopened.openCount).toBe(1);
-    expect(reopened.items.find((item) => item.id === child.item.id)).toMatchObject({
-      title: 'Prepare the announcement',
-      status: 'open',
-    });
-    expect(reopened.items.find((item) => item.id === child.item.id)?.parentId).toBeUndefined();
-  });
-
-  it('keeps open descendants attached only to an unfinished parent', () => {
-    const env = setup();
-    const parent = env.tool('todo_add', { title: 'Deliver the release' }) as { item: TodoItem };
-    const middle = env.tool('todo_add', { title: 'Prepare the announcement', parent_id: parent.item.id }) as {
-      item: TodoItem;
-    };
-    env.tool('todo_complete', { id: middle.item.id });
-    const descendant = env.tool('todo_add', { title: 'Confirm launch timing', parent_id: middle.item.id }) as {
-      item: TodoItem;
-    };
-    expect(descendant.item.parentId).toBe(parent.item.id);
-
-    const completedParent = env.tool('todo_complete', { id: parent.item.id }) as { item: TodoItem };
-    expect(completedParent.item.status).toBe('done');
-    const openItems = (env.tool('todo_list') as { items: TodoItem[] }).items.filter((item) => item.status === 'open');
-    expect(openItems).toEqual([{ id: descendant.item.id, title: 'Confirm launch timing', status: 'open' }]);
-  });
-
-  it('shares the same items through the user API and keeps stored fields minimal', () => {
-    const env = setup();
-    const created = env.route('POST', '/items', {
-      threadId: env.thread.id,
-      title: 'Finish the onboarding guide',
-    }) as { item: TodoItem };
-    const child = env.route('POST', '/items', {
-      threadId: env.thread.id,
-      title: 'Clarify the first-run path',
-      parentId: created.item.id,
-    }) as { item: TodoItem };
-    env.route('PATCH', '/items', {
-      threadId: env.thread.id,
-      id: child.item.id,
-      title: 'Clarify setup on the first run',
-      status: 'done',
-    });
-
-    expect(env.route('GET', '/threads', {}, new URLSearchParams({ threadId: env.thread.id }))).toMatchObject({
-      openCount: 1,
-      items: [
-        { title: 'Finish the onboarding guide', status: 'open' },
-        { title: 'Clarify setup on the first run', status: 'done', parentId: created.item.id },
-      ],
-    });
-    const stored = (env.state.get('byThread') as Record<string, TodoItem[]>)[env.thread.id]!;
-    expect(Object.keys(stored[0]!).sort()).toEqual(['id', 'status', 'title']);
-    expect(Object.keys(stored[1]!).sort()).toEqual(['id', 'parentId', 'status', 'title']);
-    expect(env.route('DELETE', '/items', { threadId: env.thread.id, id: created.item.id })).toEqual({
-      deleted: true,
-      keptSubitemCount: 1,
-    });
-    expect(env.route('GET', '/threads', {}, new URLSearchParams({ threadId: env.thread.id }))).toMatchObject({
-      openCount: 0,
-      items: [{ id: child.item.id, status: 'done' }],
-    });
-    expect(() =>
-      env.route('PATCH', '/items', { threadId: env.thread.id, id: child.item.id, status: 'invalid' }),
-    ).toThrow('Todo status must be open or done.');
-    expect(() => env.route('PATCH', '/items', { threadId: env.thread.id, id: child.item.id })).toThrow(
-      'Provide a new title or status.',
-    );
-  });
-
-  it('drops legacy management fields when reading existing Todo items', () => {
-    const env = setup({
-      'todo-thread': {
-        items: [
-          {
-            id: 'legacy-id',
-            title: 'Keep this unfinished result',
-            status: 'open',
-            priority: 5,
-            nextAction: 'Inspect a file',
-            goalId: 'old-goal-id',
-          },
-        ],
-        operations: [{ id: 'old-operation-log-entry' }],
-      },
-    });
-    expect(env.tool('todo_list')).toEqual({
-      items: [{ id: 'legacy-id', title: 'Keep this unfinished result', status: 'open' }],
-      openCount: 1,
-    });
+    const noTodo = await env.projection!({ ...input, tools: [] } as unknown as ProjectionInput, async (next) => next);
+    expect(noTodo.systemPrompt).toBe('Base instructions');
+    expect(noTodo.turns).toEqual([]);
   });
 });

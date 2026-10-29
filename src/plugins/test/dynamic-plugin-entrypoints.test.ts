@@ -73,9 +73,9 @@ describe('dynamic first-party plugin entries', () => {
           .filter((tool) => tool.owner === 'pico.todo')
           .map((tool) => tool.definition.name)
           .sort(),
-      ).toEqual(['todo_add', 'todo_complete', 'todo_delete', 'todo_list', 'todo_reopen', 'todo_update']);
+      ).toEqual(['todo_edit', 'todo_list']);
       expect(runtime.pluginHttpRoute('pico.todo', 'GET', '/threads')).toBeDefined();
-      expect(runtime.pluginHttpRoute('pico.todo', 'PATCH', '/items')).toBeDefined();
+      expect(runtime.pluginHttpRoute('pico.todo', 'POST', '/edit')).toBeDefined();
       expect(runtime.plugins.webUiAssetLocation('pico.todo', 'webui')).toBeDefined();
       expect(runtime.modelCatalog.listProviderTypes()).toContainEqual(
         expect.objectContaining({ addPage: { pluginId: 'pico.chatgpt-plan', pageId: 'account' } }),
@@ -115,6 +115,7 @@ describe('dynamic first-party plugin entries', () => {
           .pipelines.filter((item) => item.stage === 'projection')
           .map((item) => item.pluginId),
       ).toEqual([
+        'pico.qq-adapter',
         'pico.workspace',
         'pico.rolling-context',
         'pico.goal',
@@ -131,7 +132,7 @@ describe('dynamic first-party plugin entries', () => {
       expect(runtime.pluginInfo().catalog).toContainEqual(
         expect.objectContaining({ id: 'pico.todo', enabled: true, loaded: true }),
       );
-      expect(runtime.tools.listBySource('runtime').filter((tool) => tool.owner === 'pico.todo')).toHaveLength(6);
+      expect(runtime.tools.listBySource('runtime').filter((tool) => tool.owner === 'pico.todo')).toHaveLength(2);
       expect(runtime.pluginHttpRoute('pico.todo', 'GET', '/threads')).toBeDefined();
     } finally {
       await runtime.shutdown();
