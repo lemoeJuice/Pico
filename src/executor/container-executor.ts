@@ -10,6 +10,7 @@ import { currentExecutorBundle, currentExecutorVersion } from './bundle.js';
 import type { ExecutionListener, ExecutorAdapter, ExecutorServiceAddress } from './executor.js';
 import { executorPluginDirectory } from './plugin-host.js';
 import { RemoteHostExecutor } from './remote-executor.js';
+import { ServiceError } from '../contracts/service-error.js';
 
 const CONTAINER_SETTING_PREFIX = 'executor-container-connection:';
 const CONTAINER_NAME_SETTING_PREFIX = 'executor-container-name:';
@@ -18,7 +19,6 @@ const CONTAINER_NAME_PREFIX = process.env.PICO_CONTAINER_NAME?.trim() || 'pico-e
 const CONTAINER_PORT = 4174;
 const EXECUTOR_PATH = '/opt/pico/executor-agent.mjs';
 const DEFAULT_CONTAINER_IMAGE = 'docker.io/library/node:22-bookworm-slim';
-const CONTAINER_RESTART_COOLDOWN_MS = 30_000;
 
 interface SavedContainerConnection {
   port: number;
@@ -175,7 +175,8 @@ export class ContainerExecutor implements ExecutorAdapter {
   private readonly pluginDirectory: string;
   private readonly connectionPromises = new Map<string, Promise<SavedContainerConnection>>();
   private readonly setupPromises = new Map<string, ContainerSetup>();
-  private readonly restartAttempts = new Map<string, number>();
+  private readonly manualRestartPromises = new Map<string, Promise<void>>();
+  private readonly manualRestartPathPromises = new Map<string, Promise<void>>();
   private storageArgs: string[] | null = null;
 
   constructor(
@@ -224,6 +225,37 @@ export class ContainerExecutor implements ExecutorAdapter {
   async shutdown(): Promise<void> {
     // Workspace containers and their execution ledgers persist across Runtime restarts.
     await this.client.shutdown();
+  }
+
+  restart(binding: ExecutorBinding): Promise<void> {
+    const pathKey = resolve(binding.workspacePath);
+    const existing = this.manualRestartPathPromises.get(pathKey);
+    if (existing) return existing;
+    let promise!: Promise<void>;
+    promise = Promise.resolve().then(async () => {
+      const workspace = await realpath(binding.workspacePath);
+      const workspaceInfo = await stat(workspace);
+      if (!workspaceInfo.isDirectory()) throw new Error('Container workspace must be a directory.');
+      const workspaceKey = createHash('sha256').update(workspace).digest('hex');
+      const canonicalExisting = this.manualRestartPromises.get(workspaceKey);
+      if (canonicalExisting && canonicalExisting !== promise) return canonicalExisting;
+      this.manualRestartPromises.set(workspaceKey, promise);
+      try {
+        const containerName = this.containerName(workspaceKey);
+        const setup = this.setupPromises.get(workspaceKey);
+        if (setup) await setup.promise.catch(() => undefined);
+        const saved = await this.connection(workspaceKey);
+        const state = await this.inspectContainer(containerName);
+        if (!state.exists) throw new Error('Container Executor has not been created for this workspace.');
+        await this.restartAndRecover(workspace, containerName, saved, new AbortController().signal);
+      } finally {
+        if (this.manualRestartPromises.get(workspaceKey) === promise) this.manualRestartPromises.delete(workspaceKey);
+      }
+    }).finally(() => {
+      if (this.manualRestartPathPromises.get(pathKey) === promise) this.manualRestartPathPromises.delete(pathKey);
+    });
+    this.manualRestartPathPromises.set(pathKey, promise);
+    return promise;
   }
 
   private connection(workspaceKey: string): Promise<SavedContainerConnection> {
@@ -289,6 +321,8 @@ export class ContainerExecutor implements ExecutorAdapter {
     signal?: AbortSignal,
   ): Promise<void> {
     if (signal?.aborted) throw abortError();
+    const manualRestart = this.manualRestartPromises.get(workspaceKey);
+    if (manualRestart) await awaitWithSignal(manualRestart, signal);
     let setup = this.setupPromises.get(workspaceKey);
     if (!setup) {
       const created: ContainerSetup = {
@@ -335,10 +369,9 @@ export class ContainerExecutor implements ExecutorAdapter {
       const probe = await this.probeConnection(saved.port, saved.accessToken, signal);
       if (!probe.reachable) {
         if (probe.responded) {
-          throw new Error(`Container Executor endpoint returned HTTP ${probe.status ?? 'an error'}; restart skipped.`);
+          throw new Error(`Container Executor endpoint returned HTTP ${probe.status ?? 'an error'}.`);
         }
-        await this.restartAndRecover(workspace, workspaceKey, containerName, saved, signal);
-        return;
+        throw new Error('Container Executor connection timed out; use the Thread manual restart action to recover it.');
       }
     }
     if (!running.exists) {
@@ -418,29 +451,20 @@ export class ContainerExecutor implements ExecutorAdapter {
 
   private async restartAndRecover(
     workspace: string,
-    workspaceKey: string,
     containerName: string,
     saved: SavedContainerConnection,
     signal: AbortSignal,
   ): Promise<void> {
     const endpointUrl = `http://127.0.0.1:${saved.port}`;
     if (await this.hasActiveExecutorTransaction(workspace, endpointUrl)) {
-      throw new Error(
-        'Container Executor connection timed out; restart skipped because an Executor transaction is active.',
-      );
+      throw new ServiceError(409, 'Container Executor restart skipped because an Executor transaction is active.');
     }
-
-    const now = Date.now();
-    const previousAttempt = this.restartAttempts.get(workspaceKey);
-    if (previousAttempt !== undefined && now - previousAttempt < CONTAINER_RESTART_COOLDOWN_MS) {
-      const remainingSeconds = Math.ceil((CONTAINER_RESTART_COOLDOWN_MS - (now - previousAttempt)) / 1_000);
-      throw new Error(`Container Executor restart was attempted recently; retry in ${remainingSeconds} seconds.`);
-    }
-    this.restartAttempts.set(workspaceKey, now);
 
     let restartError: unknown;
     try {
-      await this.callPodman(['restart', containerName], undefined, signal);
+      const state = await this.inspectContainer(containerName, signal);
+      if (!state.exists) throw new Error('Container Executor does not exist.');
+      await this.callPodman([state.running ? 'restart' : 'start', containerName], undefined, signal);
     } catch (error) {
       if (signal.aborted) throw abortError();
       restartError = error;
@@ -455,7 +479,6 @@ export class ContainerExecutor implements ExecutorAdapter {
 
     const afterRestart = await this.probeConnection(saved.port, saved.accessToken, signal);
     if (afterRestart.reachable) {
-      this.restartAttempts.delete(workspaceKey);
       return;
     }
     if (afterRestart.responded) {
@@ -465,7 +488,7 @@ export class ContainerExecutor implements ExecutorAdapter {
     const versionPath = `${EXECUTOR_PATH}.version`;
     if (!(await this.containerFileExists(containerName, EXECUTOR_PATH, signal))) {
       throw new Error(
-        'Container restarted, but its existing Executor agent file is missing; automatic recovery stopped.',
+        'Container restarted, but its existing Executor agent file is missing; recovery stopped.',
       );
     }
     const installedVersion = (await this.containerFileExists(containerName, versionPath, signal))
@@ -478,7 +501,6 @@ export class ContainerExecutor implements ExecutorAdapter {
       signal,
     );
     await this.waitUntilReachable(saved.port, saved.accessToken, signal);
-    this.restartAttempts.delete(workspaceKey);
   }
 
   private async hasActiveExecutorTransaction(workspace: string, endpointUrl: string): Promise<boolean> {

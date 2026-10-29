@@ -4793,6 +4793,23 @@ export class PicoRuntime {
     );
   }
 
+  async restartContainerExecutor(threadId: string): Promise<Awaited<ReturnType<PicoRuntime['executorStatus']>>> {
+    const binding = this.store.executorForThread(threadId);
+    if (!binding) throw new ServiceError(404, 'Thread not found');
+    if (binding.kind !== 'container') {
+      throw new ServiceError(400, 'Manual restart is only available for Container Executors.');
+    }
+    await this.containerExecutor.restart(binding);
+    const status = await this.executorStatus(threadId);
+    if (!status.connected || !status.compatible) {
+      throw new ServiceError(
+        409,
+        `Container Executor restarted but did not pass the connection and protocol check. ${status.error ?? ''}`.trim(),
+      );
+    }
+    return status;
+  }
+
   async drain(): Promise<void> {
     while (this.loops.size > 0) await Promise.all([...this.loops.values()]);
   }

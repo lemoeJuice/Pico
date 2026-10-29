@@ -243,7 +243,8 @@
   }
   .executor-error-actions {
     width: 100%;
-    justify-content: space-between;
+    justify-content: flex-start;
+    gap: 8px 12px;
   }
   .executor-choice-grid {
     grid-template-columns: 1fr;

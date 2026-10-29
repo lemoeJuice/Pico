@@ -1,6 +1,6 @@
 import { setToolPolicy } from '../src/plugins/test/helpers.js';
 import { permissionPlugin } from '../src/plugins/permissions.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -32,6 +32,8 @@ function createMockContainerAgent(
   executions: Map<string, MockRemoteExecution>;
   getSubmissionCount: () => number;
   loseExecutions: boolean;
+  setServiceAvailable: (available: boolean) => void;
+  getRestartCount: () => number;
   completeExecution: (id: string, result: unknown) => void;
   loseNextSubmissionAck: boolean;
   close: () => void;
@@ -42,6 +44,8 @@ function createMockContainerAgent(
   let serviceReady = false;
   let containerCreated = false;
   let submissionCount = 0;
+  let restartCount = 0;
+  let serviceAvailable = true;
   let loseExecutions = false;
   let loseNextSubmissionAck = false;
   const originalFetch = globalThis.fetch;
@@ -52,6 +56,7 @@ function createMockContainerAgent(
   globalThis.fetch = async (input, init) => {
     const requestUrl = new URL(input instanceof Request ? input.url : String(input));
     if (!exposedPort || Number(requestUrl.port) !== exposedPort) return originalFetch(input, init);
+    if (!serviceAvailable) throw new TypeError('fetch failed: connection refused');
     if (!serviceReady) return json({ error: 'Container Executor is not ready.' }, 503);
 
     const headers = new Headers(input instanceof Request ? input.headers : undefined);
@@ -156,12 +161,17 @@ function createMockContainerAgent(
         serviceReady = Boolean(exposedPort && accessToken);
         return { stdout: '', stderr: '' };
       }
+      if (args.includes('restart')) restartCount += 1;
       const result = await podman(args, input, signal);
       if (args.includes('run')) containerCreated = true;
       return result;
     },
     executions,
     getSubmissionCount: () => submissionCount,
+    setServiceAvailable(available) {
+      serviceAvailable = available;
+    },
+    getRestartCount: () => restartCount,
     get loseExecutions() {
       return loseExecutions;
     },
@@ -483,6 +493,100 @@ describe('Executor execution identity and recovery', () => {
       expect((await executor.execute('registry-eof-tool', binding)).status).toBe('completed');
       expect(env.store.getExecution('registry-eof-tool')?.error).toBeNull();
       expect(containerSetupAttempts).toBe(2);
+    } finally {
+      await executor.shutdown();
+      mockAgent.close();
+      await env.cleanup();
+    }
+  });
+
+  it('reports a disconnected Container without restarting and shares a successful manual restart', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.createThread('container');
+    const workspaceKey = createHash('sha256').update(env.workspace).digest('hex');
+    env.store.setSetting(`executor-container-connection:${workspaceKey}`, { port: 43123, accessToken: 'a'.repeat(64) });
+    const catalog = new ToolCatalog();
+    let restartStarted!: () => void;
+    const restartWasStarted = new Promise<void>((resolve) => {
+      restartStarted = resolve;
+    });
+    let releaseRestart!: () => void;
+    const restartGate = new Promise<void>((resolve) => {
+      releaseRestart = resolve;
+    });
+    const podman = async (args: string[]) => {
+      if (args.includes('info')) return { stdout: '5.0.0', stderr: '' };
+      if (args.includes('inspect')) return { stdout: 'true', stderr: '' };
+      if (args.includes('run')) return { stdout: 'container-id', stderr: '' };
+      if (args.includes('restart')) {
+        restartStarted();
+        await restartGate;
+        mockAgent.setServiceAvailable(true);
+        return { stdout: 'container-id', stderr: '' };
+      }
+      if (args.includes('exec')) return { stdout: '', stderr: '' };
+      throw new Error(`Unexpected Podman command: ${args[0] ?? 'empty'}`);
+    };
+    const mockAgent = createMockContainerAgent(env.workspace, catalog, podman);
+    const executor = new ContainerExecutor(env.store, undefined, undefined, mockAgent.runner);
+    try {
+      const binding = env.store.executorForThread(thread.id)!;
+      await executor.checkConnection(binding);
+      mockAgent.setServiceAvailable(false);
+
+      await expect(executor.checkConnection(binding)).rejects.toThrow(/manual.*restart|restart manually/i);
+      expect(mockAgent.getRestartCount()).toBe(0);
+
+      const firstRestart = executor.restart(binding);
+      await restartWasStarted;
+      const secondRestart = executor.restart(binding);
+      expect(secondRestart).toBe(firstRestart);
+      expect(mockAgent.getRestartCount()).toBe(1);
+      releaseRestart();
+      await Promise.all([firstRestart, secondRestart]);
+      expect(mockAgent.getRestartCount()).toBe(1);
+      await expect(executor.checkConnection(binding)).resolves.toMatchObject({ kind: 'executor' });
+    } finally {
+      releaseRestart();
+      await executor.shutdown();
+      mockAgent.close();
+      await env.cleanup();
+    }
+  });
+
+  it('refuses manual Container restart while a workspace Executor transaction is active', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.createThread('container');
+    const workspaceKey = createHash('sha256').update(env.workspace).digest('hex');
+    env.store.setSetting(`executor-container-connection:${workspaceKey}`, { port: 43124, accessToken: 'b'.repeat(64) });
+    const catalog = new ToolCatalog();
+    const podman = async (args: string[]) => {
+      if (args.includes('info')) return { stdout: '5.0.0', stderr: '' };
+      if (args.includes('inspect')) return { stdout: 'true', stderr: '' };
+      if (args.includes('run')) return { stdout: 'container-id', stderr: '' };
+      if (args.includes('exec')) return { stdout: '', stderr: '' };
+      throw new Error(`Unexpected Podman command: ${args[0] ?? 'empty'}`);
+    };
+    const mockAgent = createMockContainerAgent(env.workspace, catalog, podman);
+    const executor = new ContainerExecutor(env.store, undefined, undefined, mockAgent.runner);
+    try {
+      const binding = env.store.executorForThread(thread.id)!;
+      await executor.checkConnection(binding);
+      const modelExecution = env.store.createModelExecution('restart-active-model', thread.id, 0);
+      env.store.transitionExecution(modelExecution.id, 'running');
+      const call = { id: 'restart-active-call', name: 'shell', arguments: { command: 'true' } };
+      env.store.commitModelStep({
+        assistantRecordId: 'restart-active-model:assistant',
+        modelExecutionId: modelExecution.id,
+        threadId: thread.id,
+        payload: assistantPayload({ batchId: 'restart-active-model:batch', toolCalls: [call] }),
+        toolCalls: [{ call, executionId: 'restart-active-tool' }],
+      });
+      env.store.transitionExecution('restart-active-tool', 'running');
+      mockAgent.setServiceAvailable(false);
+
+      await expect(executor.restart(binding)).rejects.toThrow(/transaction is active/i);
+      expect(mockAgent.getRestartCount()).toBe(0);
     } finally {
       await executor.shutdown();
       mockAgent.close();

@@ -804,6 +804,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [thinkingExpanded, setThinkingExpanded] = useState(true);
   const [executorUpdateOpen, setExecutorUpdateOpen] = useState(false);
   const [executorUpdateBusy, setExecutorUpdateBusy] = useState(false);
+  const [executorRestartBusy, setExecutorRestartBusy] = useState(false);
+  const executorStatusGeneration = useRef(0);
   const [executorUpdateError, setExecutorUpdateError] = useState('');
   const [socketConnected, setSocketConnected] = useState(false);
   const [sendingThreadIds, setSendingThreadIds] = useState<Set<string>>(new Set());
@@ -1603,6 +1605,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     const refresh = async (): Promise<void> => {
       if (!alive || refreshing) return;
       refreshing = true;
+      const statusGeneration = executorStatusGeneration.current;
       try {
         const [executorResult] = await Promise.allSettled([
           api<{
@@ -1615,7 +1618,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             updateSupported?: boolean;
           }>(`/api/threads/${encodeURIComponent(threadId)}/executor`),
         ]);
-        if (!alive) return;
+        if (!alive || statusGeneration !== executorStatusGeneration.current) return;
         const executorStatus = executorStatusFromProbe(executorResult);
         setExecutorConnected(executorStatus.connected);
         setExecutorError(executorStatus.error);
@@ -2176,6 +2179,48 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       }
     } finally {
       setExecutorUpdateBusy(false);
+    }
+  };
+
+  const restartContainerExecutor = async (): Promise<void> => {
+    if (!selectedThread || selectedThread.executorKind !== 'container' || executorRestartBusy) return;
+    const targetThreadId = selectedThread.id;
+    executorStatusGeneration.current += 1;
+    setExecutorRestartBusy(true);
+    setExecutorUpdateError('');
+    let restartError = '';
+    try {
+      await api(`/api/threads/${encodeURIComponent(targetThreadId)}/executor/restart`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+    } catch (caught) {
+      restartError = caught instanceof Error ? caught.message : 'Could not restart the container.';
+    }
+    try {
+      const status = await api<{
+        connected: boolean;
+        error?: string;
+        updateAvailable?: boolean;
+        compatible?: boolean;
+        executorVersion?: string | null;
+        targetVersion?: string | null;
+        updateSupported?: boolean;
+      }>(`/api/threads/${encodeURIComponent(targetThreadId)}/executor`);
+      if (activeThreadId.current === targetThreadId) {
+        const checked = executorStatusFromProbe({ status: 'fulfilled', value: status });
+        setExecutorConnected(checked.connected);
+        setExecutorError(checked.connected ? null : restartError || checked.error);
+        setExecutorDetails(status);
+      }
+    } catch (caught) {
+      if (activeThreadId.current === targetThreadId) {
+        setExecutorConnected(false);
+        setExecutorError(restartError || (caught instanceof Error ? caught.message : 'Could not check the container.'));
+      }
+    } finally {
+      if (activeThreadId.current === targetThreadId) executorStatusGeneration.current += 1;
+      setExecutorRestartBusy(false);
     }
   };
 
@@ -3214,9 +3259,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   : `${executorLabel(selectedThread)} Executor unavailable.`}
               </strong>
               <span>
-                {executorDetails.compatible === false && executorDetails.updateAvailable
-                  ? 'This Thread is unavailable until its Executor is updated.'
-                  : `Continue in a new ${selectedThread.executorKind === 'container' ? 'Host' : 'Container'} Thread in this Project.`}
+                {selectedThread.executorKind === 'container' && !(executorDetails.compatible === false && executorDetails.updateAvailable)
+                  ? 'Restart the container to try reconnecting, or continue in a new Host Thread in this Project. Restarting may affect other Threads using this container.'
+                  : executorDetails.compatible === false && executorDetails.updateAvailable
+                    ? 'This Thread is unavailable until its Executor is updated.'
+                    : `Continue in a new ${selectedThread.executorKind === 'container' ? 'Host' : 'Container'} Thread in this Project.`}
               </span>
             </div>
             <div className="executor-error-actions">
@@ -3225,9 +3272,16 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   Update Executor
                 </button>
               ) : (
-                <button type="button" onClick={startAlternateExecutorThread}>
-                  New {selectedThread.executorKind === 'container' ? 'Host' : 'Container'} Thread
-                </button>
+                <>
+                  {selectedThread.executorKind === 'container' ? (
+                    <button type="button" onClick={() => void restartContainerExecutor()} disabled={executorRestartBusy}>
+                      {executorRestartBusy ? 'Restarting…' : 'Restart Container'}
+                    </button>
+                  ) : null}
+                  <button type="button" onClick={startAlternateExecutorThread}>
+                    New {selectedThread.executorKind === 'container' ? 'Host' : 'Container'} Thread
+                  </button>
+                </>
               )}
               <details className="executor-error-details">
                 <summary>Diagnostics</summary>

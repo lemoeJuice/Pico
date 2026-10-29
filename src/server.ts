@@ -484,6 +484,9 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   app.post('/api/threads/:threadId/executor/update', async (request, response) => {
     response.json(await runtime.updateExecutor(request.params.threadId!));
   });
+  app.post('/api/threads/:threadId/executor/restart', async (request, response) => {
+    response.json(await runtime.restartContainerExecutor(request.params.threadId!));
+  });
   app.get('/api/settings/model', (_request, response) => response.json(runtime.publicModelSettings()));
   app.get('/api/model-catalog', (_request, response) => response.json(runtime.modelCatalogView()));
   app.get('/api/model-catalog/adapters', (request, response) => {

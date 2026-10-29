@@ -191,6 +191,7 @@
 .executor-error-actions {
   display: flex;
   flex: 0 0 auto;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
 }
@@ -204,6 +205,10 @@
   font-weight: 600;
   white-space: nowrap;
   cursor: pointer;
+}
+.executor-error-actions > button:disabled {
+  cursor: progress;
+  opacity: 0.65;
 }
 .executor-error-actions > button:hover {
   background: #fff;
