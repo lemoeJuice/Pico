@@ -1,6 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { expect, it } from 'vitest';
+import { validatePluginUiTree } from '../../ui-protocol.js';
+
+const firstExecutionId = '01234567-89ab-cdef-0123-456789abcdef:12345678-1234-1234-1234-123456789abc:call_1234567890/+long';
+const secondExecutionId = '01234567-89ab-cdef-0123-456789abcdef:12345678-1234-1234-1234-123456789abc:call_second';
 
 function createHarness(
   status = 'pending',
@@ -11,6 +15,10 @@ function createHarness(
 ) {
   let onWindowMessage: ((event: any) => void) | undefined;
   let tree: any[] = [];
+  let descendantApprovals = includeChildApprovals ? [
+    { executionId: firstExecutionId, threadId: 'child', threadTitle: 'Research', toolName: 'read_file', arguments: { path: 'notes.md' }, reviewer: { model: 'reviewer-1', outcome: 'allow', reason: 'Safe to inspect.' } },
+    { executionId: secondExecutionId, threadId: 'child', threadTitle: 'Research', toolName: 'write_file', arguments: { path: 'result.md' } },
+  ] : [];
   const parent = {};
   const requests: Array<Record<string, any>> = [];
   const port = {
@@ -27,10 +35,7 @@ function createHarness(
                 tools: [],
                 autoReview: false,
                 approvals: approvalStatus ? [{ executionId: 'execution', status: approvalStatus }] : [],
-                descendantApprovals: includeChildApprovals ? [
-                  { executionId: 'exec:child:123', threadId: 'child', threadTitle: 'Research', toolName: 'read_file', arguments: { path: 'notes.md' }, reviewer: { model: 'reviewer-1', outcome: 'allow', reason: 'Safe to inspect.' } },
-                  { executionId: 'exec:child:456', threadId: 'child', threadTitle: 'Research', toolName: 'write_file', arguments: { path: 'result.md' } },
-                ] : [],
+                descendantApprovals,
               }
             : { ok: true };
         const failed = failChildDecision && path.endsWith('/approvals') && message.init?.method === 'POST';
@@ -87,12 +92,26 @@ function createHarness(
     action(actionId: string, value?: string) {
       port.onmessage?.({ data: { type: 'pico:plugin-ui:action', actionId, value } });
     },
+    setDescendantApprovals(approvals: typeof descendantApprovals) {
+      descendantApprovals = approvals;
+      port.onmessage?.({ data: { type: 'pico:plugin-ui:event', event: { type: 'plugin.updated', pluginId: 'pico.permissions' } } });
+    },
+    get descendantApprovals() { return descendantApprovals; },
   };
 }
 
 const flush = async () => {
   for (let i = 0; i < 8; i += 1) await Promise.resolve();
 };
+
+function findNode(tree: any[], predicate: (node: any) => boolean): any {
+  for (const node of tree) {
+    if (predicate(node)) return node;
+    const found = findNode(node.children ?? [], predicate);
+    if (found) return found;
+  }
+  return undefined;
+}
 
 it('renders host-safe approval actions only while an approval is pending and routes the selected action through the bridge', async () => {
   const harness = createHarness();
@@ -148,17 +167,24 @@ it('moves pending child approvals to the main Thread card and lets the user insp
   const harness = createHarness('pending', 'pending', 'ChildThreadApprovals');
   await flush();
   expect(harness.tree.filter((node) => node.type === 'card')).toHaveLength(2);
+  expect(validatePluginUiTree(harness.tree, 'thread.card')).toBe(true);
   expect(JSON.stringify(harness.tree)).toContain('Research · read_file');
   expect(JSON.stringify(harness.tree)).toContain('notes.md');
   expect(JSON.stringify(harness.tree)).toContain('Safe to inspect.');
-  harness.action('child-expand:exec:child:123');
+  const firstCard = harness.tree[0]!;
+  const secondCard = harness.tree[1]!;
+  const expandAction = findNode([firstCard], (node) => node.type === 'disclosure').actionId;
+  const allowAction = findNode([firstCard], (node) => node.label === 'Allow once').actionId;
+  const openAction = findNode([secondCard], (node) => node.label === 'Open Thread').actionId;
+  harness.action(expandAction);
   await flush();
   expect(JSON.stringify(harness.tree)).toContain('Tool arguments');
-  harness.action('child-decision:allow:exec%3Achild%3A123');
+  expect(validatePluginUiTree(harness.tree, 'thread.card')).toBe(true);
+  harness.action(allowAction);
   await flush();
   const decision = harness.requests.find((request) => request.path === '/api/plugins/pico.permissions/approvals');
-  expect(JSON.parse(decision?.init.body)).toEqual({ executionId: 'exec:child:123', allow: true, rememberForThread: false });
-  harness.action('open:child');
+  expect(JSON.parse(decision?.init.body)).toEqual({ executionId: firstExecutionId, allow: true, rememberForThread: false });
+  harness.action(openAction);
   await flush();
   expect(harness.requests).toContainEqual(expect.objectContaining({ action: 'open-thread', threadId: 'child' }));
 });
@@ -169,10 +195,30 @@ it('renders no child approval card when there are no pending descendant requests
   expect(harness.tree).toEqual([]);
 });
 
+it('keeps approval actions bound to the same execution across updates and ignores resolved requests', async () => {
+  const harness = createHarness('pending', 'pending', 'ChildThreadApprovals');
+  await flush();
+  const firstAllow = findNode([harness.tree[0]], (node) => node.label === 'Allow once').actionId;
+  const secondDeny = findNode([harness.tree[1]], (node) => node.label === 'Deny').actionId;
+  const [first, second] = harness.descendantApprovals;
+  harness.setDescendantApprovals([second!, first!]);
+  await flush();
+  expect(validatePluginUiTree(harness.tree, 'thread.card')).toBe(true);
+  harness.action(secondDeny);
+  await flush();
+  const decisions = () => harness.requests.filter((request) => request.path === '/api/plugins/pico.permissions/approvals');
+  expect(JSON.parse(decisions()[0]!.init.body)).toEqual({ executionId: secondExecutionId, allow: false, rememberForThread: false });
+  harness.setDescendantApprovals([second!]);
+  await flush();
+  harness.action(firstAllow);
+  await flush();
+  expect(decisions()).toHaveLength(1);
+});
+
 it('shows an approval error in the child request card', async () => {
   const harness = createHarness('pending', 'pending', 'ChildThreadApprovals', true, true);
   await flush();
-  harness.action('child-decision:allow:exec%3Achild%3A123');
+  harness.action(findNode(harness.tree, (node) => node.label === 'Allow once').actionId);
   await flush();
   expect(JSON.stringify(harness.tree)).toContain('approval failed');
 });

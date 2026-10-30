@@ -3,6 +3,13 @@
   const pluginId = 'pico.permissions';
   let port = null, init = null, context = { thread: null }, sequence = 0, requestId = 0;
   let data = { tools: [], approvals: [], descendantApprovals: [], autoReview: false, autoReviewDenials: false }, busy = false, error = '', toolsExpanded = false, renderedThreadId = null, serverAllowed = false;
+  let nextChildAction = 0;
+  const childActionByExecution = new Map(), childExecutionByAction = new Map();
+  function childActionToken(executionId) {
+    let token = childActionByExecution.get(executionId);
+    if (!token) { token = String(++nextChildAction); childActionByExecution.set(executionId, token); childExecutionByAction.set(token, executionId); }
+    return token;
+  }
   const pending = new Map();
   const text = (text) => ({ type: 'text', text: String(text ?? '') });
   const para = (text) => ({ type: 'paragraph', text: String(text ?? '') });
@@ -81,11 +88,11 @@
   }
   function childThreadApprovals() {
     if (!context.thread || data.descendantApprovals.length === 0) return [];
-    return data.descendantApprovals.map((approval) => ({ type: 'card', children: [{ type: 'group', layout: 'stack-compact', children: [
+    return data.descendantApprovals.map((approval) => { const token = childActionToken(approval.executionId); return ({ type: 'card', children: [{ type: 'group', layout: 'stack-compact', children: [
       { type: 'heading', text: `${approval.threadTitle || 'Child Thread'} · ${approval.toolName}` },
       para('This child Thread is waiting for permission.'),
       ...(error ? [{ type: 'status', text: error, tone: 'danger' }] : []),
-      { type: 'disclosure', label: 'View tool call details', open: expandedChildApprovals.has(approval.executionId), actionId: `child-expand:${approval.executionId}`, children: [
+      { type: 'disclosure', label: 'View tool call details', open: expandedChildApprovals.has(approval.executionId), actionId: `child-expand:${token}`, children: [
         ...(approval.reviewer ? [
           { type: 'status', text: `Auto-review: ${approval.reviewer.outcome}`, tone: approval.reviewer.outcome === 'allow' ? 'success' : approval.reviewer.outcome === 'deny' ? 'danger' : 'neutral' },
           para(approval.reviewer.reason || 'No reviewer explanation was provided.'),
@@ -94,12 +101,12 @@
         { type: 'heading', level: 4, text: 'Tool arguments' },
         para(JSON.stringify(approval.arguments ?? {}, null, 2)),
         { type: 'actions', children: [
-          button('Deny', `child-decision:deny:${encodeURIComponent(approval.executionId)}`, busy, 'danger'),
-          button('Allow once', `child-decision:allow:${encodeURIComponent(approval.executionId)}`, busy, 'primary'),
-          button('Open Thread', `open:${approval.threadId}`, busy),
+          button('Deny', `child-deny:${token}`, busy, 'danger'),
+          button('Allow once', `child-allow:${token}`, busy, 'primary'),
+          button('Open Thread', `child-open:${token}`, busy),
         ] },
       ] },
-    ] }] }));
+    ] }] }); });
   }
   function resultActions() {
     const execution = context.toolResult ?? context.execution, approval = currentApproval();
@@ -135,8 +142,14 @@
     const id = action.actionId;
     if (id === 'mcp-server') { if (!context.mcpServer?.id) return; await update({ path: '/mcp-servers' }, { serverId: context.mcpServer.id, enabled: action.value === 'true' }); return; }
     if (id.startsWith('open:')) { try { await send('open-thread', { threadId: id.slice(5) }); } catch (reason) { error = reason instanceof Error ? reason.message : String(reason); draw(); } return; }
-    if (id.startsWith('child-expand:')) { const executionId = id.slice('child-expand:'.length); if (expandedChildApprovals.has(executionId)) expandedChildApprovals.delete(executionId); else expandedChildApprovals.add(executionId); draw(); return; }
-    if (id.startsWith('child-decision:')) { const prefix = 'child-decision:', separator = id.indexOf(':', prefix.length); if (separator < 0) return; const decision = id.slice(prefix.length, separator), encodedExecutionId = id.slice(separator + 1); if (!encodedExecutionId || !['allow', 'deny'].includes(decision)) return; let executionId; try { executionId = decodeURIComponent(encodedExecutionId); } catch { return; } await update({ path: '/approvals', method: 'POST' }, { executionId, allow: decision === 'allow', rememberForThread: false }); return; }
+    if (/^child-(expand|allow|deny|open):[0-9]+$/.test(id)) {
+      const [kind, token] = id.split(':'), executionId = childExecutionByAction.get(token);
+      const approval = data.descendantApprovals.find((item) => item.executionId === executionId);
+      if (!approval) return;
+      if (kind === 'child-expand') { if (expandedChildApprovals.has(executionId)) expandedChildApprovals.delete(executionId); else expandedChildApprovals.add(executionId); draw(); return; }
+      if (kind === 'child-open') { try { await send('open-thread', { threadId: approval.threadId }); } catch (reason) { error = reason instanceof Error ? reason.message : String(reason); draw(); } return; }
+      await update({ path: '/approvals', method: 'POST' }, { executionId, allow: kind === 'child-allow', rememberForThread: false }); return;
+    }
     if (id.startsWith('tool:')) { const toolName = id.slice(5), tool = data.tools.find((x) => x.name === toolName); if (!tool || !context.thread) return; await update({ path: '/rules' }, { threadId: context.thread.id, toolName, policy: action.value === 'true' ? 'allow' : 'ask' }); return; }
     if (id === 'reviewer' || id === 'reviewer-denials') { if (!context.thread) return; await update({ path: id === 'reviewer' ? '/reviewer' : '/reviewer-denials' }, { threadId: context.thread.id, enabled: action.value === 'true' }); return; }
     if (id.startsWith('decision:')) { const approval = currentApproval(); if (!approval?.executionId) return; const allow = id !== 'decision:deny'; await update({ path: '/approvals', method: 'POST' }, { executionId: approval.executionId, allow, rememberForThread: allow && id === 'decision:allow-thread' }); return; }
@@ -145,7 +158,7 @@
     if (!message || typeof message !== 'object') return;
     if (message.type === 'pico:plugin-ui:response') { const handler = pending.get(message.id); if (!handler) return; pending.delete(message.id); message.ok ? handler.resolve(message.value) : handler.reject(new Error(message.error)); }
     else if (message.type === 'pico:plugin-ui:action') void act(message);
-    else if (message.type === 'pico:plugin-ui:context') { const nextThreadId = message.context?.threadId ?? message.context?.thread?.id ?? null; if (nextThreadId !== renderedThreadId) toolsExpanded = false; renderedThreadId = nextThreadId; context = message.context ?? { thread: null }; void refresh(); }
+    else if (message.type === 'pico:plugin-ui:context') { const nextThreadId = message.context?.threadId ?? message.context?.thread?.id ?? null; if (nextThreadId !== renderedThreadId) { toolsExpanded = false; childActionByExecution.clear(); childExecutionByAction.clear(); expandedChildApprovals.clear(); } renderedThreadId = nextThreadId; context = message.context ?? { thread: null }; void refresh(); }
     else if (message.type === 'pico:plugin-ui:popover-dismiss') { toolsExpanded = false; }
     else if (message.type === 'pico:plugin-ui:toolbar-toggle') { toolsExpanded = message.open === true; }
     else if (message.type === 'pico:plugin-ui:event' && message.event?.type === 'plugin.updated' && message.event.pluginId === pluginId) void refresh();
