@@ -1,47 +1,59 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { ModelInputAttempt } from '../src/contracts/runtime.js';
-import { ComposerTps, latestOutputTokensPerSecond, TextSpeedWindow } from '../src/web/model-metrics.js';
+import { ComposerTps, latestGenerationTokensPerSecond } from '../src/web/model-metrics.js';
 import { mergePluginSelectionRefresh } from '../src/web/plugin-model-selection-state.js';
 
-describe('provider throughput', () => {
-  it('uses the recorded output token metric from the last physical request', () => {
+describe('composer generation throughput', () => {
+  it('uses provider output tokens divided by time after first visible text', () => {
     const attempts = [
-      { providerRequests: [{ outputTokensPerSecond: 12.5, outputTextCharacters: 9999 }] },
+      {
+        providerRequests: [
+          {
+            outcome: 'completed',
+            durationMs: 2000,
+            firstTextMs: 500,
+            usage: { outputTokens: 12 },
+          },
+        ],
+      },
     ] as ModelInputAttempt[];
-    expect(latestOutputTokensPerSecond(attempts)).toBe(12.5);
-    expect(
-      latestOutputTokensPerSecond([{ providerRequests: [{ outputTextCharacters: 9999 }] }] as ModelInputAttempt[]),
-    ).toBeNull();
-    expect(
-      latestOutputTokensPerSecond([{ providerRequests: [{ outputTokensPerSecond: 12 }, {}] }] as ModelInputAttempt[]),
-    ).toBeNull();
+    expect(latestGenerationTokensPerSecond(attempts)).toBe(8);
   });
-  it('displays unavailable until a provider metric is loaded and explains the elapsed time', () => {
+  it('omits the value while running and explains the measurement', () => {
     const markup = renderToStaticMarkup(
-      <ComposerTps threadId="a" executionId="b" status="completed" request={async <T,>() => ({}) as T} />,
+      <ComposerTps threadId="a" executionId="b" status="running" request={async <T,>() => ({}) as T} />,
     );
     expect(markup).toContain('TPS —');
-    expect(markup).toContain('Estimated visible-text tokens');
+    expect(markup).toContain('Provider-reported output tokens');
   });
-  it('estimates a rolling text speed and resets after a pause', () => {
-    const speed = new TextSpeedWindow();
-    expect(speed.add(0, 'abcd')).toBeNull();
-    expect(speed.add(1000, 'abcdefgh')).toBe(2);
-    expect(speed.add(5000, 'abcd')).toBeNull();
-    expect(speed.add(6000, '中文')).toBe(2);
-  });
-  it('requires 500ms of observations and isolates a new execution', () => {
-    const first = new TextSpeedWindow();
-    expect(first.add(0, 'abcd')).toBeNull();
-    expect(first.add(1, 'abcdefgh')).toBeNull();
-    expect(first.add(499, 'abcd')).toBeNull();
-    expect(first.add(500, 'abcd')).toBe(8);
-    const nextExecution = new TextSpeedWindow();
-    expect(nextExecution.add(501, 'abcd')).toBeNull();
-    expect(nextExecution.add(502, 'abcdefgh')).toBeNull();
-    expect(nextExecution.add(4000, 'abcd')).toBeNull();
-    expect(nextExecution.add(4500, 'abcd')).toBe(2);
+  it('requires a completed physical request with exact usage and valid post-first-text duration', () => {
+    const request = {
+      outcome: 'completed',
+      durationMs: 2000,
+      firstTextMs: 500,
+      usage: { outputTokens: 12 },
+    };
+    const forRequest = (value: object) =>
+      latestGenerationTokensPerSecond([{ providerRequests: [value] }] as ModelInputAttempt[]);
+    expect(forRequest({ ...request, outcome: 'running' })).toBeNull();
+    expect(forRequest({ ...request, outcome: 'retrying' })).toBeNull();
+    expect(forRequest({ ...request, firstTextMs: undefined })).toBeNull();
+    expect(forRequest({ ...request, firstTextMs: -1 })).toBeNull();
+    expect(forRequest({ ...request, durationMs: 500 })).toBeNull();
+    expect(forRequest({ ...request, usage: null })).toBeNull();
+    expect(forRequest({ ...request, usage: { outputTokens: undefined } })).toBeNull();
+    expect(forRequest({ ...request, usage: { outputTokens: -1 } })).toBeNull();
+    expect(
+      latestGenerationTokensPerSecond([
+        {
+          providerRequests: [
+            { ...request, outcome: 'completed' },
+            { ...request, outcome: 'failed' },
+          ],
+        },
+      ] as ModelInputAttempt[]),
+    ).toBeNull();
   });
   it('preserves in-flight edits and independent plugin choices when refreshes return', () => {
     const old = { a: 'fixed draft', b: 'old', c: 'saving' };
