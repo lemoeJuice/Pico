@@ -709,6 +709,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [projectId, setProjectId] = useState<string | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
   const [independentThreads, setIndependentThreads] = useState<Thread[]>([]);
+  const independentThreadsRef = useRef(independentThreads);
+  independentThreadsRef.current = independentThreads;
   const [independentThreadsLoaded, setIndependentThreadsLoaded] = useState(false);
   const independentThreadVersion = useRef(0);
   const [threadId, setThreadId] = useState<string | null>(null);
@@ -915,7 +917,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const archivedThreadVersion = useRef(0);
   const activeProjectId = useRef(projectId);
   const activeThreadsRef = useRef(threads);
-  activeThreadsRef.current = threads;
+  activeThreadsRef.current = projectId === null ? independentThreads : threads;
   const threadUpdateVersions = useRef(new Map<string, number>());
   const snapshotVersions = useRef(new Map<string, number>());
   const pendingMessageIds = useRef<PendingMessageIds>(composerState.current.pendingMessages);
@@ -1673,6 +1675,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     };
   }, [archivedThreadsOpen, settingsOpen]);
 
+  const independentSelectionReady = projectId === null && independentThreadsLoaded;
   useEffect(() => {
     let current = true;
     setThreads([]);
@@ -1680,10 +1683,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     setSnapshot(null);
     if (!projectsLoaded) return () => { current = false; };
     if (!projectId) {
-      if (!independentThreadsLoaded) return () => { current = false; };
+      if (!independentSelectionReady) return () => { current = false; };
       localStorage.setItem('pico.project', 'none');
       const remembered = localStorage.getItem('pico.thread.none');
-      setThreadId(independentThreads.some((item) => item.id === remembered) ? remembered : independentThreads[0]?.id ?? null);
+      const available = independentThreadsRef.current;
+      setThreadId(available.some((item) => item.id === remembered) ? remembered : available[0]?.id ?? null);
       return () => { current = false; };
     }
     localStorage.setItem('pico.project', projectId);
@@ -1700,7 +1704,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     return () => {
       current = false;
     };
-  }, [independentThreads, independentThreadsLoaded, loadProjectThreads, projectId, projectsLoaded]);
+  }, [independentSelectionReady, loadProjectThreads, projectId, projectsLoaded]);
 
   useEffect(() => {
     if (!threadId) {
