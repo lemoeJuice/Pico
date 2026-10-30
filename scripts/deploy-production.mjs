@@ -39,6 +39,7 @@ import { selectDeploymentScope } from './deploy/selection.mjs';
 import { acquireSystemdUnitReference, assertRestartableSystemdUnit } from './deploy/systemd.mjs';
 import { assertSystemdTokenSource } from './deploy/systemd-credentials.mjs';
 import { recoverStoppedSystemdUnit } from './deploy/systemd-recovery.mjs';
+import { getActiveThreadCount as countActiveThreads } from './deploy/thread-activity.mjs';
 
 const projectRoot = realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
 const runtimeLauncher = path.join(projectRoot, 'scripts/start-runtime.sh');
@@ -376,39 +377,9 @@ async function verifyWorkspace(baseUrl, cookie) {
 
 async function getActiveThreadCount(baseUrl, cookie) {
   const threads = await getJson(baseUrl, cookie, '/api/threads');
-  if (!Array.isArray(threads)) throw new Error('The Runtime returned an invalid Thread list; refusing to restart.');
-  const validStates = new Set(['idle', 'paused', 'running', 'pausing']);
-  for (const thread of threads) {
-    if (!validStates.has(thread?.state)) {
-      throw new Error('The Runtime returned an unknown Thread state; refusing to restart.');
-    }
-  }
-  const activeThreadIds = new Set(
-    threads
-      .filter((thread) => thread.state === 'running' || thread.state === 'pausing')
-      .map((thread) => thread.id),
+  return countActiveThreads(threads, (threadId) =>
+    getJson(baseUrl, cookie, `/api/threads/${encodeURIComponent(threadId)}`),
   );
-  const pausedThreads = threads.filter((thread) => thread.state === 'paused');
-  for (let index = 0; index < pausedThreads.length; index += 8) {
-    const page = pausedThreads.slice(index, index + 8);
-    const snapshots = await Promise.all(
-      page.map((thread) => {
-        if (typeof thread.id !== 'string' || !thread.id) {
-          throw new Error('The Runtime returned a Thread without an ID; refusing to restart.');
-        }
-        return getJson(baseUrl, cookie, `/api/threads/${encodeURIComponent(thread.id)}`);
-      }),
-    );
-    for (const [pageIndex, snapshot] of snapshots.entries()) {
-      if (!Array.isArray(snapshot?.executions)) {
-        throw new Error('The Runtime returned an invalid execution snapshot; refusing to restart.');
-      }
-      if (snapshot.executions.some((execution) => execution.status === 'pending' || execution.status === 'running')) {
-        activeThreadIds.add(page[pageIndex].id);
-      }
-    }
-  }
-  return activeThreadIds.size;
 }
 
 async function waitForIdle(baseUrl, cookie) {
