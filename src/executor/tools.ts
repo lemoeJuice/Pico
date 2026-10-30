@@ -13,14 +13,19 @@ process.once('exit', () => {
   for (const cleanup of activeShellExitCleanups) cleanup();
 });
 
-
 function requiredString(args: Record<string, unknown>, key: string): string {
   const value = args[key];
   if (typeof value !== 'string') throw new Error(`Expected ${key} to be a string`);
   return value;
 }
 
-async function safePath(workspacePath: string, requestedPath: string, allowMissing = false): Promise<string> {
+async function safePath(
+  workspacePath: string,
+  requestedPath: string,
+  allowMissing = false,
+  host = false,
+): Promise<string> {
+  if (host) return resolve(workspacePath, requestedPath || '.');
   if (isAbsolute(requestedPath) || requestedPath.split(/[\\/]/).includes('..')) {
     throw new Error('Tool paths must stay inside the selected workspace');
   }
@@ -68,11 +73,7 @@ function imageMimeType(bytes: Buffer): 'image/png' | 'image/jpeg' | 'image/webp'
     return 'image/png';
   }
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
-  if (
-    bytes.length >= 12 &&
-    bytes.toString('ascii', 0, 4) === 'RIFF' &&
-    bytes.toString('ascii', 8, 12) === 'WEBP'
-  ) {
+  if (bytes.length >= 12 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP') {
     return 'image/webp';
   }
   return null;
@@ -343,7 +344,7 @@ function applyHunks(source: string, hunks: string[]): string {
   return result === '' ? '' : `${result}${hadFinalNewline ? '\n' : ''}`;
 }
 
-async function applyPatch(patchText: string, workspacePath: string): Promise<string[]> {
+async function applyPatch(patchText: string, workspacePath: string, host = false): Promise<string[]> {
   const patch = patchText.replace(/^\*\*\* Begin Patch\n/, '').replace(/\n\*\*\* End Patch\s*$/, '\n');
   const blocks = patch.split(/(?=^diff --git |^\*\*\* (?:Update|Add|Delete) File: )/m).filter(Boolean);
   if (!blocks.length) throw new Error('Patch is empty or unsupported');
@@ -360,7 +361,7 @@ async function applyPatch(patchText: string, workspacePath: string): Promise<str
       updatedFile ??
       (newHeader && newHeader !== '/dev/null' ? newHeader : oldHeader && oldHeader !== '/dev/null' ? oldHeader : null);
     if (!filePath || filePath === '/dev/null') throw new Error('Patch needs a relative file path');
-    const target = await safePath(workspacePath, filePath, true);
+    const target = await safePath(workspacePath, filePath, true, host);
     if (deletedFile || newHeader === '/dev/null') {
       await unlink(target);
       changed.push(filePath);
@@ -388,7 +389,8 @@ export function builtinExecutorTools(): ExecutorToolImplementation[] {
     {
       definition: BUILTIN_EXECUTOR_TOOL_DEFINITIONS.read_file!,
       async execute(args, context) {
-        const target = await safePath(context.workspacePath, requiredString(args, 'path'));
+        const base = context.workingDirectory || context.workspacePath;
+        const target = await safePath(base, requiredString(args, 'path'), false, context.filesystemMode === 'host');
         const handle = await open(target, 'r');
         let size: number;
         let buffer: Buffer;
@@ -408,7 +410,7 @@ export function builtinExecutorTools(): ExecutorToolImplementation[] {
         if (decoded.includes('\0')) throw new Error('File contains binary data; read_file supports UTF-8 text files.');
         const contents = decoded.slice(0, READ_FILE_LIMITS.maxCharacters);
         return {
-          path: relative(context.workspacePath, target),
+          path: relative(base, target),
           contents,
           truncated: size > bytesRead || decoded.length > READ_FILE_LIMITS.maxCharacters,
         };
@@ -418,7 +420,12 @@ export function builtinExecutorTools(): ExecutorToolImplementation[] {
       definition: BUILTIN_EXECUTOR_TOOL_DEFINITIONS.read_image!,
       async execute(args, context) {
         const requestedPath = requiredString(args, 'path');
-        const target = await safePath(context.workspacePath, requestedPath);
+        const target = await safePath(
+          context.workingDirectory || context.workspacePath,
+          requestedPath,
+          false,
+          context.filesystemMode === 'host',
+        );
         const handle = await open(target, 'r');
         let bytes: Buffer;
         try {
@@ -429,7 +436,9 @@ export function builtinExecutorTools(): ExecutorToolImplementation[] {
           while (true) {
             if (bytesRead === buffer.length) {
               if (buffer.length === MAX_IMAGE_BYTES + 1) break;
-              const expanded = Buffer.alloc(Math.min(MAX_IMAGE_BYTES + 1, Math.max(buffer.length + 1, buffer.length * 2)));
+              const expanded = Buffer.alloc(
+                Math.min(MAX_IMAGE_BYTES + 1, Math.max(buffer.length + 1, buffer.length * 2)),
+              );
               buffer.copy(expanded, 0, 0, bytesRead);
               buffer = expanded;
             }
@@ -456,13 +465,29 @@ export function builtinExecutorTools(): ExecutorToolImplementation[] {
     {
       definition: BUILTIN_EXECUTOR_TOOL_DEFINITIONS.search_files!,
       async execute(args, context) {
-        return searchFiles(requiredString(args, 'pattern'), context.workspacePath, context.signal);
+        const root = await safePath(
+          context.workingDirectory || context.workspacePath,
+          typeof args.path === 'string' ? args.path : '.',
+          false,
+          context.filesystemMode === 'host',
+        );
+        return searchFiles(
+          requiredString(args, 'pattern'),
+          root,
+          context.signal,
+        );
       },
     },
     {
       definition: BUILTIN_EXECUTOR_TOOL_DEFINITIONS.apply_patch!,
       async execute(args, context) {
-        return { changed: await applyPatch(requiredString(args, 'patch'), context.workspacePath) };
+        return {
+          changed: await applyPatch(
+            requiredString(args, 'patch'),
+            context.workingDirectory || context.workspacePath,
+            context.filesystemMode === 'host',
+          ),
+        };
       },
     },
     {
@@ -474,7 +499,7 @@ export function builtinExecutorTools(): ExecutorToolImplementation[] {
         const { exitCode, stdout, stderr } = await runProcess(
           executable,
           shellArgs,
-          context.workspacePath,
+          context.workingDirectory || context.workspacePath,
           context.signal,
           timeoutMs,
         );

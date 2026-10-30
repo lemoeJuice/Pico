@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { startRemoteExecutorServer, type RunningRemoteExecutorServer } from './remote-server.js';
 
 async function main(): Promise<void> {
@@ -44,6 +44,15 @@ async function main(): Promise<void> {
     ...(process.env.PICO_EXECUTOR_PORT ? { port: Number(process.env.PICO_EXECUTOR_PORT) } : {}),
     token: process.env.PICO_EXECUTOR_TOKEN ?? '',
     workspaceRoot: process.env.PICO_EXECUTOR_WORKSPACE_ROOT ?? process.cwd(),
+    // Older local Host agents restart themselves with their original environment
+    // after an update, before the Runtime can launch them with the new flag.
+    filesystemMode:
+      process.env.PICO_EXECUTOR_FILESYSTEM_MODE === 'host' ||
+      (process.env.PICO_EXECUTOR_FILESYSTEM_MODE === undefined &&
+        process.env.PICO_EXECUTOR_WORKSPACE_ROOT === '/' &&
+        basename(process.env.PICO_EXECUTOR_INSTALL_PATH ?? '') === 'executor-host.mjs')
+        ? 'host'
+        : 'scoped',
     ...(process.env.PICO_EXECUTOR_NAME ? { name: process.env.PICO_EXECUTOR_NAME } : {}),
     databasePath: process.env.PICO_EXECUTOR_DB_PATH ?? join(process.cwd(), 'data', 'executor.sqlite'),
     ...(installedVersion ? { executorVersion: installedVersion } : {}),

@@ -162,6 +162,7 @@ export class HostExecutor implements ExecutorAdapter {
         PICO_EXECUTOR_PORT: String(saved.port),
         PICO_EXECUTOR_TOKEN: saved.accessToken,
         PICO_EXECUTOR_WORKSPACE_ROOT: '/',
+        PICO_EXECUTOR_FILESYSTEM_MODE: 'host',
         PICO_EXECUTOR_DB_PATH: join(directory, 'executor-host.sqlite'),
         PICO_EXECUTOR_PLUGIN_DIR: this.pluginDirectory,
         PICO_EXECUTOR_INSTALL_PATH: this.agentPath,

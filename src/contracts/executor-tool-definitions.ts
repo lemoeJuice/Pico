@@ -7,7 +7,7 @@ export const BUILTIN_EXECUTOR_TOOL_DEFINITIONS: Readonly<Record<string, ToolDefi
   read_file: {
     name: 'read_file',
     description:
-      'Read a UTF-8 text file inside the selected workspace. Paths are relative to the workspace; output is capped at 60,000 characters and returns truncated when more remains.',
+      'Read a UTF-8 text file. Relative paths use the execution working directory; path access depends on the Executor. Output is capped at 60,000 characters and returns truncated when more remains.',
     parameters: {
       type: 'object',
       properties: { path: stringSchema },
@@ -18,7 +18,7 @@ export const BUILTIN_EXECUTOR_TOOL_DEFINITIONS: Readonly<Record<string, ToolDefi
   read_image: {
     name: 'read_image',
     description:
-      'Read a PNG, JPEG, or WebP image file inside the selected workspace for visual inspection. Paths are relative to the workspace; files are limited to 4 MiB.',
+      'Read a PNG, JPEG, or WebP image for visual inspection. Relative paths use the execution working directory; path access depends on the Executor. Files are limited to 4 MiB.',
     parameters: {
       type: 'object',
       properties: { path: stringSchema },
@@ -29,10 +29,10 @@ export const BUILTIN_EXECUTOR_TOOL_DEFINITIONS: Readonly<Record<string, ToolDefi
   search_files: {
     name: 'search_files',
     description:
-      'Search text files under the workspace using a regular expression. Skips dependency and build folders; output is capped at 200 matches and 30,000 characters, and truncated indicates incomplete coverage.',
+      'Search text files under the requested path or execution working directory using a regular expression. Path access depends on the Executor. Skips dependency and build folders; output is capped at 200 matches and 30,000 characters, and truncated indicates incomplete coverage.',
     parameters: {
       type: 'object',
-      properties: { pattern: stringSchema },
+      properties: { pattern: stringSchema, path: stringSchema },
       required: ['pattern'],
       additionalProperties: false,
     },
@@ -40,7 +40,7 @@ export const BUILTIN_EXECUTOR_TOOL_DEFINITIONS: Readonly<Record<string, ToolDefi
   apply_patch: {
     name: 'apply_patch',
     description:
-      'Apply a unified diff patch to files in the selected workspace. Paths must be relative and may not escape the workspace.',
+      'Apply a unified diff patch to files. Relative paths use the execution working directory; path access depends on the Executor.',
     parameters: {
       type: 'object',
       properties: { patch: stringSchema },
@@ -50,7 +50,7 @@ export const BUILTIN_EXECUTOR_TOOL_DEFINITIONS: Readonly<Record<string, ToolDefi
   },
   shell: {
     name: 'shell',
-    description: 'Run a shell command in the selected executor workspace and return its output and exit code.',
+    description: 'Run a shell command in the Executor working directory and return its output and exit code.',
     parameters: {
       type: 'object',
       properties: { command: stringSchema, timeout_ms: { type: 'integer', minimum: 1000, maximum: 600000 } },

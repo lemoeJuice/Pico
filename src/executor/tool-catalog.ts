@@ -2,6 +2,10 @@ import type { Thread, ToolDefinition } from '../core/types.js';
 
 export interface ExecutorToolContext {
   workspacePath: string;
+  /** Execution working directory, distinct from an optional Project workspace. */
+  workingDirectory?: string;
+  /** Host tools can address paths outside the Project workspace. */
+  filesystemMode?: 'host' | 'scoped';
   executionId: string;
   signal: AbortSignal;
 }

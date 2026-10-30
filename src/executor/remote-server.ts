@@ -23,6 +23,7 @@ export interface RemoteExecutorServerOptions {
   port?: number;
   token: string;
   workspaceRoot: string;
+  filesystemMode?: 'host' | 'scoped';
   name?: string;
   databasePath?: string;
   pluginDirectory?: string;
@@ -102,6 +103,13 @@ export async function startRemoteExecutorServer(
     return path;
   };
 
+  // The configured root remains the executor's default working directory in
+  // the absence of a Project workspace; it is not itself a Project binding.
+  const executionWorkspace = async (requested: unknown): Promise<string> => {
+    if (requested === '') return '';
+    return validateWorkspace(requested);
+  };
+
   const currentState = (id: string): RemoteExecutionState | null => ledger.get(id);
 
   const run = (id: string, request: RemoteExecutionRequest): Promise<RemoteExecutionState> => {
@@ -118,9 +126,11 @@ export async function startRemoteExecutorServer(
         return ledger.transition(id, 'failed', { error: `Unknown Remote Executor tool: ${request.toolName}` });
       }
       try {
-        const workspacePath = await validateWorkspace(request.workspacePath);
+        const workspacePath = await executionWorkspace(request.workspacePath);
         const result = await tool.execute(request.arguments, {
           workspacePath,
+          workingDirectory: workspacePath || (options.filesystemMode === 'host' ? process.cwd() : workspaceRoot),
+          filesystemMode: options.filesystemMode ?? 'scoped',
           executionId: id,
           signal: controller.signal,
         });
@@ -156,6 +166,7 @@ export async function startRemoteExecutorServer(
       name: options.name?.trim() || hostname(),
       kind: 'executor',
       workspaceRoot,
+      workspaceOptional: true,
       workspaceFileDownload: true,
       tools: tools.listBySource('executor').map((tool) => tool.definition),
     });
@@ -188,7 +199,12 @@ export async function startRemoteExecutorServer(
   });
   app.post('/api/workspaces/download', async (request, response) => {
     const body = bodyObject(request);
-    await serveRemoteWorkspaceFile(body.workspacePath, body.path, validateWorkspace, response);
+    await serveRemoteWorkspaceFile(
+      body.workspacePath,
+      body.path,
+      async (path) => (await executionWorkspace(path)) || (options.filesystemMode === 'host' ? process.cwd() : workspaceRoot),
+      response,
+    );
   });
   app.post('/api/executions/:id', async (request, response) => {
     const id = remoteExecutionId(request.params.id!);
@@ -214,7 +230,7 @@ export async function startRemoteExecutorServer(
       if (accepted.state.status === 'pending') schedule(id, priorInput);
       return response.status(200).json(ledger.get(id) ?? accepted.state);
     }
-    const workspacePath = await validateWorkspace(body.workspacePath);
+    const workspacePath = await executionWorkspace(body.workspacePath);
     const input: RemoteExecutionRequest = { ...identity, workspacePath };
     const accepted = ledger.createIfAbsent(id, identity, input);
     if (!accepted.inserted && accepted.state.status === 'running' && !active.has(id)) {

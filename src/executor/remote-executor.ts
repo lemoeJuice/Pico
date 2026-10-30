@@ -114,6 +114,9 @@ export async function inspectRemoteExecutor(
   if (info.workspaceFileDownload !== undefined && typeof info.workspaceFileDownload !== 'boolean') {
     throw new Error('Remote Executor returned an invalid file download capability.');
   }
+  if (info.workspaceOptional !== undefined && typeof info.workspaceOptional !== 'boolean') {
+    throw new Error('Remote Executor returned an invalid optional workspace capability.');
+  }
   info.tools = validateToolDefinitions(info.tools);
   return info;
 }
@@ -153,6 +156,9 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     const info = await inspectRemoteExecutor(endpointUrl, accessToken);
     if (info.protocolVersion !== EXECUTOR_PROTOCOL_VERSION || info.kind !== 'executor') {
       throw new Error(`Executor protocol version ${info.protocolVersion} is incompatible; update this Executor.`);
+    }
+    if (!binding.workspacePath && info.workspaceOptional !== true) {
+      throw new Error('This Executor does not support Threads without a workspace; update the Executor.');
     }
     return info.tools;
   }
@@ -366,6 +372,12 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     const { endpointUrl, accessToken } = address;
     let remote: RemoteExecutionState;
     if (current.status === 'pending') {
+      if (!(address.workspacePath ?? binding.workspacePath)) {
+        const info = await inspectRemoteExecutor(endpointUrl, accessToken, signal);
+        if (info.workspaceOptional !== true) {
+          throw new Error('This Executor does not support Threads without a workspace; update the Executor.');
+        }
+      }
       remote = await this.retryTransientRequest(signal, () =>
         requestJson<RemoteExecutionState>(
           endpointUrl,

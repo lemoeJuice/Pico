@@ -7,6 +7,7 @@ export interface ExecutorConnectionInfo {
   executorVersion?: string;
   updateSupported?: boolean;
   workspaceFileDownload?: boolean;
+  workspaceOptional?: boolean;
 }
 
 export interface ExecutorServiceAddress {

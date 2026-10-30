@@ -29,6 +29,44 @@ describe('workspace tools', () => {
     expect(builtinExecutorToolDefinitions()).toEqual(createToolCatalog().list());
   });
 
+  it('allows Host file tools to work outside the project reference directory', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-host-reference-'));
+    const workspacePath = join(directory, 'project');
+    const outside = join(directory, 'other.txt');
+    await mkdir(workspacePath);
+    await writeFile(outside, 'before\n');
+    const context = {
+      workspacePath,
+      workingDirectory: workspacePath,
+      filesystemMode: 'host' as const,
+      executionId: 'host',
+      signal: new AbortController().signal,
+    };
+    try {
+      expect(await toolMap.get('read_file')!.execute({ path: outside }, context)).toMatchObject({
+        contents: 'before\n',
+      });
+      const patch = [
+        '*** Begin Patch',
+        `*** Update File: ${outside}`,
+        '@@ -1,1 +1,1 @@',
+        '-before',
+        '+after',
+        '*** End Patch',
+      ].join('\n');
+      await toolMap.get('apply_patch')!.execute({ patch }, context);
+      expect(await readFile(outside, 'utf8')).toBe('after\n');
+      expect(await toolMap.get('search_files')!.execute({ pattern: 'after', path: directory }, context)).toMatchObject({
+        matches: ['other.txt:1:after'],
+      });
+      await expect(
+        toolMap.get('read_file')!.execute({ path: outside }, { ...context, filesystemMode: 'scoped' }),
+      ).rejects.toThrow();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('reads, searches, and patches files within the selected workspace', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pico-tools-'));
     const workspacePath = join(directory, 'workspace');

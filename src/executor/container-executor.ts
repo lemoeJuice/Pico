@@ -14,15 +14,25 @@ import { ServiceError } from '../contracts/service-error.js';
 
 const CONTAINER_SETTING_PREFIX = 'executor-container-connection:';
 const CONTAINER_NAME_SETTING_PREFIX = 'executor-container-name:';
+const CONTAINER_ATTACH_SETTING_PREFIX = 'executor-container-attach:';
 const CONTAINER_INSTALLATION_SETTING = 'executor-container-installation-id';
 const CONTAINER_NAME_PREFIX = process.env.PICO_CONTAINER_NAME?.trim() || 'pico-executor';
 const CONTAINER_PORT = 4174;
 const EXECUTOR_PATH = '/opt/pico/executor-agent.mjs';
+const INDEPENDENT_WORKSPACE_ROOT = '/pico-thread-work';
 const DEFAULT_CONTAINER_IMAGE = 'docker.io/library/node:22-bookworm-slim';
 
 interface SavedContainerConnection {
   port: number;
   accessToken: string;
+}
+
+interface ContainerWorkspaceAttachment {
+  image: string | null;
+  workspace: string;
+  status: 'pending' | 'attached' | 'rolled_back';
+  snapshotImage?: string;
+  snapshotImages?: string[];
 }
 
 interface ContainerSetup {
@@ -177,6 +187,9 @@ export class ContainerExecutor implements ExecutorAdapter {
   private readonly setupPromises = new Map<string, ContainerSetup>();
   private readonly manualRestartPromises = new Map<string, Promise<void>>();
   private readonly manualRestartPathPromises = new Map<string, Promise<void>>();
+  private readonly workspaceAttachPromises = new Map<string, Promise<void>>();
+  private readonly workspaceRecoveryPromises = new Map<string, Promise<void>>();
+  private readonly workspaceRollbackPromises = new Map<string, Promise<void>>();
   private storageArgs: string[] | null = null;
 
   constructor(
@@ -232,34 +245,417 @@ export class ContainerExecutor implements ExecutorAdapter {
   }
 
   restart(binding: ExecutorBinding): Promise<void> {
-    const pathKey = resolve(binding.workspacePath);
+    const independent = !binding.workspacePath.trim();
+    const stableKey = createHash('sha256').update(`executor:${binding.id}`).digest('hex');
+    const savedAttachment = this.store.getSetting<ContainerWorkspaceAttachment | null>(
+      `${CONTAINER_ATTACH_SETTING_PREFIX}${stableKey}`,
+      null,
+    );
+    const pathKey = independent || savedAttachment ? `executor:${binding.id}` : resolve(binding.workspacePath);
     const existing = this.manualRestartPathPromises.get(pathKey);
     if (existing) return existing;
     let promise!: Promise<void>;
-    promise = Promise.resolve().then(async () => {
-      const workspace = await realpath(binding.workspacePath);
-      const workspaceInfo = await stat(workspace);
-      if (!workspaceInfo.isDirectory()) throw new Error('Container workspace must be a directory.');
-      const workspaceKey = createHash('sha256').update(workspace).digest('hex');
-      const canonicalExisting = this.manualRestartPromises.get(workspaceKey);
-      if (canonicalExisting && canonicalExisting !== promise) return canonicalExisting;
-      this.manualRestartPromises.set(workspaceKey, promise);
-      try {
-        const containerName = this.containerName(workspaceKey);
-        const setup = this.setupPromises.get(workspaceKey);
-        if (setup) await setup.promise.catch(() => undefined);
-        const saved = await this.connection(workspaceKey);
-        const state = await this.inspectContainer(containerName);
-        if (!state.exists) throw new Error('Container Executor has not been created for this workspace.');
-        await this.restartAndRecover(workspace, containerName, saved, new AbortController().signal);
-      } finally {
-        if (this.manualRestartPromises.get(workspaceKey) === promise) this.manualRestartPromises.delete(workspaceKey);
-      }
-    }).finally(() => {
-      if (this.manualRestartPathPromises.get(pathKey) === promise) this.manualRestartPathPromises.delete(pathKey);
-    });
+    promise = Promise.resolve()
+      .then(async () => {
+        const attaching = this.workspaceAttachPromises.get(stableKey);
+        if (attaching) await attaching;
+        if (this.workspaceAttachPromises.has(stableKey)) {
+          throw new ServiceError(409, 'Container Executor workspace attachment is pending commit.');
+        }
+        const workspace = independent ? null : await realpath(binding.workspacePath);
+        if (workspace && !(await stat(workspace)).isDirectory())
+          throw new Error('Container workspace must be a directory.');
+        const attached = this.store.getSetting<ContainerWorkspaceAttachment | null>(
+          `${CONTAINER_ATTACH_SETTING_PREFIX}${stableKey}`,
+          null,
+        );
+        if (independent && attached && attached.status !== 'rolled_back') {
+          throw new ServiceError(409, 'This Container Executor has been attached to a Project workspace.');
+        }
+        const workspaceKey =
+          independent || attached?.workspace === workspace
+            ? stableKey
+            : createHash('sha256').update(workspace!).digest('hex');
+        const canonicalExisting = this.manualRestartPromises.get(workspaceKey);
+        if (canonicalExisting && canonicalExisting !== promise) return canonicalExisting;
+        this.manualRestartPromises.set(workspaceKey, promise);
+        try {
+          const containerName = this.containerName(workspaceKey);
+          const setup = this.setupPromises.get(workspaceKey);
+          if (setup) await setup.promise.catch(() => undefined);
+          const saved = await this.connection(workspaceKey);
+          const state = await this.inspectContainer(containerName);
+          if (!state.exists) throw new Error('Container Executor has not been created for this workspace.');
+          await this.restartAndRecover(workspace, containerName, saved, new AbortController().signal);
+        } finally {
+          if (this.manualRestartPromises.get(workspaceKey) === promise) this.manualRestartPromises.delete(workspaceKey);
+        }
+      })
+      .finally(() => {
+        if (this.manualRestartPathPromises.get(pathKey) === promise) this.manualRestartPathPromises.delete(pathKey);
+      });
     this.manualRestartPathPromises.set(pathKey, promise);
     return promise;
+  }
+
+  /** Attach a Project workspace to an independent Thread container without replacing its environment. */
+  attachWorkspace(binding: ExecutorBinding, workspacePath: string): Promise<void> {
+    if (binding.kind !== 'container' || binding.workspacePath.trim()) {
+      return Promise.reject(new Error('Only an independent Container Executor can be attached to a workspace.'));
+    }
+    const pathKey = resolve(workspacePath);
+    const stableKey = createHash('sha256').update(`executor:${binding.id}`).digest('hex');
+    const prior = this.workspaceAttachPromises.get(stableKey);
+    if (prior) {
+      return prior.then(async () => {
+        const requestedWorkspace = await realpath(pathKey);
+        const record = this.store.getSetting<ContainerWorkspaceAttachment | null>(
+          `${CONTAINER_ATTACH_SETTING_PREFIX}${stableKey}`,
+          null,
+        );
+        if (record?.workspace !== requestedWorkspace) {
+          throw new Error('Container Executor is already attached to a different workspace.');
+        }
+      });
+    }
+    const promise = (async () => {
+      const workspace = await realpath(pathKey);
+      if (!(await stat(workspace)).isDirectory()) throw new Error('Container workspace must be a directory.');
+      const pendingAttachment = this.store.getSetting<ContainerWorkspaceAttachment | null>(
+        `${CONTAINER_ATTACH_SETTING_PREFIX}${stableKey}`,
+        null,
+      );
+      if (pendingAttachment?.image) await this.rollbackWorkspaceAttachment(binding);
+      else if (pendingAttachment?.status === 'attached') {
+        if (pendingAttachment.workspace !== workspace)
+          throw new Error('This Container Executor has already been attached to a different Project workspace.');
+        return;
+      }
+      await this.ensureService(null, stableKey, this.containerName(stableKey));
+      const saved = await this.connection(stableKey);
+      const endpointUrl = `http://127.0.0.1:${saved.port}`;
+      if (await this.hasActiveExecutorTransaction(null, endpointUrl)) {
+        throw new ServiceError(409, 'Container workspace attach skipped because an Executor transaction is active.');
+      }
+      const name = this.containerName(stableKey);
+      const mount = await this.containerWorkspaceMount(name);
+      if (mount === workspace) return;
+      if (mount !== null) throw new Error('Container Executor is already attached to a different workspace.');
+      await this.recreateWithWorkspace(name, stableKey, workspace, saved);
+    })();
+    this.workspaceAttachPromises.set(stableKey, promise);
+    void promise.catch(() => {
+      if (this.workspaceAttachPromises.get(stableKey) === promise) this.workspaceAttachPromises.delete(stableKey);
+    });
+    return promise;
+  }
+
+  async finalizeWorkspaceAttachment(binding: ExecutorBinding): Promise<void> {
+    const key = createHash('sha256').update(`executor:${binding.id}`).digest('hex');
+    const recovery = this.workspaceRecoveryPromises.get(key);
+    if (recovery) await recovery;
+    const record = this.store.getSetting<ContainerWorkspaceAttachment | null>(
+      `${CONTAINER_ATTACH_SETTING_PREFIX}${key}`,
+      null,
+    );
+    if (!record || record.status === 'rolled_back') {
+      throw new Error(
+        'Container workspace attachment cannot be finalized because its migration record is missing or rolled back.',
+      );
+    }
+    try {
+      this.store.setSetting(`${CONTAINER_ATTACH_SETTING_PREFIX}${key}`, {
+        image: null,
+        ...((record.image ?? record.snapshotImage) ? { snapshotImage: record.image ?? record.snapshotImage } : {}),
+        snapshotImages: [
+          ...new Set(
+            [...(record.snapshotImages ?? []), record.image, record.snapshotImage].filter((image): image is string =>
+              Boolean(image),
+            ),
+          ),
+        ],
+        workspace: record.workspace,
+        status: 'attached',
+      } satisfies ContainerWorkspaceAttachment);
+      this.workspaceAttachPromises.delete(key);
+      await this.pruneUnreferencedSnapshots(key, record);
+    } finally {
+      this.workspaceAttachPromises.delete(key);
+    }
+  }
+
+  async rollbackWorkspaceAttachment(binding: ExecutorBinding): Promise<void> {
+    const key = createHash('sha256').update(`executor:${binding.id}`).digest('hex');
+    const prior = this.workspaceRollbackPromises.get(key);
+    if (prior) return prior;
+    const inProgressRecovery = this.workspaceRecoveryPromises.get(key);
+    if (inProgressRecovery) await inProgressRecovery;
+    const concurrentRollback = this.workspaceRollbackPromises.get(key);
+    if (concurrentRollback) return concurrentRollback;
+    const rollback = this.rollbackWorkspaceAttachmentOnce(key)
+      .catch((error: unknown) => {
+        this.workspaceAttachPromises.delete(key);
+        throw error;
+      })
+      .finally(() => {
+        if (this.workspaceRollbackPromises.get(key) === rollback) this.workspaceRollbackPromises.delete(key);
+      });
+    this.workspaceRollbackPromises.set(key, rollback);
+    return rollback;
+  }
+
+  private async rollbackWorkspaceAttachmentOnce(key: string): Promise<void> {
+    const record = this.store.getSetting<ContainerWorkspaceAttachment | null>(
+      `${CONTAINER_ATTACH_SETTING_PREFIX}${key}`,
+      null,
+    );
+    if (record?.status === 'rolled_back') return;
+    if (!record?.image) {
+      this.workspaceAttachPromises.delete(key);
+      return;
+    }
+    const name = this.containerName(key);
+    const saved = await this.connection(key);
+    if (await this.hasActiveExecutorTransaction(null, `http://127.0.0.1:${saved.port}`)) {
+      throw new ServiceError(409, 'Container workspace rollback skipped because an Executor transaction is active.');
+    }
+    const state = await this.inspectContainer(name);
+    if (!state.exists) {
+      await this.runContainer(name, key, record.image, null, saved);
+      await this.startAgent(name, saved, INDEPENDENT_WORKSPACE_ROOT);
+      await this.waitUntilReachable(saved.port, saved.accessToken, new AbortController().signal);
+      this.store.setSetting(`${CONTAINER_ATTACH_SETTING_PREFIX}${key}`, {
+        image: null,
+        snapshotImage: record.image,
+        snapshotImages: [...new Set([...(record.snapshotImages ?? []), record.image])],
+        workspace: record.workspace,
+        status: 'rolled_back',
+      } satisfies ContainerWorkspaceAttachment);
+      this.workspaceAttachPromises.delete(key);
+      return;
+    }
+    const mount = await this.containerWorkspaceMount(name);
+    if (mount === null) {
+      this.store.setSetting(`${CONTAINER_ATTACH_SETTING_PREFIX}${key}`, {
+        image: null,
+        snapshotImage: record.image,
+        snapshotImages: [...new Set([...(record.snapshotImages ?? []), record.image])],
+        workspace: record.workspace,
+        status: 'rolled_back',
+      } satisfies ContainerWorkspaceAttachment);
+      this.workspaceAttachPromises.delete(key);
+      return;
+    }
+    if (mount !== record.workspace) throw new Error('Container workspace changed during attachment rollback.');
+    await this.callPodman(['rm', '-f', name]).catch(() => undefined);
+    await this.runContainer(name, key, record.image, null, saved);
+    await this.startAgent(name, saved, INDEPENDENT_WORKSPACE_ROOT);
+    await this.waitUntilReachable(saved.port, saved.accessToken, new AbortController().signal);
+    this.store.setSetting(`${CONTAINER_ATTACH_SETTING_PREFIX}${key}`, {
+      image: null,
+      snapshotImage: record.image,
+      snapshotImages: [...new Set([...(record.snapshotImages ?? []), record.image])],
+      workspace: record.workspace,
+      status: 'rolled_back',
+    } satisfies ContainerWorkspaceAttachment);
+    this.workspaceAttachPromises.delete(key);
+  }
+
+  private async restorePendingWorkspaceAttachment(binding: ExecutorBinding, workspace: string): Promise<void> {
+    const key = createHash('sha256').update(`executor:${binding.id}`).digest('hex');
+    const prior = this.workspaceRecoveryPromises.get(key);
+    if (prior) return prior;
+    const rollback = this.workspaceRollbackPromises.get(key);
+    if (rollback) await rollback;
+    const record = this.store.getSetting<ContainerWorkspaceAttachment | null>(
+      `${CONTAINER_ATTACH_SETTING_PREFIX}${key}`,
+      null,
+    );
+    if (record?.status === 'rolled_back') {
+      throw new ServiceError(409, 'Container workspace attachment was rolled back; retry Project setup.');
+    }
+    if (!record || record.workspace !== workspace) {
+      throw new Error('Container workspace attachment has no matching retained filesystem snapshot.');
+    }
+    if (record.status === 'attached') {
+      const state = await this.inspectContainer(this.containerName(key));
+      if (!state.exists) {
+        throw new Error(
+          'Attached Container is missing. Its attach-time snapshot is retained, but later root filesystem changes cannot be guaranteed from that snapshot; restore or inspect it manually before retrying.',
+        );
+      }
+      const mountedWorkspace = await this.containerWorkspaceMount(this.containerName(key));
+      if (mountedWorkspace !== workspace) {
+        throw new Error('Attached Container workspace mount is missing or changed; automatic recovery stopped.');
+      }
+      return;
+    }
+    const snapshot = record.image;
+    if (!snapshot) throw new Error('Pending Container workspace attachment has no recoverable filesystem snapshot.');
+    const recovery = this.restoreContainerFromSnapshotOnce(key, workspace, snapshot).finally(() => {
+      if (this.workspaceRecoveryPromises.get(key) === recovery) this.workspaceRecoveryPromises.delete(key);
+    });
+    this.workspaceRecoveryPromises.set(key, recovery);
+    return recovery;
+  }
+
+  private async restoreContainerFromSnapshotOnce(key: string, workspace: string, image: string): Promise<void> {
+    const saved = await this.connection(key);
+    if (await this.hasActiveExecutorTransaction(workspace, `http://127.0.0.1:${saved.port}`)) {
+      throw new ServiceError(409, 'Container workspace recovery skipped because an Executor transaction is active.');
+    }
+    const name = this.containerName(key);
+    const state = await this.inspectContainer(name);
+    let createFromSnapshot = !state.exists;
+    if (state.exists) {
+      const mountedWorkspace = await this.containerWorkspaceMount(name);
+      if (mountedWorkspace !== null && mountedWorkspace !== workspace) {
+        throw new Error('Container is mounted to a different workspace; pending recovery stopped.');
+      }
+      if (mountedWorkspace === null) {
+        await this.callPodman(['rm', '-f', name]);
+        createFromSnapshot = true;
+      } else if (!state.running) await this.callPodman(['start', name]);
+    }
+    if (createFromSnapshot) {
+      await this.runContainer(name, key, image, workspace, saved);
+    }
+    const probe = await this.probeConnection(saved.port, saved.accessToken);
+    if (!probe.reachable) {
+      if (probe.responded) throw new Error(`Container Executor endpoint returned HTTP ${probe.status ?? 'an error'}.`);
+      await this.startAgent(name, saved, '/workspace');
+      await this.waitUntilReachable(saved.port, saved.accessToken, new AbortController().signal);
+    }
+  }
+
+  private async pruneUnreferencedSnapshots(key: string, record: ContainerWorkspaceAttachment): Promise<void> {
+    const retained = record.image ?? record.snapshotImage;
+    for (const image of record.snapshotImages ?? []) {
+      if (!image || image === retained) continue;
+      try {
+        const references = await this.callPodman(['ps', '-a', '--filter', `ancestor=${image}`, '--format', '{{.ID}}']);
+        if (references.stdout.trim()) continue;
+        await this.callPodman(['image', 'rm', image]);
+        const latest = this.store.getSetting<ContainerWorkspaceAttachment | null>(
+          `${CONTAINER_ATTACH_SETTING_PREFIX}${key}`,
+          null,
+        );
+        if (!latest) continue;
+        this.store.setSetting(`${CONTAINER_ATTACH_SETTING_PREFIX}${key}`, {
+          ...latest,
+          snapshotImages: (latest.snapshotImages ?? []).filter((candidate) => candidate !== image),
+        } satisfies ContainerWorkspaceAttachment);
+      } catch {
+        // Keep failed/unverifiable snapshots; they may still back a container image layer.
+      }
+    }
+  }
+
+  private async recreateWithWorkspace(
+    name: string,
+    key: string,
+    workspace: string,
+    saved: SavedContainerConnection,
+  ): Promise<void> {
+    const image = `${CONTAINER_NAME_PREFIX}-snapshot-${this.installationId.slice(0, 12)}-${key.slice(0, 12)}-${randomBytes(4).toString('hex')}`;
+    const setting = `${CONTAINER_ATTACH_SETTING_PREFIX}${key}`;
+    const previous = this.store.getSetting<ContainerWorkspaceAttachment | null>(setting, null);
+    await this.callPodman(['commit', name, image]);
+    this.store.setSetting(setting, {
+      image,
+      workspace,
+      status: 'pending',
+      snapshotImages: [
+        ...new Set(
+          [...(previous?.snapshotImages ?? []), previous?.snapshotImage].filter((item): item is string =>
+            Boolean(item),
+          ),
+        ),
+      ],
+    } satisfies ContainerWorkspaceAttachment);
+    try {
+      await this.callPodman(['rm', '-f', name]);
+      await this.runContainer(name, key, image, workspace, saved);
+      await this.startAgent(name, saved);
+      await this.waitUntilReachable(saved.port, saved.accessToken, new AbortController().signal);
+    } catch (error) {
+      await this.callPodman(['rm', '-f', name]).catch(() => undefined);
+      try {
+        await this.runContainer(name, key, image, null, saved);
+        await this.startAgent(name, saved, INDEPENDENT_WORKSPACE_ROOT);
+        await this.waitUntilReachable(saved.port, saved.accessToken, new AbortController().signal);
+        this.store.setSetting(setting, {
+          image: null,
+          snapshotImage: image,
+          snapshotImages: [
+            ...new Set(
+              [...(previous?.snapshotImages ?? []), previous?.snapshotImage, image].filter((item): item is string =>
+                Boolean(item),
+              ),
+            ),
+          ],
+          workspace,
+          status: 'rolled_back',
+        } satisfies ContainerWorkspaceAttachment);
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          `Workspace attachment failed and container rollback failed: ${message(rollbackError)}`,
+          { cause: rollbackError },
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async containerWorkspaceMount(containerName: string): Promise<string | null> {
+    const result = await this.callPodman(['container', 'inspect', containerName, '--format', '{{json .Mounts}}']);
+    const mounts = JSON.parse(result.stdout.trim() || '[]') as Array<{ Destination?: string; Source?: string }>;
+    const workspace = mounts.find((mount) => mount.Destination === '/workspace');
+    return workspace?.Source ? await realpath(workspace.Source) : null;
+  }
+
+  private async runContainer(
+    name: string,
+    key: string,
+    image: string,
+    workspace: string | null,
+    saved: SavedContainerConnection,
+  ): Promise<void> {
+    await this.callPodman([
+      'run',
+      '-d',
+      '--name',
+      name,
+      '--restart=unless-stopped',
+      '--label',
+      `io.pico.executor=${workspace ? 'workspace' : 'container'}`,
+      '--label',
+      `io.pico.executor-key=${key}`,
+      ...(workspace ? ['--label', `io.pico.workspace-key=${key}`] : []),
+      '--label',
+      `io.pico.installation-id=${this.installationId}`,
+      '-p',
+      `127.0.0.1:${saved.port}:${CONTAINER_PORT}`,
+      ...(workspace ? ['--volume', `${workspace}:/workspace:rw`] : []),
+      '--volume',
+      `pico-executor-data-${this.installationId.slice(0, 16)}-${key.slice(0, 32)}:/opt/pico/data:rw`,
+      '--volume',
+      `${this.pluginDirectory}:/opt/pico/executor-plugins:ro`,
+      '-e',
+      `PICO_EXECUTOR_TOKEN=${saved.accessToken}`,
+      image,
+      'sleep',
+      'infinity',
+    ]);
+  }
+
+  private async startAgent(name: string, saved: SavedContainerConnection, workspaceRoot = '/workspace'): Promise<void> {
+    const versionPath = `${EXECUTOR_PATH}.version`;
+    const installedVersion = (await this.containerFileExists(name, versionPath))
+      ? (await this.callPodman(['exec', name, 'cat', versionPath])).stdout.trim() || 'unknown'
+      : 'unknown';
+    await this.callPodman(this.agentLaunchArgs(name, saved.accessToken, versionPath, installedVersion, workspaceRoot));
   }
 
   private connection(workspaceKey: string): Promise<SavedContainerConnection> {
@@ -295,13 +691,51 @@ export class ContainerExecutor implements ExecutorAdapter {
   }
 
   private async addressFor(binding: ExecutorBinding, signal?: AbortSignal): Promise<ExecutorServiceAddress> {
+    const independentKey = createHash('sha256').update(`executor:${binding.id}`).digest('hex');
+    const attaching = this.workspaceAttachPromises.get(independentKey);
+    if (attaching) await awaitWithSignal(attaching, signal);
+    if (this.workspaceAttachPromises.has(independentKey)) {
+      throw new ServiceError(
+        409,
+        'Container workspace attachment is being committed. Retry after Project setup completes.',
+      );
+    }
+    const attachment = this.store.getSetting<ContainerWorkspaceAttachment | null>(
+      `${CONTAINER_ATTACH_SETTING_PREFIX}${independentKey}`,
+      null,
+    );
+    if (!binding.workspacePath.trim()) {
+      if (attachment?.image) await this.rollbackWorkspaceAttachment(binding);
+      if (attachment?.status === 'attached')
+        throw new Error('This Container Executor has been attached to a Project workspace.');
+      const workspaceKey = independentKey;
+      const containerName = this.containerName(workspaceKey);
+      await this.ensureService(null, workspaceKey, containerName, signal);
+      const saved = await this.connection(workspaceKey);
+      return { endpointUrl: `http://127.0.0.1:${saved.port}`, accessToken: saved.accessToken, workspacePath: '' };
+    }
     const workspace = await realpath(binding.workspacePath);
     const workspaceInfo = await stat(workspace);
     if (!workspaceInfo.isDirectory()) throw new Error('Container workspace must be a directory.');
-    const workspaceKey = createHash('sha256').update(workspace).digest('hex');
+    if (attachment?.status === 'attached' || attachment?.image) {
+      if (attachment.workspace !== workspace) {
+        throw new Error('Container attachment record does not match the Project workspace.');
+      }
+      await this.restorePendingWorkspaceAttachment(binding, workspace);
+    }
+    const workspaceKey =
+      attachment?.workspace === workspace && attachment.status !== 'rolled_back'
+        ? independentKey
+        : createHash('sha256').update(workspace).digest('hex');
     const containerName = this.containerName(workspaceKey);
     await this.ensureService(workspace, workspaceKey, containerName, signal);
     const saved = await this.connection(workspaceKey);
+    if (attachment?.image && attachment.workspace === workspace) {
+      const mountedWorkspace = await this.containerWorkspaceMount(containerName);
+      if (mountedWorkspace !== workspace)
+        throw new Error('Attached Container Executor workspace mount does not match the Project.');
+      await this.finalizeWorkspaceAttachment(binding);
+    }
     return {
       endpointUrl: `http://127.0.0.1:${saved.port}`,
       accessToken: saved.accessToken,
@@ -319,7 +753,7 @@ export class ContainerExecutor implements ExecutorAdapter {
   }
 
   private async ensureService(
-    workspace: string,
+    workspace: string | null,
     workspaceKey: string,
     containerName: string,
     signal?: AbortSignal,
@@ -358,14 +792,14 @@ export class ContainerExecutor implements ExecutorAdapter {
   }
 
   private async setupService(
-    workspace: string,
+    workspace: string | null,
     workspaceKey: string,
     containerName: string,
     signal: AbortSignal,
   ): Promise<void> {
     await this.callPodman(['info', '--format', '{{.Version.Version}}'], undefined, signal);
-    const root = await realpath(workspace);
-    if (!(await stat(root)).isDirectory()) throw new Error('Container workspace must be a directory.');
+    const root = workspace ? await realpath(workspace) : null;
+    if (root && !(await stat(root)).isDirectory()) throw new Error('Container workspace must be a directory.');
     await mkdir(this.pluginDirectory, { recursive: true });
     const saved = await this.connection(workspaceKey);
     const running = await this.inspectContainer(containerName, signal);
@@ -394,8 +828,7 @@ export class ContainerExecutor implements ExecutorAdapter {
           `io.pico.installation-id=${this.installationId}`,
           '-p',
           `127.0.0.1:${saved.port}:${CONTAINER_PORT}`,
-          '--volume',
-          `${root}:/workspace:rw`,
+          ...(root ? ['--volume', `${root}:/workspace:rw`] : []),
           '--volume',
           `pico-executor-data-${this.installationId.slice(0, 16)}-${workspaceKey.slice(0, 32)}:/opt/pico/data:rw`,
           '--volume',
@@ -414,7 +847,13 @@ export class ContainerExecutor implements ExecutorAdapter {
     }
 
     await this.callPodman(
-      ['exec', containerName, 'sh', '-lc', 'mkdir -p /opt/pico/data /opt/pico/executor-plugins'],
+      [
+        'exec',
+        containerName,
+        'sh',
+        '-lc',
+        `mkdir -p ${root ? '/workspace' : INDEPENDENT_WORKSPACE_ROOT} /workspace /opt/pico/data /opt/pico/executor-plugins`,
+      ],
       undefined,
       signal,
     );
@@ -445,7 +884,13 @@ export class ContainerExecutor implements ExecutorAdapter {
     }
     if (!(await this.isReachable(saved.port, saved.accessToken, signal))) {
       await this.callPodman(
-        this.agentLaunchArgs(containerName, saved.accessToken, versionPath, installedVersion),
+        this.agentLaunchArgs(
+          containerName,
+          saved.accessToken,
+          versionPath,
+          installedVersion,
+          root ? '/workspace' : INDEPENDENT_WORKSPACE_ROOT,
+        ),
         undefined,
         signal,
       );
@@ -454,7 +899,7 @@ export class ContainerExecutor implements ExecutorAdapter {
   }
 
   private async restartAndRecover(
-    workspace: string,
+    workspace: string | null,
     containerName: string,
     saved: SavedContainerConnection,
     signal: AbortSignal,
@@ -491,9 +936,7 @@ export class ContainerExecutor implements ExecutorAdapter {
 
     const versionPath = `${EXECUTOR_PATH}.version`;
     if (!(await this.containerFileExists(containerName, EXECUTOR_PATH, signal))) {
-      throw new Error(
-        'Container restarted, but its existing Executor agent file is missing; recovery stopped.',
-      );
+      throw new Error('Container restarted, but its existing Executor agent file is missing; recovery stopped.');
     }
     const installedVersion = (await this.containerFileExists(containerName, versionPath, signal))
       ? (await this.callPodman(['exec', containerName, 'cat', versionPath], undefined, signal)).stdout.trim() ||
@@ -507,9 +950,11 @@ export class ContainerExecutor implements ExecutorAdapter {
     await this.waitUntilReachable(saved.port, saved.accessToken, signal);
   }
 
-  private async hasActiveExecutorTransaction(workspace: string, endpointUrl: string): Promise<boolean> {
+  private async hasActiveExecutorTransaction(workspace: string | null, endpointUrl: string): Promise<boolean> {
     if (this.client.hasInFlightExecutionAt(endpointUrl)) return true;
-    for (const workspacePath of this.store.listRunningContainerExecutorWorkspacePaths()) {
+    const activePaths = this.store.listRunningContainerExecutorWorkspacePaths();
+    if (!workspace) return activePaths.includes('');
+    for (const workspacePath of activePaths) {
       try {
         if ((await realpath(workspacePath)) === workspace) return true;
       } catch {
@@ -524,6 +969,7 @@ export class ContainerExecutor implements ExecutorAdapter {
     accessToken: string,
     versionPath: string,
     installedVersion: string,
+    workspaceRoot = '/workspace',
   ): string[] {
     return [
       'exec',
@@ -533,7 +979,7 @@ export class ContainerExecutor implements ExecutorAdapter {
       'PICO_EXECUTOR_HOST=0.0.0.0',
       `PICO_EXECUTOR_PORT=${CONTAINER_PORT}`,
       `PICO_EXECUTOR_TOKEN=${accessToken}`,
-      'PICO_EXECUTOR_WORKSPACE_ROOT=/workspace',
+      `PICO_EXECUTOR_WORKSPACE_ROOT=${workspaceRoot}`,
       'PICO_EXECUTOR_DB_PATH=/opt/pico/data/executor.sqlite',
       'PICO_EXECUTOR_PLUGIN_DIR=/opt/pico/executor-plugins',
       `PICO_EXECUTOR_INSTALL_PATH=${EXECUTOR_PATH}`,

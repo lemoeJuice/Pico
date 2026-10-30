@@ -9,6 +9,7 @@ export interface RemoteExecutorInfo {
   executorVersion?: string;
   updateSupported?: boolean;
   workspaceFileDownload?: boolean;
+  workspaceOptional?: boolean;
   name: string;
   kind: string;
   workspaceRoot: string;

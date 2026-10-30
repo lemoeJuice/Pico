@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { startRemoteExecutorServer } from '../src/executor/remote-server.js';
+import { currentExecutorVersion } from '../src/executor/bundle.js';
 import { startServer } from '../src/server.js';
 
 const keys = ['PICO_HOST', 'PICO_PORT', 'PICO_DB_PATH', 'PICO_ACCESS_TOKEN'] as const;
@@ -131,7 +132,7 @@ it('downloads remote Thread files through its bound Executor and preserves local
     });
     expect(await server.runtime.executorStatus(oldThread.id)).toMatchObject({
       executorVersion: '0.2.0',
-      targetVersion: '0.2.1',
+      targetVersion: currentExecutorVersion(),
       updateAvailable: true,
     });
 
