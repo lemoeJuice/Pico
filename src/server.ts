@@ -14,6 +14,7 @@ import {
 import express, { type ErrorRequestHandler, type Request, type Response } from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
 import { attachModelDraftResume } from './server/model-draft-resume.js';
+import { serveWorkspaceFile } from './server/workspace-file.js';
 import { PicoRuntime } from './runtime/runtime.js';
 import { ServiceError } from './contracts/service-error.js';
 import { errorResponse, parserError } from './server-errors.js';
@@ -259,6 +260,9 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   });
 
   app.get('/api/health', (_request, response) => response.json({ ok: true }));
+  app.get('/api/threads/:threadId/workspace-file', async (request, response) => {
+    await serveWorkspaceFile(runtime.getThread(request.params.threadId!), request.query.path, response);
+  });
   app.get('/api/info', (_request, response) =>
     response.json({ defaultWorkspace: process.cwd(), version: currentExecutorVersion() }),
   );

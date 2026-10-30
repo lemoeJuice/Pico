@@ -5364,7 +5364,7 @@ function AssistantDraftMessage({
           <p className="projection-state" role="status">Earlier reasoning and tool previews may be incomplete.</p>
         ) : null}
         {draft.reasoningSummary ? <Reasoning text={draft.reasoningSummary} /> : null}
-        {draft.text ? <Markdown>{draft.text}</Markdown> : null}
+        {draft.text ? <Markdown threadId={threadId}>{draft.text}</Markdown> : null}
         {!draft.unconfirmed && !draft.previewIncomplete ? <AssistantToolPreviewSection threadId={threadId} executionId={draft.executionId} generating={!draft.settled} /> : null}
       </div>
     </div>
@@ -5955,7 +5955,7 @@ function AssistantBubble({
             label={assistant.reasoningSummary ? 'Reasoning content' : 'Thinking'}
           />
         ) : null}
-        {assistant.content ? <Markdown>{assistant.content}</Markdown> : null}
+        {assistant.content ? <Markdown threadId={threadId}>{assistant.content}</Markdown> : null}
         {calls.length > 0 ? (
           <div className="tool-group">
             <div className="tool-group-label">

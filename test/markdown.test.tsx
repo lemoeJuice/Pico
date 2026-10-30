@@ -91,4 +91,19 @@ describe('Markdown', () => {
     expect(html).toContain('<a href="https://example.com">safe</a>');
     expect(html).toContain('<a href="../guide">relative</a>');
   });
+
+  it('resolves assistant workspace links for their Thread without changing external links', () => {
+    const html = renderToStaticMarkup(
+      <Markdown threadId="thread-1">
+        {
+          '[file](prototype/window-composite.mjs#L3) [unicode](目录/文件%20名.md) [web](https://example.com/path) [section](#part) [unsafe](javascript:alert%281%29)'
+        }
+      </Markdown>,
+    );
+    expect(html).toContain('href="/api/threads/thread-1/workspace-file?path=prototype%2Fwindow-composite.mjs#L3"');
+    expect(html).toContain('path=%E7%9B%AE%E5%BD%95%2F%E6%96%87%E4%BB%B6+%E5%90%8D.md');
+    expect(html).toContain('href="https://example.com/path"');
+    expect(html).toContain('href="#part"');
+    expect(html).not.toContain('javascript:');
+  });
 });
