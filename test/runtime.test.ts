@@ -1061,6 +1061,7 @@ describe('durable Thread runtime invariants', () => {
       expect(env.store.listExecutions(thread.id).find((execution) => execution.kind === 'tool')?.status).toBe(
         'interrupted',
       );
+      expect(env.runtime.getThread(thread.id)?.state).toBe('idle');
       expect(threadCanBeInterrupted(env.runtime.getThread(thread.id)!.state, env.store.listExecutions(thread.id))).toBe(
         false,
       );
@@ -1096,8 +1097,134 @@ describe('durable Thread runtime invariants', () => {
           promptSummary: { turns: [{ kind: 'message', role: 'user', characters: 'Begin'.length }] },
         },
       ]);
-      expect(env.runtime.getThread(thread.id)?.state).toBe('paused');
+      expect(env.runtime.getThread(thread.id)).toMatchObject({
+        state: 'idle',
+        pauseRequested: false,
+        pauseReason: null,
+      });
+      expect(model.calls).toBe(1);
     } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('does not restart an interrupted Model Step on Runtime restart, but accepts a new message', async () => {
+    const started = deferred<void>();
+    const model = new FakeModel((_prompt, callNumber, signal) =>
+      callNumber === 1
+        ? new Promise((_resolve, reject) => {
+            started.resolve();
+            signal.addEventListener('abort', () => reject(new DOMException('Interrupted', 'AbortError')), {
+              once: true,
+            });
+          })
+        : response('New message handled.'),
+    );
+    const env = await setupRuntime(model);
+    let runtime = env.runtime;
+    const thread = env.createThread();
+    try {
+      await runtime.submit(thread.id, 'interrupt-before-restart', 'Begin');
+      await started.promise;
+      await runtime.interrupt(thread.id);
+      await runtime.shutdown();
+      runtime = new PicoRuntime(env.store, { model, pluginDirectory: join(env.directory, 'empty-plugins') });
+      await setupTestCatalog(runtime);
+      await runtime.initialize();
+      await runtime.drain();
+      expect(model.calls).toBe(1);
+      expect(runtime.getThread(thread.id)?.state).toBe('idle');
+
+      await runtime.submit(thread.id, 'after-interrupt-restart', 'Try something else');
+      await runtime.drain();
+      expect(model.calls).toBe(2);
+      expect(runtime.getThread(thread.id)?.state).toBe('idle');
+    } finally {
+      await runtime.shutdown();
+      env.store.close();
+      await rm(env.directory, { recursive: true, force: true });
+    }
+  });
+
+  it('prevents Continue from racing an Interrupt and permits a later explicit Continue', async () => {
+    const started = deferred<void>();
+    const aborted = deferred<void>();
+    const release = deferred<void>();
+    const model = new FakeModel((_prompt, callNumber, signal) =>
+      callNumber === 1
+        ? new Promise((_resolve, reject) => {
+            started.resolve();
+            signal.addEventListener(
+              'abort',
+              () => {
+                aborted.resolve();
+                void release.promise.then(() => reject(new DOMException('Interrupted', 'AbortError')));
+              },
+              { once: true },
+            );
+          })
+        : response('Continued.'),
+    );
+    const env = await setupRuntime(model);
+    const thread = env.createThread();
+    try {
+      await env.runtime.submit(thread.id, 'interrupt-race', 'Begin');
+      await started.promise;
+      const interrupt = env.runtime.interrupt(thread.id);
+      await aborted.promise;
+      expect(() => env.runtime.continue(thread.id)).toThrow(/Interrupt is still stopping/);
+      release.resolve();
+      await interrupt;
+      expect(env.runtime.getThread(thread.id)?.state).toBe('idle');
+      expect(model.calls).toBe(1);
+
+      env.runtime.continue(thread.id);
+      await env.runtime.drain();
+      expect(model.calls).toBe(2);
+      expect(env.runtime.getThread(thread.id)?.state).toBe('idle');
+    } finally {
+      release.resolve();
+      await env.cleanup();
+    }
+  });
+
+  it('processes messages submitted while Interrupt is stopping the current step', async () => {
+    const started = deferred<void>();
+    const aborted = deferred<void>();
+    const release = deferred<void>();
+    const model = new FakeModel((_prompt, callNumber, signal) =>
+      callNumber === 1
+        ? new Promise((_resolve, reject) => {
+            started.resolve();
+            signal.addEventListener(
+              'abort',
+              () => {
+                aborted.resolve();
+                void release.promise.then(() => reject(new DOMException('Interrupted', 'AbortError')));
+              },
+              { once: true },
+            );
+          })
+        : response('Handled the new message.'),
+    );
+    const env = await setupRuntime(model);
+    const thread = env.createThread();
+    try {
+      await env.runtime.submit(thread.id, 'interrupt-queued-start', 'Begin');
+      await started.promise;
+      const interrupt = env.runtime.interrupt(thread.id);
+      await aborted.promise;
+      await env.runtime.submit(thread.id, 'interrupt-queued-message', 'New request');
+      release.resolve();
+      await interrupt;
+      await env.runtime.drain();
+      expect(model.calls).toBe(2);
+      expect(model.prompts[1]?.turns).toEqual(
+        expect.arrayContaining([expect.objectContaining({ content: 'New request' })]),
+      );
+      expect(env.runtime.getThread(thread.id)?.state).toBe('idle');
+    } finally {
+      release.resolve();
       await env.cleanup();
     }
   });

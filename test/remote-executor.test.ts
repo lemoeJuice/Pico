@@ -749,7 +749,7 @@ describe('Remote Host Executor', () => {
       expect(env.store.listExecutions(thread.id).find((execution) => execution.kind === 'tool')?.status).toBe(
         'interrupted',
       );
-      expect(env.runtime.getThread(thread.id)?.state).toBe('paused');
+      expect(env.runtime.getThread(thread.id)?.state).toBe('idle');
       expect(model.calls).toBe(1);
     } finally {
       await env.cleanup();

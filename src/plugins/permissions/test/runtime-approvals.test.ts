@@ -417,7 +417,7 @@ describe('Permissions Runtime integration', () => {
       expect(execution?.status).toBe('interrupted');
       expect((result?.payload as { status?: string }).status).toBe('interrupted');
       expect(model.calls).toBe(1);
-      expect(env.runtime.getThread(thread.id)?.state).toBe('paused');
+      expect(env.runtime.getThread(thread.id)?.state).toBe('idle');
     } finally {
       await env.cleanup();
     }

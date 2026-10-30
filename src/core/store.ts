@@ -1242,6 +1242,21 @@ export class PicoStore {
     ).map((row) => this.recordFromRow(row));
   }
 
+  interruptStopped(threadId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT kind, payload_json FROM canonical_records
+        WHERE thread_id = ? AND (
+          kind IN ('message', 'assistant') OR
+          (kind = 'plugin' AND json_extract(payload_json, '$.pluginId') = 'pico.runtime'
+            AND json_extract(payload_json, '$.action') IN ('interrupt-stopped', 'interrupt-resumed', 'context-rewound'))
+        ) ORDER BY seq DESC LIMIT 1`,
+      )
+      .get(threadId) as SqlRow | undefined;
+    if (!row || row.kind !== 'plugin') return false;
+    return (JSON.parse(String(row.payload_json)) as { action?: string }).action === 'interrupt-stopped';
+  }
+
   latestCanonicalSeq(threadId: string): number {
     const row = this.db
       .prepare('SELECT COALESCE(MAX(seq), 0) AS seq FROM canonical_records WHERE thread_id = ?')

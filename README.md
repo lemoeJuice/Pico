@@ -68,7 +68,7 @@ The browser asks for the token once and receives a revocable, `HttpOnly`, `SameS
 - The Thread view loads the newest 100 canonical records first. Use **Load earlier history** to page backward; this only limits UI reads and never trims the stored history or changes model projection.
 - Expand **Model input** below a committed assistant step or an uncommitted Model Step to inspect each prompt passed to the model adapter after projection and model plugins run. It is loaded on demand from the execution log; API credentials are not included and the view is not part of canonical conversation history.
 - Use the **Project context** Thread action or `/project-context` to view context shared across that Project's Threads. Set it with `/project-context set` followed by text on the next line; use `/project-context clear` to remove it. Pico injects this explicitly maintained text into future Model Input projections and never summarizes or trims it automatically.
-- Pause lets current Model and Tool executions settle and prevents the next Model Step. Interrupt explicitly tries to stop active work. Continue restarts a paused Thread from its durable records.
+- Pause lets current Model and Tool executions settle and prevents the next Model Step. Interrupt stops active work and leaves the Thread idle once it has stopped; it does not automatically retry the interrupted step. Continue restarts a paused Thread from its durable records.
 
 The database defaults to `data/pico.sqlite`; the database file is created with owner-only permissions. Projects, Messages, complete Model Steps, Tool results, execution logs, settings, and plugin-local state (including permission rules and approvals) are persisted there.
 

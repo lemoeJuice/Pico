@@ -1179,17 +1179,21 @@ export class PicoRuntime {
   private readonly executionListeners = new Set<(execution: Execution) => void>();
   private storeUnsubscribers: Array<() => void> = [];
   private readonly loops = new Map<string, Promise<void>>();
+  private readonly interrupts = new Set<string>();
   private readonly modelDrafts = new ModelDraftBuffer();
   private readonly contextStates = new ThreadContextState();
-  private readonly snapshotHistoryCache = new Map<string, {
-    seq: number;
-    settingsKey: string;
-    threadKey: string;
-    records: CanonicalRecord[];
-    contextUsage: ContextUsageEstimate;
-    projection: ReturnType<typeof runtimeConversationProjection>;
-    estimatedBytes: number;
-  }>();
+  private readonly snapshotHistoryCache = new Map<
+    string,
+    {
+      seq: number;
+      settingsKey: string;
+      threadKey: string;
+      records: CanonicalRecord[];
+      contextUsage: ContextUsageEstimate;
+      projection: ReturnType<typeof runtimeConversationProjection>;
+      estimatedBytes: number;
+    }
+  >();
   private snapshotHistoryCacheBytes = 0;
   private readonly inFlightThreadOperations = new Map<string, number>();
   private readonly modelSignals = new Map<string, AbortController>();
@@ -2510,7 +2514,9 @@ export class PicoRuntime {
 
   private resumeForPlugin(threadId: string): Thread {
     this.requireUnarchivedThread(threadId);
+    this.assertNotInterrupting(threadId);
     this.recoverOrphanedModelExecutions(threadId, 'plugin-resume');
+    this.releaseInterruptStop(threadId);
     this.store.setPause(threadId, false);
     this.publishThreadUpdate(threadId);
     this.startLoop(threadId);
@@ -2519,7 +2525,9 @@ export class PicoRuntime {
 
   continue(threadId: string): Thread {
     this.requireUnarchivedThread(threadId);
+    this.assertNotInterrupting(threadId);
     this.recoverOrphanedModelExecutions(threadId, 'continue');
+    this.releaseInterruptStop(threadId);
     this.store.setPause(threadId, false);
     this.publishThreadUpdate(threadId);
     this.startLoop(threadId);
@@ -2528,6 +2536,7 @@ export class PicoRuntime {
 
   retryModelExecution(threadId: string, sourceExecutionId: string): { execution: Execution; thread: Thread } {
     this.requireUnarchivedThread(threadId);
+    this.assertNotInterrupting(threadId);
     if (this.loops.has(threadId)) {
       throw new Error('This Thread is already running. Wait for the active step to settle before retrying.');
     }
@@ -2592,9 +2601,25 @@ export class PicoRuntime {
   }
 
   async interrupt(threadId: string): Promise<Thread> {
+    this.assertNotInterrupting(threadId);
+    this.interrupts.add(threadId);
+    try {
+      return await this.stopInterruptedThread(threadId);
+    } finally {
+      this.interrupts.delete(threadId);
+    }
+  }
+
+  private assertNotInterrupting(threadId: string): void {
+    if (this.interrupts.has(threadId)) throw new ServiceError(409, 'Interrupt is still stopping this Thread.');
+  }
+
+  private async stopInterruptedThread(threadId: string): Promise<Thread> {
     const thread = this.store.getThread(threadId);
     if (!thread) throw new ServiceError(404, 'Thread not found');
-    this.store.setPause(threadId, true, 'Interrupted by user. Continue when ready to inspect the current environment.');
+    const interruptThrough = this.store.latestCanonicalSeq(threadId);
+    const interruptReason = 'Interrupt requested; waiting for active work to stop.';
+    this.store.setPause(threadId, true, interruptReason);
     for (const [executionId, controller] of this.modelSignals) {
       const execution = this.store.getExecution(executionId);
       if (execution?.threadId === threadId) {
@@ -2671,6 +2696,25 @@ export class PicoRuntime {
         });
       }
     }
+    // Keep the stop barrier in place until the loop has finished; clearing it
+    // earlier would let its finalizer start the interrupted work again.
+    if (!this.store.listActiveExecutions(threadId).some((execution) => execution.kind !== 'model')) {
+      await this.loops.get(threadId);
+    }
+    const current = this.store.getThread(threadId);
+    let hasNewMessages = false;
+    if (current?.pauseReason === interruptReason && this.store.listActiveExecutions(threadId).length === 0) {
+      this.store.transaction(() => {
+        hasNewMessages = this.store.hasMessageAfter(threadId, interruptThrough);
+        this.store.appendCanonical(threadId, `pico:interrupt-stopped:${randomUUID()}`, 'plugin', {
+          pluginId: 'pico.runtime',
+          action: 'interrupt-stopped',
+        });
+        if (hasNewMessages) this.releaseInterruptStop(threadId);
+        this.store.setPause(threadId, false);
+      });
+    }
+    if (hasNewMessages) this.startLoop(threadId);
     this.publishThreadUpdate(threadId);
     return this.getThread(threadId)!;
   }
@@ -3446,7 +3490,16 @@ export class PicoRuntime {
       .filter((tool): tool is Extract<RegisteredTool, { source: 'mcp' }> => tool.source === 'mcp');
   }
 
+  private releaseInterruptStop(threadId: string): void {
+    if (!this.store.interruptStopped(threadId)) return;
+    this.store.appendCanonical(threadId, `pico:interrupt-resumed:${randomUUID()}`, 'plugin', {
+      pluginId: 'pico.runtime',
+      action: 'interrupt-resumed',
+    });
+  }
+
   private needsModelStep(threadId: string): boolean {
+    if (this.store.interruptStopped(threadId)) return false;
     const latestAssistant = this.store.modelOutputForThread(threadId);
     if (!latestAssistant) return this.store.hasMessage(threadId) || this.plugins.hasPendingPluginWork(threadId);
     if (latestAssistant.payload.toolCalls.length > 0) {
