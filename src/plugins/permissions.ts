@@ -603,6 +603,8 @@ export const permissionPlugin: PicoPlugin = {
       if (!thread) throw new Error('Thread not found');
       const allApprovals = Object.values(readApprovals());
       const approvals = allApprovals.filter((approval) => approval.threadId === threadId);
+      const autoReview = readAutoReview();
+      const autoReviewDenials = readAutoReviewDenials();
       const children = new Map<string, Thread[]>();
       for (const candidate of threads.list(thread.projectId)) {
         if (!candidate.parentThreadId) continue;
@@ -628,6 +630,8 @@ export const permissionPlugin: PicoPlugin = {
           threadId: approval.threadId,
           toolName: approval.toolName,
           threadTitle: descendants.get(approval.threadId)!.title,
+          autoReview: autoReview[approval.threadId] === true,
+          autoReviewDenials: autoReviewDenials[approval.threadId] === true,
           arguments: approval.arguments,
           ...(approval.reviewer
             ? {
@@ -644,8 +648,8 @@ export const permissionPlugin: PicoPlugin = {
         tools: await toolList(threadId),
         approvals,
         descendantApprovals,
-        autoReview: readAutoReview()[threadId] === true,
-        autoReviewDenials: readAutoReviewDenials()[threadId] === true,
+        autoReview: autoReview[threadId] === true,
+        autoReviewDenials: autoReviewDenials[threadId] === true,
       };
     });
     http.register('PUT', '/rules', async ({ body }) => {
@@ -657,6 +661,54 @@ export const permissionPlugin: PicoPlugin = {
       if (!threads.get(threadId)) throw new Error('Thread not found');
       setPolicy(threadId, toolName, value.policy);
       return { threadId, tools: await toolList(threadId) };
+    });
+    http.register('POST', '/child-auto-review', ({ body }) => {
+      const value = requestBody(body);
+      const parentThreadId = typeof value.parentThreadId === 'string' ? value.parentThreadId : '';
+      const executionId = typeof value.executionId === 'string' ? value.executionId : '';
+      if (!parentThreadId || !executionId) throw new Error('parentThreadId and executionId are required');
+
+      const parent = threads.get(parentThreadId);
+      if (!parent || parent.archivedAt || parent.deletedAt) throw new Error('Parent Thread not found or inactive');
+      const approval = readApprovals()[executionId];
+      if (!approval || approval.status !== 'pending') throw new Error('Pending approval not found');
+      const execution = executions.get(executionId);
+      if (!execution || execution.threadId !== approval.threadId || execution.status !== 'pending') {
+        throw new Error('Tool Execution is no longer pending');
+      }
+
+      let current = threads.get(approval.threadId);
+      const visited = new Set<string>();
+      let isDescendant = false;
+      while (current && !visited.has(current.id)) {
+        visited.add(current.id);
+        if (current.archivedAt || current.deletedAt || current.projectId !== parent.projectId) break;
+        if (current.parentThreadId === parentThreadId) {
+          isDescendant = true;
+          break;
+        }
+        current = current.parentThreadId ? threads.get(current.parentThreadId) : null;
+      }
+      if (!isDescendant) throw new Error('Approval is not from an active descendant Thread in the same Project');
+
+      state.transaction(() => {
+        const autoReview = readAutoReview();
+        const autoReviewDenials = readAutoReviewDenials();
+        if (autoReview[approval.threadId] === true && autoReviewDenials[approval.threadId] === true) return;
+        state.set('autoReview', { ...autoReview, [approval.threadId]: true });
+        state.set('autoReviewDenials', { ...autoReviewDenials, [approval.threadId]: true });
+        canonical.append(approval.threadId, { action: 'reviewer.mode', mode: 'auto' });
+        canonical.append(approval.threadId, { action: 'reviewer.denial-mode', mode: 'direct' });
+      });
+
+      return {
+        parentThreadId,
+        threadId: approval.threadId,
+        executionId,
+        autoReview: true,
+        autoReviewDenials: true,
+        approvalStatus: approval.status,
+      };
     });
     http.register('PUT', '/reviewer', ({ body }) => {
       const value = requestBody(body);

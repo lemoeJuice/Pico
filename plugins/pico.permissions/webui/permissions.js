@@ -91,6 +91,11 @@
     return data.descendantApprovals.map((approval) => { const token = childActionToken(approval.executionId); return ({ type: 'card', children: [{ type: 'group', layout: 'stack-compact', children: [
       { type: 'heading', text: `${approval.threadTitle || 'Child Thread'} · ${approval.toolName}` },
       para('This child Thread is waiting for permission.'),
+      { type: 'group', layout: 'spread', children: [
+        { type: 'status', text: `Auto-review ${approval.autoReview ? 'on' : 'off'} · automatic denials ${approval.autoReviewDenials ? 'on' : 'off'}`, tone: approval.autoReview && approval.autoReviewDenials ? 'success' : 'neutral' },
+        button('Switch to auto', `child-auto:${token}`, busy || (approval.autoReview === true && approval.autoReviewDenials === true), 'soft'),
+      ] },
+      para('For future requests, automatic review can allow or deny without asking. This request still needs a decision.'),
       ...(error ? [{ type: 'status', text: error, tone: 'danger' }] : []),
       { type: 'disclosure', label: 'View tool call details', open: expandedChildApprovals.has(approval.executionId), actionId: `child-expand:${token}`, children: [
         ...(approval.reviewer ? [
@@ -137,17 +142,18 @@
   ] }]; }
   const expandedChildApprovals = new Set();
   function draw() { const nodes = init?.viewId === 'ToolPermissions' ? toolbar() : init?.viewId === 'ChildThreadApprovals' ? childThreadApprovals() : init?.viewId === 'McpServerPermissions' ? serverControl() : resultActions(); port?.postMessage({ type: 'pico:plugin-ui:render', tree: nodes }); }
-  async function update(action, body) { busy = true; error = ''; draw(); try { await api(action.path, action.method || 'PUT', body); await refresh(); } catch (reason) { error = reason instanceof Error ? reason.message : String(reason); } finally { busy = false; draw(); } }
+  async function update(action, body) { busy = true; error = ''; draw(); try { await api(action.path, action.method || 'PUT', body); await refresh(); } catch (reason) { const message = reason instanceof Error ? reason.message : String(reason); await refresh(); error = message; } finally { busy = false; draw(); } }
   async function act(action) {
     const id = action.actionId;
     if (id === 'mcp-server') { if (!context.mcpServer?.id) return; await update({ path: '/mcp-servers' }, { serverId: context.mcpServer.id, enabled: action.value === 'true' }); return; }
     if (id.startsWith('open:')) { try { await send('open-thread', { threadId: id.slice(5) }); } catch (reason) { error = reason instanceof Error ? reason.message : String(reason); draw(); } return; }
-    if (/^child-(expand|allow|deny|open):[0-9]+$/.test(id)) {
+    if (/^child-(expand|allow|deny|open|auto):[0-9]+$/.test(id)) {
       const [kind, token] = id.split(':'), executionId = childExecutionByAction.get(token);
       const approval = data.descendantApprovals.find((item) => item.executionId === executionId);
       if (!approval) return;
       if (kind === 'child-expand') { if (expandedChildApprovals.has(executionId)) expandedChildApprovals.delete(executionId); else expandedChildApprovals.add(executionId); draw(); return; }
       if (kind === 'child-open') { try { await send('open-thread', { threadId: approval.threadId }); } catch (reason) { error = reason instanceof Error ? reason.message : String(reason); draw(); } return; }
+      if (kind === 'child-auto') { const parentThreadId = context.threadId ?? context.thread?.id; if (!parentThreadId || busy || (approval.autoReview && approval.autoReviewDenials)) return; await update({ path: '/child-auto-review', method: 'POST' }, { parentThreadId, executionId }); return; }
       await update({ path: '/approvals', method: 'POST' }, { executionId, allow: kind === 'child-allow', rememberForThread: false }); return;
     }
     if (id.startsWith('tool:')) { const toolName = id.slice(5), tool = data.tools.find((x) => x.name === toolName); if (!tool || !context.thread) return; await update({ path: '/rules' }, { threadId: context.thread.id, toolName, policy: action.value === 'true' ? 'allow' : 'ask' }); return; }

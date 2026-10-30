@@ -319,7 +319,8 @@
 .tool-group-label span {
   color: #8ba38e;
 }
-.conversation-detail-card {
+.conversation-detail-card,
+.plugin-ui-host-rendered--thread-card > .plugin-ui-tree > .plugin-ui-card {
   display: block;
   width: 100%;
   min-width: 0;

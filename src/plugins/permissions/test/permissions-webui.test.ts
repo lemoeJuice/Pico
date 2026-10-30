@@ -12,6 +12,7 @@ function createHarness(
   viewId = 'PermissionResultActions',
   includeChildApprovals = true,
   failChildDecision = false,
+  failChildAuto = false,
 ) {
   let onWindowMessage: ((event: any) => void) | undefined;
   let tree: any[] = [];
@@ -28,6 +29,17 @@ function createHarness(
       if (message.type === 'pico:plugin-ui:request') {
         requests.push(message);
         const path = typeof message.path === 'string' ? message.path : '';
+        if (path.endsWith('/child-auto-review') && !failChildAuto) {
+          const body = JSON.parse(message.init.body);
+          const selected = descendantApprovals.find((approval) => approval.executionId === body.executionId);
+          if (selected) {
+            descendantApprovals = descendantApprovals.map((approval) =>
+              approval.threadId === selected.threadId
+                ? { ...approval, autoReview: true, autoReviewDenials: true }
+                : approval,
+            );
+          }
+        }
         const value = path.endsWith('/mcp-servers')
           ? { allowedMcpServers: { 'server-1': true } }
           : path.endsWith('/threads?threadId=thread')
@@ -38,7 +50,8 @@ function createHarness(
                 descendantApprovals,
               }
             : { ok: true };
-        const failed = failChildDecision && path.endsWith('/approvals') && message.init?.method === 'POST';
+        const failed = (failChildDecision && path.endsWith('/approvals') && message.init?.method === 'POST') ||
+          (failChildAuto && path.endsWith('/child-auto-review'));
         queueMicrotask(() =>
           port.onmessage?.({
             data: {
@@ -221,6 +234,33 @@ it('shows an approval error in the child request card', async () => {
   harness.action(findNode(harness.tree, (node) => node.label === 'Allow once').actionId);
   await flush();
   expect(JSON.stringify(harness.tree)).toContain('approval failed');
+});
+
+it('enables both automatic review settings for the selected child without deciding its pending request', async () => {
+  const harness = createHarness('pending', 'pending', 'ChildThreadApprovals');
+  await flush();
+  const action = findNode([harness.tree[0]], (node) => node.label === 'Switch to auto');
+  expect(action.disabled).toBe(false);
+  expect(JSON.stringify(harness.tree)).toContain('This request still needs a decision.');
+  harness.action(action.actionId);
+  await flush();
+  const request = harness.requests.find((item) => item.path.endsWith('/child-auto-review'));
+  expect(request?.init.method).toBe('POST');
+  expect(JSON.parse(request?.init.body)).toEqual({ parentThreadId: 'thread', executionId: firstExecutionId });
+  expect(harness.requests.some((item) => item.path.endsWith('/approvals') && item.init?.method === 'POST')).toBe(false);
+  expect(harness.tree).toHaveLength(2);
+  expect(findNode([harness.tree[0]], (node) => node.label === 'Switch to auto').disabled).toBe(true);
+  expect(findNode([harness.tree[1]], (node) => node.label === 'Switch to auto').disabled).toBe(true);
+  expect(validatePluginUiTree(harness.tree, 'thread.card')).toBe(true);
+});
+
+it('shows an error if enabling automatic review fails and keeps the control available', async () => {
+  const harness = createHarness('pending', 'pending', 'ChildThreadApprovals', true, false, true);
+  await flush();
+  harness.action(findNode(harness.tree, (node) => node.label === 'Switch to auto').actionId);
+  await flush();
+  expect(JSON.stringify(harness.tree)).toContain('approval failed');
+  expect(findNode(harness.tree, (node) => node.label === 'Switch to auto').disabled).toBe(false);
 });
 
 it('does not render result actions for non-pending executions or resolved approvals', async () => {
