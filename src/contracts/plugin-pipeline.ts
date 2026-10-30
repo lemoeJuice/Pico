@@ -84,6 +84,8 @@ export interface ToolInvocationInput {
   signal: AbortSignal;
   /** Null means the Runtime no longer has this tool locally (for example, a remote tool). */
   toolSource: 'runtime' | 'executor' | 'mcp' | null;
+  /** Durable MCP routing identity for this invocation, when applicable. */
+  mcpTarget?: McpToolTarget;
   /** Fail the invocation and include structured guidance for the next Model Step when appropriate. */
   fail(reason: string, result?: unknown): Promise<Execution>;
   invoke(): Promise<Execution>;

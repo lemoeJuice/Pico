@@ -2,7 +2,11 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { expect, it } from 'vitest';
 
-function createHarness(status = 'pending', approvalStatus: string | null = 'pending') {
+function createHarness(
+  status = 'pending',
+  approvalStatus: string | null = 'pending',
+  viewId = 'PermissionResultActions',
+) {
   let onWindowMessage: ((event: any) => void) | undefined;
   let tree: any[] = [];
   const parent = {};
@@ -13,13 +17,17 @@ function createHarness(status = 'pending', approvalStatus: string | null = 'pend
       if (message.type === 'pico:plugin-ui:render') tree = message.tree;
       if (message.type === 'pico:plugin-ui:request') {
         requests.push(message);
-        const value = message.path.endsWith('/threads?threadId=thread')
-          ? {
-              tools: [],
-              autoReview: false,
-              approvals: approvalStatus ? [{ executionId: 'execution', status: approvalStatus }] : [],
-            }
-          : { ok: true };
+        const path = typeof message.path === 'string' ? message.path : '';
+        const value = path.endsWith('/mcp-servers')
+          ? { allowedMcpServers: { 'server-1': true } }
+          : path.endsWith('/threads?threadId=thread')
+            ? {
+                tools: [],
+                autoReview: false,
+                approvals: approvalStatus ? [{ executionId: 'execution', status: approvalStatus }] : [],
+                descendantApprovals: [{ threadId: 'child', threadTitle: 'Research', toolName: 'read_file' }],
+              }
+            : { ok: true };
         queueMicrotask(() =>
           port.onmessage?.({ data: { type: 'pico:plugin-ui:response', id: message.id, ok: true, value } }),
         );
@@ -48,8 +56,13 @@ function createHarness(status = 'pending', approvalStatus: string | null = 'pend
       pluginId: 'pico.permissions',
       entry: 'webui',
       viewType: 'component',
-      viewId: 'PermissionResultActions',
-      context: { thread: null, threadId: 'thread', toolResult: { executionId: 'execution', status } },
+      viewId,
+      context: {
+        thread: viewId === 'ToolPermissions' ? { id: 'thread' } : null,
+        threadId: 'thread',
+        mcpServer: { id: 'server-1' },
+        toolResult: { executionId: 'execution', status },
+      },
     },
     ports: [port],
   });
@@ -58,8 +71,8 @@ function createHarness(status = 'pending', approvalStatus: string | null = 'pend
       return tree;
     },
     requests,
-    action(actionId: string) {
-      port.onmessage?.({ data: { type: 'pico:plugin-ui:action', actionId } });
+    action(actionId: string, value?: string) {
+      port.onmessage?.({ data: { type: 'pico:plugin-ui:action', actionId, value } });
     },
   };
 }
@@ -99,6 +112,28 @@ it('renders host-safe approval actions only while an approval is pending and rou
   expect(
     harness.requests.filter((request) => request.path.endsWith('/threads?threadId=thread')).length,
   ).toBeGreaterThan(1);
+});
+
+it('renders and updates the server default without requiring a selected Thread', async () => {
+  const harness = createHarness('pending', 'pending', 'McpServerPermissions');
+  await flush();
+  expect(JSON.stringify(harness.tree)).toContain('Allow this server');
+  expect(JSON.stringify(harness.tree)).toContain('"checked":true');
+  harness.action('mcp-server', 'false');
+  await flush();
+  const update = harness.requests.find(
+    (request) => request.path.endsWith('/mcp-servers') && request.init?.method === 'PUT',
+  );
+  expect(JSON.parse(update?.init.body)).toEqual({ serverId: 'server-1', enabled: false });
+});
+
+it('shows pending child approvals and opens the child Thread', async () => {
+  const harness = createHarness('pending', 'pending', 'ToolPermissions');
+  await flush();
+  expect(JSON.stringify(harness.tree)).toContain('Research: read_file');
+  harness.action('open:child');
+  await flush();
+  expect(harness.requests).toContainEqual(expect.objectContaining({ action: 'open-thread', threadId: 'child' }));
 });
 
 it('does not render result actions for non-pending executions or resolved approvals', async () => {

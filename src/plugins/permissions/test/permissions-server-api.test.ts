@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startServer } from '../../../server.js';
+import { assistantPayload } from '../../../../test/helpers.js';
 
 const envKeys = ['PICO_HOST', 'PICO_PORT', 'PICO_DB_PATH', 'PICO_ACCESS_TOKEN'] as const;
 const originalEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
@@ -28,7 +29,18 @@ describe('Permissions plugin server API', () => {
 
       const project = await server.runtime.createProject('Permission API', directory);
       const thread = server.runtime.createThread(project.id, 'host');
-      const executionId = `${thread.id}:approval-step:read-call`;
+      const modelExecutionId = 'approval-step';
+      const call = { id: 'read-call', name: 'read_file', arguments: { path: 'facts.txt' } };
+      const executionId = `${thread.id}:${modelExecutionId}:${call.id}`;
+      server.runtime.store.createModelExecution(modelExecutionId, thread.id, 0);
+      server.runtime.store.transitionExecution(modelExecutionId, 'running');
+      server.runtime.store.commitModelStep({
+        assistantRecordId: `${modelExecutionId}:assistant`,
+        modelExecutionId,
+        threadId: thread.id,
+        payload: assistantPayload({ toolCalls: [call], batchId: `${modelExecutionId}:batch` }),
+        toolCalls: [{ call, executionId, source: 'executor' }],
+      });
       server.runtime.store.setPluginState('pico.permissions', 'approvals', {
         [executionId]: {
           executionId,
@@ -42,10 +54,10 @@ describe('Permissions plugin server API', () => {
 
       const response = await fetch(`http://127.0.0.1:${server.port}/api/plugins/pico.permissions/approvals`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${server.port}` },
         body: JSON.stringify({ executionId, allow: true, rememberForThread: true }),
       });
-      expect(response.status).toBe(200);
+      expect(response.status, await response.text()).toBe(200);
       expect(
         server.runtime.store.getPluginState<Record<string, Record<string, string>>>('pico.permissions', 'rules', {})[
           thread.id

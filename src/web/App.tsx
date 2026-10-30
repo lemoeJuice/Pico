@@ -4192,7 +4192,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             </button>
           </SettingsNavigation>
           {mcpManagerOpen ? (
-            <McpSettings request={api} refreshVersion={mcpServerRefreshVersion} />
+            <McpSettings
+              request={api}
+              refreshVersion={mcpServerRefreshVersion}
+              pluginProps={pluginUiContext}
+              pluginContributions={uiContributions}
+              pluginEvents={pluginEvents}
+              runCommand={runPluginCommand}
+              isRegisteredPage={isRegisteredPluginPage}
+            />
           ) : developerMenuOpen ? (
             <DeveloperSettings
               plugins={pluginInfo?.plugins ?? []}

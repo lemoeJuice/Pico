@@ -90,7 +90,7 @@ describe('Permissions Runtime integration', () => {
           .pluginInfo()
           .ui.filter((item) => item.pluginId === 'pico.permissions')
           .map((item) => item.slot),
-      ).toEqual(['thread.toolbar', 'tool.result']);
+      ).toEqual(['thread.toolbar', 'tool.result', 'mcp.server.card']);
     } finally {
       await env.cleanup();
     }

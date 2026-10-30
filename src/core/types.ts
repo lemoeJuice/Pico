@@ -166,7 +166,14 @@ export interface ToolDefinition {
 }
 
 export interface UiContribution {
-  slot: 'thread.toolbar' | 'composer.action' | 'composer.model' | 'composer.status' | 'sidebar.panel' | 'tool.result';
+  slot:
+    | 'thread.toolbar'
+    | 'composer.action'
+    | 'composer.model'
+    | 'composer.status'
+    | 'sidebar.panel'
+    | 'tool.result'
+    | 'mcp.server.card';
   id: string;
   label: string;
   description?: string;

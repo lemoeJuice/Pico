@@ -161,6 +161,24 @@ describe('dynamic plugin UI boundary', () => {
       validatePluginUiTree(
         [
           {
+            type: 'group',
+            layout: 'spread',
+            children: [
+              { type: 'paragraph', text: 'Allow tool execution by default for this server.' },
+              { type: 'switch', label: 'Allow by default', checked: false, actionId: 'allow-server' },
+            ],
+          },
+        ],
+        'mcp.server.card',
+      ),
+    ).toBe(true);
+    expect(
+      validatePluginUiTree([{ type: 'paragraph', text: 'Unsupported slot.' }], 'composer.status'),
+    ).toBe(false);
+    expect(
+      validatePluginUiTree(
+        [
+          {
             type: 'disclosure',
             label: 'History',
             open: false,

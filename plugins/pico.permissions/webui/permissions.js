@@ -2,7 +2,7 @@
   'use strict';
   const pluginId = 'pico.permissions';
   let port = null, init = null, context = { thread: null }, sequence = 0, requestId = 0;
-  let data = { tools: [], approvals: [], autoReview: false, autoReviewDenials: false }, busy = false, error = '', toolsExpanded = false, renderedThreadId = null;
+  let data = { tools: [], approvals: [], descendantApprovals: [], autoReview: false, autoReviewDenials: false }, busy = false, error = '', toolsExpanded = false, renderedThreadId = null, serverAllowed = false;
   const pending = new Map();
   const text = (text) => ({ type: 'text', text: String(text ?? '') });
   const para = (text) => ({ type: 'paragraph', text: String(text ?? '') });
@@ -11,15 +11,22 @@
   const api = (path, method = 'GET', body) => send('api', { path: `/api/plugins/${pluginId}${path}`, ...(method === 'GET' ? {} : { init: { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) } }) });
   function currentApproval() { const id = context.toolResult?.executionId ?? context.execution?.id; return id ? data.approvals.find((a) => a.executionId === id) : undefined; }
   async function refresh() {
+    if (init?.viewId === 'McpServerPermissions') {
+      const serverId = context.mcpServer?.id, sequenceId = ++requestId;
+      if (!serverId) { serverAllowed = false; draw(); return; }
+      try { const next = await api('/mcp-servers'); if (sequenceId !== requestId) return; serverAllowed = next.allowedMcpServers?.[serverId] === true; error = ''; }
+      catch (reason) { if (sequenceId !== requestId) return; error = reason instanceof Error ? reason.message : String(reason); }
+      draw(); return;
+    }
     const threadId = context.threadId ?? context.thread?.id;
-    if (!threadId) { data = { tools: [], approvals: [], autoReview: false, autoReviewDenials: false }; draw(); return; }
+    if (!threadId) { data = { tools: [], approvals: [], descendantApprovals: [], autoReview: false, autoReviewDenials: false }; draw(); return; }
     const sequenceId = ++requestId;
-    try { const next = await api(`/threads?threadId=${encodeURIComponent(threadId)}`); if (sequenceId !== requestId) return; data = { tools: Array.isArray(next.tools) ? next.tools : [], approvals: Array.isArray(next.approvals) ? next.approvals : [], autoReview: next.autoReview === true, autoReviewDenials: next.autoReviewDenials === true }; error = ''; }
+    try { const next = await api(`/threads?threadId=${encodeURIComponent(threadId)}`); if (sequenceId !== requestId) return; data = { tools: Array.isArray(next.tools) ? next.tools : [], approvals: Array.isArray(next.approvals) ? next.approvals : [], descendantApprovals: Array.isArray(next.descendantApprovals) ? next.descendantApprovals : [], autoReview: next.autoReview === true, autoReviewDenials: next.autoReviewDenials === true }; error = ''; }
     catch (reason) { if (sequenceId !== requestId) return; error = reason instanceof Error ? reason.message : String(reason); }
     draw();
   }
   function toolbar() {
-    port?.postMessage({ type: 'pico:plugin-ui:toolbar-state', badgeCount: Math.min(999, data.tools.length) });
+    port?.postMessage({ type: 'pico:plugin-ui:toolbar-state', badgeCount: Math.min(999, data.descendantApprovals.length) });
     if (!context.thread) return [{ type: 'card', children: [
       { type: 'group', layout: 'stack-compact', children: [
         { type: 'heading', text: 'Tool permissions' },
@@ -63,7 +70,16 @@
         para(tool.description),
       ] };
     });
+    const pendingChildren = data.descendantApprovals.length ? [{ type: 'card', children: [{ type: 'group', layout: 'stack-compact', children: [
+      { type: 'heading', text: 'Child Threads awaiting permission' },
+      para('Open the child Thread to review the tool call and decide.'),
+      ...data.descendantApprovals.map((approval) => ({ type: 'group', layout: 'spread', children: [
+        para(`${approval.threadTitle || 'Child Thread'}: ${approval.toolName}`),
+        button('Open Thread', `open:${approval.threadId}`),
+      ] })),
+    ] }] }] : [];
     return [
+      ...pendingChildren,
       { type: 'card', children: [{ type: 'group', layout: 'stack-compact', children: content }] },
       { type: 'card', children: [{ type: 'group', layout: 'stack-compact', children: [
       { type: 'heading', text: 'Per-tool defaults' },
@@ -94,10 +110,17 @@
       { type: 'actions', children: [button('Deny', 'decision:deny', busy, 'danger'), button('Allow once', 'decision:allow', busy, 'primary'), ...(!review ? [button('Allow in Thread', 'decision:allow-thread', busy)] : [])] },
     ] }];
   }
-  function draw() { const nodes = init?.viewId === 'ToolPermissions' ? toolbar() : resultActions(); port?.postMessage({ type: 'pico:plugin-ui:render', tree: nodes }); }
+  function serverControl() { return [{ type: 'group', layout: 'stack-compact', children: [
+    { type: 'switch', label: 'Allow this server’s tools by default', checked: serverAllowed, actionId: 'mcp-server', disabled: busy || !context.mcpServer?.id },
+    para('Applies to this server’s tools in all Threads unless a Thread has its own rule.'),
+    ...(error ? [{ type: 'status', text: error, tone: 'danger' }] : []),
+  ] }]; }
+  function draw() { const nodes = init?.viewId === 'ToolPermissions' ? toolbar() : init?.viewId === 'McpServerPermissions' ? serverControl() : resultActions(); port?.postMessage({ type: 'pico:plugin-ui:render', tree: nodes }); }
   async function update(action, body) { busy = true; error = ''; draw(); try { await api(action.path, action.method || 'PUT', body); await refresh(); } catch (reason) { error = reason instanceof Error ? reason.message : String(reason); } finally { busy = false; draw(); } }
   async function act(action) {
     const id = action.actionId;
+    if (id === 'mcp-server') { if (!context.mcpServer?.id) return; await update({ path: '/mcp-servers' }, { serverId: context.mcpServer.id, enabled: action.value === 'true' }); return; }
+    if (id.startsWith('open:')) { try { await send('open-thread', { threadId: id.slice(5) }); } catch (reason) { error = reason instanceof Error ? reason.message : String(reason); draw(); } return; }
     if (id.startsWith('tool:')) { const toolName = id.slice(5), tool = data.tools.find((x) => x.name === toolName); if (!tool || !context.thread) return; await update({ path: '/rules' }, { threadId: context.thread.id, toolName, policy: action.value === 'true' ? 'allow' : 'ask' }); return; }
     if (id === 'reviewer' || id === 'reviewer-denials') { if (!context.thread) return; await update({ path: id === 'reviewer' ? '/reviewer' : '/reviewer-denials' }, { threadId: context.thread.id, enabled: action.value === 'true' }); return; }
     if (id.startsWith('decision:')) { const approval = currentApproval(); if (!approval?.executionId) return; const allow = id !== 'decision:deny'; await update({ path: '/approvals', method: 'POST' }, { executionId: approval.executionId, allow, rememberForThread: allow && id === 'decision:allow-thread' }); return; }

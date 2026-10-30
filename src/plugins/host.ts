@@ -734,6 +734,7 @@ export class PluginHost {
               'composer.status',
               'sidebar.panel',
               'tool.result',
+              'mcp.server.card',
             ].includes(contribution.slot)
           ) {
             throw new Error(`Unsupported UI semantic slot: ${contribution.slot}`);
@@ -746,10 +747,12 @@ export class PluginHost {
             throw new Error('UI component contributions must name a valid Web UI entry and component.');
           }
           if (
-            (contribution.slot === 'composer.model' || contribution.slot === 'tool.result') &&
+            (contribution.slot === 'composer.model' ||
+              contribution.slot === 'tool.result' ||
+              contribution.slot === 'mcp.server.card') &&
             (!contribution.entry || !contribution.component)
           ) {
-            throw new Error('composer.model and tool.result contributions must name a Web UI entry and component.');
+            throw new Error('This UI slot requires a Web UI entry and component.');
           }
           if (
             contribution.providers !== undefined &&

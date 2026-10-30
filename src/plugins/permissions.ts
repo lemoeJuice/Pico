@@ -31,7 +31,7 @@ type PermissionRules = Record<string, Record<string, PermissionPolicy>>;
 type PermissionApprovals = Record<string, PermissionApproval>;
 type PermissionTools = Record<
   string,
-  Array<Pick<ToolDefinition, 'name' | 'description'> & { policy: PermissionPolicy }>
+  Array<Pick<ToolDefinition, 'name' | 'description'> & { policy: PermissionPolicy; mcpServerId?: string }>
 >;
 
 function objectValue<T extends object>(value: unknown): T {
@@ -96,6 +96,8 @@ export const permissionPlugin: PicoPlugin = {
       objectValue<Record<string, boolean>>(state.get('autoReviewDenials', {}));
 
     const readRules = (): PermissionRules => objectValue<PermissionRules>(state.get('rules', {}));
+    const readAllowedServers = (): Record<string, boolean> =>
+      objectValue<Record<string, boolean>>(state.get('allowedMcpServers', {}));
     const readApprovals = (): PermissionApprovals => objectValue<PermissionApprovals>(state.get('approvals', {}));
     threads.onCreated((thread) => {
       const parentThreadId = thread.parentThreadId;
@@ -177,9 +179,11 @@ export const permissionPlugin: PicoPlugin = {
       toolName: string,
       source: ToolInvocationInput['toolSource'],
       thread: Thread,
+      mcpServerId?: string,
     ): PermissionPolicy => {
       const configured = readRules()[threadId]?.[toolName];
       if (configured) return configured;
+      if (source === 'mcp' && mcpServerId && readAllowedServers()[mcpServerId] === true) return 'allow';
       return defaultPolicy(source, thread);
     };
 
@@ -453,10 +457,15 @@ export const permissionPlugin: PicoPlugin = {
           : (await threads.tools(threadId)).map((tool) => ({
               name: tool.name,
               description: tool.description,
+              ...(tool.mcpServerId ? { mcpServerId: tool.mcpServerId } : {}),
               policy: defaultPolicy(tool.source, thread),
             })));
       const rules = readRules()[threadId] ?? {};
-      return available.map((tool) => ({ ...tool, policy: rules[tool.name] ?? tool.policy }));
+      const allowedServers = readAllowedServers();
+      return available.map((tool) => ({
+        ...tool,
+        policy: rules[tool.name] ?? (tool.mcpServerId && allowedServers[tool.mcpServerId] ? 'allow' : tool.policy),
+      }));
     };
 
     pipelines.use('projection', async (input, next) => {
@@ -464,12 +473,11 @@ export const permissionPlugin: PicoPlugin = {
       const available = input.tools.map((tool) => ({
         name: tool.name,
         description: tool.description,
-        policy:
-          rules[tool.name] ??
-          defaultPolicy(
-            input.toolSources?.[tool.name] ?? (input.thread.executorKind === 'runtime' ? 'runtime' : 'executor'),
-            input.thread,
-          ),
+        ...(input.mcpTargets?.[tool.name] ? { mcpServerId: input.mcpTargets[tool.name]!.serverId } : {}),
+        policy: defaultPolicy(
+          input.toolSources?.[tool.name] ?? (input.thread.executorKind === 'runtime' ? 'runtime' : 'executor'),
+          input.thread,
+        ),
       }));
       const nextAvailable = {
         ...objectValue<PermissionTools>(cache.get('availableTools', {})),
@@ -484,7 +492,13 @@ export const permissionPlugin: PicoPlugin = {
     });
 
     pipelines.use('toolInvocation', async (input, next) => {
-      const policy = getPolicy(input.thread.id, input.call.name, input.toolSource, input.thread);
+      const policy = getPolicy(
+        input.thread.id,
+        input.call.name,
+        input.toolSource,
+        input.thread,
+        input.mcpTarget?.serverId,
+      );
       if (policy === 'deny') {
         canonical.append(input.thread.id, {
           action: 'decision',
@@ -537,15 +551,63 @@ export const permissionPlugin: PicoPlugin = {
       supportsPopover: true,
     });
     ui.contribute(permissionResultUi('permission-result-actions', 'PermissionResultActions'));
+    ui.contribute({
+      slot: 'mcp.server.card',
+      id: 'mcp-server-permissions',
+      label: 'MCP server permissions',
+      entry: 'webui',
+      component: 'McpServerPermissions',
+    });
+
+    http.register('GET', '/mcp-servers', () => ({ allowedMcpServers: readAllowedServers() }));
+    http.register('PUT', '/mcp-servers', ({ body }) => {
+      const value = requestBody(body);
+      const serverId = typeof value.serverId === 'string' ? value.serverId : '';
+      if (!serverId || typeof value.enabled !== 'boolean') throw new Error('serverId and enabled are required');
+      if (!context.mcp.list().some((server) => server.id === serverId)) throw new Error('MCP server not found');
+      const allowed = { ...readAllowedServers() };
+      if (value.enabled) allowed[serverId] = true;
+      else delete allowed[serverId];
+      state.set('allowedMcpServers', allowed);
+      return { serverId, enabled: value.enabled };
+    });
 
     http.register('GET', '/threads', async ({ query }) => {
       const threadId = permissionPath(query.get('threadId'), 'threadId');
-      if (!threads.get(threadId)) throw new Error('Thread not found');
-      const approvals = Object.values(readApprovals()).filter((approval) => approval.threadId === threadId);
+      const thread = threads.get(threadId);
+      if (!thread) throw new Error('Thread not found');
+      const allApprovals = Object.values(readApprovals());
+      const approvals = allApprovals.filter((approval) => approval.threadId === threadId);
+      const children = new Map<string, Thread[]>();
+      for (const candidate of threads.list(thread.projectId)) {
+        if (!candidate.parentThreadId) continue;
+        const siblings = children.get(candidate.parentThreadId) ?? [];
+        siblings.push(candidate);
+        children.set(candidate.parentThreadId, siblings);
+      }
+      const descendants = new Map<string, Thread>();
+      const queue = [threadId];
+      for (let index = 0; index < queue.length; index += 1) {
+        for (const child of children.get(queue[index]!) ?? []) {
+          if (child.id === threadId || descendants.has(child.id)) continue;
+          descendants.set(child.id, child);
+          queue.push(child.id);
+        }
+      }
+      const descendantApprovals = allApprovals
+        .filter((approval) => descendants.has(approval.threadId) && approval.status === 'pending')
+        .filter((approval) => executions.get(approval.executionId)?.status === 'pending')
+        .map((approval) => ({
+          executionId: approval.executionId,
+          threadId: approval.threadId,
+          toolName: approval.toolName,
+          threadTitle: descendants.get(approval.threadId)!.title,
+        }));
       return {
         threadId,
         tools: await toolList(threadId),
         approvals,
+        descendantApprovals,
         autoReview: readAutoReview()[threadId] === true,
         autoReviewDenials: readAutoReviewDenials()[threadId] === true,
       };

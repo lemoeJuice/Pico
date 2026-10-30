@@ -4373,6 +4373,7 @@ export class PicoRuntime {
       executionId,
       signal: controller.signal,
       toolSource,
+      ...(persistedMcpTarget ? { mcpTarget: persistedMcpTarget } : {}),
       fail: async (reason, result) => {
         const current = this.store.getExecution(executionId);
         if (!current) throw new Error(`Tool Execution ${executionId} disappeared before it could fail.`);

@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { LoaderCircle, Pencil, Play, Plus, Square, Trash2, X } from 'lucide-react';
+import type { UiContribution } from '../core/types.js';
+import type { PluginUiEvent, PluginUiProps } from '../plugins/ui-protocol.js';
+import { PluginWebView } from './plugin-web-view.js';
+import { uiContributionsAt } from './ui-contributions.js';
+
+type McpPluginUiProps = Omit<PluginUiProps, 'executeCommand'>;
 
 type McpTransport = 'stdio' | 'streamable-http';
 
@@ -276,7 +282,23 @@ export function McpStartConfirmation({
   );
 }
 
-export function McpSettings({ request, refreshVersion = 0 }: { request: Request; refreshVersion?: number }) {
+export function McpSettings({
+  request,
+  refreshVersion = 0,
+  pluginProps,
+  pluginContributions = [],
+  pluginEvents = [],
+  runCommand,
+  isRegisteredPage,
+}: {
+  request: Request;
+  refreshVersion?: number;
+  pluginProps?: McpPluginUiProps | null;
+  pluginContributions?: UiContribution[];
+  pluginEvents?: Array<{ sequence: number; event: PluginUiEvent }>;
+  runCommand?(pluginId: string, threadId: string | null, command: string): Promise<unknown>;
+  isRegisteredPage?(pluginId: string, pageId: string): boolean;
+}) {
   const [servers, setServers] = useState<McpServerView[] | null>(null);
   const [draft, setDraft] = useState<FormDraft | null>(null);
   const [pendingStart, setPendingStart] = useState<McpServerView | null>(null);
@@ -498,6 +520,34 @@ export function McpSettings({ request, refreshVersion = 0 }: { request: Request;
                 </small>
               </div>
               {server.lastError ? <p className="mcp-server-error">{server.lastError}</p> : null}
+              {pluginProps && runCommand && isRegisteredPage
+                ? uiContributionsAt(pluginContributions, 'mcp.server.card').map((contribution) =>
+                    contribution.pluginId && contribution.entry && contribution.component ? (
+                      <PluginWebView
+                        key={`${server.id}:${contribution.pluginId}:${contribution.id}`}
+                        pluginId={contribution.pluginId}
+                        entry={contribution.entry}
+                        viewType="component"
+                        viewId={contribution.component}
+                        uiSlot="mcp.server.card"
+                        events={pluginEvents}
+                        {...pluginProps}
+                        context={{
+                          ...pluginProps.context,
+                          mcpServer: {
+                            id: server.id,
+                            name: server.name,
+                            transport: server.transport,
+                            visibleByDefault: server.visibleByDefault,
+                            tools: server.tools,
+                          },
+                        }}
+                        isRegisteredPage={isRegisteredPage}
+                        runCommand={runCommand}
+                      />
+                    ) : null,
+                  )
+                : null}
               <details className="mcp-tools-details">
                 <summary>Discovered tools ({server.tools.length})</summary>
                 {server.tools.length ? (

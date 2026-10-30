@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
+import { PluginWebView } from '../src/web/plugin-web-view.js';
 import {
   localStartRequestBody,
   McpPrivateNetworkAccessControl,
@@ -10,6 +11,44 @@ import {
 } from '../src/web/mcp-settings.js';
 
 describe('MCP settings page', () => {
+  it('renders an MCP card extension host when no Thread is selected', () => {
+    const context = {
+      thread: null,
+      mcpServer: {
+        id: 'server-one',
+        name: 'Server one',
+        transport: 'stdio' as const,
+        visibleByDefault: false,
+        tools: [{ name: 'lookup', description: 'Look up a record.' }],
+      },
+    };
+    const markup = renderToStaticMarkup(
+      <PluginWebView
+        pluginId="test.permissions"
+        entry="webui"
+        viewType="component"
+        viewId="McpServerPolicy"
+        uiSlot="mcp.server.card"
+        context={context}
+        settings={{} as never}
+        api={async <T,>() => ({} as T)}
+        updateModelSettings={async () => undefined}
+        openThread={async () => undefined}
+        openMessage={async () => undefined}
+        runCommand={async () => undefined}
+        openPage={() => undefined}
+        isRegisteredPage={() => false}
+        onError={() => undefined}
+        onNotice={() => undefined}
+      />,
+    );
+
+    expect(markup).toContain('plugin-ui-host-rendered--mcp-server-card');
+    expect(markup).toContain('Loading plugin interface');
+    expect(context.thread).toBeNull();
+    expect(context.mcpServer.id).toBe('server-one');
+  });
+
   it('explains local process permissions and clarifies that Pico does not expose an MCP endpoint', () => {
     const request = async <T,>(): Promise<T> => {
       throw new Error('The server list request is made after mounting.');

@@ -26,6 +26,24 @@ function pluginSource(version: string): string {
 `;
 }
 
+function mcpCardPluginSource(): string {
+  return `export default {
+    id: 'pico.mcp-card-test',
+    name: 'MCP card test',
+    version: '1.0.0',
+    activate({ ui }) {
+      ui.contribute({
+        slot: 'mcp.server.card',
+        id: 'server-policy',
+        label: 'Server policy',
+        entry: 'webui',
+        component: 'ServerPolicy',
+      });
+    },
+  };
+`;
+}
+
 function pluginDirectory(): string {
   const directory = mkdtempSync(join(tmpdir(), 'pico-plugin-lifecycle-'));
   temporaryDirectories.push(directory);
@@ -46,6 +64,36 @@ afterEach(() => {
 });
 
 describe('PluginHost lifecycle', () => {
+  it('registers MCP server card components as plugin UI contributions', async () => {
+    const store = new PicoStore(':memory:');
+    const commands = new CommandRegistry();
+    const directory = mkdtempSync(join(tmpdir(), 'pico-mcp-card-plugin-'));
+    temporaryDirectories.push(directory);
+    writeFileSync(join(directory, 'pico.mcp-card-test.mjs'), mcpCardPluginSource());
+    const host = new PluginHost(
+      store,
+      new ToolCatalog(),
+      new ExecutionPipelines(),
+      commands,
+      directory,
+      unavailablePluginServices,
+    );
+    try {
+      await host.load();
+      expect(host.uiContributions()).toContainEqual(
+        expect.objectContaining({
+          pluginId: 'pico.mcp-card-test',
+          slot: 'mcp.server.card',
+          entry: 'webui',
+          component: 'ServerPolicy',
+        }),
+      );
+    } finally {
+      await host.shutdown();
+      store.close();
+    }
+  });
+
   it('loads independent entries and cleans registrations when disabled or reloaded', async () => {
     const store = new PicoStore(':memory:');
     const commands = new CommandRegistry();

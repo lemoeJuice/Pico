@@ -150,6 +150,26 @@ const uiNodeTypesBySlot: Record<PluginUiSlot, ReadonlySet<PluginUiNode['type']>>
     'table',
   ]),
   'tool.result': new Set(['text', 'paragraph', 'group', 'actions', 'button']),
+  'mcp.server.card': new Set([
+    'text',
+    'status',
+    'heading',
+    'paragraph',
+    'group',
+    'card',
+    'actions',
+    'button',
+    'fieldButton',
+    'textInput',
+    'checkbox',
+    'switch',
+    'range',
+    'textArea',
+    'select',
+    'disclosure',
+    'list',
+    'table',
+  ]),
 };
 
 export function validatePluginUiTree(value: unknown, slot: PluginUiSlot | 'settings.page'): value is PluginUiNode[] {
@@ -405,6 +425,14 @@ export function isPluginUiToolbarStateMessage(value: unknown): value is PluginUi
 
 export interface PluginUiContext {
   thread: Thread | null;
+  /** The MCP server card hosting this component; present only for the mcp.server.card slot. */
+  mcpServer?: {
+    id: string;
+    name: string;
+    transport: 'stdio' | 'streamable-http';
+    visibleByDefault: boolean;
+    tools: Array<{ name: string; description: string }>;
+  };
   providerInstanceId?: string;
   modelSelection?: ThreadModelSelection;
   /** Narrow identity for a result-area action; does not expose the Thread object or Tool arguments. */
@@ -428,6 +456,7 @@ export function samePluginUiContext(left: PluginUiContext, right: PluginUiContex
     left.result === right.result &&
     left.threadId === right.threadId &&
     left.providerInstanceId === right.providerInstanceId &&
+    JSON.stringify(left.mcpServer ?? null) === JSON.stringify(right.mcpServer ?? null) &&
     left.toolResult?.executionId === right.toolResult?.executionId &&
     left.toolResult?.status === right.toolResult?.status
   );
