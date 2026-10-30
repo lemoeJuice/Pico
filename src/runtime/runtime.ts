@@ -4222,7 +4222,7 @@ export class PicoRuntime {
     this.publish({ type: 'runtime.compaction', threadId: thread.id, status: 'started' });
     let compactionSaved = false;
     try {
-      const call = await this.completePluginModelCall('pico.runtime', {
+      const call = await this.completeRuntimeModelCall({
         threadId: thread.id,
         projectId: thread.projectId,
         purpose: 'runtime-compaction-summary',
@@ -4681,6 +4681,25 @@ export class PicoRuntime {
     pluginId: string,
     request: PluginModelCallRequest,
   ): Promise<PluginModelCallRecord & { response: ModelResponse }> {
+    if (!this.plugins?.declaresModelCalls(pluginId)) {
+      throw new ServiceError(400, `Plugin "${pluginId}" has not declared model-call access.`);
+    }
+    if (!this.plugins.canCallModels(pluginId)) {
+      throw new ServiceError(409, `Plugin "${pluginId}" is not active and cannot call models.`);
+    }
+    return this.startPluginModelCall(pluginId, request);
+  }
+
+  private completeRuntimeModelCall(
+    request: PluginModelCallRequest,
+  ): Promise<PluginModelCallRecord & { response: ModelResponse }> {
+    return this.startPluginModelCall('pico.runtime', request);
+  }
+
+  private startPluginModelCall(
+    pluginId: string,
+    request: PluginModelCallRequest,
+  ): Promise<PluginModelCallRecord & { response: ModelResponse }> {
     if (!/^[a-z0-9][a-z0-9._-]*$/i.test(request.purpose) || request.purpose.length > 80) {
       throw new Error('Plugin model call purpose must be a short stable identifier.');
     }
@@ -4979,30 +4998,35 @@ export class PicoRuntime {
 
   pluginModelSelectionsView() {
     return Object.fromEntries(
-      Object.entries(this.pluginModelSelections()).map(([id, config]) => {
-        if (config.mode !== 'fixed' || !config.selection) return [id, config];
-        try {
-          this.modelCatalog.validateSelection(config.selection);
-          return [id, config];
-        } catch {
-          return [
-            id,
-            {
-              ...config,
-              selection: {
-                ...config.selection,
-                unavailableReason: 'The saved model, adapter or parameters are unavailable. Select again.',
+      Object.entries(this.pluginModelSelections())
+        .filter(([id]) => this.plugins.declaresModelCalls(id))
+        .map(([id, config]) => {
+          if (config.mode !== 'fixed' || !config.selection) return [id, config];
+          try {
+            this.modelCatalog.validateSelection(config.selection);
+            return [id, config];
+          } catch {
+            return [
+              id,
+              {
+                ...config,
+                selection: {
+                  ...config.selection,
+                  unavailableReason: 'The saved model, adapter or parameters are unavailable. Select again.',
+                },
               },
-            },
-          ];
-        }
-      }),
+            ];
+          }
+        }),
     );
   }
 
   updatePluginModelSelection(pluginId: string, config: { mode: 'thread' | 'fixed'; selection?: CatalogSelection }) {
     if (!this.plugins.catalog().some((plugin) => plugin.id === pluginId))
       throw new ServiceError(404, 'Plugin not found');
+    if (!this.plugins.declaresModelCalls(pluginId)) {
+      throw new ServiceError(400, `Plugin "${pluginId}" has not declared model-call access.`);
+    }
     if (!config || !['thread', 'fixed'].includes(config.mode))
       throw new ServiceError(400, 'Invalid plugin model configuration');
     const normalized =

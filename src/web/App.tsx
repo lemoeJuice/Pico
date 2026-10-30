@@ -151,6 +151,7 @@ type PluginInfo = {
     loaded: boolean;
     hotReloadable: boolean;
     required: boolean;
+    modelCalls: boolean;
     error?: string;
   }>;
   ui: UiContribution[];
@@ -4500,49 +4501,51 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                           {plugin.required ? <p className="field-note">Required by Pico</p> : null}
                         </div>
                       </summary>
-                      <div className="plugin-manager-model-settings">
-                        <div className="plugin-ui-field">
-                          <span>Model for plugin calls</span>
-                          <PluginUiSelect
-                            label={`Model for ${plugin.name} plugin calls`}
-                            compact={false}
-                            disabled={busyPluginSelections.has(plugin.id)}
-                            value={pluginModelSelections[plugin.id]?.mode ?? 'thread'}
-                            options={[
-                              { value: 'thread', label: 'Inherit Thread' },
-                              { value: 'fixed', label: 'Choose independently' },
-                            ]}
-                            onChange={(value) => {
-                              const mode = value as 'thread' | 'fixed';
-                              const current = pluginModelSelections[plugin.id];
-                              if (mode === 'fixed' && !current?.selection) {
-                                pluginSelectionDrafts.current.add(plugin.id);
-                                pluginSelectionVersions.current[plugin.id] =
-                                  (pluginSelectionVersions.current[plugin.id] ?? 0) + 1;
-                                setPluginModelSelections((items) => ({ ...items, [plugin.id]: { mode } }));
-                                return;
-                              }
-                              void savePluginSelection(
-                                plugin.id,
-                                mode === 'thread' ? { mode } : { mode, selection: current!.selection! },
-                              ).catch((caught: unknown) =>
-                                setError(caught instanceof Error ? caught.message : String(caught)),
-                              );
-                            }}
-                          />
+                      {plugin.modelCalls ? (
+                        <div className="plugin-manager-model-settings">
+                          <div className="plugin-ui-field">
+                            <span>Model for plugin calls</span>
+                            <PluginUiSelect
+                              label={`Model for ${plugin.name} plugin calls`}
+                              compact={false}
+                              disabled={busyPluginSelections.has(plugin.id)}
+                              value={pluginModelSelections[plugin.id]?.mode ?? 'thread'}
+                              options={[
+                                { value: 'thread', label: 'Inherit Thread' },
+                                { value: 'fixed', label: 'Choose independently' },
+                              ]}
+                              onChange={(value) => {
+                                const mode = value as 'thread' | 'fixed';
+                                const current = pluginModelSelections[plugin.id];
+                                if (mode === 'fixed' && !current?.selection) {
+                                  pluginSelectionDrafts.current.add(plugin.id);
+                                  pluginSelectionVersions.current[plugin.id] =
+                                    (pluginSelectionVersions.current[plugin.id] ?? 0) + 1;
+                                  setPluginModelSelections((items) => ({ ...items, [plugin.id]: { mode } }));
+                                  return;
+                                }
+                                void savePluginSelection(
+                                  plugin.id,
+                                  mode === 'thread' ? { mode } : { mode, selection: current!.selection! },
+                                ).catch((caught: unknown) =>
+                                  setError(caught instanceof Error ? caught.message : String(caught)),
+                                );
+                              }}
+                            />
+                          </div>
+                          {pluginModelSelections[plugin.id]?.mode === 'fixed' ? (
+                            <ModelSelection
+                              models={modelCatalog.models}
+                              instances={modelCatalog.instances}
+                              selection={pluginModelSelections[plugin.id]?.selection ?? null}
+                              loadAdapters={loadAdapters}
+                              onSave={async (selection) => {
+                                await savePluginSelection(plugin.id, { mode: 'fixed', selection });
+                              }}
+                            />
+                          ) : null}
                         </div>
-                        {pluginModelSelections[plugin.id]?.mode === 'fixed' ? (
-                          <ModelSelection
-                            models={modelCatalog.models}
-                            instances={modelCatalog.instances}
-                            selection={pluginModelSelections[plugin.id]?.selection ?? null}
-                            loadAdapters={loadAdapters}
-                            onSave={async (selection) => {
-                              await savePluginSelection(plugin.id, { mode: 'fixed', selection });
-                            }}
-                          />
-                        ) : null}
-                      </div>
+                      ) : null}
                     </details>
                     <div className="plugin-manager-actions">
                       <button

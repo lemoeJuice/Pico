@@ -102,6 +102,7 @@ export const autoThreadTitlePlugin: PicoPlugin = {
   id: PLUGIN_ID,
   name: 'Automatic Thread Titles',
   version: '0.1.0',
+  modelCalls: true,
   activate({ pipelines, models, threads, canonical }) {
     const context = { models, threads, canonical };
     const attemptedByThread = new Map<string, string>();

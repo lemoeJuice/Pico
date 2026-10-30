@@ -12,6 +12,10 @@ Workflow plugins can read the current Thread's tool state with `threads.tools(th
 
 MCP servers have a `visibleByDefault` setting, which defaults to `false`. Pico captures it when a root Thread is created, even if that server has not started yet. A Thread's explicit per-tool setting takes precedence, and later server setting changes affect newly created Threads only. Child Threads inherit the parent's captured defaults and explicit settings.
 
+## Auxiliary model calls
+
+A Runtime plugin that calls `context.models.complete` must declare `modelCalls: true` on its exported plugin object. Undeclared plugins are rejected by Runtime, and Plugin settings only show model selection for declared plugins. Declared plugins inherit the current Thread's model unless the user selects a fixed model for that plugin. Runtime-owned context compaction uses a separate internal call path.
+
 The Runtime serves a plugin's registered UI entry from its own package directory. The entry runs in a sandboxed iframe as a logic controller. It sends a bounded, serializable component tree over the transferred `MessagePort`; the Pico Web UI validates the tree for the active slot and renders all visible controls itself. The iframe's pixels are hidden. There is no HTML, Markdown, URL, image, CSS, class, raw dimension, DOM, or React-tree channel. Invalid or unrecognized descriptions fail closed with a host-owned unavailable message. Plugin UI assets are public static files; credentials and mutable plugin state remain behind authenticated Runtime APIs.
 
 Third-party package layout:

@@ -86,6 +86,7 @@ export const permissionPlugin: PicoPlugin = {
   id: 'pico.permissions',
   name: 'Invocation permissions',
   version: '0.1.0',
+  modelCalls: true,
   pipelinePriority: { projection: 80 },
   activate(pluginContext) {
     const context = pluginContext;

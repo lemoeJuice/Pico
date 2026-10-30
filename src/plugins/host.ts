@@ -70,6 +70,8 @@ export interface PicoPlugin {
   id: string;
   name: string;
   version: string;
+  /** Opt in to auxiliary model calls through `context.models.complete`. */
+  modelCalls?: true;
   /** Runtime tools registered by this plugin are enabled in new Thread defaults only when opted in. */
   defaultToolsEnabled?: boolean;
   pipelinePriority?: Partial<Record<PipelineStage, number>>;
@@ -194,12 +196,14 @@ export interface PluginCatalogEntry extends LoadedPlugin {
   loaded: boolean;
   hotReloadable: boolean;
   required: boolean;
+  modelCalls: boolean;
   error?: string;
 }
 
 interface PluginCandidate {
   plugin: PicoPlugin;
   source: string;
+  modelCalls: boolean;
   filename?: string;
 }
 
@@ -285,6 +289,18 @@ export class PluginHost {
     return [...this.loaded];
   }
 
+  declaresModelCalls(pluginId: string): boolean {
+    return this.candidates.get(pluginId)?.modelCalls === true;
+  }
+
+  canCallModels(pluginId: string): boolean {
+    return (
+      this.declaresModelCalls(pluginId) &&
+      this.enablement.get(pluginId) === true &&
+      this.loaded.some((plugin) => plugin.id === pluginId)
+    );
+  }
+
   /** Run required plugin initialization while the caller's Thread creation transaction is open. */
   initializeThread(thread: Thread): void {
     for (const listeners of this.threadCreatedListeners.values()) {
@@ -313,6 +329,7 @@ export class PluginHost {
         loaded: this.loaded.some((plugin) => plugin.id === id),
         hotReloadable: Boolean(candidate.filename),
         required: this.requiredPlugins.has(id),
+        modelCalls: candidate.modelCalls,
         ...(error ? { error } : {}),
       };
     });
@@ -327,6 +344,7 @@ export class PluginHost {
         loaded: false,
         hotReloadable: true,
         required: this.requiredPlugins.has(id),
+        modelCalls: false,
         error: diagnostic.error,
       });
     }
@@ -356,6 +374,7 @@ export class PluginHost {
     try {
       const plugin = candidate.filename ? await this.importPlugin(candidate.filename) : candidate.plugin;
       candidate.plugin = plugin;
+      candidate.modelCalls = plugin.modelCalls === true;
       await this.activate(plugin, candidate.source);
       this.enablement.set(pluginId, true);
       this.candidateErrors.delete(pluginId);
@@ -381,9 +400,11 @@ export class PluginHost {
     if (!this.enablement.get(pluginId)) throw new ServiceError(409, 'This plugin is disabled.');
     this.assertLifecycleSafe();
     const previous = candidate.plugin;
+    const previousModelCalls = candidate.modelCalls;
     await this.deactivatePlugin(pluginId);
     try {
       candidate.plugin = candidate.filename ? await this.importPlugin(candidate.filename) : previous;
+      candidate.modelCalls = candidate.plugin.modelCalls === true;
       await this.activate(candidate.plugin, candidate.source);
       this.candidateErrors.delete(pluginId);
       this.options.onChange?.(pluginId);
@@ -393,6 +414,7 @@ export class PluginHost {
       this.candidateErrors.set(pluginId, { source: candidate.source, error: message });
       this.loadErrors.push(`${pluginId} reload: ${message}`);
       candidate.plugin = previous;
+      candidate.modelCalls = previousModelCalls;
       try {
         await this.activate(previous, candidate.source);
       } catch (restoreError) {
@@ -541,7 +563,11 @@ export class PluginHost {
   async load(plugins: PicoPlugin[] = [], defaultDisabled: string[] = []): Promise<LoadedPlugin[]> {
     this.forcedDisabled.clear();
     for (const id of defaultDisabled) this.forcedDisabled.add(id);
-    const candidates: PluginCandidate[] = plugins.map((plugin) => ({ plugin, source: 'built-in' }));
+    const candidates: PluginCandidate[] = plugins.map((plugin) => ({
+      plugin,
+      source: 'built-in',
+      modelCalls: plugin.modelCalls === true,
+    }));
     const files: string[] = [];
     try {
       files.push(...(await readdir(this.pluginDirectory)).filter((file) => file.endsWith('.mjs')).sort());
@@ -551,7 +577,7 @@ export class PluginHost {
     for (const filename of files) {
       try {
         const plugin = await this.importPlugin(filename);
-        candidates.push({ plugin, source: filename, filename });
+        candidates.push({ plugin, source: filename, filename, modelCalls: plugin.modelCalls === true });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.loadErrors.push(`${filename}: ${message}`);
@@ -564,12 +590,12 @@ export class PluginHost {
       persisted && typeof persisted === 'object' && !Array.isArray(persisted)
         ? (persisted as Record<string, unknown>)
         : {};
-    for (const { plugin, source, filename } of candidates) {
+    for (const { plugin, source, filename, modelCalls } of candidates) {
       if (this.candidates.has(plugin.id)) {
         this.loadErrors.push(`${plugin.id}: Duplicate plugin ID from ${source}`);
         continue;
       }
-      this.candidates.set(plugin.id, { plugin, source, ...(filename ? { filename } : {}) });
+      this.candidates.set(plugin.id, { plugin, source, modelCalls, ...(filename ? { filename } : {}) });
       const savedValue = saved[plugin.id];
       const enabled = this.forcedDisabled.has(plugin.id) ? false : typeof savedValue === 'boolean' ? savedValue : true;
       this.enablement.set(plugin.id, enabled);

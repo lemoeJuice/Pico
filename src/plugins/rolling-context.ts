@@ -642,6 +642,7 @@ export const rollingContextPlugin: PicoPlugin = {
   id: 'pico.rolling-context',
   name: 'Rolling Context',
   version: '0.1.0',
+  modelCalls: true,
   defaultToolsEnabled: true,
   pipelinePriority: { projection: 0 },
   activate(context) {
