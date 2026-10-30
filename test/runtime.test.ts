@@ -1262,7 +1262,7 @@ describe('durable Thread runtime invariants', () => {
         },
       ]);
       expect(env.store.listRecords(thread.id).map((record) => record.kind)).toEqual(['message', 'plugin']);
-      expect(env.runtime.getThread(thread.id)?.state).toBe('paused');
+      expect(env.runtime.getThread(thread.id)?.state).toBe('model_error');
     } finally {
       await env.cleanup();
     }

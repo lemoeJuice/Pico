@@ -126,7 +126,7 @@ export const goalPlugin: PicoPlugin = {
       const thread = threads.get(threadId);
       // This is a read-only scheduling predicate. The durable Goal status owns
       // continuation; model-step counts do not pause an active Goal.
-      return Boolean(goal?.status === 'active' && thread && thread.state !== 'paused' && thread.state !== 'pausing');
+      return Boolean(goal?.status === 'active' && thread && thread.state !== 'paused' && thread.state !== 'pausing' && thread.state !== 'model_error');
     });
 
     pipelines.use('projection', async (input, next) => {

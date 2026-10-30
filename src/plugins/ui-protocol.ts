@@ -104,6 +104,10 @@ const UI_LIMITS = {
   tableCells: 2100,
 } as const;
 const uiNodeTypesBySlot: Record<PluginUiSlot, ReadonlySet<PluginUiNode['type']>> = {
+  'thread.card': new Set([
+    'text', 'status', 'heading', 'paragraph', 'group', 'card', 'actions', 'button', 'fieldButton',
+    'textInput', 'checkbox', 'switch', 'range', 'textArea', 'select', 'disclosure', 'list', 'table',
+  ]),
   'thread.toolbar': new Set([
     'text',
     'status',

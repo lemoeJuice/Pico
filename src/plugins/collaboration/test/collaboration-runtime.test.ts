@@ -8,6 +8,50 @@ import { PicoRuntime } from '../../../runtime/runtime.js';
 import { FakeModel, response, setupTestCatalog } from '../../../../test/helpers.js';
 
 describe('collaboration Runtime persistence', () => {
+  it('uses target executor tool defaults when a child crosses executor types', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-collaboration-executor-'));
+    const workspace = join(directory, 'workspace');
+    await mkdir(workspace);
+    const store = new PicoStore(join(directory, 'runtime.sqlite'));
+    const runtime = new PicoRuntime(store, {
+      model: new FakeModel(() => response('Executor selection is complete.')),
+      plugins: [collaborationPlugin],
+      pluginDirectory: join(directory, 'empty-plugins'),
+    });
+
+    try {
+      await runtime.initialize();
+      const project = await runtime.createProject('Executor selection', workspace);
+      const parent = runtime.createThread(project.id, 'runtime', 'Parent');
+      await runtime.setThreadToolEnabled(parent.id, 'spawn_thread', false);
+      const spawn = runtime.tools.get('spawn_thread');
+      if (!spawn) throw new Error('spawn_thread was not registered');
+      const result = (await spawn.execute(
+        { prompt: 'Use the Container executor', executor: 'container' },
+        {
+          thread: parent,
+          executionId: 'container-child-spawn',
+          workspacePath: parent.workspacePath,
+          signal: new AbortController().signal,
+        },
+      )) as { threadId: string; executor: string };
+      const child = runtime.getThread(result.threadId);
+
+      expect(child?.executorKind).toBe('container');
+      expect(result.executor).toContain('Container');
+      expect((await runtime.listThreadTools(parent.id)).find((tool) => tool.name === 'spawn_thread')?.enabled).toBe(
+        false,
+      );
+      expect((await runtime.listThreadTools(child!.id)).find((tool) => tool.name === 'spawn_thread')?.enabled).toBe(
+        true,
+      );
+    } finally {
+      await runtime.shutdown();
+      store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('reuses the persisted child and its selection when a spawn is redelivered after view reconstruction', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pico-collaboration-restart-'));
     const workspace = join(directory, 'workspace');

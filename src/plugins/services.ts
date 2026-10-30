@@ -14,6 +14,10 @@ export interface PluginServices {
   };
   threads: {
     get(threadId: string): Thread | null;
+    /** Publish the current Thread projection after plugin-owned state changes. */
+    notifyStateChanged(threadId: string): void;
+    /** Deliver an idempotent status notice to the direct parent, if it is available. */
+    notifyParent(threadId: string, eventId: string, content: string): void;
     modelSelection(threadId: string): ThreadModelSelection;
     /** Preview the current full model projection without starting a model step. */
     previewModelInput(threadId: string): Promise<ProjectionInput>;
@@ -22,6 +26,8 @@ export interface PluginServices {
     list(projectId?: string): Thread[];
     updateTitle(pluginId: string, threadId: string, title: string): Thread;
     tools(threadId: string): Promise<ThreadToolView[]>;
+    /** Resolve the tool names available from a local Executor template before creating a Thread. */
+    toolNamesForExecutor(projectId: string, executorKind: ExecutorKind): Promise<string[]>;
     /** Change whether a tool is included in future model projections for this Thread. Permission remains invocation-scoped. */
     setToolEnabled(threadId: string, toolName: string, enabled: boolean): Promise<void>;
     binding(threadId: string): ExecutorBinding | null;
@@ -38,6 +44,8 @@ export interface PluginServices {
         modelSelection?: CatalogSelection;
         /** Sparse per-tool visibility overrides applied when this Thread is first created. */
         toolOverrides?: Record<string, boolean>;
+        /** Defaults to true. Set false when a child crosses executor boundaries. */
+        inheritToolSettings?: boolean;
       },
     ): Thread;
     send(
@@ -100,6 +108,8 @@ export const unavailablePluginServices: PluginServices = {
   projects: { list: unavailable },
   threads: {
     get: unavailable,
+    notifyStateChanged: unavailable,
+    notifyParent: unavailable,
     modelSelection: unavailable,
     previewModelInput: unavailable,
     validateModelSelection: unavailable,
@@ -107,6 +117,7 @@ export const unavailablePluginServices: PluginServices = {
     list: unavailable,
     updateTitle: unavailable,
     tools: unavailable,
+    toolNamesForExecutor: unavailable,
     setToolEnabled: unavailable,
     binding: unavailable,
     create: unavailable,

@@ -79,6 +79,11 @@
   border-color: #d8e6d8;
   box-shadow: inset 0 0 0 1px rgba(98, 132, 106, 0.06);
 }
+.composer-state-control.state-waiting_permission {
+  color: #896b42;
+  background: #faf5ec;
+  border-color: #efe1c9;
+}
 .composer-state-control.state-pausing {
   color: #9a744b;
   background: #faf5ec;
@@ -88,6 +93,11 @@
   color: #806d5a;
   background: #f6f2ec;
   border-color: #eee6dc;
+}
+.composer-state-control.state-model_error {
+  color: #9b5e4c;
+  background: #fbf0ed;
+  border-color: #efd9d3;
 }
 .composer-state-control.state-idle .state-dot {
   background: #9baa9d;

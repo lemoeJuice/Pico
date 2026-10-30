@@ -5,7 +5,7 @@ export function visiblePauseReason(
   pauseReason: string | null,
   transientMessages: readonly string[] = [],
 ): string | null {
-  if ((state !== 'paused' && state !== 'pausing') || !pauseReason) return null;
+  if ((state !== 'paused' && state !== 'pausing' && state !== 'model_error') || !pauseReason) return null;
   if (transientMessages.some((message) => message.length > 0 && pauseReason.includes(message))) return null;
   return pauseReason;
 }

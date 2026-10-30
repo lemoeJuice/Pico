@@ -110,6 +110,8 @@ export interface PluginContext extends Omit<PluginServices, 'models' | 'continua
     updateTitle(threadId: string, title: string): Thread;
     /** Register synchronous, required Thread initialization inside the Thread creation transaction. */
     onCreated(listener: (thread: Thread) => void): () => void;
+    /** Patch a running Thread's public state from plugin-owned durable state. */
+    patchState(patch: (thread: Thread) => Thread['state'] | null): () => void;
   };
   tools: {
     register(
@@ -256,6 +258,7 @@ export class PluginHost {
   private readonly activePlugins: PicoPlugin[] = [];
   private readonly subscriptions = new Map<string, Array<() => void>>();
   private readonly threadCreatedListeners = new Map<string, Set<(thread: Thread) => void>>();
+  private readonly threadStatePatches = new Set<(thread: Thread) => Thread['state'] | null>();
   private readonly continuations = new Map<string, (threadId: string) => boolean>();
   private readonly loadErrors: string[] = [];
   private readonly candidates = new Map<string, PluginCandidate>();
@@ -287,6 +290,15 @@ export class PluginHost {
     for (const listeners of this.threadCreatedListeners.values()) {
       for (const listener of listeners) listener(thread);
     }
+  }
+
+  patchThreadState(thread: Thread): Thread {
+    let result = thread;
+    for (const patch of this.threadStatePatches) {
+      const state = patch(result);
+      if (state) result = { ...result, state };
+    }
+    return result;
   }
 
   catalog(): PluginCatalogEntry[] {
@@ -615,6 +627,12 @@ export class PluginHost {
       threads: {
         ...this.services.threads,
         updateTitle: (threadId, title) => this.services.threads.updateTitle(plugin.id, threadId, title),
+        patchState: (patch) => {
+          this.threadStatePatches.add(patch);
+          const unsubscribe = () => { this.threadStatePatches.delete(patch); };
+          subscriptions.push(unsubscribe);
+          return unsubscribe;
+        },
         onCreated: (listener) => {
           let listeners = this.threadCreatedListeners.get(plugin.id);
           if (!listeners) {
@@ -728,6 +746,7 @@ export class PluginHost {
         contribute: (contribution) => {
           if (
             ![
+              'thread.card',
               'thread.toolbar',
               'composer.action',
               'composer.model',
@@ -748,6 +767,7 @@ export class PluginHost {
           }
           if (
             (contribution.slot === 'composer.model' ||
+              contribution.slot === 'thread.card' ||
               contribution.slot === 'tool.result' ||
               contribution.slot === 'mcp.server.card') &&
             (!contribution.entry || !contribution.component)

@@ -26,7 +26,7 @@
     draw();
   }
   function toolbar() {
-    port?.postMessage({ type: 'pico:plugin-ui:toolbar-state', badgeCount: Math.min(999, data.descendantApprovals.length) });
+    port?.postMessage({ type: 'pico:plugin-ui:toolbar-state', badgeCount: 0 });
     if (!context.thread) return [{ type: 'card', children: [
       { type: 'group', layout: 'stack-compact', children: [
         { type: 'heading', text: 'Tool permissions' },
@@ -70,16 +70,7 @@
         para(tool.description),
       ] };
     });
-    const pendingChildren = data.descendantApprovals.length ? [{ type: 'card', children: [{ type: 'group', layout: 'stack-compact', children: [
-      { type: 'heading', text: 'Child Threads awaiting permission' },
-      para('Open the child Thread to review the tool call and decide.'),
-      ...data.descendantApprovals.map((approval) => ({ type: 'group', layout: 'spread', children: [
-        para(`${approval.threadTitle || 'Child Thread'}: ${approval.toolName}`),
-        button('Open Thread', `open:${approval.threadId}`),
-      ] })),
-    ] }] }] : [];
     return [
-      ...pendingChildren,
       { type: 'card', children: [{ type: 'group', layout: 'stack-compact', children: content }] },
       { type: 'card', children: [{ type: 'group', layout: 'stack-compact', children: [
       { type: 'heading', text: 'Per-tool defaults' },
@@ -87,6 +78,28 @@
       { type: 'group', layout: 'stack-compact', children: toolRows.length ? toolRows : [para('Tool definitions will appear after the next Model projection.')] },
       ] }] },
     ];
+  }
+  function childThreadApprovals() {
+    if (!context.thread || data.descendantApprovals.length === 0) return [];
+    return data.descendantApprovals.map((approval) => ({ type: 'card', children: [{ type: 'group', layout: 'stack-compact', children: [
+      { type: 'heading', text: `${approval.threadTitle || 'Child Thread'} · ${approval.toolName}` },
+      para('This child Thread is waiting for permission.'),
+      ...(error ? [{ type: 'status', text: error, tone: 'danger' }] : []),
+      { type: 'disclosure', label: 'View tool call details', open: expandedChildApprovals.has(approval.executionId), actionId: `child-expand:${approval.executionId}`, children: [
+        ...(approval.reviewer ? [
+          { type: 'status', text: `Auto-review: ${approval.reviewer.outcome}`, tone: approval.reviewer.outcome === 'allow' ? 'success' : approval.reviewer.outcome === 'deny' ? 'danger' : 'neutral' },
+          para(approval.reviewer.reason || 'No reviewer explanation was provided.'),
+          ...(approval.reviewer.model ? [para(`Reviewer model: ${approval.reviewer.model}`)] : []),
+        ] : []),
+        { type: 'heading', level: 4, text: 'Tool arguments' },
+        para(JSON.stringify(approval.arguments ?? {}, null, 2)),
+        { type: 'actions', children: [
+          button('Deny', `child-decision:deny:${encodeURIComponent(approval.executionId)}`, busy, 'danger'),
+          button('Allow once', `child-decision:allow:${encodeURIComponent(approval.executionId)}`, busy, 'primary'),
+          button('Open Thread', `open:${approval.threadId}`, busy),
+        ] },
+      ] },
+    ] }] }));
   }
   function resultActions() {
     const execution = context.toolResult ?? context.execution, approval = currentApproval();
@@ -115,12 +128,15 @@
     para('Applies to this server’s tools in all Threads unless a Thread has its own rule.'),
     ...(error ? [{ type: 'status', text: error, tone: 'danger' }] : []),
   ] }]; }
-  function draw() { const nodes = init?.viewId === 'ToolPermissions' ? toolbar() : init?.viewId === 'McpServerPermissions' ? serverControl() : resultActions(); port?.postMessage({ type: 'pico:plugin-ui:render', tree: nodes }); }
+  const expandedChildApprovals = new Set();
+  function draw() { const nodes = init?.viewId === 'ToolPermissions' ? toolbar() : init?.viewId === 'ChildThreadApprovals' ? childThreadApprovals() : init?.viewId === 'McpServerPermissions' ? serverControl() : resultActions(); port?.postMessage({ type: 'pico:plugin-ui:render', tree: nodes }); }
   async function update(action, body) { busy = true; error = ''; draw(); try { await api(action.path, action.method || 'PUT', body); await refresh(); } catch (reason) { error = reason instanceof Error ? reason.message : String(reason); } finally { busy = false; draw(); } }
   async function act(action) {
     const id = action.actionId;
     if (id === 'mcp-server') { if (!context.mcpServer?.id) return; await update({ path: '/mcp-servers' }, { serverId: context.mcpServer.id, enabled: action.value === 'true' }); return; }
     if (id.startsWith('open:')) { try { await send('open-thread', { threadId: id.slice(5) }); } catch (reason) { error = reason instanceof Error ? reason.message : String(reason); draw(); } return; }
+    if (id.startsWith('child-expand:')) { const executionId = id.slice('child-expand:'.length); if (expandedChildApprovals.has(executionId)) expandedChildApprovals.delete(executionId); else expandedChildApprovals.add(executionId); draw(); return; }
+    if (id.startsWith('child-decision:')) { const prefix = 'child-decision:', separator = id.indexOf(':', prefix.length); if (separator < 0) return; const decision = id.slice(prefix.length, separator), encodedExecutionId = id.slice(separator + 1); if (!encodedExecutionId || !['allow', 'deny'].includes(decision)) return; let executionId; try { executionId = decodeURIComponent(encodedExecutionId); } catch { return; } await update({ path: '/approvals', method: 'POST' }, { executionId, allow: decision === 'allow', rememberForThread: false }); return; }
     if (id.startsWith('tool:')) { const toolName = id.slice(5), tool = data.tools.find((x) => x.name === toolName); if (!tool || !context.thread) return; await update({ path: '/rules' }, { threadId: context.thread.id, toolName, policy: action.value === 'true' ? 'allow' : 'ask' }); return; }
     if (id === 'reviewer' || id === 'reviewer-denials') { if (!context.thread) return; await update({ path: id === 'reviewer' ? '/reviewer' : '/reviewer-denials' }, { threadId: context.thread.id, enabled: action.value === 'true' }); return; }
     if (id.startsWith('decision:')) { const approval = currentApproval(); if (!approval?.executionId) return; const allow = id !== 'decision:deny'; await update({ path: '/approvals', method: 'POST' }, { executionId: approval.executionId, allow, rememberForThread: allow && id === 'decision:allow-thread' }); return; }

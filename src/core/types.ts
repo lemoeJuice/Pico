@@ -1,6 +1,6 @@
 import type { CatalogSelection } from '../contracts/model-catalog.js';
 export type ExecutorKind = 'container' | 'host' | 'runtime';
-export type ThreadState = 'idle' | 'running' | 'pausing' | 'paused';
+export type ThreadState = 'idle' | 'running' | 'pausing' | 'paused' | 'model_error' | 'waiting_permission';
 export type ExecutionKind = 'model' | 'tool';
 export type ExecutionStatus = 'pending' | 'running' | 'completed' | 'failed' | 'interrupted';
 export type MessageRole = 'user' | 'assistant';
@@ -40,6 +40,7 @@ export interface Thread {
   createdByAgent: boolean;
   pauseRequested: boolean;
   pauseReason: string | null;
+  pauseCode?: 'model_error' | null;
   createdAt: string;
   archivedAt?: string | null;
   deletedAt?: string | null;
@@ -167,6 +168,7 @@ export interface ToolDefinition {
 
 export interface UiContribution {
   slot:
+    | 'thread.card'
     | 'thread.toolbar'
     | 'composer.action'
     | 'composer.model'

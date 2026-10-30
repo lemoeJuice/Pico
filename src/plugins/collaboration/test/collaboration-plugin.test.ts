@@ -69,16 +69,22 @@ function setup() {
       list: (projectId?: string) =>
         [...threadsById.values()].filter((thread) => !projectId || thread.projectId === projectId),
       tools: async () => [],
-      binding: () => ({ remoteConnectionId: null }),
+      toolNamesForExecutor: async () => [],
+      binding: () => ({ remoteConnectionId: parent.executorRemote ? 'remote-1' : null }),
       create: (
         projectId: string,
-        _kind: Thread['executorKind'],
+        kind: Thread['executorKind'],
         title: string,
         options: { parentThreadId?: string | null; idempotencyKey?: string; modelSelection?: CatalogSelection },
       ) => {
         const existing = options.idempotencyKey ? createByKey.get(options.idempotencyKey) : undefined;
         if (existing) return existing;
-        const child = { ...makeThread(`child-${++idCount}`, projectId, options.parentThreadId ?? null), title };
+        const child = {
+          ...makeThread(`child-${++idCount}`, projectId, options.parentThreadId ?? null),
+          executorKind: kind,
+          executorLabel: `${kind === 'runtime' ? 'Chat' : kind === 'container' ? 'Container' : 'Host'} · Project`,
+          title,
+        };
         threadsById.set(child.id, child);
         if (options.modelSelection) selectionByThread.set(child.id, structuredClone(options.modelSelection));
         if (options.idempotencyKey) createByKey.set(options.idempotencyKey, child);
@@ -196,6 +202,39 @@ describe('Collaboration plugin', () => {
     await expect(spawn({ prompt: 'Different task' }, toolContext)).rejects.toThrow('already used');
   });
 
+  it('lists visible Project Threads with pagination and excludes archived or hidden children', async () => {
+    const env = setup();
+    const old = makeThread('old');
+    old.createdAt = '2025-01-01T00:00:00.000Z';
+    const latest = makeThread('latest', 'project-1', 'parent');
+    latest.createdAt = '2026-02-01T00:00:00.000Z';
+    const archived = makeThread('archived', 'project-1', 'parent');
+    archived.archivedAt = '2026-02-02T00:00:00.000Z';
+    const hidden = makeThread('hidden', 'project-1', 'parent');
+    hidden.deletedAt = '2026-02-03T00:00:00.000Z';
+    const foreign = makeThread('foreign', 'project-2');
+    for (const thread of [old, latest, archived, hidden, foreign]) env.threadsById.set(thread.id, thread);
+
+    const context = { thread: env.parent, executionId: 'list-1' };
+    const list = env.tools.get('list_project_threads')!;
+    expect(list({ limit: 2 }, context)).toEqual({
+      threads: [expect.objectContaining({ threadId: 'latest' }), expect.objectContaining({ threadId: 'parent' })],
+      offset: 0,
+      next_offset: 2,
+      has_more: true,
+    });
+    expect(list({ offset: 2, limit: 2 }, context)).toMatchObject({
+      threads: [expect.objectContaining({ threadId: 'old' })],
+      next_offset: null,
+      has_more: false,
+    });
+    expect(await env.tools.get('list_child_threads')!({}, context)).toEqual([
+      expect.objectContaining({ threadId: 'latest' }),
+    ]);
+    expect(() => list({ offset: -1 }, context)).toThrow('offset must be a non-negative integer');
+    expect(() => list({ limit: 101 }, context)).toThrow('limit must be an integer between 1 and 100');
+  });
+
   it('explains mixed history arguments and accepts separate page and chunk retries', () => {
     const env = setup();
     env.canonicalRecords.push({ ...env.canonicalRecords[0]!, id: 'record-2', seq: 2 });
@@ -229,6 +268,51 @@ describe('Collaboration plugin', () => {
     expect(JSON.parse(chunk.records[0]!.chunk.text)).toEqual(page.records[0]);
     expect(chunk.records[0]).toMatchObject({ next_offset: null, complete: true });
     expect(chunk.has_more).toBe(false);
+  });
+
+  it('selects an explicit executor and rejects reusing the same execution with a different executor', async () => {
+    const env = setup();
+    const spawn = env.tools.get('spawn_thread')!;
+    const context = { thread: env.parent, executionId: 'executor-selection' };
+    const created = (await spawn({ prompt: 'Run this in Chat mode', executor: 'runtime' }, context)) as {
+      threadId: string;
+      executor: string;
+    };
+
+    expect(env.threadsById.get(created.threadId)?.executorKind).toBe('runtime');
+    expect(created.executor).toContain('Chat');
+    await expect(spawn({ prompt: 'Run this in Chat mode', executor: 'container' }, context)).rejects.toThrow(
+      'different executor',
+    );
+  });
+
+  it('rejects invalid target tool settings before creating a child', async () => {
+    const env = setup();
+    const spawn = env.tools.get('spawn_thread')!;
+
+    await expect(
+      spawn(
+        { prompt: 'Use an unknown Container tool', executor: 'container', tool_settings: [{ name: 'missing', enabled: true }] },
+        { thread: env.parent, executionId: 'invalid-target-tool' },
+      ),
+    ).rejects.toThrow('target Executor: missing');
+    expect(env.threadsById.size).toBe(1);
+    expect(env.sent.size).toBe(0);
+  });
+
+  it('treats inherited Remote Host and explicit local Host as different idempotent requests', async () => {
+    const env = setup();
+    env.parent.executorKind = 'host';
+    env.parent.executorRemote = true;
+    const spawn = env.tools.get('spawn_thread')!;
+    const context = { thread: env.parent, executionId: 'remote-host-selection' };
+
+    const inherited = (await spawn({ prompt: 'Inspect the remote workspace' }, context)) as { threadId: string };
+    await expect(spawn({ prompt: 'Inspect the remote workspace', executor: 'host' }, context)).rejects.toThrow(
+      'different executor',
+    );
+    expect(env.threadsById.size).toBe(2);
+    expect(env.threadsById.has(inherited.threadId)).toBe(true);
   });
 
   it('bounds history pages and returns oversized records in bounded chunks', async () => {

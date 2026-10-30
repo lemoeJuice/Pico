@@ -85,6 +85,14 @@
   background: #c4a17e;
   box-shadow: 0 0 0 3px rgba(196, 161, 126, 0.12);
 }
+.thread-state-dot.state-waiting_permission {
+  background: #c49a67;
+  box-shadow: 0 0 0 3px rgba(196, 154, 103, 0.12);
+}
+.thread-state-dot.state-model_error {
+  background: #c47d69;
+  box-shadow: 0 0 0 3px rgba(196, 125, 105, 0.12);
+}
 .thread-state-dot {
   flex: 0 0 6px;
 }

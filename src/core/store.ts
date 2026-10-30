@@ -161,6 +161,7 @@ export class PicoStore {
         created_by_agent INTEGER NOT NULL DEFAULT 0,
         pause_requested INTEGER NOT NULL DEFAULT 0,
         pause_reason TEXT,
+        pause_code TEXT,
         created_at TEXT NOT NULL,
         archived_at TEXT,
         deleted_at TEXT
@@ -631,6 +632,9 @@ export class PicoStore {
     if (!columns.some((column) => column.name === 'deleted_at')) {
       this.db.exec('ALTER TABLE threads ADD COLUMN deleted_at TEXT;');
     }
+    if (!columns.some((column) => column.name === 'pause_code')) {
+      this.db.exec('ALTER TABLE threads ADD COLUMN pause_code TEXT;');
+    }
   }
 
   private migratePluginModelCallFingerprint(): void {
@@ -972,6 +976,7 @@ export class PicoStore {
       createdByAgent: row.created_by_agent === 1,
       pauseRequested: row.pause_requested === 1,
       pauseReason: typeof row.pause_reason === 'string' ? row.pause_reason : null,
+      pauseCode: row.pause_code === 'model_error' ? 'model_error' : null,
       createdAt: String(row.created_at),
       archivedAt: typeof row.archived_at === 'string' ? row.archived_at : null,
       deletedAt: typeof row.deleted_at === 'string' ? row.deleted_at : null,
@@ -979,15 +984,16 @@ export class PicoStore {
     };
   }
 
-  setPause(threadId: string, paused: boolean, reason: string | null = null): void {
+  setPause(threadId: string, paused: boolean, reason: string | null = null, code: 'model_error' | null = null): void {
     this.transaction(() => {
       const result = this.db
-        .prepare('UPDATE threads SET pause_requested = ?, pause_reason = ? WHERE id = ?')
-        .run(paused ? 1 : 0, paused ? reason : null, threadId);
+        .prepare('UPDATE threads SET pause_requested = ?, pause_reason = ?, pause_code = ? WHERE id = ?')
+        .run(paused ? 1 : 0, paused ? reason : null, paused ? code : null, threadId);
       if (result.changes === 0) throw new ServiceError(404, 'Thread not found');
       this.workflowFact(`thread:${threadId}`, `pause:${threadId}`, {
         pauseRequested: paused,
         pauseReason: paused ? reason : null,
+        pauseCode: paused ? code : null,
       });
     });
   }
@@ -1056,7 +1062,7 @@ export class PicoStore {
       this.db.exec(
         'DELETE FROM tool_execution_routes; DELETE FROM executions; DELETE FROM plugin_state; DELETE FROM plugin_model_calls; DELETE FROM thread_model_selections;',
       );
-      this.db.prepare('UPDATE threads SET pause_requested = 0, pause_reason = NULL').run();
+      this.db.prepare('UPDATE threads SET pause_requested = 0, pause_reason = NULL, pause_code = NULL').run();
       const facts = this.db
         .prepare(
           `SELECT * FROM canonical_records
@@ -1078,10 +1084,11 @@ export class PicoStore {
         if (envelope.key.startsWith('pause:')) {
           const threadId = envelope.key.slice('pause:'.length);
           this.db
-            .prepare('UPDATE threads SET pause_requested = ?, pause_reason = ? WHERE id = ?')
+            .prepare('UPDATE threads SET pause_requested = ?, pause_reason = ?, pause_code = ? WHERE id = ?')
             .run(
               value.pauseRequested ? 1 : 0,
               value.pauseRequested ? String(value.pauseReason ?? '') || null : null,
+              value.pauseRequested && value.pauseCode === 'model_error' ? 'model_error' : null,
               threadId,
             );
         } else if (envelope.key.startsWith('execution:')) {

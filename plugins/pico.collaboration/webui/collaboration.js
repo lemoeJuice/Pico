@@ -42,7 +42,7 @@
       if (child.pauseReason) content.push(para(child.pauseReason));
       content.push({ type: 'actions', children: [
         button('Open', `open:${child.id}`, pending),
-        button(child.state === 'paused' ? 'Continue' : 'Pause', `state:${child.id}:${child.state === 'paused' ? 'resume' : 'pause'}`, pending),
+        button(child.state === 'paused' || child.state === 'model_error' ? 'Continue' : 'Pause', `state:${child.id}:${child.state === 'paused' || child.state === 'model_error' ? 'resume' : 'pause'}`, pending),
       ] });
       content.push({ type: 'textArea', label: `Message ${child.title}`, value: messages.get(child.id) ?? '', placeholder: 'Send a follow-up message…', actionId: `message:${child.id}`, rows: 'compact', maxLength: 20000, disabled: pending });
       content.push({ type: 'actions', children: [button('Send', `send:${child.id}`, pending || !(messages.get(child.id) ?? '').trim(),)] });

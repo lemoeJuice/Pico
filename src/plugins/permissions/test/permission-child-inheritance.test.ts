@@ -136,9 +136,55 @@ describe('Permission child Thread inheritance', () => {
     }
   });
 
+  it('does not copy permission rules or Auto-review settings when the child changes executor', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('Child task complete.')), {
+      plugins: [permissionPlugin, collaborationPlugin],
+    });
+    const parent = env.runtime.createThread(env.project.id, 'runtime', 'Parent');
+
+    try {
+      await permissionRequest(env.runtime, 'PUT', '/rules', {
+        threadId: parent.id,
+        toolName: 'read_file',
+        policy: 'allow',
+      });
+      await permissionRequest(env.runtime, 'PUT', '/reviewer', { threadId: parent.id, enabled: true });
+      await permissionRequest(env.runtime, 'PUT', '/reviewer-denials', { threadId: parent.id, enabled: true });
+
+      const spawn = env.runtime.tools.get('spawn_thread');
+      if (!spawn) throw new Error('spawn_thread was not registered');
+      const result = (await spawn.execute(
+        { prompt: 'Run this task in a Container.', executor: 'container' },
+        {
+          thread: parent,
+          executionId: 'cross-executor-permission-spawn',
+          workspacePath: parent.workspacePath,
+          signal: new AbortController().signal,
+        },
+      )) as { threadId: string };
+      const child = env.runtime.getThread(result.threadId);
+      expect(child?.executorKind).toBe('container');
+
+      const rules = env.store.getPluginState<Record<string, Record<string, string>>>('pico.permissions', 'rules', {});
+      expect(rules[parent.id]).toEqual({ read_file: 'allow' });
+      expect(rules[child!.id]).toBeUndefined();
+      expect(
+        await permissionRequest<{ autoReview: boolean; autoReviewDenials: boolean }>(
+          env.runtime,
+          'GET',
+          '/threads',
+          undefined,
+          child!.id,
+        ),
+      ).toMatchObject({ autoReview: false, autoReviewDenials: false });
+    } finally {
+      await env.cleanup();
+    }
+  });
+
   it('aggregates pending approvals from all descendants and clears them after resolution', async () => {
     const model = new FakeModel((prompt) =>
-      prompt.turns.some((turn) => turn.kind === 'tool_result')
+      prompt.system.includes('This Thread has no parent.') || prompt.turns.some((turn) => turn.kind === 'tool_result')
         ? response('The child task is complete.')
         : response('', [
             {
@@ -221,13 +267,20 @@ describe('Permission child Thread inheritance', () => {
       const unrelatedApproval = await waitForApproval(unrelatedChild.threadId);
 
       const parentView = await permissionRequest<{
-        descendantApprovals: Array<{ executionId: string; threadId: string; threadTitle: string }>;
+        descendantApprovals: Array<{
+          executionId: string;
+          threadId: string;
+          threadTitle: string;
+          arguments: Record<string, unknown>;
+          reviewer?: { model: string; outcome: string; reason: string };
+        }>;
       }>(env.runtime, 'GET', '/threads', undefined, parent.id);
       expect(parentView.descendantApprovals).toEqual([
         expect.objectContaining({
           executionId: grandchildApproval.executionId,
           threadId: grandchild.threadId,
           threadTitle: 'Grandchild',
+          arguments: {},
         }),
       ]);
       expect(

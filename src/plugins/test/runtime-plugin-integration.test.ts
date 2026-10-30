@@ -23,6 +23,7 @@ describe('First-party plugin Runtime integration', () => {
         'spawn_thread',
         'list_models',
         'send_thread_message',
+        'list_project_threads',
         'list_child_threads',
         'read_thread_history',
       ]);

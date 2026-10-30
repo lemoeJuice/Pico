@@ -5,7 +5,8 @@ import type { ModelPrompt } from '../contracts/model.js';
 
 type PermissionPolicy = 'allow' | 'deny' | 'ask';
 
-export function defaultPolicy(source: 'runtime' | 'executor' | 'mcp' | null, thread: Thread): PermissionPolicy {
+export function defaultPolicy(source: 'runtime' | 'executor' | 'mcp' | null, thread: Thread, toolName?: string): PermissionPolicy {
+  if (toolName === 'list_project_threads') return 'ask';
   if (source === 'mcp') return 'ask';
   if (source === 'runtime') return 'allow';
   return thread.executorKind === 'host' ? 'ask' : 'allow';
@@ -99,9 +100,18 @@ export const permissionPlugin: PicoPlugin = {
     const readAllowedServers = (): Record<string, boolean> =>
       objectValue<Record<string, boolean>>(state.get('allowedMcpServers', {}));
     const readApprovals = (): PermissionApprovals => objectValue<PermissionApprovals>(state.get('approvals', {}));
+    threads.patchState((thread) => {
+      if (thread.state !== 'running') return null;
+      return Object.values(readApprovals()).some(
+        (approval) => approval.threadId === thread.id && approval.status === 'pending' &&
+          executions.get(approval.executionId)?.status === 'pending',
+      ) ? 'waiting_permission' : null;
+    });
     threads.onCreated((thread) => {
       const parentThreadId = thread.parentThreadId;
       if (!parentThreadId) return;
+      const parent = threads.get(parentThreadId);
+      if (!parent || parent.executorKind !== thread.executorKind || parent.executorRemote !== thread.executorRemote) return;
       state.transaction(() => {
         const rules = readRules();
         if (!Object.hasOwn(rules, thread.id) && Object.hasOwn(rules, parentThreadId)) {
@@ -158,6 +168,7 @@ export const permissionPlugin: PicoPlugin = {
           source: options.source,
         });
       });
+      threads.notifyStateChanged(approval.threadId);
       const waiters = decisionWaiters.get(approval.executionId);
       if (waiters && updated.status !== 'pending' && updated.status !== 'cancelled') {
         decisionWaiters.delete(approval.executionId);
@@ -184,7 +195,7 @@ export const permissionPlugin: PicoPlugin = {
       const configured = readRules()[threadId]?.[toolName];
       if (configured) return configured;
       if (source === 'mcp' && mcpServerId && readAllowedServers()[mcpServerId] === true) return 'allow';
-      return defaultPolicy(source, thread);
+      return defaultPolicy(source, thread, toolName);
     };
 
     const createApproval = (input: ToolInvocationInput): PermissionApproval => {
@@ -207,6 +218,7 @@ export const permissionPlugin: PicoPlugin = {
           arguments: input.call.arguments,
         });
       });
+      threads.notifyStateChanged(input.thread.id);
       return approval;
     };
 
@@ -458,7 +470,7 @@ export const permissionPlugin: PicoPlugin = {
               name: tool.name,
               description: tool.description,
               ...(tool.mcpServerId ? { mcpServerId: tool.mcpServerId } : {}),
-              policy: defaultPolicy(tool.source, thread),
+              policy: defaultPolicy(tool.source, thread, tool.name),
             })));
       const rules = readRules()[threadId] ?? {};
       const allowedServers = readAllowedServers();
@@ -477,6 +489,7 @@ export const permissionPlugin: PicoPlugin = {
         policy: defaultPolicy(
           input.toolSources?.[tool.name] ?? (input.thread.executorKind === 'runtime' ? 'runtime' : 'executor'),
           input.thread,
+          tool.name,
         ),
       }));
       const nextAvailable = {
@@ -529,6 +542,9 @@ export const permissionPlugin: PicoPlugin = {
             return input.fail(reason, deniedResult(reason, denied.reviewer ? { reviewer: denied.reviewer } : {}));
           }
         }
+        if (approval.status === 'pending') {
+          threads.notifyParent(input.thread.id, `permission:${approval.executionId}`, `Child Thread "${input.thread.title}" (${input.thread.id}) is waiting for user approval of ${approval.toolName}. The user can review the request in the parent Thread.`);
+        }
         const approved = await awaitDecision(approval, input.signal);
         if (!approved) {
           const reason =
@@ -541,6 +557,14 @@ export const permissionPlugin: PicoPlugin = {
       return next(input);
     });
 
+    ui.contribute({
+      slot: 'thread.card',
+      id: 'child-thread-approvals',
+      label: 'Child Thread approvals',
+      description: 'Review pending permission requests from child Threads.',
+      entry: 'webui',
+      component: 'ChildThreadApprovals',
+    });
     ui.contribute({
       slot: 'thread.toolbar',
       id: 'tool-permissions',
@@ -589,6 +613,7 @@ export const permissionPlugin: PicoPlugin = {
       const queue = [threadId];
       for (let index = 0; index < queue.length; index += 1) {
         for (const child of children.get(queue[index]!) ?? []) {
+          if (child.archivedAt || child.deletedAt) continue;
           if (child.id === threadId || descendants.has(child.id)) continue;
           descendants.set(child.id, child);
           queue.push(child.id);
@@ -602,6 +627,16 @@ export const permissionPlugin: PicoPlugin = {
           threadId: approval.threadId,
           toolName: approval.toolName,
           threadTitle: descendants.get(approval.threadId)!.title,
+          arguments: approval.arguments,
+          ...(approval.reviewer
+            ? {
+                reviewer: {
+                  model: approval.reviewer.model,
+                  outcome: approval.reviewer.outcome,
+                  reason: approval.reviewer.reason.slice(0, 2000),
+                },
+              }
+            : {}),
         }));
       return {
         threadId,

@@ -30,6 +30,8 @@ type SpawnIndex = Record<
     threadId: string;
     prompt: string;
     createdAt: string;
+    executorKind?: Thread['executorKind'];
+    executorIdentity?: string;
     modelSelection?: CatalogSelection;
     requestedModel?: CatalogSelection | null;
     toolOverrides?: Record<string, boolean>;
@@ -44,7 +46,7 @@ function readSpawnIndex(get: PluginContext['state']['get']): SpawnIndex {
 function childThreads(threads: CollaborationServices['threads'], parent: Thread): Thread[] {
   return threads
     .list(parent.projectId)
-    .filter((thread) => thread.parentThreadId === parent.id)
+    .filter((thread) => thread.parentThreadId === parent.id && thread.archivedAt == null && thread.deletedAt == null)
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
 
@@ -97,6 +99,12 @@ export const collaborationPlugin: PicoPlugin = {
           properties: {
             prompt: { type: 'string', minLength: 1 },
             title: { type: 'string' },
+            executor: {
+              type: 'string',
+              enum: ['inherit', 'runtime', 'container', 'host'],
+              description:
+                'Executor for the child Thread. Defaults to inherit; this preserves a parent Remote Host binding when present. Explicit host selects the local Host executor.',
+            },
             model: {
               type: 'object',
               description:
@@ -143,6 +151,22 @@ export const collaborationPlugin: PicoPlugin = {
           prompt.replace(/\s+/g, ' ').slice(0, 60) ||
           'Child Thread';
         if (title.length > 120) throw new Error('Child Thread title must be at most 120 characters');
+        const requestedExecutor = args.executor ?? 'inherit';
+        if (!['inherit', 'runtime', 'container', 'host'].includes(String(requestedExecutor))) {
+          throw new Error('executor must be inherit, runtime, container, or host');
+        }
+        const executorKind = (
+          requestedExecutor === 'inherit' ? parent.executorKind : requestedExecutor
+        ) as Thread['executorKind'];
+        const preserveRemoteBinding = requestedExecutor === 'inherit' && parent.executorRemote;
+        const sameExecutorTemplate =
+          executorKind === parent.executorKind && preserveRemoteBinding === parent.executorRemote;
+        const parentBinding = threads.binding(parent.id);
+        const executorIdentity = stable({
+          executorKind,
+          remote: preserveRemoteBinding,
+          remoteConnectionId: preserveRemoteBinding ? parentBinding?.remoteConnectionId ?? null : null,
+        });
 
         const requestedToolOverrides: Record<string, boolean> = {};
         if (args.tool_settings !== undefined) {
@@ -170,9 +194,17 @@ export const collaborationPlugin: PicoPlugin = {
             )
           : undefined;
         if (normalizedToolOverrides) {
-          const availableToolNames = new Set((await threads.tools(parent.id)).map((tool) => tool.name));
+          const availableToolNames = new Set(
+            sameExecutorTemplate
+              ? (await threads.tools(parent.id)).map((tool) => tool.name)
+              : await threads.toolNamesForExecutor(parent.projectId, executorKind),
+          );
           const unknownTool = Object.keys(normalizedToolOverrides).find((name) => !availableToolNames.has(name));
-          if (unknownTool) throw new Error(`Tool is not available in the parent Thread: ${unknownTool}`);
+          if (unknownTool) {
+            throw new Error(
+              `Tool is not available in the ${sameExecutorTemplate ? 'parent Thread' : 'target Executor'}: ${unknownTool}`,
+            );
+          }
         }
 
         let requestedModel: CatalogSelection | null = null;
@@ -211,6 +243,16 @@ export const collaborationPlugin: PicoPlugin = {
         }
         if (previous && stable(previous.requestedModel ?? null) !== stable(requestedModel))
           throw new Error('This tool execution ID was already used with a different model selection');
+        const legacyExecutorIdentity = stable({
+          executorKind: parent.executorKind,
+          remote: parent.executorRemote,
+          remoteConnectionId: parentBinding?.remoteConnectionId ?? null,
+        });
+        if (
+          previous &&
+          (previous.executorIdentity ?? legacyExecutorIdentity) !== executorIdentity
+        )
+          throw new Error('This tool execution ID was already used with a different executor');
         if (!child) {
           let modelSelection = previous?.modelSelection;
           if (!modelSelection) {
@@ -218,16 +260,18 @@ export const collaborationPlugin: PicoPlugin = {
               ? models.validateSelection(requestedModel)
               : structuredClone(threads.modelSelection(parent.id) as unknown as CatalogSelection);
           }
-          const binding = threads.binding(parent.id);
           const taskKey = `spawn:${parent.id}:${stableKey}`;
           state.transaction(() => {
-            child = threads.create(parent.projectId, parent.executorKind, title, {
+            child = threads.create(parent.projectId, executorKind, title, {
               parentThreadId: parent.id,
               createdByAgent: true,
               idempotencyKey: taskKey,
-              ...(binding?.remoteConnectionId ? { remoteConnectionId: binding.remoteConnectionId } : {}),
-              ...(parent.executorRemote ? { workspacePath: parent.workspacePath } : {}),
+              ...(preserveRemoteBinding && parentBinding?.remoteConnectionId
+                ? { remoteConnectionId: parentBinding.remoteConnectionId }
+                : {}),
+              ...(preserveRemoteBinding ? { workspacePath: parent.workspacePath } : {}),
               modelSelection: modelSelection as unknown as ThreadModelSelection,
+              inheritToolSettings: sameExecutorTemplate,
               ...(normalizedToolOverrides ? { toolOverrides: normalizedToolOverrides } : {}),
             });
             const current = readSpawnIndex(state.get);
@@ -239,6 +283,8 @@ export const collaborationPlugin: PicoPlugin = {
                 createdAt: new Date().toISOString(),
                 modelSelection,
                 requestedModel,
+                executorKind,
+                executorIdentity,
                 ...(normalizedToolOverrides ? { toolOverrides: normalizedToolOverrides } : {}),
               },
             });
@@ -311,6 +357,52 @@ export const collaborationPlugin: PicoPlugin = {
         }
         if (target.id === sender.id) throw new Error('Cannot send a message to the current Thread');
         return threads.send(sender.id, target.id, content, `${toolContext.executionId}:message`);
+      },
+    );
+
+    tools.register(
+      {
+        name: 'list_project_threads',
+        description:
+          'List visible, non-archived Threads in the current Project, newest first. Use this to discover a Thread before reading its history with read_thread_history. Results are paginated; pass offset=next_offset to continue.',
+        parameters: {
+          type: 'object',
+          properties: {
+            offset: { type: 'integer', minimum: 0, description: 'Number of Threads to skip; defaults to 0.' },
+            limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Maximum results; defaults to 50.' },
+          },
+          additionalProperties: false,
+        },
+      },
+      (args, toolContext) => {
+        const current = toolContext.thread;
+        if (!current) throw new Error('Thread context is missing');
+        const offset = args.offset === undefined ? 0 : args.offset;
+        const limit = args.limit === undefined ? 50 : args.limit;
+        if (!Number.isInteger(offset) || (offset as number) < 0)
+          throw new Error('offset must be a non-negative integer');
+        if (!Number.isInteger(limit) || (limit as number) < 1 || (limit as number) > 100) {
+          throw new Error('limit must be an integer between 1 and 100');
+        }
+        const visible = threads
+          .list(current.projectId)
+          .filter((thread) => thread.archivedAt == null && thread.deletedAt == null)
+          .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+        const page = visible.slice(offset as number, (offset as number) + (limit as number));
+        const nextOffset = (offset as number) + page.length;
+        return {
+          threads: page.map((thread) => ({
+            threadId: thread.id,
+            title: thread.title,
+            state: thread.state,
+            executor: thread.executorLabel,
+            parentThreadId: thread.parentThreadId,
+            createdAt: thread.createdAt,
+          })),
+          offset,
+          next_offset: nextOffset < visible.length ? nextOffset : null,
+          has_more: nextOffset < visible.length,
+        };
       },
     );
 

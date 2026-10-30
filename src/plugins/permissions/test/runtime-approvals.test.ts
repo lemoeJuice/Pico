@@ -82,15 +82,74 @@ describe('Permissions Runtime integration', () => {
         'spawn_thread',
         'list_models',
         'send_thread_message',
+        'list_project_threads',
         'list_child_threads',
         'read_thread_history',
       ]);
+      expect((await permissionView(env.runtime, thread.id)).tools.find((tool) => tool.name === 'list_project_threads')?.policy)
+        .toBe('ask');
+      await setPermission(env.runtime, thread.id, 'list_project_threads', 'allow');
+      expect((await permissionView(env.runtime, thread.id)).tools.find((tool) => tool.name === 'list_project_threads')?.policy)
+        .toBe('allow');
       expect(
         env.runtime
           .pluginInfo()
           .ui.filter((item) => item.pluginId === 'pico.permissions')
           .map((item) => item.slot),
-      ).toEqual(['thread.toolbar', 'tool.result', 'mcp.server.card']);
+      ).toEqual(['thread.card', 'thread.toolbar', 'tool.result', 'mcp.server.card']);
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('sets a child to waiting_permission, notifies a paused parent, and clears the state after approval', async () => {
+    const model = new FakeModel((prompt) =>
+      prompt.turns.some((turn) => turn.kind === 'tool_result')
+        ? response('The child task is complete.')
+        : response('', [{ id: 'child-permission-call', name: 'list_project_threads', arguments: {} }]),
+    );
+    const env = await setupRuntime(model, { plugins: [permissionPlugin, collaborationPlugin] });
+    const parent = env.createThread('runtime', 'Parent');
+    try {
+      env.runtime.pause(parent.id);
+
+      const spawn = env.runtime.tools.get('spawn_thread');
+      if (!spawn) throw new Error('spawn_thread was not registered');
+      const child = (await spawn.execute(
+        { prompt: 'Perform a task that requires approval.', title: 'Approval child' },
+        {
+          thread: parent,
+          executionId: 'waiting-permission-child',
+          workspacePath: parent.workspacePath,
+          signal: new AbortController().signal,
+        },
+      )) as { threadId: string };
+
+      await untilAsync(async () => env.runtime.getThread(child.threadId)?.state === 'waiting_permission');
+      const pending = (await permissionView(env.runtime, child.threadId)).approvals.find(
+        (approval) => approval.status === 'pending',
+      );
+      expect(pending).toBeDefined();
+      expect(env.runtime.getThread(parent.id)).toMatchObject({ state: 'paused', pauseRequested: true });
+      expect(
+        env.store.listRecords(parent.id).some(
+          (record) =>
+            record.kind === 'message' &&
+            record.id.includes(`permission:${pending!.executionId}`) &&
+            record.payload.source === 'child' &&
+            record.payload.senderThreadId === child.threadId,
+        ),
+      ).toBe(true);
+
+      await decidePermission(env.runtime, pending!.executionId, true);
+      await env.runtime.drain();
+      expect(
+        (await permissionView(env.runtime, child.threadId)).approvals.find(
+          (approval) => approval.executionId === pending!.executionId,
+        )?.status,
+      ).toBe('allowed');
+      expect(env.runtime.getThread(child.threadId)?.state).not.toBe('waiting_permission');
+      expect(env.runtime.getThread(parent.id)).toMatchObject({ state: 'paused', pauseRequested: true });
     } finally {
       await env.cleanup();
     }

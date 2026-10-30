@@ -398,13 +398,15 @@ function ThreadStateControl({
   onAction(action: 'pause' | 'continue' | 'interrupt'): void;
 }) {
   const control =
-    state === 'running'
-      ? { label: 'Pause', accessible: 'Thread working. Pause after the active execution settles.', icon: Pause }
-      : state === 'pausing'
-        ? { label: 'Pausing', accessible: 'Thread is pausing after the active execution settles.', icon: LoaderCircle }
-        : state === 'paused'
-          ? { label: 'Continue', accessible: 'Thread is paused. Continue this Thread.', icon: Play }
-          : { label: 'Idle', accessible: 'Thread is idle.', icon: null };
+    state === 'waiting_permission'
+      ? { label: 'Waiting', accessible: 'Thread is waiting for permission. Pause this Thread.', icon: Pause }
+      : state === 'running'
+        ? { label: 'Pause', accessible: 'Thread working. Pause after the active execution settles.', icon: Pause }
+        : state === 'pausing'
+          ? { label: 'Pausing', accessible: 'Thread is pausing after the active execution settles.', icon: LoaderCircle }
+          : state === 'paused' || state === 'model_error'
+            ? { label: 'Continue', accessible: 'Thread is paused. Continue this Thread.', icon: Play }
+            : { label: 'Idle', accessible: 'Thread is idle.', icon: null };
   const ControlIcon = control.icon;
   return (
     <>
@@ -414,7 +416,7 @@ function ThreadStateControl({
         aria-label={control.accessible}
         title={control.accessible}
         disabled={state === 'idle' || state === 'pausing'}
-        onClick={() => onAction(state === 'running' ? 'pause' : 'continue')}
+        onClick={() => onAction(state === 'running' || state === 'waiting_permission' ? 'pause' : 'continue')}
       >
         {ControlIcon ? (
           <ControlIcon className={state === 'pausing' ? 'state-spinner' : undefined} size={14} aria-hidden="true" />
@@ -1171,6 +1173,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     return commands.filter((command) => command.name.startsWith(token)).slice(0, 7);
   }, [commands, draft]);
   const uiContributions = pluginInfo?.ui ?? [];
+  const threadCardContributions = uiContributionsAt(uiContributions, 'thread.card');
   const toolbarContributions = uiContributionsAt(uiContributions, 'thread.toolbar');
   const composerActions = uiContributionsAt(uiContributions, 'composer.action');
   const composerStatusContributions = uiContributionsAt(uiContributions, 'composer.status');
@@ -3775,6 +3778,22 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                         executorName={executorLabel(selectedThread)}
                       />
                     ) : null}
+                    {threadCardContributions.map((contribution) =>
+                      contribution.entry && contribution.component && contribution.pluginId && pluginUiContext ? (
+                        <PluginWebView
+                          key={pluginUiContributionKey(contribution)}
+                          pluginId={contribution.pluginId}
+                          entry={contribution.entry}
+                          viewType="component"
+                          viewId={contribution.component}
+                          uiSlot={contribution.slot}
+                          {...pluginUiContext}
+                          events={pluginEvents}
+                          isRegisteredPage={isRegisteredPluginPage}
+                          runCommand={runPluginCommand}
+                        />
+                      ) : null,
+                    )}
                   </div>
                 </ThinkingDisclosureContext.Provider>
               </div>

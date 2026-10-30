@@ -1241,7 +1241,9 @@ export class PicoRuntime {
     const services: PluginServices = {
       projects: { list: () => this.listProjects() },
       threads: {
-        get: (threadId) => this.store.getThread(threadId),
+        get: (threadId) => this.getThread(threadId),
+        notifyStateChanged: (threadId) => this.publishThreadUpdate(threadId),
+        notifyParent: (threadId, eventId, content) => this.notifyParent(threadId, eventId, content),
         previewModelInput: async (threadId) => {
           const thread = this.store.getThread(threadId);
           if (!thread) throw new Error(`Thread ${threadId} was not found.`);
@@ -1255,6 +1257,35 @@ export class PicoRuntime {
         updateTitle: (pluginId, threadId, title) => this.updateThreadTitleFromPlugin(pluginId, threadId, title),
         tools: async (threadId) => {
           return this.listThreadTools(threadId);
+        },
+        toolNamesForExecutor: async (projectId, executorKind) => {
+          const project = this.store.getProject(projectId);
+          if (!project) throw new ServiceError(404, 'Project not found');
+          const runtimeNames = this.tools.listBySource('runtime').map((tool) => tool.definition.name);
+          const mcpNames = this.registeredMcpTools().map((tool) => tool.definition.name);
+          let executorNames: string[] = [];
+          if (executorKind === 'container') {
+            executorNames = builtinExecutorToolDefinitions().map((tool) => tool.name);
+            for (const thread of this.listThreads(projectId)) {
+              if (thread.executorKind !== 'container' || thread.archivedAt != null || thread.deletedAt != null) continue;
+              const cached = this.readCachedThreadToolSurface(thread.id);
+              executorNames.push(
+                ...(cached?.tools.filter((tool) => cached.sources[tool.name] === 'executor').map((tool) => tool.name) ??
+                  []),
+              );
+            }
+          } else if (executorKind === 'host') {
+            const binding: ExecutorBinding = {
+              id: randomUUID(),
+              kind: 'host',
+              label: `Host · ${project.name}`,
+              workspacePath: project.workspacePath,
+              remoteConnectionId: null,
+              createdAt: new Date().toISOString(),
+            };
+            executorNames = (await this.adapterFor(binding).listTools(binding)).map((tool) => tool.name);
+          }
+          return [...new Set([...runtimeNames, ...mcpNames, ...executorNames])];
         },
         setToolEnabled: async (threadId, toolName, enabled) => {
           await this.setThreadToolEnabled(threadId, toolName, enabled);
@@ -1278,7 +1309,7 @@ export class PicoRuntime {
             if (!result.created) return result;
             const created = result.thread;
             const hadToolSettings = this.hasStoredThreadToolSettings(created.id);
-            if (options.parentThreadId) {
+            if (options.parentThreadId && options.inheritToolSettings !== false) {
               this.inheritThreadToolSettings(options.parentThreadId, created.id);
             } else if (!hadToolSettings) this.initializeThreadToolSettings(created.id);
             if (!hadToolSettings && options.toolOverrides)
@@ -1460,6 +1491,10 @@ export class PicoRuntime {
     // A disconnected Executor may leave its execution running and pause the Thread;
     // a confirmed-lost Host execution becomes interrupted before the next Model Step.
     for (const thread of this.store.listThreads()) {
+      if (thread.pauseCode === 'model_error') {
+        const failure = this.store.listExecutions(thread.id).filter((execution) => execution.kind === 'model' && execution.status === 'failed').at(-1);
+        if (failure) this.notifyParent(thread.id, `model-error:${failure.id}`, `Child Thread "${thread.title}" (${thread.id}) stopped after a model error. Continue the child to retry. ${thread.pauseReason ?? ''}`);
+      }
       if (!thread.pauseRequested || this.latestActiveBatch(thread.id)) this.startLoop(thread.id);
     }
   }
@@ -1728,11 +1763,13 @@ export class PicoRuntime {
     const state: ThreadState = thread.pauseRequested
       ? loopActive
         ? 'pausing'
-        : 'paused'
+        : thread.pauseCode === 'model_error'
+          ? 'model_error'
+          : 'paused'
       : loopActive || executionActive
         ? 'running'
         : 'idle';
-    return { ...thread, state };
+    return this.plugins.patchThreadState({ ...thread, state });
   }
 
   listThreads(projectId?: string): Thread[] {
@@ -2373,6 +2410,15 @@ export class PicoRuntime {
     }
     this.publishThreadUpdate(thread.id);
     return result;
+  }
+
+  private notifyParent(threadId: string, eventId: string, content: string): void {
+    const child = this.store.getThread(threadId);
+    const parent = child?.parentThreadId ? this.store.getThread(child.parentThreadId) : null;
+    if (!child || !parent || child.projectId !== parent.projectId || child.archivedAt || child.deletedAt || parent.archivedAt || parent.deletedAt) return;
+    this.postMessage(parent, `pico:child-status:${eventId}`, {
+      role: 'user', source: 'child', senderThreadId: child.id, senderLabel: child.title, content,
+    });
   }
 
   pause(threadId: string): Thread {
@@ -4024,7 +4070,8 @@ export class PicoRuntime {
           error instanceof ModelCallError && error.status !== undefined
             ? `${safeModelError(error)} Continue this Thread to start a new attempt.`
             : 'Model step failed. Continue this Thread to start a new attempt.';
-        this.store.setPause(thread.id, true, failureSummary);
+        this.store.setPause(thread.id, true, failureSummary, 'model_error');
+        this.notifyParent(thread.id, `model-error:${modelExecutionId}`, `Child Thread "${thread.title}" (${thread.id}) stopped after a model error. Continue the child to retry. ${failureSummary}`);
         this.publish({
           type: 'runtime.error',
           threadId: thread.id,
