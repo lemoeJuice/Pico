@@ -252,7 +252,6 @@ describe('dynamic plugin UI boundary', () => {
     expect(
       validatePluginUiTree([{ type: 'textArea', label: 'Goal', actionId: 'goal', rows: 'small' }], 'settings.page'),
     ).toBe(false);
-    expect(validatePluginUiTree([{ type: 'paragraph', text: 'x'.repeat(20001) }], 'settings.page')).toBe(false);
     expect(
       validatePluginUiTree(
         [
@@ -265,6 +264,31 @@ describe('dynamic plugin UI boundary', () => {
         ],
         'composer.model',
       ),
+    ).toBe(false);
+  });
+
+  it('accepts long text and large explicit input limits while retaining type validation', () => {
+    const longText = 'x'.repeat(250_000);
+    expect(
+      validatePluginUiTree(
+        [
+          { type: 'paragraph', text: longText },
+          { type: 'textInput', label: 'Input', value: longText, actionId: 'input', maxLength: 300_000 },
+          { type: 'textArea', label: 'Details', value: longText, actionId: 'details', maxLength: 300_000 },
+          { type: 'table', columns: ['Content'], rows: [[longText]] },
+        ],
+        'settings.page',
+      ),
+    ).toBe(true);
+    expect(
+      validatePluginUiTree(
+        Array.from({ length: 11 }, () => ({ type: 'paragraph', text: 'x'.repeat(19_000) })),
+        'settings.page',
+      ),
+    ).toBe(true);
+    expect(validatePluginUiTree([{ type: 'paragraph', text: 42 }], 'settings.page')).toBe(false);
+    expect(
+      validatePluginUiTree([{ type: 'textInput', label: 'Input', actionId: 'input', maxLength: -1 }], 'settings.page'),
     ).toBe(false);
   });
 

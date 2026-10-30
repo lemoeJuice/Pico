@@ -1,12 +1,27 @@
 (() => {
   const pluginId = 'pico.rolling-context';
-  let port = null, seq = 0, context = { thread: null }, segments = [], inputs = [], visibleSegments = 30, visibleInputs = 20, pending = false, error = '';
+  let port = null, seq = 0, context = { thread: null }, segments = [], inputs = [], segmentPage = 0, inputPage = 0, pending = false, error = '';
+  let openDetail = '', detailPage = 0;
+  const pageSize = 10, detailSize = 8000;
   let economics = null, economicsThreadId = null;
   const emptyEconomics = () => ({ provider: '', model: '', inputPerMillion: '', cachedInputPerMillion: '', cacheWritePerMillion: '', expectedFutureCalls: '', charactersPerToken: '' });
   let economicsDraft = emptyEconomics();
   const requests = new Map(), sourceById = new Map(), openDisclosures = new Set(['inputs']);
   const text = (text) => ({ type: 'text', text: String(text ?? '') });
-  const para = (text) => ({ type: 'paragraph', text: String(text ?? '') });
+  const para = (text) => { const value = String(text ?? ''); return { type: 'paragraph', text: value.length > 2000 ? `${value.slice(0, 1999)}…` : value }; };
+  const detail = (key, label, value) => {
+    const open = openDetail === key;
+    const content = String(value ?? '');
+    const pages = Math.max(1, Math.ceil(content.length / detailSize));
+    const page = Math.min(detailPage, pages - 1);
+    const children = open ? [{ type: 'paragraph', text: content.slice(page * detailSize, (page + 1) * detailSize) }] : [];
+    if (open && pages > 1) children.push(para(`Part ${page + 1} of ${pages}`), { type: 'actions', children: [button('Previous part', 'detail:previous', page === 0), button('Next part', 'detail:next', page + 1 >= pages)] });
+    return { type: 'disclosure', label, open, actionId: `detail:open:${key}`, children };
+  };
+  const pagination = (kind, page, total) => {
+    const pages = Math.max(1, Math.ceil(total / pageSize));
+    return pages > 1 ? [para(`Page ${page + 1} of ${pages}`), { type: 'actions', children: [button('Previous page', `page:${kind}:previous`, page === 0), button('Next page', `page:${kind}:next`, page + 1 >= pages)] }] : [];
+  };
   const button = (label, actionId, disabled = pending) => ({ type: 'button', label, actionId, disabled });
   const input = (label, value, actionId, inputType = 'text') => ({ type: 'textInput', label, value: String(value ?? ''), actionId, inputType, ...(inputType === 'number' ? { min: 0, step: 'any' } : {}) });
   const api = (path, init) => request('api', { path, ...(init ? { init } : {}) });
@@ -36,7 +51,10 @@
     ] });
     if (error) nodes.push(para(error));
     if (!segments.length) nodes.push(para('No summarized model rounds yet. A completed round becomes eligible when the next model step starts.'));
-    for (const segment of [...segments].sort((a,b) => b.startSeq-a.startSeq).slice(0, visibleSegments)) {
+    segmentPage = Math.min(segmentPage, Math.max(0, Math.ceil(segments.length / pageSize) - 1));
+    inputPage = Math.min(inputPage, Math.max(0, Math.ceil(inputs.length / pageSize) - 1));
+    const segmentRows = [...segments].sort((a,b) => b.startSeq-a.startSeq).slice(segmentPage * pageSize, (segmentPage + 1) * pageSize);
+    for (const [index, segment] of segmentRows.entries()) {
       const actions = [];
       if (segment.summaryStatus !== 'completed') actions.push(button('Retry summary', `action:retry-summary:${segment.id}`));
       actions.push(button('Jump to source', `open:${segment.startSeq}`, false));
@@ -44,22 +62,22 @@
         { type: 'heading', text: `Canonical #${segment.startSeq}–#${segment.endSeq} · ${segment.tier}` },
         para(`${segment.id} · SHA-256 ${segment.sourceHash} · summary ${segment.summaryStatus} · ${segment.sourceRecordIds?.length || 0} records`),
       ];
-      if (segment.summary) children.push({ type: 'disclosure', label: `Direct summary · ${segment.summaryVersion}`, open: openDisclosures.has(`summary:${segment.id}`), actionId: `disclosure:summary:${segment.id}`, children: [para(segment.summary)] });
-      children.push({ type: 'disclosure', label: sourceById.has(segment.id) ? 'Canonical source' : 'Load exact Canonical source', open: openDisclosures.has(`source:${segment.id}`), actionId: `disclosure:source:${segment.id}`, children: [sourceById.has(segment.id) ? para(sourceById.get(segment.id)) : para('Use the disclosure to load source.')] });
+      if (segment.summary) children.push(detail(`summary:${index}`, `Direct summary · ${segment.summaryVersion}`, segment.summary));
+      children.push(detail(`source:${index}`, sourceById.has(segment.id) ? 'Canonical source' : 'Load exact Canonical source', sourceById.get(segment.id) ?? 'Loading source…'));
       const evaluator = segment.evaluator || {};
       children.push(para(`Evaluator: ${evaluator.status} · ${evaluator.recommendation || 'no recommendation'} · ${evaluator.reason || 'not evaluated'} · expected savings ${evaluator.expectedSavings ?? 'unknown'} · cache data ${evaluator.cacheCostDataKnown ? 'known' : 'unknown'}`));
-      const transitions = (segment.transitions || []).map((item) => para(`${item.from} → ${item.to} · ${item.reason}`));
-      children.push({ type: 'disclosure', label: `Tier transition history (${transitions.length})`, open: openDisclosures.has(`transitions:${segment.id}`), actionId: `disclosure:transitions:${segment.id}`, children: transitions.length ? transitions : [para('No changes yet.')] });
+      const transitions = segment.transitions || [];
+      children.push(detail(`transitions:${index}`, `Tier transition history (${transitions.length})`, transitions.length ? transitions.map((item) => `${item.from} → ${item.to} · ${item.reason}`).join('\n') : 'No changes yet.'));
       children.push({ type: 'actions', children: actions }); nodes.push({ type: 'card', children });
     }
-    const inputRows = [...inputs].reverse().slice(0, visibleInputs).map(({ executionId, attempt }) => ({ type: 'card', children: [
+    nodes.push(...pagination('segments', segmentPage, segments.length));
+    const inputRows = [...inputs].reverse().slice(inputPage * pageSize, (inputPage + 1) * pageSize).map(({ executionId, attempt }, index) => ({ type: 'card', children: [
       { type: 'heading', text: `Model Execution ${executionId} · ${attempt.status}` },
       para(`Request ${attempt.id} · ${attempt.prompt?.model || 'model unknown'} · ${attempt.createdAt}`),
-      { type: 'disclosure', label: 'Exact prompt sent to Model Adapter', open: openDisclosures.has(`prompt:${executionId}`), actionId: `disclosure:prompt:${executionId}`, children: [para(JSON.stringify(attempt.prompt, null, 2))] },
+      detail(`prompt:${index}`, 'Exact prompt sent to Model Adapter', openDetail === `prompt:${index}` ? JSON.stringify(attempt.prompt, null, 2) : ''),
       ...(attempt.error ? [para(attempt.error)] : []),
     ] }));
-    nodes.push({ type: 'disclosure', label: `Actual Model Inputs (${inputs.length})`, open: openDisclosures.has('inputs'), actionId: 'disclosure:inputs', children: inputRows.length ? inputRows : [para('No recorded Model Inputs for this Thread yet.')] });
-    if (segments.length > visibleSegments || inputs.length > visibleInputs) nodes.push(button('Load more history', 'load-more', false));
+    nodes.push({ type: 'disclosure', label: `Actual Model Inputs (${inputs.length})`, open: openDisclosures.has('inputs'), actionId: 'disclosure:inputs', children: inputRows.length ? [...inputRows, ...pagination('inputs', inputPage, inputs.length)] : [para('No recorded Model Inputs for this Thread yet.')] });
     port?.postMessage({ type: 'pico:plugin-ui:render', tree: nodes });
   }
   async function refresh() {
@@ -96,17 +114,31 @@
       return;
     }
     if (id.startsWith('economics:')) { const key = id.slice('economics:'.length); if (Object.hasOwn(economicsDraft, key)) economicsDraft[key] = a.value ?? ''; return; }
-    if (id === 'load-more') { visibleSegments += 30; visibleInputs += 20; draw(); return; }
+    if (id === 'detail:previous' || id === 'detail:next') { detailPage = Math.max(0, detailPage + (id.endsWith('next') ? 1 : -1)); draw(); return; }
+    if (id.startsWith('page:')) {
+      const [, kind, direction] = id.split(':');
+      const delta = direction === 'next' ? 1 : -1;
+      if (kind === 'segments') segmentPage = Math.max(0, segmentPage + delta);
+      else if (kind === 'inputs') inputPage = Math.max(0, inputPage + delta);
+      openDetail = ''; detailPage = 0; draw(); return;
+    }
+    if (id.startsWith('detail:open:')) {
+      const key = id.slice('detail:open:'.length);
+      openDetail = a.value === 'true' ? key : ''; detailPage = 0;
+      if (openDetail.startsWith('source:')) {
+        const index = Number(openDetail.slice('source:'.length));
+        const segment = [...segments].sort((a,b) => b.startSeq-a.startSeq)[segmentPage * pageSize + index];
+        if (segment && !sourceById.has(segment.id)) try {
+          draw();
+          const result = await api(`/api/plugins/${pluginId}/source?threadId=${encodeURIComponent(context.thread.id)}&segmentId=${encodeURIComponent(segment.id)}`);
+          sourceById.set(segment.id, result.source);
+        } catch (failure) { error = failure.message || String(failure); }
+      }
+      draw(); return;
+    }
     if (id.startsWith('disclosure:')) {
       const key = id.slice('disclosure:'.length);
       if (a.value === 'true') openDisclosures.add(key); else openDisclosures.delete(key);
-      if (key.startsWith('source:') && a.value === 'true') {
-        const segmentId = key.slice('source:'.length);
-        if (!sourceById.has(segmentId)) try {
-          const result = await api(`/api/plugins/${pluginId}/source?threadId=${encodeURIComponent(context.thread.id)}&segmentId=${encodeURIComponent(segmentId)}`);
-          sourceById.set(segmentId, result.source);
-        } catch (failure) { error = failure.message || String(failure); }
-      }
       draw(); return;
     }
     if (id.startsWith('global:')) { await act(id.slice(7)); return; }
@@ -120,7 +152,7 @@
     port.onmessage = ({ data }) => {
       if (data?.type === 'pico:plugin-ui:response' && requests.has(data.id)) { const request = requests.get(data.id); requests.delete(data.id); data.ok ? request.resolve(data.value) : request.reject(new Error(data.error)); }
       else if (data?.type === 'pico:plugin-ui:action') void handle(data);
-      else if (data?.type === 'pico:plugin-ui:context') { context = data.context || context; void Promise.all([refresh(), loadEconomics()]).catch((failure) => { error = failure.message; draw(); }); }
+      else if (data?.type === 'pico:plugin-ui:context') { if (data.context?.thread?.id !== context.thread?.id) { segmentPage = 0; inputPage = 0; openDetail = ''; detailPage = 0; sourceById.clear(); } context = data.context || context; void Promise.all([refresh(), loadEconomics()]).catch((failure) => { error = failure.message; draw(); }); }
     };
     port.start(); draw(); if (typeof init.attemptId === 'string') port.postMessage({ type: 'pico:plugin-ui:ready', attemptId: init.attemptId }); void Promise.all([refresh(), loadEconomics()]).catch((failure) => { error = failure.message; draw(); });
   });

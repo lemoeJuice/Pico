@@ -98,8 +98,6 @@ export type PluginUiNotice = { text: string };
 const UI_LIMITS = {
   nodes: 2048,
   depth: 12,
-  text: 20000,
-  totalText: 200000,
   actions: 512,
   options: 80,
   tableRows: 300,
@@ -199,12 +197,7 @@ export function validatePluginUiTree(value: unknown, slot: PluginUiSlot | 'setti
           'table',
         ])
       : uiNodeTypesBySlot[slot];
-  let totalText = 0;
-  const textOk = (text: unknown): text is string => {
-    if (typeof text !== 'string' || text.length > UI_LIMITS.text) return false;
-    totalText += text.length;
-    return totalText <= UI_LIMITS.totalText;
-  };
+  const textOk = (text: unknown): text is string => typeof text === 'string';
   const walk = (node: unknown, depth: number): boolean => {
     if (
       ++count > UI_LIMITS.nodes ||
@@ -371,10 +364,7 @@ export function validatePluginUiTree(value: unknown, slot: PluginUiSlot | 'setti
                   (item.step === 'any' || (Number.isFinite(item.step) && (item.step as number) > 0)))))) &&
           (item.disabled === undefined || typeof item.disabled === 'boolean') &&
           action() &&
-          (item.maxLength === undefined ||
-            (Number.isInteger(item.maxLength) &&
-              (item.maxLength as number) >= 0 &&
-              (item.maxLength as number) <= UI_LIMITS.text)) &&
+          (item.maxLength === undefined || (Number.isSafeInteger(item.maxLength) && (item.maxLength as number) >= 0)) &&
           (item.type !== 'textArea' ||
             item.rows === undefined ||
             ['compact', 'standard', 'large'].includes(String(item.rows)))
