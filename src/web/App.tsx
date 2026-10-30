@@ -5758,14 +5758,29 @@ function ModelExecutionVariantView({
   );
 }
 
+function readableDiagnosticValue(value: unknown, depth = 0): string {
+  if (value === null) return 'null';
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (depth >= 3) return '…';
+  if (Array.isArray(value)) return value.map((item) => readableDiagnosticValue(item, depth + 1)).join(' · ');
+  if (value && typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, item]) => `${key}: ${readableDiagnosticValue(item, depth + 1)}`)
+      .join(' · ');
+  }
+  return String(value);
+}
+
 function ModelInputDisclosure({
   threadId,
   executionId,
   executionStatus,
+  onOpenChange,
 }: {
   threadId: string;
   executionId: string;
   executionStatus: Execution['status'];
+  onOpenChange?: (open: boolean) => void;
 }) {
   const [modelInputs, setModelInputs] = useState<ModelInputAttempt[] | null>(null);
   const [modelInputsLoading, setModelInputsLoading] = useState(false);
@@ -5774,6 +5789,7 @@ function ModelInputDisclosure({
     <details
       className="conversation-detail-card projection-card"
       onToggle={(event) => {
+        onOpenChange?.(event.currentTarget.open);
         if (!event.currentTarget.open || modelInputs !== null || modelInputsLoading) return;
         setModelInputsLoading(true);
         setModelInputsError('');
@@ -5821,63 +5837,91 @@ function ModelInputDisclosure({
           {attempt.partialOutputCharacters ? (
             <p className="projection-note">Discarded partial stream: {attempt.partialOutputCharacters} characters.</p>
           ) : null}
-          {(attempt.providerRequests ?? []).map((request, requestIndex) => (
-            <details className="conversation-detail-row projection-attempt" key={request.id}>
+          <details className="model-input-prompt-section">
+            <summary>
+              <ChevronRight className="detail-chevron projection-chevron" size={13} aria-hidden="true" />
+              Prompt input
+            </summary>
+            <p className="projection-note">
+              Recorded text-bearing input after projection and model plugins. Inline image bytes and opaque provider
+              reasoning replay data are summarized or omitted.
+            </p>
+            {!attempt.prompt ? (
+              <p className="projection-note">
+                The full prompt was not retained for this historical attempt; showing its summary.
+              </p>
+            ) : null}
+            <pre className="projection-view">{toJson(attempt.prompt ?? attempt.promptSummary)}</pre>
+            {attempt.prompt ? (
+              <details className="conversation-detail-row projection-attempt">
+                <summary>
+                  <ChevronRight className="detail-chevron projection-chevron" size={13} aria-hidden="true" /> Prompt
+                  diagnostics
+                </summary>
+                <pre className="projection-view">{toJson(attempt.promptSummary)}</pre>
+              </details>
+            ) : null}
+          </details>
+          {(attempt.providerRequests ?? []).length > 0 ? (
+            <details className="provider-request-section">
               <summary>
                 <ChevronRight className="detail-chevron projection-chevron" size={13} aria-hidden="true" />
-                Provider request {requestIndex + 1} · {request.outcome}
-                {request.status ? ` · HTTP ${request.status}` : ''}
-                {request.providerMetadata?.['pico.chatgpt-plan.fastMode'] === undefined
-                  ? ''
-                  : ` · Fast mode ${request.providerMetadata['pico.chatgpt-plan.fastMode'] ? 'on' : 'off'}`}
-                {request.providerError?.type ? ` · ${request.providerError.type}` : ''}
-                {request.providerError?.code ? ` · ${request.providerError.code}` : ''}
+                Provider requests ({attempt.providerRequests?.length ?? 0})
               </summary>
-              {request.outputTokensPerSecond !== undefined ? (
-                <p className="projection-note">Output tokens per second includes the wait for first text.</p>
-              ) : null}
-              <pre className="projection-view">
-                {toJson({
-                  provider: request.provider,
-                  protocol: request.protocol,
-                  endpoint: request.endpoint,
-                  attempt: request.attempt,
-                  providerMetadata: request.providerMetadata,
-                  status: request.status,
-                  contentType: request.contentType,
-                  providerRequestId: request.providerRequestId,
-                  durationMs: request.durationMs,
-                  terminalEvent: request.terminalEvent,
-                  errorCategory: request.errorCategory,
-                  errorCode: request.errorCode,
-                  providerError: request.providerError,
-                  eventCounts: request.eventCounts,
-                  firstTextMs: request.firstTextMs,
-                  outputTokensPerSecond: request.outputTokensPerSecond,
-                  deltaTextCharacters: request.deltaTextCharacters,
-                  outputTextCharacters: request.outputTextCharacters,
-                  outputItemCounts: request.outputItemCounts,
-                  toolCallCount: request.toolCallCount,
-                  finishReason: request.finishReason,
-                  responseId: request.responseId,
-                  usage: request.usage,
-                })}
-              </pre>
-            </details>
-          ))}
-          {!attempt.prompt ? (
-            <p className="projection-note">
-              The full prompt was not retained for this historical attempt; showing its summary.
-            </p>
-          ) : null}
-          <pre className="projection-view">{toJson(attempt.prompt ?? attempt.promptSummary)}</pre>
-          {attempt.prompt ? (
-            <details className="conversation-detail-row projection-attempt">
-              <summary>
-                <ChevronRight className="detail-chevron projection-chevron" size={13} aria-hidden="true" /> Prompt
-                diagnostics
-              </summary>
-              <pre className="projection-view">{toJson(attempt.promptSummary)}</pre>
+              <p className="projection-note">
+                Provider request diagnostics show the endpoint, response, timing, and usage recorded for each network
+                request. Fields appear when the provider supplies them.
+              </p>
+              {(attempt.providerRequests ?? []).map((request, requestIndex) => (
+                <details className="conversation-detail-row provider-request-row" key={request.id}>
+                  <summary>
+                    <ChevronRight className="detail-chevron projection-chevron" size={13} aria-hidden="true" />
+                    Provider request {requestIndex + 1} · {request.outcome}
+                    {request.status ? ` · HTTP ${request.status}` : ''}
+                  </summary>
+                  <dl className="provider-request-fields">
+                    {([
+                      ['Provider', request.provider],
+                      ['Protocol', request.protocol],
+                      ['Endpoint', request.endpoint],
+                      ['Attempt', request.attempt],
+                      ['HTTP status', request.status],
+                      ['Content type', request.contentType],
+                      ['Provider request ID', request.providerRequestId],
+                      ['Duration', request.durationMs === undefined ? undefined : `${request.durationMs} ms`],
+                      ['Outcome', request.outcome],
+                      ['Terminal event', request.terminalEvent],
+                      ['Error category', request.errorCategory],
+                      ['Error code', request.errorCode],
+                      ['Provider error', request.providerError ? Object.entries(request.providerError).map(([key, value]) => `${key}: ${value}`).join(' · ') : undefined],
+                      ['Event counts', request.eventCounts ? Object.entries(request.eventCounts).map(([key, value]) => `${key}: ${value}`).join(' · ') : undefined],
+                      ['First text', request.firstTextMs === undefined ? undefined : `${request.firstTextMs} ms`],
+                      ['Output speed', request.outputTokensPerSecond === undefined ? undefined : `${request.outputTokensPerSecond} tokens/s`],
+                      ['Delta text', request.deltaTextCharacters === undefined ? undefined : `${request.deltaTextCharacters} characters`],
+                      ['Output text', request.outputTextCharacters === undefined ? undefined : `${request.outputTextCharacters} characters`],
+                      ['Output items', request.outputItemCounts ? Object.entries(request.outputItemCounts).map(([key, value]) => `${key}: ${value}`).join(' · ') : undefined],
+                      ['Tool calls', request.toolCallCount],
+                      ['Finish reason', request.finishReason],
+                      ['Response ID', request.responseId],
+                      ['Usage', request.usage ? Object.entries(request.usage).filter(([, value]) => value !== undefined && value !== null).map(([key, value]) => `${key}: ${value}`).join(' · ') : undefined],
+                      ...Object.entries(request.providerMetadata ?? {}).map(([key, value]) => [
+                        `Provider option · ${key}`,
+                        readableDiagnosticValue(value),
+                      ] as const),
+                    ] as const).filter(([, value]) => value !== undefined && value !== null).map(([label, value]) => (
+                      <div className="provider-request-field" key={label}>
+                        <dt>{label}</dt>
+                        <dd>{String(value)}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                  {request.outputTokensPerSecond !== undefined ? (
+                    <p className="projection-note">
+                      Output speed includes the wait for the first text and measures the full provider request.
+                    </p>
+                  ) : null}
+                </details>
+              ))}
             </details>
           ) : null}
         </details>
@@ -5994,6 +6038,7 @@ function AssistantBubble({
   rewindDisabled?: boolean;
 }) {
   const [showModelDetails, setShowModelDetails] = useState(false);
+  const [modelInputOpen, setModelInputOpen] = useState(false);
   const assistant = recordPayload<AssistantPayload>(record);
   const calls = assistant.toolCalls ?? [];
   const executionId = record.id.replace(/:assistant$/, '');
@@ -6008,7 +6053,13 @@ function AssistantBubble({
         }
         aria-expanded={showModelDetails}
         title={showModelDetails ? 'Hide model details and continue action' : 'Show model details and continue action'}
-        onClick={() => setShowModelDetails((visible) => !visible)}
+        onClick={() =>
+          setShowModelDetails((visible) => {
+            const next = !visible;
+            if (!next) setModelInputOpen(false);
+            return next;
+          })
+        }
       >
         <Sparkles size={13} aria-hidden="true" />
       </button>
@@ -6064,8 +6115,9 @@ function AssistantBubble({
                 threadId={threadId}
                 executionId={executionId}
                 executionStatus={executions.find((execution) => execution.id === executionId)?.status ?? 'completed'}
+                onOpenChange={setModelInputOpen}
               />
-              {onContinueFromMessage ? (
+              {onContinueFromMessage && !modelInputOpen ? (
                 <button
                   type="button"
                   className="user-message-rewind"

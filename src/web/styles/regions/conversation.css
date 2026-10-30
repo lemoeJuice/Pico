@@ -549,7 +549,7 @@
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  width: min(var(--conversation-detail-card-width), 100%);
+  width: 100%;
 }
 .model-input-action-row {
   display: flex;
@@ -560,6 +560,60 @@
 .model-input-action-row > .conversation-detail-card {
   flex: 1 1 auto;
   width: auto;
+}
+.model-input-prompt-section,
+.provider-request-section {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #e5ebe4;
+}
+.model-input-prompt-section > summary,
+.provider-request-section > summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #738276;
+  font-size: 10px;
+  font-weight: 600;
+  list-style: none;
+  cursor: pointer;
+}
+.model-input-prompt-section > summary::-webkit-details-marker,
+.provider-request-section > summary::-webkit-details-marker {
+  display: none;
+}
+.model-input-prompt-section[open] > summary .projection-chevron,
+.provider-request-section[open] > summary .projection-chevron {
+  transform: rotate(90deg);
+}
+.model-input-prompt-section > .projection-note,
+.provider-request-section > .projection-note {
+  margin: 0 0 7px;
+}
+.model-input-prompt-section > .projection-view {
+  margin-top: 0;
+}
+.provider-request-fields {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+}
+.provider-request-field {
+  display: grid;
+  grid-template-columns: minmax(100px, 0.32fr) minmax(0, 1fr);
+  gap: 10px;
+  font-size: 10px;
+  line-height: 1.45;
+}
+.provider-request-field > dt {
+  color: #859287;
+  font-weight: 600;
+}
+.provider-request-field > dd {
+  min-width: 0;
+  margin: 0;
+  color: #56645a;
+  overflow-wrap: anywhere;
 }
 .model-attempt-actions {
   display: flex;
