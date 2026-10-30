@@ -32,7 +32,7 @@ describe('ChatGPT Plan Runtime integration', () => {
         query: new URLSearchParams(),
         origin: null,
       })) as ProviderInstance;
-      for (const instance of [first, second]) {
+      for (const [index, instance] of [first, second].entries()) {
         env.runtime.modelCatalog.getInstanceSecrets('pico.chatgpt-plan', instance.id).set('oauth', {
           hostId: 'urn:uuid:fake',
           clientId: 'fake-client',
@@ -45,7 +45,7 @@ describe('ChatGPT Plan Runtime integration', () => {
           scopes: ['chatgpt.tokens.use.direct'],
         });
         env.store.setPluginCache('pico.chatgpt-plan', `instance:${instance.id}:modelCatalog`, {
-          models: [{ slug: 'same-model', displayName: 'Same model' }],
+          models: [{ slug: index === 0 ? 'gpt-6-astra' : 'gpt-6-luna', displayName: 'Same model' }],
           refreshedAt: Date.now(),
         });
         await env.runtime.modelCatalog.refreshInstance(instance.id);
@@ -56,6 +56,55 @@ describe('ChatGPT Plan Runtime integration', () => {
       expect(models).toHaveLength(2);
       const firstModel = models.find((model) => model.instanceId === first.id)!;
       const secondModel = models.find((model) => model.instanceId === second.id)!;
+      const adapter = env.runtime.modelCatalog
+        .matchingAdapters(firstModel.modelId)
+        .find((entry) => entry.id === 'openai.chatgpt-plan.responses')!;
+      expect(adapter.owner).toBe('pico.chatgpt-plan');
+      expect(adapter.controls.map((control) => control.id)).toEqual(['reasoningEffort', 'fastMode']);
+      expect(adapter.controls[0]!.choices).not.toContain('none');
+      const secondAdapter = env.runtime.modelCatalog
+        .matchingAdapters(secondModel.modelId)
+        .find((entry) => entry.id === 'openai.chatgpt-plan.responses')!;
+      expect(secondAdapter.controls[0]!.choices).toContain('none');
+      expect(() =>
+        env.runtime.modelCatalog.resolveSelection({
+          modelId: firstModel.modelId,
+          adapterId: adapter.id,
+          parameters: { options: { reasoningEffort: 'none' } },
+        }),
+      ).toThrow();
+      expect(
+        env.runtime.modelCatalog.resolveSelection({
+          modelId: secondModel.modelId,
+          adapterId: secondAdapter.id,
+          parameters: { options: { reasoningEffort: 'none' } },
+        }).requestParameters,
+      ).toEqual({ fields: { reasoning: { summary: 'auto', effort: 'none' } }, temperature: null });
+      expect(
+        env.runtime.modelCatalog.resolveSelection({
+          modelId: firstModel.modelId,
+          adapterId: adapter.id,
+          parameters: { options: { reasoningEffort: 'high', fastMode: true } },
+        }).requestParameters,
+      ).toEqual({
+        fields: { reasoning: { summary: 'auto', effort: 'high' }, service_tier: 'priority' },
+        temperature: null,
+      });
+      await env.runtime.plugins.setEnabled('pico.model-parameters', false);
+      const chatGptAdapterAfterDisable = env.runtime.modelCatalog
+        .matchingAdapters(firstModel.modelId)
+        .find((entry) => entry.id === 'openai.chatgpt-plan.responses')!;
+      expect(chatGptAdapterAfterDisable.owner).toBe('pico.chatgpt-plan');
+      expect(
+        env.runtime.modelCatalog.resolveSelection({
+          modelId: firstModel.modelId,
+          adapterId: chatGptAdapterAfterDisable.id,
+          parameters: { options: { reasoningEffort: 'high', fastMode: true } },
+        }).requestParameters,
+      ).toEqual({
+        fields: { reasoning: { summary: 'auto', effort: 'high' }, service_tier: 'priority' },
+        temperature: null,
+      });
       expect(firstModel.modelId).not.toBe(secondModel.modelId);
       const threadA = env.createThread('runtime', 'A');
       const threadB = env.createThread('runtime', 'B');

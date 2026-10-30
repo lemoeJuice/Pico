@@ -11,7 +11,6 @@ import type {
   ModelParameterTarget,
   TemperatureCapability,
 } from './types.js';
-import { chatGptParameterProfile } from './providers/chatgpt.js';
 import { coreVendorProfiles } from './providers/core-vendors.js';
 import { asiaNewParameterProfile } from './providers/asia-new.js';
 import { asiaParameterProfiles } from './providers/asia-parameters.js';
@@ -121,7 +120,6 @@ const standardAdapters: AdapterContribution[] = [
     temperature: { supported: true, min: 0, max: 2, step: 0.1 },
     replayFormat: 'openai-responses',
   },
-  adapter(chatGptParameterProfile, { providerTypeIds: ['chatgpt-plan'], protocols: [RESPONSES] }, 'chatgpt-plan'),
   adapter(byId(coreVendorProfiles, 'openai.official.reasoning'), {
     endpointOrigins: ['https://api.openai.com'],
     endpointVersionedApiPath: true,

@@ -8,6 +8,7 @@ describe('ChatGPT provider plugin', () => {
     const pages: unknown[] = [];
     const routes: string[] = [];
     const contributions: unknown[] = [];
+    const adapters: unknown[] = [];
     const context = {
       providers: {
         registerType: (type: unknown, driver: unknown) => types.push({ type, driver }),
@@ -18,6 +19,7 @@ describe('ChatGPT provider plugin', () => {
       state: { get: <T>(_key: string, fallback: T) => fallback },
       cache: { get: <T>(_key: string, fallback: T) => fallback },
       secrets: { get: <T>(_key: string, fallback: T) => fallback },
+      models: { registerAdapter: (adapter: unknown) => adapters.push(adapter) },
       commands: { register() {} },
       ui: {
         contribute: (item: unknown) => contributions.push(item),
@@ -36,6 +38,14 @@ describe('ChatGPT provider plugin', () => {
     });
     expect(pages).toContainEqual(expect.objectContaining({ id: 'account', entry: 'webui' }));
     expect(contributions).toEqual([]);
+    expect(adapters).toContainEqual(
+      expect.objectContaining({
+        id: 'openai.chatgpt-plan.responses',
+        match: { providerTypeIds: ['chatgpt-plan'], protocols: ['openai-responses'] },
+        controlsForModel: expect.any(Function),
+        serialize: expect.any(Function),
+      }),
+    );
     expect(routes).toEqual(
       expect.arrayContaining([
         'GET /instances',

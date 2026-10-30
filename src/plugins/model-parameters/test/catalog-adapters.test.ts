@@ -1,84 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { expect, it } from 'vitest';
 import { PicoStore } from '../../../core/store.js';
 import { ModelCatalog } from '../../../runtime/model-catalog.js';
 import type { PluginContext } from '../../host.js';
 import type { AdapterContribution } from '../../../contracts/model-catalog.js';
 import { modelParametersPlugin } from '../index.js';
-
-describe('model parameter adapters', () => {
-  it('exposes dynamic controls for each matching model and serializes the chosen profile', async () => {
-    const store = new PicoStore(':memory:');
-    try {
-      const catalog = new ModelCatalog(store);
-      catalog.registerProviderType(
-        'plugin',
-        { id: 'chatgpt-plan', label: 'ChatGPT', addPage: { pluginId: 'plugin', pageId: 'add' } },
-        {
-          listModels: async () => [
-            {
-              id: 'one',
-              name: 'gpt-6-astra',
-              label: 'Astra',
-              protocol: 'openai-responses',
-              endpoint: 'https://chatgpt.com/backend-api/codex/responses',
-              supportsImages: true,
-            },
-            {
-              id: 'two',
-              name: 'gpt-6-luna',
-              label: 'Luna',
-              protocol: 'openai-responses',
-              endpoint: 'https://chatgpt.com/backend-api/codex/responses',
-              supportsImages: true,
-            },
-          ],
-          authorize: async () => ({}),
-        },
-      );
-      modelParametersPlugin.activate!({
-        models: {
-          registerAdapter: (adapter: AdapterContribution) => catalog.registerAdapter('pico.model-parameters', adapter),
-        },
-      } as unknown as PluginContext);
-      const instance = catalog.addInstance('plugin', 'chatgpt-plan', { label: 'test', config: {} });
-      const models = await catalog.refreshInstance(instance.id);
-      const [astra, luna] = models;
-      const first = catalog.matchingAdapters(astra!.modelId);
-      expect(first.map((entry) => entry.id)).toEqual(
-        expect.arrayContaining(['pico.responses', 'openai.chatgpt-plan.responses']),
-      );
-      expect(
-        first
-          .find((entry) => entry.id === 'openai.chatgpt-plan.responses')!
-          .controls.find((entry) => entry.id === 'reasoningEffort')!.choices,
-      ).not.toContain('none');
-      expect(
-        catalog
-          .matchingAdapters(luna!.modelId)
-          .find((entry) => entry.id === 'openai.chatgpt-plan.responses')!
-          .controls.find((entry) => entry.id === 'reasoningEffort')!.choices,
-      ).toContain('none');
-      const resolved = catalog.resolveSelection({
-        modelId: astra!.modelId,
-        adapterId: 'openai.chatgpt-plan.responses',
-        parameters: { options: { reasoningEffort: 'high', fastMode: true } },
-      });
-      expect(resolved.requestParameters).toEqual({
-        fields: { reasoning: { summary: 'auto', effort: 'high' }, service_tier: 'priority' },
-        temperature: null,
-      });
-      expect(() =>
-        catalog.resolveSelection({
-          modelId: astra!.modelId,
-          adapterId: 'openai.chatgpt-plan.responses',
-          parameters: { options: { reasoningEffort: 'none' } },
-        }),
-      ).toThrow();
-    } finally {
-      store.close();
-    }
-  });
-});
 
 it('retains each legacy profile on its documented endpoint while rejecting lookalike endpoints', async () => {
   const { profiles } = await import('../providers/index.js');

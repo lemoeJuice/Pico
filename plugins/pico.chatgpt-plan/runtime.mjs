@@ -729,6 +729,109 @@ var ChatGptPlanAuth = class {
   }
 };
 
+// src/plugins/chatgpt-plan/parameters.ts
+var basicEfforts = ["auto", "low", "medium", "high"];
+var fullEfforts = ["auto", "none", "low", "medium", "high", "xhigh", "max"];
+var flagshipEfforts = ["auto", "low", "medium", "high", "xhigh", "max"];
+function reasoningOptions(model) {
+  const slug = model.toLowerCase();
+  let values = basicEfforts;
+  if (/^gpt-6-astra(?:-|$)/.test(slug) || /^gpt-6\.1-sol(?:-|$)/.test(slug)) values = flagshipEfforts;
+  else if (/^gpt-6-(?:sol|luna)(?:-|$)/.test(slug) || /^gpt-6\.1-terra(?:-|$)/.test(slug) || /^gpt-5\.6-(?:sol|terra|luna)(?:-|$)/.test(slug)) {
+    values = fullEfforts;
+  }
+  return values.map((value) => ({
+    value,
+    label: value === "auto" ? "Auto" : value.replace(/^./, (letter) => letter.toUpperCase())
+  }));
+}
+var reasoningControl = (target2) => ({
+  id: "reasoningEffort",
+  label: "Reasoning",
+  kind: "select",
+  group: "primary",
+  defaultValue: "auto",
+  options: reasoningOptions(target2.model)
+});
+var chatGptParameterProfile = {
+  id: "openai.chatgpt-plan.responses",
+  matches(target2) {
+    return target2.provider === "chatgpt-plan" && target2.protocol === "openai-responses";
+  },
+  controls(target2) {
+    return [
+      reasoningControl(target2),
+      { id: "fastMode", label: "Fast mode", kind: "toggle", group: "primary", defaultValue: false }
+    ];
+  },
+  temperature() {
+    return {
+      mode: "unsupported",
+      description: "ChatGPT Responses does not expose temperature for this model control."
+    };
+  },
+  serialize(_target, selection) {
+    const effort = selection.reasoningEffort;
+    const fastMode = selection.fastMode === true;
+    return {
+      reasoning: { summary: "auto", ...typeof effort === "string" && effort !== "auto" ? { effort } : {} },
+      ...fastMode ? { service_tier: "priority" } : {}
+    };
+  }
+};
+
+// src/plugins/chatgpt-plan/adapter.ts
+var target = (model) => ({
+  provider: "chatgpt-plan",
+  endpoint: model.endpoint,
+  protocol: model.protocol,
+  model: model.name
+});
+function control(value) {
+  return {
+    id: value.id,
+    label: value.label,
+    type: value.kind === "toggle" ? "boolean" : value.kind === "range" ? "number" : "string",
+    ...value.options ? {
+      choices: value.options.map((option) => option.value),
+      choiceLabels: Object.fromEntries(value.options.map((option) => [option.value, option.label]))
+    } : {},
+    ...value.defaultValue !== void 0 ? { defaultValue: value.defaultValue } : {},
+    ...value.min !== void 0 ? { min: value.min } : {},
+    ...value.max !== void 0 ? { max: value.max } : {},
+    ...value.step !== void 0 ? { step: value.step } : {},
+    group: value.group,
+    ...value.description ? { description: value.description } : {}
+  };
+}
+function temperature() {
+  return { supported: false, description: "ChatGPT Responses does not expose temperature for this model control." };
+}
+function registerChatGptPlanAdapter(context) {
+  context.models.registerAdapter({
+    id: chatGptParameterProfile.id,
+    label: chatGptParameterProfile.id,
+    replayFormat: "openai-responses",
+    match: { providerTypeIds: ["chatgpt-plan"], protocols: ["openai-responses"] },
+    controls: [],
+    temperature: temperature(),
+    controlsForModel(model) {
+      return chatGptParameterProfile.controls(target(model)).map(control);
+    },
+    temperatureForModel: temperature,
+    normalize(model, parameters) {
+      const defaults = Object.fromEntries(
+        chatGptParameterProfile.controls(target(model)).filter((item) => item.defaultValue !== void 0).map((item) => [item.id, item.defaultValue])
+      );
+      return { ...parameters, options: { ...defaults, ...parameters.options } };
+    },
+    serialize(model, parameters) {
+      const fields = chatGptParameterProfile.serialize(target(model), parameters.options, 1);
+      return { fields, temperature: null };
+    }
+  });
+}
+
 // src/plugins/chatgpt-plan.ts
 function callbackForRetry(callback) {
   const retry = new URLSearchParams();
@@ -846,6 +949,7 @@ function createChatGptPlanPlugin() {
     name: "ChatGPT plan provider",
     version: "0.1.0",
     activate(context) {
+      registerChatGptPlanAdapter(context);
       const sharedOAuthPath = process.env.PICO_CHATGPT_OAUTH_DB_PATH?.trim() || (process.env.NODE_ENV === "production" ? join2(process.cwd(), "data", "chatgpt-oauth.sqlite") : null);
       sharedOAuthSecrets = sharedOAuthPath ? createSharedChatGptOAuthSecrets(sharedOAuthPath, "pico.chatgpt-plan") : null;
       instanceAvailable = (id) => context.providers.get(id)?.typeId === "chatgpt-plan";

@@ -1,4 +1,4 @@
-import type { ModelParameterControl, ModelParameterProfile, ModelParameterTarget } from '../types.js';
+import type { ModelParameterControl, ModelParameterProfile, ModelParameterTarget } from '../model-parameters/types.js';
 
 const basicEfforts = ['auto', 'low', 'medium', 'high'] as const;
 const fullEfforts = ['auto', 'none', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
@@ -8,10 +8,17 @@ function reasoningOptions(model: string): NonNullable<ModelParameterControl['opt
   const slug = model.toLowerCase();
   let values: readonly string[] = basicEfforts;
   if (/^gpt-6-astra(?:-|$)/.test(slug) || /^gpt-6\.1-sol(?:-|$)/.test(slug)) values = flagshipEfforts;
-  else if (/^gpt-6-(?:sol|luna)(?:-|$)/.test(slug) || /^gpt-6\.1-terra(?:-|$)/.test(slug) || /^gpt-5\.6-(?:sol|terra|luna)(?:-|$)/.test(slug)) {
+  else if (
+    /^gpt-6-(?:sol|luna)(?:-|$)/.test(slug) ||
+    /^gpt-6\.1-terra(?:-|$)/.test(slug) ||
+    /^gpt-5\.6-(?:sol|terra|luna)(?:-|$)/.test(slug)
+  ) {
     values = fullEfforts;
   }
-  return values.map((value) => ({ value, label: value === 'auto' ? 'Auto' : value.replace(/^./, (letter) => letter.toUpperCase()) }));
+  return values.map((value) => ({
+    value,
+    label: value === 'auto' ? 'Auto' : value.replace(/^./, (letter) => letter.toUpperCase()),
+  }));
 }
 
 const reasoningControl = (target: ModelParameterTarget): ModelParameterControl => ({
@@ -31,26 +38,20 @@ export const chatGptParameterProfile: ModelParameterProfile = {
   controls(target) {
     return [
       reasoningControl(target),
-      {
-        id: 'fastMode',
-        label: 'Fast mode',
-        kind: 'toggle',
-        group: 'primary',
-        defaultValue: false,
-      },
+      { id: 'fastMode', label: 'Fast mode', kind: 'toggle', group: 'primary', defaultValue: false },
     ];
   },
   temperature() {
-    return { mode: 'unsupported', description: 'ChatGPT Responses does not expose temperature for this model control.' };
+    return {
+      mode: 'unsupported',
+      description: 'ChatGPT Responses does not expose temperature for this model control.',
+    };
   },
   serialize(_target, selection) {
     const effort = selection.reasoningEffort;
     const fastMode = selection.fastMode === true;
     return {
-      reasoning: {
-        summary: 'auto',
-        ...(typeof effort === 'string' && effort !== 'auto' ? { effort } : {}),
-      },
+      reasoning: { summary: 'auto', ...(typeof effort === 'string' && effort !== 'auto' ? { effort } : {}) },
       ...(fastMode ? { service_tier: 'priority' } : {}),
     };
   },

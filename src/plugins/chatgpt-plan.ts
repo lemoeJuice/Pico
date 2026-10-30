@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { createSharedChatGptOAuthSecrets, type SharedChatGptOAuthSecrets } from './chatgpt-plan/oauth-store.js';
 import { ChatGptPlanAuth, RetryableChatGptAuthorizationExchange } from './chatgpt-plan/auth.js';
 import type { PicoPlugin, PluginHttpRequest } from './host.js';
+import { registerChatGptPlanAdapter } from './chatgpt-plan/adapter.js';
 
 interface CallbackOperation {
   operationId: string;
@@ -177,6 +178,7 @@ export function createChatGptPlanPlugin(): PicoPlugin {
     name: 'ChatGPT plan provider',
     version: '0.1.0',
     activate(context) {
+      registerChatGptPlanAdapter(context);
       const sharedOAuthPath =
         process.env.PICO_CHATGPT_OAUTH_DB_PATH?.trim() ||
         (process.env.NODE_ENV === 'production' ? join(process.cwd(), 'data', 'chatgpt-oauth.sqlite') : null);

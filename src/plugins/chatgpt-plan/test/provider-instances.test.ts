@@ -104,6 +104,7 @@ function setup(legacy: unknown = null) {
     state: store(state),
     cache: store(cache),
     secrets: store(new Map(legacy ? [['oauth', legacy]] : [])),
+    models: { registerAdapter() {} },
     commands: { register() {} },
     ui: { registerPage() {} },
     http: {
