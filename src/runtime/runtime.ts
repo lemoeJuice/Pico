@@ -5094,6 +5094,16 @@ export class PicoRuntime {
     return this.plugins.findHttpRoute(pluginId, method, path);
   }
 
+  async readThreadWorkspaceFile(threadId: string, path: string, signal?: AbortSignal): Promise<Response> {
+    const thread = this.store.getThread(threadId);
+    if (!thread || thread.deletedAt) throw new ServiceError(404, 'Thread not found');
+    const binding = this.store.executorForThread(threadId);
+    if (!binding || !requiresExternalExecutor(binding.kind)) {
+      throw new ServiceError(409, 'File access is unavailable for this Thread executor');
+    }
+    return this.adapterFor(binding).readWorkspaceFile(binding, path, signal);
+  }
+
   async executorStatus(threadId: string): Promise<{
     requiresExecutor: boolean;
     connected: boolean;

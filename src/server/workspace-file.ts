@@ -1,24 +1,17 @@
-import { constants } from 'node:fs';
-import { open, realpath } from 'node:fs/promises';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, isAbsolute } from 'node:path';
+import { Readable } from 'node:stream';
+import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
 import type { Response } from 'express';
-import type { Thread } from '../core/types.js';
+import { ServiceError } from '../contracts/service-error.js';
+import type { PicoRuntime } from '../runtime/runtime.js';
 
-function inside(root: string, path: string): boolean {
-  const rel = relative(root, path);
-  return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
-}
-
-/** Serve only local Thread workspace files; never execute their contents in Pico's origin. */
-export async function serveWorkspaceFile(thread: Thread | null, path: unknown, response: Response): Promise<void> {
-  if (!thread || thread.deletedAt) {
-    response.status(404).json({ error: 'Thread not found' });
-    return;
-  }
-  if (thread.executorKind === 'runtime' || thread.executorRemote) {
-    response.status(409).json({ error: 'File access is unavailable for this Thread executor' });
-    return;
-  }
+/** Relay the Executor's workspace file without buffering it in Runtime. */
+export async function serveWorkspaceFile(
+  runtime: PicoRuntime,
+  threadId: string,
+  path: unknown,
+  response: Response,
+): Promise<void> {
   if (
     typeof path !== 'string' ||
     !path ||
@@ -26,33 +19,23 @@ export async function serveWorkspaceFile(thread: Thread | null, path: unknown, r
     isAbsolute(path) ||
     path.split(/[\\/]/).includes('..')
   ) {
-    response.status(400).json({ error: 'Expected a path inside the Thread workspace' });
+    throw new ServiceError(400, 'Expected a path inside the Thread workspace');
+  }
+  const controller = new AbortController();
+  response.once('close', () => controller.abort());
+  const upstream = await runtime.readThreadWorkspaceFile(threadId, path, controller.signal);
+  if (!upstream.body) throw new ServiceError(502, 'Executor returned no file content.');
+  if (response.destroyed) {
+    await upstream.body.cancel();
     return;
   }
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
-  try {
-    const root = await realpath(thread.workspacePath);
-    const target = await realpath(resolve(root, path));
-    if (!inside(root, target)) throw new Error('Outside workspace');
-    handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    if (!(await handle.stat()).isFile()) throw new Error('Not a regular file');
-    // Validate the opened file itself on Linux, including against parent-directory symlink races.
-    if (process.platform === 'linux' && !inside(root, await realpath(`/proc/self/fd/${handle.fd}`))) {
-      throw new Error('Outside workspace');
-    }
-    response.setHeader('X-Content-Type-Options', 'nosniff');
-    response.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
-    response.setHeader('Cache-Control', 'no-store');
-    response.attachment(target);
-    response.type('application/octet-stream');
-    const stream = handle.createReadStream();
-    handle = undefined;
-    stream.on('error', () => response.destroy());
-    response.on('close', () => stream.destroy());
-    stream.pipe(response);
-  } catch {
-    await handle?.close().catch(() => undefined);
-    if (!response.headersSent) response.status(404).json({ error: 'Workspace file not found' });
-    else response.destroy();
-  }
+  response.setHeader('X-Content-Type-Options', 'nosniff');
+  response.setHeader('Content-Security-Policy', "sandbox; default-src 'none'");
+  response.setHeader('Cache-Control', 'no-store');
+  response.attachment(basename(path));
+  response.type('application/octet-stream');
+  const stream = Readable.fromWeb(upstream.body as NodeReadableStream<Uint8Array>);
+  stream.on('error', () => response.destroy());
+  response.on('close', () => stream.destroy());
+  stream.pipe(response);
 }

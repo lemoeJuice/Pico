@@ -6,6 +6,7 @@ export interface ExecutorConnectionInfo {
   kind?: string;
   executorVersion?: string;
   updateSupported?: boolean;
+  workspaceFileDownload?: boolean;
 }
 
 export interface ExecutorServiceAddress {
@@ -24,6 +25,7 @@ export interface ExecutorAdapter {
   listTools(binding: ExecutorBinding): Promise<ToolDefinition[]>;
   checkConnection(binding: ExecutorBinding): Promise<void | ExecutorConnectionInfo>;
   update(binding: ExecutorBinding, bundle: Uint8Array, version: string): Promise<{ executorVersion: string }>;
+  readWorkspaceFile(binding: ExecutorBinding, path: string, signal?: AbortSignal): Promise<Response>;
   execute(executionId: string, binding: ExecutorBinding, signal?: AbortSignal): Promise<Execution>;
   status(executionId: string, binding: ExecutorBinding): Promise<Execution | null>;
   interrupt(executionId: string, binding: ExecutorBinding): Promise<Execution | null>;

@@ -261,7 +261,7 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
 
   app.get('/api/health', (_request, response) => response.json({ ok: true }));
   app.get('/api/threads/:threadId/workspace-file', async (request, response) => {
-    await serveWorkspaceFile(runtime.getThread(request.params.threadId!), request.query.path, response);
+    await serveWorkspaceFile(runtime, request.params.threadId!, request.query.path, response);
   });
   app.get('/api/info', (_request, response) =>
     response.json({ defaultWorkspace: process.cwd(), version: currentExecutorVersion() }),

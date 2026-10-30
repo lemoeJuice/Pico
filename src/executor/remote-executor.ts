@@ -13,6 +13,7 @@ import {
   type RemoteExecutorInfo,
 } from './remote-protocol.js';
 import { validateToolDefinitions } from './plugin-host.js';
+import { isServiceError, ServiceError } from '../contracts/service-error.js';
 const requestTimeoutMs = 15_000;
 
 function remoteConnection(binding: ExecutorBinding): ExecutorServiceAddress {
@@ -86,9 +87,13 @@ function waitForRetry(milliseconds: number, signal: AbortSignal): Promise<void> 
   });
 }
 
-export async function inspectRemoteExecutor(endpointUrl: string, accessToken: string): Promise<RemoteExecutorInfo> {
+export async function inspectRemoteExecutor(
+  endpointUrl: string,
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<RemoteExecutorInfo> {
   if (Buffer.byteLength(accessToken) < 32) throw new Error('Remote Executor token must contain at least 32 bytes.');
-  const info = await requestJson<RemoteExecutorInfo>(endpointUrl, accessToken, '/api/info');
+  const info = await requestJson<RemoteExecutorInfo>(endpointUrl, accessToken, '/api/info', {}, signal);
   if (
     !info ||
     !Number.isSafeInteger(info.protocolVersion) ||
@@ -105,6 +110,9 @@ export async function inspectRemoteExecutor(endpointUrl: string, accessToken: st
   }
   if (info.updateSupported !== undefined && typeof info.updateSupported !== 'boolean') {
     throw new Error('Remote Executor returned an invalid update capability.');
+  }
+  if (info.workspaceFileDownload !== undefined && typeof info.workspaceFileDownload !== 'boolean') {
+    throw new Error('Remote Executor returned an invalid file download capability.');
   }
   info.tools = validateToolDefinitions(info.tools);
   return info;
@@ -175,6 +183,45 @@ export class RemoteHostExecutor implements ExecutorAdapter {
       throw new Error('Remote Executor returned an invalid update result.');
     }
     return { executorVersion: result.executorVersion };
+  }
+
+  async readWorkspaceFile(binding: ExecutorBinding, path: string, signal?: AbortSignal): Promise<Response> {
+    try {
+      return await this.requestWorkspaceFile(binding, path, signal);
+    } catch (error) {
+      if (isServiceError(error) || signal?.aborted) throw error;
+      throw new ServiceError(502, 'Executor could not provide the workspace file.');
+    }
+  }
+
+  private async requestWorkspaceFile(binding: ExecutorBinding, path: string, signal?: AbortSignal): Promise<Response> {
+    const { endpointUrl, accessToken, workspacePath } = await this.resolveAddress(binding, signal);
+    const info = await inspectRemoteExecutor(endpointUrl, accessToken, signal);
+    if (info.protocolVersion !== EXECUTOR_PROTOCOL_VERSION || info.kind !== 'executor' || !info.workspaceFileDownload) {
+      throw new ServiceError(409, 'This Executor does not support file downloads. Update the Executor and try again.');
+    }
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), requestTimeoutMs);
+    let response: Response;
+    try {
+      response = await fetch(remoteExecutorUrl(endpointUrl, '/api/workspaces/download'), {
+        method: 'POST',
+        redirect: 'error',
+        signal: signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal,
+        headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ workspacePath: workspacePath ?? binding.workspacePath, path }),
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!response.ok) {
+      await response.body?.cancel();
+      if (response.status === 400) throw new ServiceError(400, 'Expected a path inside the Thread workspace.');
+      if (response.status === 404) throw new ServiceError(404, 'Workspace file not found.');
+      throw new ServiceError(502, 'Executor could not provide the workspace file.');
+    }
+    if (!response.body) throw new ServiceError(502, 'Executor returned no file content.');
+    return response;
   }
 
   async execute(executionId: string, binding: ExecutorBinding, externalSignal?: AbortSignal): Promise<Execution> {

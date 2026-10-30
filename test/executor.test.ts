@@ -34,6 +34,7 @@ function createMockContainerAgent(
   loseExecutions: boolean;
   setServiceAvailable: (available: boolean) => void;
   getRestartCount: () => number;
+  getWorkspaceDownloads: () => Array<{ workspacePath: unknown; path: unknown }>;
   completeExecution: (id: string, result: unknown) => void;
   loseNextSubmissionAck: boolean;
   close: () => void;
@@ -48,6 +49,7 @@ function createMockContainerAgent(
   let serviceAvailable = true;
   let loseExecutions = false;
   let loseNextSubmissionAck = false;
+  const workspaceDownloads: Array<{ workspacePath: unknown; path: unknown }> = [];
   const originalFetch = globalThis.fetch;
 
   const json = (body: unknown, status = 200): Response =>
@@ -73,8 +75,33 @@ function createMockContainerAgent(
         name: 'Mock Container Executor',
         kind: 'executor',
         workspaceRoot: '/workspace',
+        workspaceFileDownload: true,
         tools: catalog.listBySource('executor').map((tool) => tool.definition),
       });
+    }
+
+    if (requestUrl.pathname === '/api/workspaces/download' && (init?.method ?? 'GET') === 'POST') {
+      let requestBody: Record<string, unknown>;
+      try {
+        requestBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      } catch {
+        return json({ error: 'Invalid JSON body.' }, 400);
+      }
+      workspaceDownloads.push({ workspacePath: requestBody.workspacePath, path: requestBody.path });
+      if (requestBody.workspacePath !== '/workspace' || typeof requestBody.path !== 'string') {
+        return json({ error: 'Invalid workspace download request.' }, 400);
+      }
+      try {
+        const contents = await readFile(join(workspace, requestBody.path));
+        return new Response(contents, {
+          headers: {
+            'content-type': 'application/octet-stream',
+            'content-disposition': `attachment; filename="${requestBody.path.split(/[\\/]/).at(-1)}"`,
+          },
+        });
+      } catch {
+        return json({ error: 'Workspace file not found.' }, 404);
+      }
     }
 
     const executionMatch = /^\/api\/executions\/([^/]+)(?:\/(interrupt))?$/.exec(requestUrl.pathname);
@@ -172,6 +199,7 @@ function createMockContainerAgent(
       serviceAvailable = available;
     },
     getRestartCount: () => restartCount,
+    getWorkspaceDownloads: () => workspaceDownloads,
     get loseExecutions() {
       return loseExecutions;
     },
@@ -199,6 +227,35 @@ function createMockContainerAgent(
 }
 
 describe('Executor execution identity and recovery', () => {
+  it('downloads Container workspace files through the agent workspace path', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.createThread('container');
+    const filename = 'artifact.bin';
+    const contents = Buffer.from([0, 255, 7, 128, 42]);
+    await writeFile(join(env.workspace, filename), contents);
+    const podman = async (args: string[]) => {
+      if (args.includes('info')) return { stdout: '5.0.0', stderr: '' };
+      if (args.includes('inspect')) throw new Error('no such container');
+      if (args.includes('run')) return { stdout: 'container-id', stderr: '' };
+      if (args.includes('exec')) return { stdout: '', stderr: '' };
+      throw new Error(`Unexpected Podman command: ${args[0] ?? 'empty'}`);
+    };
+    const mockAgent = createMockContainerAgent(env.workspace, new ToolCatalog(), podman);
+    const executor = new ContainerExecutor(env.store, undefined, undefined, mockAgent.runner);
+    try {
+      const binding = env.store.executorForThread(thread.id)!;
+      const response = await executor.readWorkspaceFile(binding, filename);
+      expect(response.status).toBe(200);
+      expect(Buffer.from(await response.arrayBuffer())).toEqual(contents);
+      expect(mockAgent.getWorkspaceDownloads()).toEqual([{ workspacePath: '/workspace', path: filename }]);
+      expect(JSON.stringify(mockAgent.getWorkspaceDownloads())).not.toContain(env.workspace);
+    } finally {
+      await executor.shutdown();
+      mockAgent.close();
+      await env.cleanup();
+    }
+  });
+
   it('treats concurrent and repeated Host Executor submissions with one ID as one execution', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.createThread('host');

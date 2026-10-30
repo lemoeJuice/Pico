@@ -11,6 +11,7 @@ import { loadExecutorPlugins } from './plugin-host.js';
 import type { ToolCatalog } from './tool-catalog.js';
 import { RemoteExecutionLedger } from './remote-ledger.js';
 import type { RemoteExecutionRequest, RemoteExecutionState } from './remote-protocol.js';
+import { serveRemoteWorkspaceFile } from './workspace-file.js';
 
 interface ActiveExecution {
   controller: AbortController;
@@ -155,6 +156,7 @@ export async function startRemoteExecutorServer(
       name: options.name?.trim() || hostname(),
       kind: 'executor',
       workspaceRoot,
+      workspaceFileDownload: true,
       tools: tools.listBySource('executor').map((tool) => tool.definition),
     });
   });
@@ -183,6 +185,10 @@ export async function startRemoteExecutorServer(
   );
   app.post('/api/workspaces/validate', async (request, response) => {
     response.json({ path: await validateWorkspace(bodyObject(request).path) });
+  });
+  app.post('/api/workspaces/download', async (request, response) => {
+    const body = bodyObject(request);
+    await serveRemoteWorkspaceFile(body.workspacePath, body.path, validateWorkspace, response);
   });
   app.post('/api/executions/:id', async (request, response) => {
     const id = remoteExecutionId(request.params.id!);

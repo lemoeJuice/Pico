@@ -5,6 +5,7 @@ const codes = {
   409: 'conflict',
   413: 'payload_too_large',
   415: 'unsupported_media_type',
+  502: 'bad_gateway',
 } as const;
 
 export type ServiceErrorStatus = keyof typeof codes;

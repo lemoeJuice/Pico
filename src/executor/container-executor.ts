@@ -210,6 +210,10 @@ export class ContainerExecutor implements ExecutorAdapter {
     return this.client.update(binding, bundle, version);
   }
 
+  readWorkspaceFile(binding: ExecutorBinding, path: string, signal?: AbortSignal): Promise<Response> {
+    return this.client.readWorkspaceFile(binding, path, signal);
+  }
+
   execute(executionId: string, binding: ExecutorBinding, signal?: AbortSignal): Promise<Execution> {
     return this.client.execute(executionId, binding, signal);
   }
