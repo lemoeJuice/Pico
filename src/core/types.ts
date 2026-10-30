@@ -164,6 +164,8 @@ export interface ToolDefinition {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+  /** Projection-only fields retained in the model call but omitted from the durable tool execution. */
+  modelOnlyArguments?: string[];
 }
 
 export interface UiContribution {

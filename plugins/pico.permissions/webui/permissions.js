@@ -113,6 +113,7 @@
         ] : []),
         { type: 'heading', level: 4, text: 'Tool arguments' },
         para(JSON.stringify(approval.arguments ?? {}, null, 2)),
+        ...(approval.callerExplanation ? [{ type: 'heading', level: 4, text: 'Calling model’s explanation (unverified)' }, para(approval.callerExplanation)] : []),
       ] },
     ] }] }); });
   }
@@ -127,6 +128,7 @@
     if (!(execution?.status === 'pending' && approval?.status === 'pending')) return [];
     const review = approval?.reviewer, nodes = [];
     const messages = [];
+    if (approval.callerExplanation) messages.push(para(`Calling model’s explanation (unverified): ${approval.callerExplanation}`));
     if (review) {
       messages.push(para(review.outcome === 'allow' ? 'Auto-review allowed' : review.outcome === 'deny' ? 'Auto-review denied' : 'Auto-review unavailable'));
       messages.push(para(review.reason));

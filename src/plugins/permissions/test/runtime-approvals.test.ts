@@ -14,6 +14,7 @@ interface PermissionApprovalForTest {
   threadId: string;
   toolName: string;
   arguments: Record<string, unknown>;
+  callerExplanation?: string;
   status: 'pending' | 'allowed' | 'denied' | 'cancelled';
   createdAt: string;
 }
@@ -196,7 +197,7 @@ describe('Permissions Runtime integration', () => {
       new FakeModel(() => {
         modelCalls += 1;
         return modelCalls === 1
-          ? response('', [{ id: 'approval-read', name: 'read_file', arguments: { path: 'input.txt' } }])
+          ? response('', [{ id: 'approval-read', name: 'read_file', arguments: { path: 'input.txt', permission_reason: 'Read the requested input.' } }])
           : response('The file was read after restart.');
       });
     let store = new PicoStore(databasePath);
@@ -217,6 +218,8 @@ describe('Permissions Runtime integration', () => {
       );
       const approval = (await permissionView(runtime, thread.id)).approvals[0]!;
       const executionBeforeShutdown = store.getExecution(approval.executionId);
+      expect(approval.callerExplanation).toBe('Read the requested input.');
+      expect(executionBeforeShutdown?.arguments).toEqual({ path: 'input.txt' });
 
       await runtime.shutdown();
       expect(executionBeforeShutdown?.status).toBe('pending');
@@ -232,6 +235,8 @@ describe('Permissions Runtime integration', () => {
       await setupTestCatalog(runtime);
       await runtime.initialize();
       await untilAsync(async () => (await permissionView(runtime, thread.id)).approvals[0]?.status === 'pending');
+      expect((await permissionView(runtime, thread.id)).approvals[0]?.callerExplanation).toBe('Read the requested input.');
+      expect(store.getExecution(approval.executionId)?.arguments).toEqual({ path: 'input.txt' });
       await decidePermission(runtime, approval.executionId, true);
       await runtime.drain();
 

@@ -70,6 +70,7 @@ export interface CommitStepInput {
   payload: AssistantPayload;
   toolCalls: Array<{
     call: ToolCall;
+    executionArguments?: Record<string, unknown>;
     executionId: string;
     source?: 'runtime' | 'executor' | 'mcp';
     mcpTarget?: McpToolTarget;
@@ -1551,7 +1552,7 @@ export class PicoStore {
         input.payload,
         createdAt,
       ).record;
-      for (const { call, executionId, source, mcpTarget } of input.toolCalls) {
+      for (const { call, executionArguments, executionId, source, mcpTarget } of input.toolCalls) {
         const existing = this.db.prepare('SELECT * FROM executions WHERE id = ?').get(executionId) as
           SqlRow | undefined;
         if (existing) {
@@ -1575,7 +1576,7 @@ export class PicoStore {
             input.threadId,
             input.payload.batchId,
             call.name,
-            JSON.stringify(call.arguments),
+            JSON.stringify(executionArguments ?? call.arguments),
             createdAt,
             createdAt,
           );

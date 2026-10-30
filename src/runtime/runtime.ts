@@ -4251,6 +4251,9 @@ export class PicoRuntime {
       };
       const toolExecutions = calls.map((call) => {
         const registered = this.tools.get(call.name);
+        const modelOnlyArguments = projectedTools.find((tool) => tool.name === call.name)?.modelOnlyArguments ?? [];
+        const executionArguments = { ...call.arguments };
+        for (const name of modelOnlyArguments) delete executionArguments[name];
         const source = projected.toolSources?.[call.name] ?? registered?.source;
         const mcpTarget =
           source === 'mcp'
@@ -4258,6 +4261,7 @@ export class PicoRuntime {
             : undefined;
         return {
           call,
+          executionArguments,
           executionId: `${thread.id}:${modelExecutionId}:${call.id}`,
           ...(source ? { source } : {}),
           ...(mcpTarget ? { mcpTarget } : {}),
@@ -4723,7 +4727,7 @@ export class PicoRuntime {
           thread,
           executionId,
           registered,
-          call,
+          { ...call, arguments: this.store.getExecution(executionId)?.arguments ?? call.arguments },
           toolSource,
           controller.signal,
           persistedMcpTarget,
