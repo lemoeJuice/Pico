@@ -24,8 +24,49 @@ export interface RuntimeContextCompaction {
   /** Compaction or restore fact that established the active model projection. */
   projectionRecordSeq: number;
   sourceRecordIds: string[];
+  /** Canonical conversation records that were visible to the summary model, when recorded. */
+  summaryInputRecordIds?: string[];
+  /** Highest Canonical seq included in summaryInputRecordIds, when recorded. */
+  summaryInputThroughSeq?: number;
   sourceHash: string;
   summary: string;
+}
+
+/** Internal handoff for a compaction validated against Runtime's full projection input. */
+export const runtimeContextCompactionProjectionKey = Symbol('runtime-context-compaction');
+
+export type RuntimeContextCompactionProjection = {
+  [runtimeContextCompactionProjectionKey]?: RuntimeContextCompaction | null;
+};
+
+export function runtimeContextCompactionForProjection(
+  input: { records: readonly CanonicalRecord[] } & RuntimeContextCompactionProjection,
+): RuntimeContextCompaction | null {
+  if (Object.prototype.hasOwnProperty.call(input, runtimeContextCompactionProjectionKey)) {
+    return input[runtimeContextCompactionProjectionKey] ?? null;
+  }
+  return runtimeContextCompaction(input.records);
+}
+
+function summaryInputMatchesConversation(
+  payload: Record<string, unknown>,
+  conversation: readonly CanonicalRecord[],
+): boolean {
+  const rawIds = payload.summaryInputRecordIds;
+  const rawThroughSeq = payload.summaryInputThroughSeq;
+  // Facts written before this provenance was added retain their historical behavior.
+  if (rawIds === undefined && rawThroughSeq === undefined) return true;
+  if (
+    !Array.isArray(rawIds) ||
+    !rawIds.every((id): id is string => typeof id === 'string') ||
+    !Number.isSafeInteger(rawThroughSeq) ||
+    (rawThroughSeq as number) < 1 ||
+    (Number.isSafeInteger(payload.throughSeq) && (rawThroughSeq as number) < (payload.throughSeq as number))
+  ) {
+    return false;
+  }
+  const input = conversation.filter((item) => item.seq <= (rawThroughSeq as number));
+  return input.length === rawIds.length && input.every((item, index) => item.id === rawIds[index]);
 }
 
 function recordObject(value: unknown): Record<string, unknown> {
@@ -501,6 +542,7 @@ export function runtimeConversationProjection(records: readonly CanonicalRecord[
             candidatePayload.version === 1 &&
             candidatePayload.throughSeq === checkpointThroughSeq &&
             candidatePayload.sourceHash === payload.checkpointSourceHash &&
+            summaryInputMatchesConversation(candidatePayload, parentConversation) &&
             typeof candidatePayload.summary === 'string' &&
             Boolean(candidatePayload.summary.trim()) &&
             Array.isArray(sourceIds) &&
@@ -595,6 +637,14 @@ export function runtimeContextCompaction(records: readonly CanonicalRecord[]): R
       Number.isSafeInteger(payload.contextThroughSeq) &&
       (payload.contextThroughSeq as number) >= (payload.checkpointThroughSeq as number)
     ) {
+      // Invalid restore facts remain ordinary Canonical events. Only a restore
+      // that actually created a projection node can reactivate a checkpoint.
+      if (
+        runtimeConversationProjection(records.filter((item) => item.seq <= record.seq)).activeProjectionId !==
+        record.id
+      ) {
+        return [];
+      }
       return [{
         recordId: record.id,
         recordSeq: record.seq,
@@ -613,6 +663,14 @@ export function runtimeContextCompaction(records: readonly CanonicalRecord[]): R
       Number.isSafeInteger(payload.throughSeq) &&
       (payload.throughSeq as number) >= (recovery.checkpointThroughSeq as number)
     ) {
+      // Recovery facts also have to be an accepted projection node before they
+      // can make a prior checkpoint available again.
+      if (
+        runtimeConversationProjection(records.filter((item) => item.seq <= record.seq)).activeProjectionId !==
+        record.id
+      ) {
+        return [];
+      }
       return [{
         recordId: record.id,
         recordSeq: record.seq,
@@ -667,7 +725,8 @@ export function runtimeContextCompaction(records: readonly CanonicalRecord[]): R
     if (
       source.length !== sourceIds.length ||
       source.some((item, index) => item.id !== sourceIds[index]) ||
-      source.some((item) => !byId.has(item.id))
+      source.some((item) => !byId.has(item.id)) ||
+      (!matchesActiveRestore && !summaryInputMatchesConversation(payload, conversation))
     ) {
       continue;
     }

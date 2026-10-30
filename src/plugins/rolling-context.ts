@@ -8,6 +8,7 @@ import {
   omitConsumedThreadHistoryResults,
   runtimeCompactionTurn,
   runtimeContextCompaction,
+  runtimeContextCompactionForProjection,
 } from '../contracts/canonical-projection.js';
 import { sanitizeMultimodalResultValue } from '../contracts/multimodal.js';
 import type { ProjectionInput, ProjectionProvenance } from '../contracts/plugin-pipeline.js';
@@ -452,10 +453,10 @@ function allTurns(
   context: PluginContext,
   input: ProjectionInput,
   state: RollingSegment[],
+  runtimeCompaction: ReturnType<typeof runtimeContextCompaction>,
 ): { turns: PromptTurn[]; provenance: ProjectionProvenance[] } {
   const consumed = new Set<string>();
   const replacementByStart = new Map<number, RollingSegment>();
-  const runtimeCompaction = runtimeContextCompaction(input.records);
   const rewindTargetSeq = latestRewindTargetSeq(input.records);
   const safeRecords = omitConsumedThreadHistoryResults(input.records);
   const relevant = canonicalConversationRecords(safeRecords).filter(
@@ -669,19 +670,65 @@ export const rollingContextPlugin: PicoPlugin = {
       thread: Thread,
       records: readonly CanonicalRecord[],
       modelStep = false,
+      runtimeCompaction: ReturnType<typeof runtimeContextCompaction> = runtimeContextCompaction(records),
     ): Promise<RollingSegment[]> => {
       const previous = list(thread.id);
       if (!modelStep) return previous;
       const known = new Set(previous.map((segment) => segment.id));
-      const runtimeCompaction = runtimeContextCompaction(records);
       const safeRecords = omitConsumedThreadHistoryResults(records);
-      const latestRound = completedModelRounds(safeRecords).at(-1);
+      const completeRounds = completedModelRounds(safeRecords);
+      const latestRound = completeRounds.at(-1);
+      const roundsByStart = new Map(completeRounds.map((round) => [round[0]!.seq, round]));
       const sealable = (latestRound ? [latestRound] : []).filter((block) => {
         const endSeq = block.at(-1)?.seq ?? Number.POSITIVE_INFINITY;
         if (runtimeCompaction && endSeq <= runtimeCompaction.contextThroughSeq) return false;
         return true;
       });
       let next = [...previous];
+
+      // A process can stop after the pending segment is committed but before its
+      // summary result is saved. Reconcile those segments before sealing a new
+      // round. Completed auxiliary calls replay from Runtime's idempotency record;
+      // interrupted/failed calls need an explicit fresh attempt from the UI.
+      const pendingSegments = next.filter((segment) => segment.summaryStatus === 'pending' && !segment.summary);
+      if (pendingSegments.length > 0) {
+        const calls =
+          typeof context.models.history === 'function'
+            ? context.models.history({ pluginId: 'pico.rolling-context', threadId: thread.id })
+            : [];
+        for (const segment of pendingSegments) {
+          const round = roundsByStart.get(segment.startSeq);
+          if (
+            !round ||
+            round.length !== segment.sourceRecordIds.length ||
+            round.some((record, index) => record.id !== segment.sourceRecordIds[index]) ||
+            sourceHash(round) !== segment.sourceHash ||
+            (runtimeCompaction && (round.at(-1)?.seq ?? 0) <= runtimeCompaction.contextThroughSeq)
+          ) {
+            continue;
+          }
+          const priorCall = calls.find((call) => call.idempotencyKey === callKey('summary', segment));
+          if (priorCall && (priorCall.status === 'interrupted' || priorCall.status === 'failed')) {
+            const reason =
+              priorCall.status === 'interrupted'
+                ? 'The previous summary call was interrupted before its result was saved. Use Retry summary to start a fresh attempt.'
+                : `The previous summary call failed: ${priorCall.error ?? 'unknown error'}. Use Retry summary to start a fresh attempt.`;
+            const failed: RollingSegment = {
+              ...segment,
+              summaryStatus: 'failed',
+              evaluator: { ...segment.evaluator, status: 'failed', reason },
+              updatedAt: new Date().toISOString(),
+            };
+            next = next.map((item) => (item.id === segment.id ? failed : item));
+            saveSegments(context, thread.id, next);
+            continue;
+          }
+
+          const recovered = await summarizeAndEvaluate(context, thread, segment, modelRoundContent(round));
+          next = next.map((item) => (item.id === segment.id ? recovered : item));
+          saveSegments(context, thread.id, next);
+        }
+      }
       for (const block of sealable) {
         const sourceIds = block.map((record) => record.id);
         const originalBlock = sourceIds
@@ -756,8 +803,9 @@ export const rollingContextPlugin: PicoPlugin = {
 
     pipelines.use('projection', async (input, next) => {
       const modelStep = (input as ProjectionInput & { modelStep?: boolean }).modelStep === true;
-      const segments = await reconcile(input.thread, input.records, modelStep);
-      const projected = allTurns(context, input, segments);
+      const runtimeCompaction = runtimeContextCompactionForProjection(input);
+      const segments = await reconcile(input.thread, input.records, modelStep, runtimeCompaction);
+      const projected = allTurns(context, input, segments, runtimeCompaction);
       return next({
         ...input,
         turns: projected.turns,

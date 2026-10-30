@@ -548,4 +548,182 @@ describe('Rolling Context plugin', () => {
     ).toBe(false);
     expect(projected.turns.at(-2)).toMatchObject({ role: 'user', content: 'Now inspect the next issue.' });
   });
+
+  it('recovers an interrupted pending summary into an explicit retryable state', async () => {
+    const thread = { id: 'thread-1', projectId: 'project-1', state: 'idle' } as Thread;
+    const records = [
+      record(1, 'message', { role: 'user', source: 'user', content: 'First request.' }),
+      record(2, 'assistant', {
+        content: 'First response.',
+        toolCalls: [],
+        batchId: null,
+        projectionThrough: 1,
+        usage: null,
+        model: 'test',
+      }),
+      record(3, 'message', { role: 'user', source: 'user', content: 'Next request.' }),
+    ];
+    const pending = sampleSegment([records[1]!]);
+    const values = new Map<string, unknown>([['rolling-context-v1', { byThread: { [thread.id]: [pending] } }]]);
+    const keys: string[] = [];
+    let projection:
+      | ((
+          input: ProjectionInput,
+          next: (input: ProjectionInput) => Promise<ProjectionInput>,
+        ) => Promise<ProjectionInput>)
+      | null = null;
+    let action: ((request: { body: unknown }) => Promise<unknown>) | null = null;
+    const context = {
+      threads: { get: () => thread },
+      canonical: { list: () => records, append() {} },
+      state: {
+        get<T>(key: string, fallback: T): T {
+          return (values.has(key) ? values.get(key) : fallback) as T;
+        },
+        set<T>(key: string, value: T) {
+          values.set(key, structuredClone(value));
+        },
+        transaction<T>(run: () => T): T {
+          return run();
+        },
+      },
+      models: {
+        history: () => [
+          { idempotencyKey: callKey('summary', pending), status: 'interrupted', error: 'Runtime stopped.' },
+        ],
+        complete: async (request: { idempotencyKey: string }) => {
+          keys.push(request.idempotencyKey);
+          return {
+            id: 'retry-call',
+            response: { content: JSON.stringify({ summary: 'Recovered summary.' }) },
+          };
+        },
+      },
+      pipelines: {
+        use: (_stage: string, handler: typeof projection) => {
+          projection = handler;
+        },
+      },
+      tools: { register() {} },
+      http: {
+        register: (method: string, path: string, handler: (request: { body: unknown }) => Promise<unknown>) => {
+          if (method === 'POST' && path === '/action') action = handler;
+        },
+      },
+      commands: { register() {} },
+      ui: { contribute() {}, registerPage() {} },
+    } as unknown as PluginContext;
+    rollingContextPlugin.activate?.(context);
+    const input: ProjectionInput = {
+      thread,
+      records,
+      through: records.at(-1)!.seq,
+      systemPrompt: 'system',
+      tools: [],
+      turns: [],
+      modelStep: true,
+    };
+
+    await projection!(input, async (value) => value);
+    let recovered = (values.get('rolling-context-v1') as { byThread: Record<string, RollingSegment[]> }).byThread[
+      thread.id
+    ]![0]!;
+    expect(recovered.summaryStatus).toBe('failed');
+    expect(recovered.evaluator.reason).toContain('Use Retry summary');
+    expect(keys).toEqual([]);
+
+    await action!({ body: { action: 'retry-summary', threadId: thread.id, segmentId: pending.id } });
+    recovered = (values.get('rolling-context-v1') as { byThread: Record<string, RollingSegment[]> }).byThread[
+      thread.id
+    ]![0]!;
+    expect(recovered.summaryStatus).toBe('completed');
+    expect(recovered.summary).toBe('Recovered summary.');
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).not.toBe(callKey('summary', pending));
+  });
+
+  it('does not retry a pending summary already covered by Runtime compaction', async () => {
+    const prefix = [
+      record(1, 'message', { role: 'user', source: 'user', content: 'Covered request.' }),
+      record(2, 'assistant', {
+        content: 'Covered response.',
+        toolCalls: [],
+        batchId: null,
+        projectionThrough: 1,
+        usage: null,
+        model: 'test',
+      }),
+    ];
+    const records = [
+      ...prefix,
+      record(5, 'plugin', {
+        pluginId: 'pico.runtime',
+        action: 'context-compacted',
+        version: 1,
+        throughSeq: 2,
+        sourceRecordIds: prefix.map((item) => item.id),
+        sourceHash: sourceHash(prefix),
+        summary: 'Core summary: the prior round is covered.',
+      }),
+      record(6, 'message', { role: 'user', source: 'user', content: 'Next request.' }),
+    ];
+    const pending = sampleSegment([prefix[1]!]);
+    const values = new Map<string, unknown>([['rolling-context-v1', { byThread: { 'thread-1': [pending] } }]]);
+    let summaryCalls = 0;
+    let projection:
+      | ((
+          input: ProjectionInput,
+          next: (input: ProjectionInput) => Promise<ProjectionInput>,
+        ) => Promise<ProjectionInput>)
+      | null = null;
+    const context = {
+      threads: { get: () => ({ id: 'thread-1', projectId: 'project-1', state: 'idle' }) as Thread },
+      canonical: { list: () => records, append() {} },
+      state: {
+        get<T>(key: string, fallback: T): T {
+          return (values.has(key) ? values.get(key) : fallback) as T;
+        },
+        set<T>(key: string, value: T) {
+          values.set(key, structuredClone(value));
+        },
+        transaction<T>(run: () => T): T {
+          return run();
+        },
+      },
+      models: {
+        history: () => [{ idempotencyKey: callKey('summary', pending), status: 'interrupted', error: 'Stopped.' }],
+        complete: async () => {
+          summaryCalls += 1;
+          throw new Error('Covered rounds must not be summarized again.');
+        },
+      },
+      pipelines: {
+        use: (_stage: string, handler: typeof projection) => {
+          projection = handler;
+        },
+      },
+      tools: { register() {} },
+      http: { register() {} },
+      commands: { register() {} },
+      ui: { contribute() {}, registerPage() {} },
+    } as unknown as PluginContext;
+    rollingContextPlugin.activate?.(context);
+    const thread = context.threads.get('thread-1')!;
+    const input: ProjectionInput = {
+      thread,
+      records,
+      through: records.at(-1)!.seq,
+      systemPrompt: 'system',
+      tools: [],
+      turns: [],
+      modelStep: true,
+    };
+
+    const projected = await projection!(input, async (value) => value);
+    expect(summaryCalls).toBe(0);
+    expect(projected.turns[0]).toMatchObject({
+      role: 'user',
+      content: expect.stringContaining('Core summary: the prior round is covered.'),
+    });
+  });
 });

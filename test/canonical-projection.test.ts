@@ -5,6 +5,9 @@ import {
   completedCanonicalModelInvocationBlocks,
   omitConsumedThreadHistoryResults,
   projectThreadHistoryIo,
+  runtimeContextCompaction,
+  runtimeContextCompactionForProjection,
+  runtimeContextCompactionProjectionKey,
   runtimeConversationProjection,
 } from '../src/contracts/canonical-projection.js';
 
@@ -106,6 +109,115 @@ it('keeps completed tool results when rewinding to their assistant call', () => 
   expect(
     completedCanonicalModelInvocationBlocks(projected.records).map((block) => block.map((item) => item.seq)),
   ).toEqual([[1, 2, 3, 4]]);
+});
+
+it('activates a restored checkpoint only while its recorded summary inputs remain on the active branch', () => {
+  const conversation = [
+    record(1, 'message', { role: 'user', content: 'original request' }),
+    record(2, 'assistant', { toolCalls: [], content: 'first answer' }),
+    record(3, 'message', { role: 'user', content: 'later request' }),
+    record(4, 'assistant', { toolCalls: [], content: 'later answer' }),
+  ];
+  const compacted = record(5, 'plugin', {
+    pluginId: 'pico.runtime',
+    action: 'context-compacted',
+    version: 1,
+    throughSeq: 2,
+    sourceRecordIds: ['record-1', 'record-2'],
+    summaryInputRecordIds: conversation.map((item) => item.id),
+    // Watermark includes the compact marker at seq 5, while the final
+    // conversation record itself is seq 4.
+    summaryInputThroughSeq: 5,
+    sourceHash: 'a'.repeat(64),
+    summary: 'Summary that includes the later request and answer.',
+  });
+  const restoredOnFullBranch = record(6, 'plugin', {
+    pluginId: 'pico.runtime',
+    action: 'context-restored',
+    version: 1,
+    checkpointThroughSeq: 2,
+    checkpointSourceHash: 'a'.repeat(64),
+    contextThroughSeq: 4,
+    contextThroughRecordId: 'record-4',
+  });
+
+  expect(runtimeConversationProjection([...conversation, compacted, restoredOnFullBranch]).records.at(-1)?.id).toBe(
+    restoredOnFullBranch.id,
+  );
+  expect(runtimeContextCompaction([...conversation, compacted, restoredOnFullBranch])?.summary).toContain(
+    'later request',
+  );
+
+  const rewind = record(6, 'plugin', {
+    pluginId: 'pico.runtime',
+    action: 'context-rewound',
+    version: 1,
+    targetRecordId: 'record-3',
+    targetSeq: 3,
+    parentProjectionId: null,
+  });
+  const restoredAfterRewind = record(7, 'plugin', {
+    pluginId: 'pico.runtime',
+    action: 'context-restored',
+    version: 1,
+    checkpointThroughSeq: 2,
+    checkpointSourceHash: 'a'.repeat(64),
+    contextThroughSeq: 3,
+    contextThroughRecordId: 'record-3',
+  });
+
+  const rewoundRecords = [...conversation, compacted, rewind, restoredAfterRewind];
+  // The invalid restore fact remains as an ordinary Canonical event, but it
+  // cannot reactivate the checkpoint whose summary depended on record-4.
+  expect(runtimeContextCompaction(rewoundRecords)).toBeNull();
+});
+
+it('keeps legacy compacted facts without summary-input provenance restorable', () => {
+  const source = [
+    record(1, 'message', { role: 'user', content: 'request' }),
+    record(2, 'assistant', { toolCalls: [], content: 'answer' }),
+  ];
+  const compacted = record(3, 'plugin', {
+    pluginId: 'pico.runtime',
+    action: 'context-compacted',
+    version: 1,
+    throughSeq: 2,
+    sourceRecordIds: ['record-1', 'record-2'],
+    sourceHash: 'b'.repeat(64),
+    summary: 'Legacy summary.',
+  });
+  const restored = record(4, 'plugin', {
+    pluginId: 'pico.runtime',
+    action: 'context-restored',
+    version: 1,
+    checkpointThroughSeq: 2,
+    checkpointSourceHash: 'b'.repeat(64),
+    contextThroughSeq: 2,
+    contextThroughRecordId: 'record-2',
+  });
+
+  expect(runtimeContextCompaction([...source, compacted, restored])?.summary).toBe('Legacy summary.');
+});
+
+it('honors an explicitly empty internal compaction snapshot instead of reparsing filtered records', () => {
+  const records = [
+    record(1, 'message', { role: 'user', content: 'request' }),
+    record(2, 'assistant', { toolCalls: [], content: 'answer' }),
+    record(3, 'plugin', {
+      pluginId: 'pico.runtime',
+      action: 'context-compacted',
+      version: 1,
+      throughSeq: 2,
+      sourceRecordIds: ['record-1', 'record-2'],
+      sourceHash: 'c'.repeat(64),
+      summary: 'Summary.',
+    }),
+  ];
+
+  expect(runtimeContextCompactionForProjection({ records })?.summary).toBe('Summary.');
+  expect(
+    runtimeContextCompactionForProjection({ records, [runtimeContextCompactionProjectionKey]: null }),
+  ).toBeNull();
 });
 
 it('keeps a history result for its first response and hides it after the consuming response', () => {

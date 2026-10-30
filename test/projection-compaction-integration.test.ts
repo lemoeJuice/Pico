@@ -4,11 +4,30 @@ import { FakeModel, response, setupRuntime } from './helpers.js';
 import { rollingContextPlugin } from '../src/plugins/rolling-context.js';
 import type { PicoRuntime } from '../src/runtime/runtime.js';
 import type { Thread } from '../src/core/types.js';
+import type { ModelPrompt } from '../src/contracts/model.js';
+
+type ProjectedPrompt = Pick<ModelPrompt, 'tools' | 'turns'> & { systemPrompt: string };
 
 async function compactProjected(runtime: PicoRuntime, thread: Thread) {
   const records = runtime.store.listRecords(thread.id);
   const projection = await runtime['projectModelInput'](thread, records, records.at(-1)?.seq ?? 0);
-  return runtime['compactThread'](thread, false, false, projection);
+  const result = await runtime['compactThread'](thread, false, false, projection);
+  return { projection, result };
+}
+
+function isCompactionPrompt(prompt: ModelPrompt) {
+  const finalTurn = prompt.turns.at(-1);
+  return (
+    finalTurn?.kind === 'message' && finalTurn.role === 'user' && /summarize this conversation/i.test(finalTurn.content)
+  );
+}
+
+function expectCompactionPromptMatchesProjection(prompt: ModelPrompt, projection: ProjectedPrompt) {
+  expect(prompt.system).toBe(projection.systemPrompt);
+  expect(prompt.tools).toEqual(projection.tools);
+  expect(prompt.turns.slice(0, projection.turns.length)).toEqual(projection.turns);
+  expect(prompt.turns).toHaveLength(projection.turns.length + 1);
+  expect(isCompactionPrompt(prompt)).toBe(true);
 }
 
 describe('projected compaction', () => {
@@ -37,22 +56,12 @@ describe('projected compaction', () => {
           model: 'test-model',
         });
       }
-      const result = await compactProjected(env.runtime, thread);
-      expect(result.text).toContain('Compacted 2 completed model invocation(s)');
-      expect(
-        JSON.stringify(
-          model.prompts.filter((prompt) =>
-            prompt.system.startsWith("You are Pico Runtime's conversation compaction helper"),
-          )[0],
-        ),
-      ).toContain('request 1');
-      expect(
-        JSON.stringify(
-          model.prompts.filter((prompt) =>
-            prompt.system.startsWith("You are Pico Runtime's conversation compaction helper"),
-          )[0],
-        ),
-      ).not.toContain('request 3');
+      const first = await compactProjected(env.runtime, thread);
+      expect(first.result.text).toContain('Compacted 2 completed model invocation(s)');
+      const firstPrompt = model.prompts.filter(isCompactionPrompt)[0]!;
+      expectCompactionPromptMatchesProjection(firstPrompt, first.projection);
+      expect(JSON.stringify(firstPrompt.turns)).toContain('request 1');
+      expect(JSON.stringify(firstPrompt.turns)).toContain('request 3');
       for (let n = 5; n <= 6; n++) {
         const user = env.store.appendCanonical(thread.id, `map-user-${n}`, 'message', {
           role: 'user',
@@ -69,21 +78,11 @@ describe('projected compaction', () => {
         });
       }
       const second = await compactProjected(env.runtime, thread);
-      expect(second.text).toContain('Compacted');
-      expect(
-        JSON.stringify(
-          model.prompts.filter((prompt) =>
-            prompt.system.startsWith("You are Pico Runtime's conversation compaction helper"),
-          )[1],
-        ),
-      ).toContain('Condensed earlier history.');
-      expect(
-        JSON.stringify(
-          model.prompts.filter((prompt) =>
-            prompt.system.startsWith("You are Pico Runtime's conversation compaction helper"),
-          )[1],
-        ),
-      ).not.toContain('request 5');
+      expect(second.result.text).toContain('Compacted');
+      const secondPrompt = model.prompts.filter(isCompactionPrompt)[1]!;
+      expectCompactionPromptMatchesProjection(secondPrompt, second.projection);
+      expect(JSON.stringify(secondPrompt.turns)).toContain('Condensed earlier history.');
+      expect(JSON.stringify(secondPrompt.turns)).toContain('request 5');
     } finally {
       await env.runtime.shutdown();
       env.store.close();
@@ -116,25 +115,25 @@ describe('context changes followed by projected compaction', () => {
       env.runtime.updateContextManagementSettings({ keepRecentTokens: 1 });
       for (let n = 1; n <= 6; n++) append('old', n);
       const first = await compactProjected(env.runtime, thread);
-      expect(first.text).toContain('Compacted');
+      expect(first.result.text).toContain('Compacted');
       if (action === 'restore') env.runtime.restoreContextCheckpoint(thread.id);
       else env.runtime.rewindContextToMessage(thread.id, 'old-assistant-2');
       for (let n = 1; n <= 4; n++) append('new', n);
       const second = await compactProjected(env.runtime, thread);
-      expect(second.text).toContain('Compacted');
-      const source = JSON.stringify(
-        model.prompts.filter((prompt) =>
-          prompt.system.startsWith("You are Pico Runtime's conversation compaction helper"),
-        )[1],
-      );
+      expect(second.result.text).toContain('Compacted');
+      const secondPrompt = model.prompts.filter(isCompactionPrompt)[1]!;
+      expectCompactionPromptMatchesProjection(secondPrompt, second.projection);
+      const source = JSON.stringify(secondPrompt.turns);
       expect(source).toContain('new request 1');
-      expect(source).not.toContain('new request 3');
+      expect(source).toContain('new request 3');
       expect(source).not.toContain('old request 5');
       expect(source).not.toContain('old request 6');
-      if (action === 'restore') expect(source).toContain('Summary 1');
-      else {
+      if (action === 'rewind') {
         expect(source).toContain('old request 1');
         expect(source).not.toContain('old request 3');
+      }
+      if (action === 'restore') expect(source).toContain('Summary 1');
+      else {
         expect(source).not.toContain('Summary 1');
       }
       const records = env.store.listRecords(thread.id);
@@ -171,8 +170,7 @@ it('does not run Runtime fallback from stale usage after a much smaller full pro
   });
   const isRollingSummary = (prompt: { system: string }) =>
     prompt.system.includes('Summarize exactly one sealed model-response round');
-  const isRuntimeSummary = (prompt: { system: string }) =>
-    prompt.system.includes("You are Pico Runtime's conversation compaction helper");
+  const isRuntimeSummary = isCompactionPrompt;
   const model = new FakeModel((prompt) => {
     if (isRollingSummary(prompt)) return response(JSON.stringify({ summary: 'FIRST_ROUND_WARM_SUMMARY' }));
     mainCalls += 1;
@@ -271,7 +269,7 @@ it('checks a large new user input against the full projected prompt without prov
   }
 });
 
-it('respects an unknown plugin grouped boundary without summarizing plugin context', async () => {
+it('respects unknown grouped boundaries and preserves the complete plugin projection', async () => {
   const plugin: import('../src/plugins/host.js').PicoPlugin = {
     id: 'example.unknown-projector',
     name: 'Unknown projector',
@@ -320,7 +318,7 @@ it('respects an unknown plugin grouped boundary without summarizing plugin conte
           disposition: 'raw',
           turnIndex: turns.length,
         });
-        turns.push({ kind: 'message', role: 'user', content: 'Plugin context must be excluded' });
+        turns.push({ kind: 'message', role: 'user', content: 'Separate plugin context remains available' });
         return next({ ...input, turns, provenance });
       });
     },
@@ -345,13 +343,16 @@ it('respects an unknown plugin grouped boundary without summarizing plugin conte
         model: 'test-model',
       });
     }
-    const result = await compactProjected(env.runtime, thread);
-    expect(result.text).toContain('Compacted 1 completed model invocation');
-    const prompt = JSON.stringify(model.prompts[0]);
-    expect(prompt).toContain('unknown request 1');
-    expect(prompt).not.toContain('unknown request 2');
-    expect(prompt).not.toContain('unknown request 3');
-    expect(prompt).not.toContain('Plugin context must be excluded');
+    const compacted = await compactProjected(env.runtime, thread);
+    expect(compacted.result.text).toContain('Compacted 1 completed model invocation');
+    const prompt = model.prompts.filter(isCompactionPrompt)[0]!;
+    expectCompactionPromptMatchesProjection(prompt, compacted.projection);
+    const promptText = JSON.stringify(prompt.turns);
+    expect(promptText).toContain('unknown request 1');
+    expect(promptText).not.toContain('unknown request 2');
+    expect(promptText).not.toContain('unknown request 3');
+    expect(promptText).toContain('Grouped plugin summary');
+    expect(promptText).toContain('Separate plugin context remains available');
     const compaction = env.store
       .listRecords(thread.id)
       .find((record) => record.kind === 'plugin' && record.payload.action === 'context-compacted')!;
@@ -409,9 +410,11 @@ it('compacts complete tool invocations inside a single user turn without splitti
       'single-assistant-2',
       'single-2:result',
     ]);
-    const prompt = JSON.stringify(model.prompts[0]);
-    expect(prompt).toContain('assistant 2');
-    expect(prompt).not.toContain('assistant 3');
+    const prompt = model.prompts.filter(isCompactionPrompt)[0]!;
+    expectCompactionPromptMatchesProjection(prompt, projection);
+    const promptText = JSON.stringify(prompt.turns);
+    expect(promptText).toContain('assistant 2');
+    expect(promptText).toContain('assistant 3');
   } finally {
     await env.runtime.shutdown();
     env.store.close();
@@ -458,14 +461,16 @@ it('manual compaction summarizes the final plugin projection rather than Canonic
       });
     }
 
-    const result = await env.runtime['compactThread'](thread);
+    const records = env.store.listRecords(thread.id);
+    const projection = await env.runtime['projectModelInput'](thread, records, records.at(-1)!.seq);
+    const result = await env.runtime['compactThread'](thread, false, false, projection);
 
     expect(result.text).toContain('Compacted');
-    const prompt = JSON.stringify(
-      model.prompts.find((item) => item.system.startsWith("You are Pico Runtime's conversation compaction helper")),
-    );
-    expect(prompt).toContain('safe projected request');
-    expect(prompt).not.toContain('private canonical request');
+    const prompt = model.prompts.find(isCompactionPrompt)!;
+    expectCompactionPromptMatchesProjection(prompt, projection);
+    const promptText = JSON.stringify(prompt.turns);
+    expect(promptText).toContain('safe projected request');
+    expect(promptText).not.toContain('private canonical request');
   } finally {
     await env.runtime.shutdown();
     env.store.close();
