@@ -64,7 +64,7 @@ async function generateTitle(
     try {
       const call = await context.models.complete({
         threadId: current.id,
-        projectId: current.projectId,
+        ...(current.projectId ? { projectId: current.projectId } : {}),
         purpose: 'thread-title',
         idempotencyKey: `${callPrefix}${attempt}`,
         prompt: {

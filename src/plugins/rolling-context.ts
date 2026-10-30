@@ -357,7 +357,7 @@ export async function summarizeAndEvaluate(
   try {
     const summaryCall = await context.models.complete({
       threadId: thread.id,
-      projectId: thread.projectId,
+      ...(thread.projectId ? { projectId: thread.projectId } : {}),
       purpose: 'rolling-summary',
       idempotencyKey: callKey('summary', segment),
       prompt: summaryPrompt(segment, source, model),

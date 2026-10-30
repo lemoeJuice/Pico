@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { PicoStore } from '../src/core/store.js';
+import type { ExecutorBinding } from '../src/core/types.js';
 import { assistantPayload } from './helpers.js';
 import { ToolCatalog } from '../src/executor/tool-catalog.js';
 import { HostExecutor } from '../src/executor/executor.js';
@@ -44,6 +45,7 @@ function createMockContainerAgent(
   let accessToken: string | null = null;
   let serviceReady = false;
   let containerCreated = false;
+  let mountedWorkspace: string | null = null;
   let submissionCount = 0;
   let restartCount = 0;
   let serviceAvailable = true;
@@ -76,6 +78,7 @@ function createMockContainerAgent(
         kind: 'executor',
         workspaceRoot: '/workspace',
         workspaceFileDownload: true,
+        workspaceOptional: true,
         tools: catalog.listBySource('executor').map((tool) => tool.definition),
       });
     }
@@ -174,13 +177,22 @@ function createMockContainerAgent(
     runner: async (args, input, signal) => {
       if (args.includes('container') && args.includes('inspect')) {
         if (!containerCreated) throw new Error('no such container');
+        if (args.some((argument) => argument.includes('.Mounts'))) {
+          return {
+            stdout: JSON.stringify(mountedWorkspace ? [{ Destination: '/workspace', Source: mountedWorkspace }] : []),
+            stderr: '',
+          };
+        }
         return { stdout: 'true', stderr: '' };
       }
       if (args.includes('run')) {
         const published = args[args.indexOf('-p') + 1];
         const match = published && /^127\.0\.0\.1:(\d+):4174$/.exec(published);
         if (match) exposedPort = Number(match[1]);
+        const workspaceMount = args.find((argument) => argument.endsWith(':/workspace:rw'));
+        mountedWorkspace = workspaceMount ? workspaceMount.slice(0, -':/workspace:rw'.length) : null;
       }
+      if (args.includes('rm') && args.includes('-f')) containerCreated = false;
       if (args.includes('exec')) {
         if (!args.includes('-d')) return { stdout: '', stderr: '' };
         const token = args.find((argument) => argument.startsWith('PICO_EXECUTOR_TOKEN='));
@@ -227,6 +239,208 @@ function createMockContainerAgent(
 }
 
 describe('Executor execution identity and recovery', () => {
+  it('creates independent Container Executors without host workspace mounts and isolates them by executor id', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const firstThread = env.store.createThread(null, 'container');
+    const secondThread = env.store.createThread(null, 'container');
+    const calls: string[][] = [];
+    const makeExecutor = () => {
+      const podman = async (args: string[]) => {
+        calls.push(args);
+        if (args.includes('info')) return { stdout: '5.0.0', stderr: '' };
+        if (args.includes('inspect')) throw new Error('no such container');
+        if (args.includes('run')) return { stdout: 'container-id', stderr: '' };
+        return { stdout: '', stderr: '' };
+      };
+      const agent = createMockContainerAgent(env.workspace, new ToolCatalog(), podman);
+      return { agent, executor: new ContainerExecutor(env.store, undefined, undefined, agent.runner) };
+    };
+    const first = makeExecutor();
+    const second = makeExecutor();
+    try {
+      await first.executor.checkConnection(env.store.executorForThread(firstThread.id)!);
+      await second.executor.checkConnection(env.store.executorForThread(secondThread.id)!);
+      const runs = calls.filter((args) => args.includes('run'));
+      expect(runs).toHaveLength(2);
+      expect(runs.every((args) => !args.some((arg) => arg.endsWith(':/workspace:rw')))).toBe(true);
+      const names = runs.map((args) => args[args.indexOf('--name') + 1]);
+      expect(new Set(names).size).toBe(2);
+    } finally {
+      await first.executor.shutdown();
+      await second.executor.shutdown();
+      first.agent.close();
+      second.agent.close();
+      await env.cleanup();
+    }
+  });
+
+  it('attaches a Project workspace by rebuilding the same container from its committed root filesystem', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.store.createThread(null, 'container');
+    const calls: string[][] = [];
+    const podman = async (args: string[]) => {
+      calls.push(args);
+      if (args.includes('info')) return { stdout: '5.0.0', stderr: '' };
+      if (args.includes('inspect')) throw new Error('no such container');
+      if (args.includes('run')) return { stdout: 'container-id', stderr: '' };
+      return { stdout: '', stderr: '' };
+    };
+    const agent = createMockContainerAgent(env.workspace, new ToolCatalog(), podman);
+    const executor = new ContainerExecutor(env.store, undefined, undefined, agent.runner);
+    const binding = env.store.executorForThread(thread.id)!;
+    try {
+      await executor.checkConnection(binding);
+      const initialRun = calls.find((args) => args.includes('run'))!;
+      await executor.attachWorkspace(binding, env.workspace);
+      const runs = calls.filter((args) => args.includes('run'));
+      expect(calls.some((args) => args.includes('commit'))).toBe(true);
+      expect(runs).toHaveLength(2);
+      expect(runs[0]![runs[0]!.indexOf('--name') + 1]).toBe(runs[1]![runs[1]!.indexOf('--name') + 1]);
+      expect(runs[0]!.find((arg) => arg.includes(':/opt/pico/data:rw'))).toBe(
+        runs[1]!.find((arg) => arg.includes(':/opt/pico/data:rw')),
+      );
+      expect(runs[1]!.some((arg) => arg.endsWith(':/workspace:rw'))).toBe(true);
+      expect(initialRun.some((arg) => arg.endsWith(':/workspace:rw'))).toBe(false);
+      await executor.finalizeWorkspaceAttachment(binding);
+      await executor.checkConnection({ ...binding, workspacePath: env.workspace });
+    } finally {
+      await executor.shutdown();
+      agent.close();
+      await env.cleanup();
+    }
+  });
+
+  it('restores pending workspace attachments from their snapshot and single-flights rollback after restart', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.store.createThread(null, 'container');
+    const binding = env.store.executorForThread(thread.id)!;
+    const key = createHash('sha256').update(`executor:${binding.id}`).digest('hex');
+    const snapshot = 'pico-test-retained-snapshot';
+    env.store.setSetting(`executor-container-connection:${key}`, {
+      port: 41_731,
+      accessToken: 'a'.repeat(64),
+    });
+    env.store.setSetting(`executor-container-name:${key}`, 'pico-test-restore-container');
+    env.store.setSetting(`executor-container-attach:${key}`, {
+      image: snapshot,
+      workspace: env.workspace,
+      status: 'pending',
+      snapshotImages: [],
+    });
+
+    let exists = false;
+    let mountedWorkspace: string | null = null;
+    let runs = 0;
+    let removals = 0;
+    const runArguments: string[][] = [];
+    const runner = async (args: string[]) => {
+      if (args.includes('inspect')) {
+        if (!exists) throw new Error('no such container');
+        if (args.some((argument) => argument.includes('.Mounts'))) {
+          return {
+            stdout: JSON.stringify(mountedWorkspace ? [{ Destination: '/workspace', Source: mountedWorkspace }] : []),
+            stderr: '',
+          };
+        }
+        return { stdout: 'true', stderr: '' };
+      }
+      if (args.includes('rm') && args.includes('-f')) {
+        removals += 1;
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+        exists = false;
+        mountedWorkspace = null;
+      }
+      if (args.includes('run')) {
+        runs += 1;
+        runArguments.push(args);
+        exists = true;
+        const mount = args.find((argument) => argument.endsWith(':/workspace:rw'));
+        mountedWorkspace = mount ? mount.slice(0, -':/workspace:rw'.length) : null;
+      }
+      return { stdout: '', stderr: '' };
+    };
+    const executor = new ContainerExecutor(env.store, undefined, undefined, runner);
+    const internals = executor as unknown as {
+      restorePendingWorkspaceAttachment(binding: ExecutorBinding, workspace: string): Promise<void>;
+      probeConnection(
+        port: number,
+        token: string,
+      ): Promise<{ reachable: boolean; responded: boolean; status?: number }>;
+      startAgent(name: string, saved: { port: number; accessToken: string }, root?: string): Promise<void>;
+      waitUntilReachable(port: number, token: string, signal: AbortSignal): Promise<void>;
+    };
+    internals.probeConnection = async () => ({ reachable: true, responded: true, status: 200 });
+    internals.startAgent = async () => undefined;
+    internals.waitUntilReachable = async () => undefined;
+    try {
+      await Promise.all([
+        internals.restorePendingWorkspaceAttachment(binding, env.workspace),
+        internals.restorePendingWorkspaceAttachment(binding, env.workspace),
+      ]);
+      expect(runs).toBe(1);
+      expect(runArguments[0]).toContain(snapshot);
+      expect(runArguments[0]?.some((argument) => argument.endsWith(':/workspace:rw'))).toBe(true);
+
+      await Promise.all([executor.rollbackWorkspaceAttachment(binding), executor.rollbackWorkspaceAttachment(binding)]);
+      expect(removals).toBe(1);
+      expect(runs).toBe(2);
+      expect(runArguments[1]).toContain(snapshot);
+      expect(runArguments[1]?.some((argument) => argument.endsWith(':/workspace:rw'))).toBe(false);
+
+      env.store.setSetting(`executor-container-attach:${key}`, {
+        image: null,
+        snapshotImage: snapshot,
+        snapshotImages: [snapshot],
+        workspace: env.workspace,
+        status: 'attached',
+      });
+      exists = false;
+      await expect(internals.restorePendingWorkspaceAttachment(binding, env.workspace)).rejects.toThrow(
+        /attach-time snapshot is retained.*later root filesystem changes cannot be guaranteed/i,
+      );
+      expect(runs).toBe(2);
+      expect(removals).toBe(1);
+      expect(env.store.getSetting(`executor-container-attach:${key}`, null)).toMatchObject({
+        snapshotImage: snapshot,
+        status: 'attached',
+      });
+    } finally {
+      await executor.shutdown();
+      await env.cleanup();
+    }
+  });
+
+  it('single-flights rollback calls that are waiting for workspace recovery', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.store.createThread(null, 'container');
+    const binding = env.store.executorForThread(thread.id)!;
+    const key = createHash('sha256').update(`executor:${binding.id}`).digest('hex');
+    const executor = new ContainerExecutor(env.store, undefined, undefined, async () => ({ stdout: '', stderr: '' }));
+    let resolveRecovery!: () => void;
+    const recovery = new Promise<void>((resolve) => {
+      resolveRecovery = resolve;
+    });
+    let rollbacks = 0;
+    const internals = executor as unknown as {
+      workspaceRecoveryPromises: Map<string, Promise<void>>;
+      rollbackWorkspaceAttachmentOnce(key: string): Promise<void>;
+    };
+    internals.workspaceRecoveryPromises.set(key, recovery);
+    internals.rollbackWorkspaceAttachmentOnce = async () => {
+      rollbacks += 1;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    };
+    try {
+      const requests = [executor.rollbackWorkspaceAttachment(binding), executor.rollbackWorkspaceAttachment(binding)];
+      resolveRecovery();
+      await Promise.all(requests);
+      expect(rollbacks).toBe(1);
+    } finally {
+      await executor.shutdown();
+      await env.cleanup();
+    }
+  });
+
   it('downloads Container workspace files through the agent workspace path', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.createThread('container');

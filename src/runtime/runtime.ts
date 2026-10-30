@@ -1172,6 +1172,8 @@ export class PicoRuntime {
   private readonly additionalPlugins: PicoPlugin[];
   private readonly hostExecutor: HostExecutor;
   private readonly containerExecutor: ContainerExecutor;
+  private readonly workspaceMutationThreads = new Set<string>();
+  private readonly workspaceMutationProjects = new Set<string>();
   private readonly remoteHostExecutor: RemoteHostExecutor;
   private readonly mcpManager: McpManager;
   private readonly options: RuntimeOptions;
@@ -1259,8 +1261,8 @@ export class PicoRuntime {
           return this.listThreadTools(threadId);
         },
         toolNamesForExecutor: async (projectId, executorKind) => {
-          const project = this.store.getProject(projectId);
-          if (!project) throw new ServiceError(404, 'Project not found');
+          const project = projectId ? this.store.getProject(projectId) : null;
+          if (projectId && !project) throw new ServiceError(404, 'Project not found');
           const runtimeNames = this.tools.listBySource('runtime').map((tool) => tool.definition.name);
           const mcpNames = this.registeredMcpTools().map((tool) => tool.definition.name);
           let executorNames: string[] = [];
@@ -1278,8 +1280,8 @@ export class PicoRuntime {
             const binding: ExecutorBinding = {
               id: randomUUID(),
               kind: 'host',
-              label: `Host · ${project.name}`,
-              workspacePath: project.workspacePath,
+              label: `Host${project ? ` · ${project.name}` : ''}`,
+              workspacePath: project?.workspacePath ?? '',
               remoteConnectionId: null,
               createdAt: new Date().toISOString(),
             };
@@ -1292,6 +1294,8 @@ export class PicoRuntime {
         },
         binding: (threadId) => this.store.executorForThread(threadId),
         create: (projectId, executorKind, title, options = {}) => {
+          if (projectId) this.assertProjectAvailableForWorkspaceMutation(projectId);
+          if (options.parentThreadId) this.assertThreadAvailableForWorkspaceMutation(options.parentThreadId);
           if (options.parentThreadId) {
             const parent = this.requireUnarchivedThread(options.parentThreadId);
             if (parent.projectId !== projectId) throw new Error('Parent Thread must belong to the same Project');
@@ -1323,8 +1327,8 @@ export class PicoRuntime {
         send: (senderThreadId, targetId, content, messageId) => {
           const sender = this.requireUnarchivedThread(senderThreadId);
           const target = this.requireUnarchivedThread(targetId);
-          if (sender.projectId !== target.projectId) {
-            throw new Error('Target Thread must belong to the same Project');
+          if (!this.sameThreadScope(sender, target)) {
+            throw new Error('Target Thread must belong to the same Project or independent Thread subtree');
           }
           if (sender.id === target.id) throw new Error('Cannot send a message to the current Thread');
           const payload: MessagePayload = {
@@ -1616,16 +1620,206 @@ export class PicoRuntime {
     if (thread) this.publish({ type: 'thread.updated', thread });
   }
 
-  createProject(name: string | undefined, workspacePath: string): Promise<Project> {
+  private sameThreadScope(left: Thread, right: Thread): boolean {
+    if (left.projectId || right.projectId) return left.projectId !== null && left.projectId === right.projectId;
+    const rootId = (thread: Thread): string => {
+      let current = thread;
+      const seen = new Set<string>();
+      while (current.parentThreadId && !seen.has(current.id)) {
+        seen.add(current.id);
+        const parent = this.store.getThread(current.parentThreadId);
+        if (!parent || parent.projectId !== null) break;
+        current = parent;
+      }
+      return current.id;
+    };
+    return rootId(left) === rootId(right);
+  }
+
+  private assertThreadAvailableForWorkspaceMutation(threadId: string): void {
+    if (this.workspaceMutationThreads.has(threadId))
+      throw new ServiceError(409, 'Thread workspace is being changed. Try again shortly.');
+  }
+
+  private assertProjectAvailableForWorkspaceMutation(projectId: string): void {
+    if (this.workspaceMutationProjects.has(projectId))
+      throw new ServiceError(409, 'Project workspace is being changed. Try again shortly.');
+  }
+
+  private lockWorkspaceThreads(threads: Thread[]): () => void {
+    const ids = threads.map((thread) => thread.id);
+    if (ids.some((id) => this.workspaceMutationThreads.has(id)))
+      throw new ServiceError(409, 'Thread workspace is already being changed.');
+    for (const id of ids) this.workspaceMutationThreads.add(id);
+    return () => {
+      for (const id of ids) this.workspaceMutationThreads.delete(id);
+      for (const id of ids) {
+        const thread = this.store.getThread(id);
+        if (thread && !thread.pauseRequested && this.plugins.hasPendingPluginWork(id)) this.startLoop(id);
+      }
+    };
+  }
+
+  private assertWorkspaceThreadsIdle(threads: Thread[]): void {
+    for (const thread of threads) {
+      if (
+        this.loops.has(thread.id) ||
+        this.store.listActiveExecutions(thread.id).length > 0 ||
+        (this.inFlightThreadOperations.get(thread.id) ?? 0) > 0 ||
+        this.interrupts.has(thread.id)
+      ) throw new ServiceError(409, 'Wait for this Thread to stop running before changing its workspace.');
+    }
+  }
+
+  private async rollbackWorkspaceAttachments(
+    bindings: ExecutorBinding[],
+    threads: Thread[],
+    cause: unknown,
+  ): Promise<void> {
+    const failures: Array<{ binding: ExecutorBinding; error: unknown }> = [];
+    for (const binding of [...bindings].reverse()) {
+      try {
+        await this.containerExecutor.rollbackWorkspaceAttachment(binding);
+      } catch (error) {
+        failures.push({ binding, error });
+      }
+    }
+    if (failures.length) {
+      const executorIds = failures.map(({ binding }) => binding.id);
+      const affectedThreadIds = threads.filter((thread) => executorIds.includes(thread.executorId)).map((thread) => thread.id);
+      throw new Error(`Workspace attachment rollback failed for Executor ${executorIds.join(', ')} (Threads ${affectedThreadIds.join(', ')}); their next use requires container recovery.`, {
+        cause: new AggregateError([cause, ...failures.map(({ error }) => error)], 'Workspace attachment failed and rollback was incomplete.'),
+      });
+    }
+  }
+
+  private async finalizeWorkspaceAttachments(bindings: ExecutorBinding[]): Promise<void> {
+    const failures: Array<{ executorId: string; message: string }> = [];
+    for (const binding of bindings) {
+      try {
+        await this.containerExecutor.finalizeWorkspaceAttachment(binding);
+      } catch (error) {
+        failures.push({ executorId: binding.id, message: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    if (failures.length) {
+      const current = this.store.getSetting<Array<{ executorId: string; message: string; recordedAt: string }>>(
+        'workspace-attachment-cleanup-failures', [],
+      );
+      this.store.setSetting('workspace-attachment-cleanup-failures', [
+        ...current,
+        ...failures.map((failure) => ({ ...failure, recordedAt: new Date().toISOString() })),
+      ].slice(-100));
+    }
+  }
+
+  createProject(name: string | undefined, workspacePath?: string): Promise<Project> {
     return this.createProjectChecked(name, workspacePath);
   }
 
-  private async createProjectChecked(name: string | undefined, workspacePath: string): Promise<Project> {
-    const path = await realpath(resolve(workspacePath.trim()));
+  async createProjectFromThread(threadId: string, name?: string, workspacePath?: string): Promise<{ project: Project; threads: Thread[] }> {
+    const root = this.store.getThread(threadId);
+    if (!root) throw new ServiceError(404, 'Thread not found');
+    if (root.projectId !== null) throw new ServiceError(409, 'Thread already belongs to a Project');
+    if (root.parentThreadId !== null) throw new ServiceError(409, 'Only an independent Thread root can become a Project.');
+    if (root.archivedAt || root.deletedAt) throw new ServiceError(409, 'Only an active Thread root can become a Project.');
+    const members = this.store.getThreadSubtree(threadId);
+    this.assertWorkspaceThreadsIdle(members);
+    const unlock = this.lockWorkspaceThreads(members);
+    const attached: ExecutorBinding[] = [];
+    let committed = false;
+    try {
+      const validatedPath = workspacePath?.trim() ? await this.validateWorkspaceDirectory(workspacePath) : '';
+      const cleanedName = name?.trim() || (validatedPath ? basename(validatedPath) : 'Project');
+      if (validatedPath) {
+        for (const thread of members) {
+          if (thread.executorKind !== 'container' || thread.executorRemote || thread.workspacePath) continue;
+          const binding = this.store.getExecutorBinding(thread.executorId);
+          if (!binding) throw new Error('Executor binding not found');
+          await this.containerExecutor.attachWorkspace(binding, validatedPath);
+          attached.push(binding);
+        }
+      }
+      const result = this.store.createProjectForThreadSubtree(threadId, cleanedName, validatedPath);
+      committed = true;
+      await this.finalizeWorkspaceAttachments(attached);
+      this.publish({ type: 'project.created', project: result.project });
+      for (const thread of result.threads) {
+        this.publish({ type: 'thread.updated', thread });
+        this.publish({ type: 'thread.tools.updated', threadId: thread.id });
+      }
+      return result;
+    } catch (error) {
+      if (!committed) await this.rollbackWorkspaceAttachments(attached, members, error);
+      throw error;
+    } finally {
+      unlock();
+    }
+  }
+
+  async setProjectWorkspace(projectId: string, requestedPath: string): Promise<Project> {
+    const project = this.store.getProject(projectId);
+    if (!project) throw new ServiceError(404, 'Project not found');
+    if (project.workspacePath !== '') throw new ServiceError(409, 'Project workspace has already been set.');
+    this.assertProjectAvailableForWorkspaceMutation(projectId);
+    const threads = this.store.listProjectThreads(projectId);
+    this.assertWorkspaceThreadsIdle(threads);
+    const unlock = this.lockWorkspaceThreads(threads);
+    this.workspaceMutationProjects.add(projectId);
+    const attached: ExecutorBinding[] = [];
+    let committed = false;
+    try {
+      const workspacePath = await this.validateWorkspaceDirectory(requestedPath);
+      const executorIds: string[] = [];
+      const seenExecutors = new Set<string>();
+      for (const thread of threads) {
+        if (thread.executorKind === 'runtime' || thread.executorRemote || thread.workspacePath || seenExecutors.has(thread.executorId)) continue;
+        seenExecutors.add(thread.executorId);
+        executorIds.push(thread.executorId);
+      }
+      for (const thread of threads) {
+        if (thread.executorKind !== 'container' || thread.executorRemote || thread.workspacePath) continue;
+        if (attached.some((binding) => binding.id === thread.executorId)) continue;
+        const binding = this.store.getExecutorBinding(thread.executorId);
+        if (!binding) throw new Error('Executor binding not found');
+        await this.containerExecutor.attachWorkspace(binding, workspacePath);
+        attached.push(binding);
+      }
+      const updated = this.store.setProjectWorkspace(projectId, workspacePath, executorIds);
+      if (!updated) throw new ServiceError(404, 'Project not found');
+      committed = true;
+      await this.finalizeWorkspaceAttachments(attached);
+      this.publish({ type: 'project.updated', project: updated });
+      for (const thread of threads) {
+        const refreshed = this.store.getThread(thread.id);
+        if (refreshed) this.publish({ type: 'thread.updated', thread: refreshed });
+      }
+      return updated;
+    } catch (error) {
+      if (!committed) await this.rollbackWorkspaceAttachments(attached, threads, error);
+      throw error;
+    } finally {
+      unlock();
+      this.workspaceMutationProjects.delete(projectId);
+    }
+  }
+
+  private async validateWorkspaceDirectory(requestedPath: string): Promise<string> {
+    const path = await realpath(resolve(requestedPath.trim()));
     const info = await stat(path);
-    if (!info.isDirectory()) throw new Error('Workspace path must be a directory');
+    if (!info.isDirectory()) throw new ServiceError(400, 'Workspace path must be a directory');
+    return path;
+  }
+
+  private async createProjectChecked(name: string | undefined, workspacePath?: string): Promise<Project> {
+    const requestedPath = workspacePath?.trim();
+    if (!requestedPath && !name?.trim())
+      throw new ServiceError(400, 'name is required when a workspace is not set.');
+    const path = requestedPath ? await this.validateWorkspaceDirectory(requestedPath) : '';
     const cleanedName = name?.trim() || basename(path) || 'Project';
-    return this.store.createProject(cleanedName, path);
+    const project = this.store.createProject(cleanedName, path);
+    this.publish({ type: 'project.created', project });
+    return project;
   }
 
   listProjects(): Project[] {
@@ -1633,8 +1827,30 @@ export class PicoRuntime {
   }
 
   createThread(projectId: string, executorKind: Thread['executorKind'], title = DEFAULT_THREAD_TITLE): Thread {
+    this.assertProjectAvailableForWorkspaceMutation(projectId);
     const thread = this.store.transaction(() => {
       const created = this.store.createThread(projectId, executorKind, title.trim() || DEFAULT_THREAD_TITLE, {
+        modelSelection: this.defaultThreadModelSelection(),
+      });
+      if (!this.hasStoredThreadToolSettings(created.id)) this.initializeThreadToolSettings(created.id);
+      this.plugins.initializeThread(created);
+      return created;
+    });
+    this.publish({ type: 'thread.created', thread });
+    return thread;
+  }
+
+  createIndependentThread(
+    executorKind: Thread['executorKind'],
+    title = DEFAULT_THREAD_TITLE,
+    remoteConnectionId?: string,
+  ): Thread {
+    if (remoteConnectionId && executorKind !== 'host')
+      throw new ServiceError(400, 'Remote Host Executor must use Host execution kind.');
+    const thread = this.store.transaction(() => {
+      const created = this.store.createThread(null, executorKind, title.trim() || DEFAULT_THREAD_TITLE, {
+        remoteConnectionId: remoteConnectionId ?? null,
+        workspacePath: '',
         modelSelection: this.defaultThreadModelSelection(),
       });
       if (!this.hasStoredThreadToolSettings(created.id)) this.initializeThreadToolSettings(created.id);
@@ -1772,7 +1988,7 @@ export class PicoRuntime {
     return this.plugins.patchThreadState({ ...thread, state });
   }
 
-  listThreads(projectId?: string): Thread[] {
+  listThreads(projectId?: string | null): Thread[] {
     return this.store.listThreads(projectId).map((thread) => this.getThread(thread.id) ?? thread);
   }
 
@@ -1781,11 +1997,13 @@ export class PicoRuntime {
   }
 
   archiveThread(threadId: string): Thread {
+    this.assertThreadAvailableForWorkspaceMutation(threadId);
     const current = this.store.getThread(threadId);
     if (!current) throw new ServiceError(404, 'Thread not found.');
     if (current.deletedAt) throw new ServiceError(409, 'This Thread is hidden and cannot be archived.');
     const tree = this.store.listThreadTree(threadId);
     for (const candidate of tree) {
+      this.assertThreadAvailableForWorkspaceMutation(candidate.id);
       if (!candidate.deletedAt) this.assertThreadNotRunning(candidate.id);
     }
     const archived = this.store.archiveThreadTree(threadId);
@@ -1799,6 +2017,7 @@ export class PicoRuntime {
   }
 
   unarchiveThread(threadId: string): Thread {
+    this.assertThreadAvailableForWorkspaceMutation(threadId);
     const current = this.store.getThread(threadId);
     if (!current) throw new ServiceError(404, 'Thread not found.');
     if (current.deletedAt) throw new ServiceError(409, 'This Thread is hidden and cannot be restored.');
@@ -1812,6 +2031,7 @@ export class PicoRuntime {
   }
 
   hideArchivedThread(threadId: string): Thread {
+    this.assertThreadAvailableForWorkspaceMutation(threadId);
     const current = this.store.getThread(threadId);
     if (!current) throw new ServiceError(404, 'Thread not found.');
     if (!current.archivedAt || current.deletedAt) {
@@ -1836,6 +2056,7 @@ export class PicoRuntime {
   }
 
   private beginThreadOperation(threadId: string): () => void {
+    this.assertThreadAvailableForWorkspaceMutation(threadId);
     this.inFlightThreadOperations.set(threadId, (this.inFlightThreadOperations.get(threadId) ?? 0) + 1);
     let ended = false;
     return () => {
@@ -1962,7 +2183,7 @@ export class PicoRuntime {
         : { hasInactiveHistory: false }),
       historyBranches: projection.historyBranches,
       executions: executions.map(redactExecutionImages),
-      children: this.listThreads(thread.projectId).filter((candidate) => candidate.parentThreadId === threadId),
+      children: this.listThreads().filter((candidate) => candidate.parentThreadId === threadId),
       hasEarlierRecords: page.hasEarlierRecords,
       historyPageSize: THREAD_HISTORY_PAGE_SIZE,
     };
@@ -2006,7 +2227,7 @@ export class PicoRuntime {
         projectionStatus: 'not_loaded',
         records: page.records.map((record) => snapshotRecord(record, view)),
         executions: executions.map(redactExecutionImages),
-        children: this.listThreads(thread.projectId).filter((candidate) => candidate.parentThreadId === threadId),
+      children: this.listThreads().filter((candidate) => candidate.parentThreadId === threadId),
         hasEarlierRecords: page.hasEarlierRecords,
         historyPageSize: THREAD_HISTORY_PAGE_SIZE,
       },
@@ -2073,6 +2294,8 @@ export class PicoRuntime {
     const tools = await this.listThreadTools(threadId);
     if (!tools.some((tool) => tool.name === toolName))
       throw new ServiceError(404, 'Tool is not available in this Thread');
+    if (enabled && toolName.startsWith('project_memory_') && !this.store.getThread(threadId)?.projectId)
+      throw new ServiceError(409, 'Project Memory tools are available only after this Thread joins a Project.');
 
     this.applyThreadToolOverrides(threadId, { [toolName]: enabled });
     const updated = await this.listThreadTools(threadId);
@@ -2328,6 +2551,7 @@ export class PicoRuntime {
   }
 
   async submit(threadId: string, id: string, content: string): Promise<SubmitResult> {
+    this.assertThreadAvailableForWorkspaceMutation(threadId);
     const thread = this.requireUnarchivedThread(threadId);
     const result = this.postMessage(thread, id, {
       role: 'user',
@@ -2338,6 +2562,7 @@ export class PicoRuntime {
   }
 
   submitUserMessage(threadId: string, id: string, content: string): { accepted: true; duplicate: boolean } {
+    this.assertThreadAvailableForWorkspaceMutation(threadId);
     const result = this.postMessage(this.requireUnarchivedThread(threadId), id, {
       role: 'user',
       content,
@@ -2347,6 +2572,7 @@ export class PicoRuntime {
   }
 
   async executeCommand(threadId: string, id: string, commandText: string): Promise<SubmitResult> {
+    this.assertThreadAvailableForWorkspaceMutation(threadId);
     const thread = this.requireUnarchivedThread(threadId);
     if (!commandText.trimStart().startsWith('/')) throw new ServiceError(400, 'Command text must start with /.');
     const normalizedCommand = commandText.trim();
@@ -2403,6 +2629,7 @@ export class PicoRuntime {
     id: string,
     payload: MessagePayload,
   ): { record: CanonicalRecord<MessagePayload>; inserted: boolean } {
+    this.assertThreadAvailableForWorkspaceMutation(thread.id);
     this.requireUnarchivedThread(thread.id);
     const result = this.store.appendMessage(thread.id, id, payload);
     if (result.inserted) {
@@ -2415,7 +2642,7 @@ export class PicoRuntime {
   private notifyParent(threadId: string, eventId: string, content: string): void {
     const child = this.store.getThread(threadId);
     const parent = child?.parentThreadId ? this.store.getThread(child.parentThreadId) : null;
-    if (!child || !parent || child.projectId !== parent.projectId || child.archivedAt || child.deletedAt || parent.archivedAt || parent.deletedAt) return;
+    if (!child || !parent || !this.sameThreadScope(child, parent) || child.archivedAt || child.deletedAt || parent.archivedAt || parent.deletedAt) return;
     this.postMessage(parent, `pico:child-status:${eventId}`, {
       role: 'user', source: 'child', senderThreadId: child.id, senderLabel: child.title, content,
     });
@@ -2559,6 +2786,7 @@ export class PicoRuntime {
   }
 
   private resumeForPlugin(threadId: string): Thread {
+    this.assertThreadAvailableForWorkspaceMutation(threadId);
     this.requireUnarchivedThread(threadId);
     this.assertNotInterrupting(threadId);
     this.recoverOrphanedModelExecutions(threadId, 'plugin-resume');
@@ -2570,6 +2798,7 @@ export class PicoRuntime {
   }
 
   continue(threadId: string): Thread {
+    this.assertThreadAvailableForWorkspaceMutation(threadId);
     this.requireUnarchivedThread(threadId);
     this.assertNotInterrupting(threadId);
     this.recoverOrphanedModelExecutions(threadId, 'continue');
@@ -2581,6 +2810,7 @@ export class PicoRuntime {
   }
 
   retryModelExecution(threadId: string, sourceExecutionId: string): { execution: Execution; thread: Thread } {
+    this.assertThreadAvailableForWorkspaceMutation(threadId);
     this.requireUnarchivedThread(threadId);
     this.assertNotInterrupting(threadId);
     if (this.loops.has(threadId)) {
@@ -2766,7 +2996,7 @@ export class PicoRuntime {
   }
 
   private startLoop(threadId: string): void {
-    if (this.shuttingDown || this.loops.has(threadId)) return;
+    if (this.shuttingDown || this.loops.has(threadId) || this.workspaceMutationThreads.has(threadId)) return;
     const thread = this.store.getThread(threadId);
     if (
       !thread ||
@@ -3334,6 +3564,7 @@ export class PicoRuntime {
     source?: 'runtime' | 'executor' | 'mcp' | null,
     persistedMcpTarget?: McpToolTarget | null,
   ): boolean {
+    if (toolName.startsWith('project_memory_') && !this.store.getThread(threadId)?.projectId) return false;
     this.initializeThreadToolSettings(threadId);
     const overrides = this.allThreadToolOverrides()[threadId] ?? {};
     const cached = this.readCachedThreadToolSurface(threadId);
@@ -4186,7 +4417,7 @@ export class PicoRuntime {
     const baseCallKey = `runtime-compact:${sourceHash}`;
     const preparedCall = this.preparePluginModelCall(thread, {
       threadId: thread.id,
-      projectId: thread.projectId,
+      ...(thread.projectId ? { projectId: thread.projectId } : {}),
       purpose: 'runtime-compaction-summary',
       idempotencyKey: baseCallKey,
       prompt,
@@ -4224,7 +4455,7 @@ export class PicoRuntime {
     try {
       const call = await this.completeRuntimeModelCall({
         threadId: thread.id,
-        projectId: thread.projectId,
+        ...(thread.projectId ? { projectId: thread.projectId } : {}),
         purpose: 'runtime-compaction-summary',
         idempotencyKey,
         prompt,
@@ -5206,7 +5437,9 @@ export class PicoRuntime {
     try {
       const adapter = this.adapterFor(binding);
       const info = await adapter.checkConnection(binding);
-      const compatible = info?.protocolVersion === EXECUTOR_PROTOCOL_VERSION && info.kind === 'executor';
+      const protocolCompatible = info?.protocolVersion === EXECUTOR_PROTOCOL_VERSION && info.kind === 'executor';
+      const missingWorkspaceCapability = !binding.workspacePath && info?.workspaceOptional !== true;
+      const compatible = protocolCompatible && !missingWorkspaceCapability;
       const comparison = info?.executorVersion ? compareExecutorVersions(info.executorVersion, targetVersion) : null;
       const updateAvailable = !compatible || comparison === -1 || comparison === null;
       const kind = binding.remoteConnectionId ? 'remote-host' : binding.kind;
@@ -5222,7 +5455,9 @@ export class PicoRuntime {
         updateSupported: info?.updateSupported === true,
         ...(!compatible
           ? {
-              error: `Executor protocol is incompatible. ${info?.executorVersion ? `Installed version: ${info.executorVersion}.` : 'Installed version is unknown.'} Update the Executor to ${targetVersion}.`,
+              error: missingWorkspaceCapability && protocolCompatible
+                ? `This Executor does not support Threads without a workspace. Update the Executor to ${targetVersion}.`
+                : `Executor protocol is incompatible. ${info?.executorVersion ? `Installed version: ${info.executorVersion}.` : 'Installed version is unknown.'} Update the Executor to ${targetVersion}.`,
             }
           : {}),
       };
@@ -5262,6 +5497,7 @@ export class PicoRuntime {
   }
 
   async restartContainerExecutor(threadId: string): Promise<Awaited<ReturnType<PicoRuntime['executorStatus']>>> {
+    this.assertThreadAvailableForWorkspaceMutation(threadId);
     const binding = this.store.executorForThread(threadId);
     if (!binding) throw new ServiceError(404, 'Thread not found');
     if (binding.kind !== 'container') {

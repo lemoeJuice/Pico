@@ -29,7 +29,7 @@ export interface ExecutorBinding {
 
 export interface Thread {
   id: string;
-  projectId: string;
+  projectId: string | null;
   executorId: string;
   executorKind: ExecutorKind;
   executorRemote: boolean;

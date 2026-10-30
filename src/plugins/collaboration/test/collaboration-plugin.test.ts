@@ -5,7 +5,7 @@ import { ExecutionPipelines } from '../../../core/pipeline.js';
 import { collaborationPlugin } from '../../../plugins/collaboration.js';
 import type { PluginContext } from '../../../plugins/host.js';
 
-function makeThread(id: string, projectId = 'project-1', parentThreadId: string | null = null): Thread {
+function makeThread(id: string, projectId: string | null = 'project-1', parentThreadId: string | null = null): Thread {
   return {
     id,
     projectId,
@@ -66,8 +66,8 @@ function setup() {
         selectionByThread.set(id, structuredClone(selection));
         return selection;
       },
-      list: (projectId?: string) =>
-        [...threadsById.values()].filter((thread) => !projectId || thread.projectId === projectId),
+      list: (projectId?: string | null) =>
+        [...threadsById.values()].filter((thread) => projectId === undefined || thread.projectId === projectId),
       tools: async () => [],
       toolNamesForExecutor: async () => [],
       binding: () => ({ remoteConnectionId: parent.executorRemote ? 'remote-1' : null }),
@@ -233,6 +233,41 @@ describe('Collaboration plugin', () => {
     ]);
     expect(() => list({ offset: -1 }, context)).toThrow('offset must be a non-negative integer');
     expect(() => list({ limit: 101 }, context)).toThrow('limit must be an integer between 1 and 100');
+  });
+
+  it('keeps independent Thread listing, history, and messages inside the same root tree', async () => {
+    const env = setup();
+    env.parent.projectId = null;
+    const child = makeThread('independent-child', null, env.parent.id);
+    const otherRoot = makeThread('other-root', null);
+    const otherChild = makeThread('other-child', null, otherRoot.id);
+    for (const thread of [child, otherRoot, otherChild]) env.threadsById.set(thread.id, thread);
+
+    const context = { thread: env.parent, executionId: 'independent-scope' };
+    const listed = env.tools.get('list_project_threads')!({}, context) as {
+      threads: Array<{ threadId: string }>;
+    };
+    expect(listed.threads.map((thread) => thread.threadId)).toEqual(['parent', 'independent-child']);
+
+    const send = env.tools.get('send_thread_message')!;
+    await expect(
+      send({ thread_id: child.id, message: 'same tree' }, { ...context, executionId: 'same-tree-send' }),
+    ).resolves.toMatchObject({ delivered: true, threadId: child.id });
+    await expect(
+      send({ thread_id: otherChild.id, message: 'cross tree' }, { ...context, executionId: 'cross-tree-send' }),
+    ).rejects.toThrow('same Project or independent Thread tree');
+
+    const read = env.tools.get('read_thread_history')!;
+    expect(() => read({ thread_id: child.id }, context)).not.toThrow();
+    expect(() => read({ thread_id: otherChild.id }, context)).toThrow('same Project or independent Thread tree');
+
+    const postMessage = env.routes.get('POST /threads/message')!;
+    expect(() =>
+      postMessage({
+        body: { parentThreadId: env.parent.id, childThreadId: otherChild.id, message: 'cross tree', operationId: 'cross-tree-ui' },
+        query: new URLSearchParams(),
+      }),
+    ).toThrow('Child Thread does not belong to this parent');
   });
 
   it('explains mixed history arguments and accepts separate page and chunk retries', () => {

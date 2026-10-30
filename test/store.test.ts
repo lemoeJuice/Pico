@@ -7,6 +7,56 @@ import { PicoStore } from '../src/core/store.js';
 import { assistantPayload } from './helpers.js';
 
 describe('PicoStore migrations', () => {
+  it('makes legacy Thread project ownership nullable without breaking dependent tables', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-nullable-thread-project-'));
+    const databasePath = join(directory, 'legacy.sqlite');
+    let store: PicoStore | null = new PicoStore(databasePath);
+    try {
+      const project = store.createProject('Legacy Project', directory);
+      const thread = store.createThread(project.id, 'host');
+      store.appendMessage(thread.id, 'legacy-owned-thread-record', {
+        role: 'user', content: 'preserve', source: 'user',
+      });
+      store.close();
+      store = null;
+
+      const legacy = new DatabaseSync(databasePath);
+      legacy.exec(`
+        PRAGMA foreign_keys = OFF;
+        PRAGMA legacy_alter_table = ON;
+        ALTER TABLE threads RENAME TO threads_nullable;
+        CREATE TABLE threads (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id),
+          executor_id TEXT NOT NULL REFERENCES executors(id),
+          title TEXT NOT NULL,
+          parent_thread_id TEXT REFERENCES threads(id),
+          created_by_agent INTEGER NOT NULL DEFAULT 0,
+          pause_requested INTEGER NOT NULL DEFAULT 0,
+          pause_reason TEXT,
+          pause_code TEXT,
+          created_at TEXT NOT NULL,
+          archived_at TEXT,
+          deleted_at TEXT
+        );
+        INSERT INTO threads SELECT * FROM threads_nullable;
+        DROP TABLE threads_nullable;
+        PRAGMA legacy_alter_table = OFF;
+        PRAGMA foreign_keys = ON;
+      `);
+      legacy.close();
+
+      store = new PicoStore(databasePath);
+      const migratedThread = store.listThreads(project.id)[0];
+      expect(migratedThread?.projectId).toBe(project.id);
+      expect(store.listRecords(migratedThread!.id).map((record) => record.id)).toContain('legacy-owned-thread-record');
+      expect(store.createThread(null, 'runtime').projectId).toBeNull();
+    } finally {
+      store?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('adds scope metadata without changing existing Canonical row content', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pico-canonical-scope-migration-'));
     const databasePath = join(directory, 'canonical.sqlite');
@@ -118,6 +168,46 @@ describe('PicoStore migrations', () => {
     } finally {
       store?.close();
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('independent Thread Project assignment', () => {
+  it('keeps standalone roots isolated and assigns an entire child tree atomically', () => {
+    const store = new PicoStore(':memory:');
+    try {
+      const root = store.createThread(null, 'host', 'Independent root');
+      const child = store.createThread(null, 'container', 'Child', { parentThreadId: root.id });
+      const other = store.createThread(null, 'runtime', 'Other root');
+
+      expect(store.listThreads(null).map(({ id }) => id)).toEqual(expect.arrayContaining([root.id, child.id, other.id]));
+      const { project, threads } = store.createProjectForThreadSubtree(root.id, 'New Project', '');
+
+      expect(threads.map(({ projectId }) => projectId)).toEqual([project.id, project.id]);
+      expect(store.getThread(root.id)?.projectId).toBe(project.id);
+      expect(store.getThread(child.id)?.projectId).toBe(project.id);
+      expect(store.getThread(other.id)?.projectId).toBeNull();
+      expect(store.listThreads(null).map(({ id }) => id)).toEqual([other.id]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('sets a Project workspace only on explicitly selected local bindings', () => {
+    const store = new PicoStore(':memory:');
+    try {
+      const project = store.createProject('Workspace later', '');
+      const host = store.createThread(project.id, 'host');
+      const chat = store.createThread(project.id, 'runtime');
+
+      store.setProjectWorkspace(project.id, '/workspace', [host.executorId, chat.executorId]);
+
+      expect(store.getThread(host.id)?.workspacePath).toBe('/workspace');
+      expect(store.getThread(chat.id)?.workspacePath).toBe('');
+      expect(store.getProject(project.id)?.workspacePath).toBe('/workspace');
+      expect(() => store.setProjectWorkspace(project.id, '/elsewhere', [])).toThrow(/already been set/);
+    } finally {
+      store.close();
     }
   });
 });

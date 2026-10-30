@@ -271,11 +271,18 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   app.post('/api/projects', async (request, response) => {
     const body = bodyObject(request);
     if (body.name !== undefined && typeof body.name !== 'string') throw new ServiceError(400, 'name must be a string');
+    if (body.workspacePath !== undefined && typeof body.workspacePath !== 'string') {
+      throw new ServiceError(400, 'workspacePath must be a string');
+    }
     const project = await runtime.createProject(
       typeof body.name === 'string' ? body.name : undefined,
-      requiredText(body, 'workspacePath'),
+      typeof body.workspacePath === 'string' ? body.workspacePath : undefined,
     );
     response.status(201).json(project);
+  });
+  app.post('/api/projects/:projectId/workspace', async (request, response) => {
+    const body = bodyObject(request);
+    response.json(await runtime.setProjectWorkspace(request.params.projectId!, requiredText(body, 'workspacePath')));
   });
   app.get('/api/projects/:projectId/threads', (request, response) => {
     const project = runtime.listProjects().find((candidate) => candidate.id === request.params.projectId);
@@ -288,7 +295,8 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     if (kind !== 'container' && kind !== 'host' && kind !== 'runtime') {
       throw new ServiceError(400, 'executorKind must be container, host, or runtime');
     }
-    if (body.remoteConnectionId !== undefined && (typeof body.remoteConnectionId !== 'string' || kind !== 'host')) {
+    if (body.remoteConnectionId !== undefined &&
+        (typeof body.remoteConnectionId !== 'string' || !body.remoteConnectionId.trim() || kind !== 'host')) {
       throw new ServiceError(400, 'Remote Executor Threads must use Host execution kind.');
     }
     const title = typeof body.title === 'string' ? body.title : DEFAULT_THREAD_TITLE;
@@ -302,6 +310,40 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
           )
         : runtime.createThread(request.params.projectId!, kind as ExecutorKind, title);
     response.status(201).json(thread);
+  });
+
+  app.post('/api/threads', (request, response) => {
+    const body = bodyObject(request);
+    const kind = body.executorKind;
+    if (kind !== 'container' && kind !== 'host' && kind !== 'runtime') {
+      throw new ServiceError(400, 'executorKind must be container, host, or runtime');
+    }
+    if (body.remoteConnectionId !== undefined &&
+        (typeof body.remoteConnectionId !== 'string' || !body.remoteConnectionId.trim() || kind !== 'host')) {
+      throw new ServiceError(400, 'Remote Executor Threads must use Host execution kind.');
+    }
+    if (body.title !== undefined && typeof body.title !== 'string') throw new ServiceError(400, 'title must be a string');
+    response.status(201).json(
+      runtime.createIndependentThread(
+        kind,
+        typeof body.title === 'string' ? body.title : DEFAULT_THREAD_TITLE,
+        typeof body.remoteConnectionId === 'string' ? body.remoteConnectionId : undefined,
+      ),
+    );
+  });
+  app.post('/api/threads/:threadId/project', async (request, response) => {
+    const body = bodyObject(request);
+    if (body.name !== undefined && typeof body.name !== 'string') throw new ServiceError(400, 'name must be a string');
+    if (body.workspacePath !== undefined && typeof body.workspacePath !== 'string') {
+      throw new ServiceError(400, 'workspacePath must be a string');
+    }
+    response.status(201).json(
+      await runtime.createProjectFromThread(
+        request.params.threadId!,
+        typeof body.name === 'string' ? body.name : undefined,
+        typeof body.workspacePath === 'string' ? body.workspacePath : undefined,
+      ),
+    );
   });
 
   app.get('/api/executor-connections', (_request, response) => {
@@ -375,7 +417,8 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
 
   app.get('/api/threads', (request, response) => {
     const projectId = typeof request.query.projectId === 'string' ? request.query.projectId : undefined;
-    response.json(runtime.listThreads(projectId));
+    if (request.query.unassigned === 'true') return response.json(runtime.listThreads(null));
+    return response.json(runtime.listThreads(projectId));
   });
   app.get('/api/threads/archived', (_request, response) => {
     response.json({ threads: runtime.listArchivedThreads() });

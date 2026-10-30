@@ -23,16 +23,16 @@ export interface PluginServices {
     previewModelInput(threadId: string): Promise<ProjectionInput>;
     validateModelSelection(selection: CatalogSelection): ThreadModelSelection;
     updateModelSelection(threadId: string, selection: CatalogSelection): ThreadModelSelection;
-    list(projectId?: string): Thread[];
+    list(projectId?: string | null): Thread[];
     updateTitle(pluginId: string, threadId: string, title: string): Thread;
     tools(threadId: string): Promise<ThreadToolView[]>;
     /** Resolve the tool names available from a local Executor template before creating a Thread. */
-    toolNamesForExecutor(projectId: string, executorKind: ExecutorKind): Promise<string[]>;
+    toolNamesForExecutor(projectId: string | null, executorKind: ExecutorKind): Promise<string[]>;
     /** Change whether a tool is included in future model projections for this Thread. Permission remains invocation-scoped. */
     setToolEnabled(threadId: string, toolName: string, enabled: boolean): Promise<void>;
     binding(threadId: string): ExecutorBinding | null;
     create(
-      projectId: string,
+      projectId: string | null,
       executorKind: ExecutorKind,
       title: string,
       options?: {

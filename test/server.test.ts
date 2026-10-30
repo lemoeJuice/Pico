@@ -527,3 +527,52 @@ describe('Pico server access boundary', () => {
     }
   });
 });
+
+describe('independent Thread Project API', () => {
+  it('creates an independent Thread, assigns its full tree, and sets workspace once', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-independent-project-'));
+    let server: Awaited<ReturnType<typeof startServer>> | undefined;
+    try {
+      process.env.PICO_HOST = '127.0.0.1';
+      process.env.PICO_PORT = '0';
+      process.env.PICO_DB_PATH = join(directory, 'pico.sqlite');
+      delete process.env.PICO_ACCESS_TOKEN;
+      server = await startServer();
+      const base = `http://127.0.0.1:${server.port}`;
+      const headers = { 'content-type': 'application/json' };
+      const created = await fetch(`${base}/api/threads`, {
+        method: 'POST', headers, body: JSON.stringify({ executorKind: 'host', title: 'Independent' }),
+      });
+      expect(created.status).toBe(201);
+      const root = await created.json();
+      expect(root.projectId).toBeNull();
+      const child = server.runtime.store.createThread(null, 'runtime', 'Child', { parentThreadId: root.id });
+      const unassigned = await fetch(`${base}/api/threads?unassigned=true`).then((response) => response.json());
+      expect(unassigned.map((thread: { id: string }) => thread.id)).toEqual(expect.arrayContaining([root.id, child.id]));
+
+      const assigned = await fetch(`${base}/api/threads/${root.id}/project`, {
+        method: 'POST', headers, body: JSON.stringify({ name: 'Assigned Project' }),
+      });
+      expect(assigned.status).toBe(201);
+      const result = await assigned.json();
+      expect(result.project.workspacePath).toBe('');
+      expect(result.threads.map((thread: { projectId: string }) => thread.projectId)).toEqual([
+        result.project.id,
+        result.project.id,
+      ]);
+
+      const workspace = await fetch(`${base}/api/projects/${result.project.id}/workspace`, {
+        method: 'POST', headers, body: JSON.stringify({ workspacePath: directory }),
+      });
+      expect(workspace.status).toBe(200);
+      expect((await workspace.json()).workspacePath).toBe(directory);
+      const repeated = await fetch(`${base}/api/projects/${result.project.id}/workspace`, {
+        method: 'POST', headers, body: JSON.stringify({ workspacePath: directory }),
+      });
+      expect(repeated.status).toBe(409);
+    } finally {
+      await server?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});

@@ -4,9 +4,10 @@ import { collaborationPlugin } from '../src/plugins/collaboration.js';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { PicoStore } from '../src/core/store.js';
 import { startRemoteExecutorServer } from '../src/executor/remote-server.js';
+import { RemoteHostExecutor } from '../src/executor/remote-executor.js';
 import { ToolCatalog } from '../src/executor/tool-catalog.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
 import { FakeModel, response, setupRuntime, setupTestCatalog } from './helpers.js';
@@ -40,6 +41,106 @@ async function until(predicate: () => boolean, timeoutMs = 3000): Promise<void> 
 }
 
 describe('Remote Host Executor', () => {
+  it('requires the optional-workspace capability only for workspace-free Threads', async () => {
+    const store = new PicoStore(':memory:');
+    const thread = store.createThread(null, 'host');
+    const binding = store.executorForThread(thread.id)!;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(JSON.stringify({ protocolVersion: 2, executorVersion: '0.2.1', kind: 'executor', name: 'old', workspaceRoot: '/', tools: [] }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+    const executor = new RemoteHostExecutor(store, undefined, async () => ({ endpointUrl: 'http://127.0.0.1:1234', accessToken: token }));
+    try {
+      await expect(executor.listTools(binding)).rejects.toThrow('does not support Threads without a workspace');
+      await expect(executor.listTools({ ...binding, workspacePath: '/some/project' })).resolves.toEqual([]);
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('runs Host tools without a Project workspace and accepts absolute file paths', async () => {
+    const directory = await import('node:fs/promises').then(({ mkdtemp }) =>
+      mkdtemp(join(tmpdir(), 'pico-host-no-workspace-')),
+    );
+    const target = join(directory, 'target.txt');
+    await writeFile(target, 'outside the runtime cwd');
+    const server = await startRemoteExecutorServer({
+      token,
+      workspaceRoot: '/',
+      filesystemMode: 'host',
+      databasePath: join(directory, 'ledger.sqlite'),
+      port: 0,
+    });
+    const baseUrl = `http://127.0.0.1:${server.port}`;
+    try {
+      const accepted = await fetch(`${baseUrl}/api/executions/host-no-project`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ toolName: 'read_file', arguments: { path: target }, workspacePath: '' }),
+      });
+      expect(accepted.status).toBe(202);
+      expect(await waitForExecution(baseUrl, 'host-no-project')).toMatchObject({ status: 'completed' });
+      expect(await getJson(`${baseUrl}/api/executions/host-no-project`, token)).toMatchObject({
+        result: { contents: 'outside the runtime cwd' },
+      });
+    } finally {
+      await server.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('runs without a Project workspace while retaining the remote execution root', async () => {
+    const directory = await import('node:fs/promises').then(({ mkdtemp }) =>
+      mkdtemp(join(tmpdir(), 'pico-no-workspace-')),
+    );
+    const workspaceRoot = join(directory, 'root');
+    await mkdir(workspaceRoot);
+    await writeFile(join(workspaceRoot, 'note.txt'), 'remote root');
+    const server = await startRemoteExecutorServer({
+      token,
+      workspaceRoot,
+      databasePath: join(directory, 'ledger.sqlite'),
+      port: 0,
+    });
+    const baseUrl = `http://127.0.0.1:${server.port}`;
+    try {
+      const accepted = await fetch(`${baseUrl}/api/executions/no-project`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ toolName: 'read_file', arguments: { path: 'note.txt' }, workspacePath: '' }),
+      });
+      expect(accepted.status).toBe(202);
+      expect(await waitForExecution(baseUrl, 'no-project')).toMatchObject({ status: 'completed' });
+      expect(await getJson(`${baseUrl}/api/executions/no-project`, token)).toMatchObject({
+        result: { contents: 'remote root' },
+      });
+      const download = await fetch(`${baseUrl}/api/workspaces/download`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ workspacePath: '', path: 'note.txt' }),
+      });
+      expect(download.status).toBe(200);
+      expect(await download.text()).toBe('remote root');
+      const escape = await fetch(`${baseUrl}/api/workspaces/download`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ workspacePath: '', path: '../outside' }),
+      });
+      expect(escape.status).toBe(400);
+      const badPath = await fetch(`${baseUrl}/api/executions/bad-path`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ toolName: 'read_file', arguments: { path: '../outside' }, workspacePath: '' }),
+      });
+      expect(badPath.status).toBe(202);
+      expect(await waitForExecution(baseUrl, 'bad-path')).toMatchObject({ status: 'failed' });
+    } finally {
+      await server.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('authenticates, confines selected workspaces, and deduplicates durable execution IDs', async () => {
     const directory = await import('node:fs/promises').then(({ mkdtemp }) =>
       mkdtemp(join(tmpdir(), 'pico-remote-executor-')),

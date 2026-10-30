@@ -31,7 +31,9 @@ export const workspacePlugin: PicoPlugin = {
         systemPrompt:
           input.thread.executorKind === 'runtime'
             ? input.systemPrompt
-            : `${input.systemPrompt}\nThe selected workspace is ${input.thread.workspacePath}. The executor type is ${input.thread.executorKind}.`,
+            : input.thread.workspacePath
+              ? `${input.systemPrompt}\nThe Project workspace is ${input.thread.workspacePath}. The executor type is ${input.thread.executorKind}.`
+              : `${input.systemPrompt}\nThis Thread has no Project workspace. The executor type is ${input.thread.executorKind}.`,
       }),
     );
 
@@ -42,7 +44,7 @@ export const workspacePlugin: PicoPlugin = {
         if (!context.thread) return { text: 'Choose a thread first.' };
         if (context.thread.executorKind === 'runtime') return { text: 'This Chat Thread has no attached workspace.' };
         canonical.append(context.thread.id, { action: 'workspace-inspected', executor: context.thread.executorKind });
-        return { text: `Workspace: ${context.thread.workspacePath}\nExecutor: ${context.thread.executorLabel}` };
+        return { text: `Workspace: ${context.thread.workspacePath || 'Not set'}\nExecutor: ${context.thread.executorLabel}` };
       },
     });
   },

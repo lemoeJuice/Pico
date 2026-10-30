@@ -299,6 +299,7 @@ export class PicoStore {
     this.migrateRemoteExecutorBindings();
     this.migrateRuntimeExecutorKind();
     this.migrateThreadVisibility();
+    this.migrateNullableThreadProject();
     this.migratePluginModelCallFingerprint();
     migrateLegacyPermissions(this.db);
     migrateLegacyChatGptPreferences(this.db);
@@ -637,6 +638,43 @@ export class PicoStore {
     }
   }
 
+  private migrateNullableThreadProject(): void {
+    const column = (this.db.prepare('PRAGMA table_info(threads)').all() as Array<{ name: string; notnull: number }>).find(
+      (candidate) => candidate.name === 'project_id',
+    );
+    if (!column?.notnull) return;
+    this.db.exec('PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;');
+    try {
+      this.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE threads_new (
+            id TEXT PRIMARY KEY,
+            project_id TEXT REFERENCES projects(id),
+            executor_id TEXT NOT NULL REFERENCES executors(id),
+            title TEXT NOT NULL,
+            parent_thread_id TEXT REFERENCES threads(id),
+            created_by_agent INTEGER NOT NULL DEFAULT 0,
+            pause_requested INTEGER NOT NULL DEFAULT 0,
+            pause_reason TEXT,
+            pause_code TEXT,
+            created_at TEXT NOT NULL,
+            archived_at TEXT,
+            deleted_at TEXT
+          );
+          INSERT INTO threads_new SELECT id, project_id, executor_id, title, parent_thread_id,
+            created_by_agent, pause_requested, pause_reason, pause_code, created_at, archived_at, deleted_at FROM threads;
+          DROP TABLE threads;
+          ALTER TABLE threads_new RENAME TO threads;
+          CREATE INDEX IF NOT EXISTS threads_project_created ON threads(project_id, created_at);
+        `);
+      });
+    } finally {
+      this.db.exec('PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ON;');
+    }
+    if ((this.db.prepare('PRAGMA foreign_key_check').all() as SqlRow[]).length > 0)
+      throw new Error('Nullable Thread Project migration left foreign-key violations.');
+  }
+
   private migratePluginModelCallFingerprint(): void {
     const columns = this.db.prepare('PRAGMA table_info(plugin_model_calls)').all() as Array<{ name: string }>;
     if (!columns.some((column) => column.name === 'request_fingerprint')) {
@@ -684,6 +722,28 @@ export class PicoStore {
     return { id, name, workspacePath, createdAt };
   }
 
+  createProjectForThreadSubtree(
+    threadId: string,
+    name: string,
+    workspacePath: string,
+  ): { project: Project; threads: Thread[] } {
+    return this.transaction(() => {
+      const project = this.createProject(name, workspacePath);
+      const threads = this.assignThreadSubtreeToProject(threadId, project);
+      return { project, threads };
+    });
+  }
+
+  getThreadSubtree(threadId: string): Thread[] {
+    const ids = this.db.prepare(`
+      WITH RECURSIVE subtree(id) AS (
+        SELECT id FROM threads WHERE id = ?
+        UNION SELECT child.id FROM threads child JOIN subtree parent ON child.parent_thread_id = parent.id
+      ) SELECT id FROM subtree
+    `).all(threadId) as Array<{ id: string }>;
+    return ids.map(({ id }) => this.getThread(String(id))).filter((thread): thread is Thread => thread !== null);
+  }
+
   getProject(id: string): Project | null {
     const row = this.db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as SqlRow | undefined;
     return row ? this.projectFromRow(row) : null;
@@ -709,7 +769,7 @@ export class PicoStore {
   }
 
   createThreadWithResult(
-    projectId: string,
+    projectId: string | null,
     executorKind: ExecutorKind,
     title = DEFAULT_THREAD_TITLE,
     options: {
@@ -722,15 +782,15 @@ export class PicoStore {
       toolOverrides?: Record<string, boolean>;
     } = {},
   ): { thread: Thread; created: boolean } {
-    const project = this.getProject(projectId);
-    if (!project) throw new ServiceError(404, 'Project not found');
+    const project = projectId ? this.getProject(projectId) : null;
+    if (projectId && !project) throw new ServiceError(404, 'Project not found');
     const remoteConnection = options.remoteConnectionId
       ? this.getRemoteExecutorConnection(options.remoteConnectionId)
       : null;
     if (options.remoteConnectionId && !remoteConnection) throw new ServiceError(404, 'Remote Executor connection not found');
     if (remoteConnection && executorKind !== 'host')
       throw new ServiceError(400, 'Remote Host Executor must use Host execution kind');
-    const workspacePath = executorKind === 'runtime' ? '' : (options.workspacePath ?? project.workspacePath);
+    const workspacePath = executorKind === 'runtime' ? '' : (options.workspacePath ?? project?.workspacePath ?? '');
     const idempotencyKey = options.idempotencyKey?.trim();
     if (idempotencyKey && idempotencyKey.length > 240) throw new ServiceError(400, 'Thread creation idempotency key is too long.');
     const requestHash = idempotencyKey
@@ -761,7 +821,7 @@ export class PicoStore {
         : executorKind === 'runtime'
           ? 'Chat'
           : 'Host';
-    const label = `${kindLabel} · ${project.name}`;
+    const label = `${kindLabel}${project ? ` · ${project.name}` : ''}`;
     return this.transaction(() => {
       if (idempotencyKey && requestHash) {
         const existing = this.db
@@ -856,6 +916,66 @@ export class PicoStore {
     return row ? this.threadFromRow(row) : null;
   }
 
+  getExecutorBinding(id: string): ExecutorBinding | null {
+    const row = this.db.prepare('SELECT * FROM executors WHERE id = ?').get(id) as SqlRow | undefined;
+    if (!row) return null;
+    return {
+      id: String(row.id),
+      kind: row.kind as ExecutorKind,
+      label: String(row.label),
+      workspacePath: String(row.workspace_path),
+      remoteConnectionId: typeof row.remote_connection_id === 'string' ? row.remote_connection_id : null,
+      createdAt: String(row.created_at),
+    };
+  }
+
+  assignThreadSubtreeToProject(threadId: string, project: Project): Thread[] {
+    return this.transaction(() => {
+      const root = this.getThread(threadId);
+      if (!root) throw new ServiceError(404, 'Thread not found');
+      if (root.projectId !== null) throw new ServiceError(409, 'Thread already belongs to a Project');
+      if (root.parentThreadId !== null) throw new ServiceError(409, 'Only an independent Thread root can become a Project.');
+      if (root.archivedAt || root.deletedAt) throw new ServiceError(409, 'Only an active Thread root can become a Project.');
+      const members = this.db.prepare(`
+        WITH RECURSIVE subtree(id) AS (
+          SELECT id FROM threads WHERE id = ?
+          UNION SELECT child.id FROM threads child JOIN subtree parent ON child.parent_thread_id = parent.id
+        ) SELECT id FROM subtree
+      `).all(threadId) as Array<{ id: string }>;
+      const ids = members.map(({ id }) => String(id));
+      const nowRunning = ids.some((id) => this.listActiveExecutions(id).length > 0);
+      if (nowRunning) throw new ServiceError(409, 'Cannot assign a Thread subtree while a task is running.');
+      this.db.prepare(`WITH RECURSIVE subtree(id) AS (
+        SELECT id FROM threads WHERE id = ?
+        UNION SELECT child.id FROM threads child JOIN subtree parent ON child.parent_thread_id = parent.id
+      ) UPDATE threads SET project_id = ? WHERE id IN (SELECT id FROM subtree)`).run(threadId, project.id);
+      const setLabel = this.db.prepare('UPDATE executors SET label = ? WHERE id = ?');
+      const setWorkspace = this.db.prepare("UPDATE executors SET workspace_path = ? WHERE id = ? AND kind != 'runtime' AND remote_connection_id IS NULL AND workspace_path = ''");
+      for (const id of ids) {
+        const thread = this.getThread(id);
+        if (!thread) continue;
+        setLabel.run(`${thread.executorLabel} · ${project.name}`, thread.executorId);
+        if (thread.executorKind !== 'runtime' && !thread.executorRemote && !thread.workspacePath)
+          setWorkspace.run(project.workspacePath, thread.executorId);
+      }
+      return ids.map((id) => this.getThread(id)).filter((thread): thread is Thread => thread !== null);
+    });
+  }
+
+  setProjectWorkspace(projectId: string, workspacePath: string, executorIds: string[]): Project | null {
+    return this.transaction(() => {
+      const project = this.getProject(projectId);
+      if (!project) return null;
+      if (project.workspacePath !== '') throw new ServiceError(409, 'Project workspace has already been set.');
+      const result = this.db.prepare('UPDATE projects SET workspace_path = ? WHERE id = ?').run(workspacePath, projectId);
+      if (!result.changes) return null;
+      const updateExecutor = this.db.prepare(`UPDATE executors SET workspace_path = ? WHERE id = ?
+        AND kind != 'runtime' AND remote_connection_id IS NULL AND workspace_path = ''`);
+      for (const executorId of executorIds) updateExecutor.run(workspacePath, executorId);
+      return this.getProject(projectId);
+    });
+  }
+
   updateThreadTitle(threadId: string, title: string): Thread | null {
     const result = this.db.prepare('UPDATE threads SET title = ? WHERE id = ?').run(title, threadId);
     if (Number(result.changes) === 0) return null;
@@ -918,16 +1038,16 @@ export class PicoStore {
     return this.getThread(threadId);
   }
 
-  listThreads(projectId?: string): Thread[] {
+  listThreads(projectId?: string | null): Thread[] {
     const rows = (
-      projectId
+      projectId !== undefined
         ? this.db
             .prepare(
               `
           SELECT t.*, e.kind AS executor_kind, e.label AS executor_label,
                  e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote
           FROM threads t JOIN executors e ON e.id = t.executor_id
-          WHERE t.project_id = ? AND t.archived_at IS NULL AND t.deleted_at IS NULL
+          WHERE t.project_id IS ? AND t.archived_at IS NULL AND t.deleted_at IS NULL
           ORDER BY t.created_at DESC
         `,
             )
@@ -944,6 +1064,16 @@ export class PicoStore {
             )
             .all()
     ) as SqlRow[];
+    return rows.map((row) => this.threadFromRow(row));
+  }
+
+  listProjectThreads(projectId: string): Thread[] {
+    const rows = this.db.prepare(`
+      SELECT t.*, e.kind AS executor_kind, e.label AS executor_label,
+             e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote
+      FROM threads t JOIN executors e ON e.id = t.executor_id
+      WHERE t.project_id = ? ORDER BY t.created_at
+    `).all(projectId) as SqlRow[];
     return rows.map((row) => this.threadFromRow(row));
   }
 
@@ -965,7 +1095,7 @@ export class PicoStore {
   private threadFromRow(row: SqlRow): Thread {
     return {
       id: String(row.id),
-      projectId: String(row.project_id),
+      projectId: typeof row.project_id === 'string' ? row.project_id : null,
       executorId: String(row.executor_id),
       executorKind: row.executor_kind as ExecutorKind,
       executorRemote: typeof row.executor_remote === 'string' && row.executor_remote.length > 0,

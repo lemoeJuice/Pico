@@ -264,11 +264,11 @@ export const projectContextPlugin: PicoPlugin = {
   pipelinePriority: { projection: 40 },
   activate(context) {
     const { tools, pipelines, commands, ui, http, threads } = context;
-    const projectOfThread = (threadId: string): Thread => {
+    const projectOfThread = (threadId: string): Thread & { projectId: string } => {
       const thread = threads.get(threadId);
       if (!thread) throw new Error('Thread not found.');
       if (!thread.projectId) throw new Error('This Thread is not attached to a Project.');
-      return thread;
+      return thread as Thread & { projectId: string };
     };
     const list = (projectId: string, query = '') => {
       const items = entriesForProject(context, projectId).filter(
@@ -276,7 +276,7 @@ export const projectContextPlugin: PicoPlugin = {
       );
       return items.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt.localeCompare(a.updatedAt));
     };
-    const add = (thread: Thread, args: Record<string, unknown>, source: ProjectMemoryEntry['source'] = 'agent') => {
+    const add = (thread: Thread & { projectId: string }, args: Record<string, unknown>, source: ProjectMemoryEntry['source'] = 'agent') => {
       const text = normalizeText(args.text);
       const category = validCategory(args.category) ? args.category : null;
       if (!category) throw new Error('category must be fact, decision, activity, or open-issue.');
@@ -517,7 +517,7 @@ export const projectContextPlugin: PicoPlugin = {
             text: 'Use /project-context to view, /project-context set followed by text, or /project-context clear.',
           };
         const item = add(
-          commandContext.thread,
+          projectOfThread(commandContext.thread.id),
           { category: 'fact', text: match[1], operation_id: randomUUID() },
           'manual',
         );

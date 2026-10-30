@@ -43,10 +43,34 @@ function readSpawnIndex(get: PluginContext['state']['get']): SpawnIndex {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as SpawnIndex) : {};
 }
 
+function sameThreadScope(threads: CollaborationServices['threads'], left: Thread, right: Thread): boolean {
+  if (left.projectId !== null || right.projectId !== null) {
+    return left.projectId !== null && left.projectId === right.projectId;
+  }
+  const rootId = (thread: Thread): string => {
+    let current = thread;
+    const seen = new Set<string>();
+    while (current.parentThreadId && !seen.has(current.id)) {
+      seen.add(current.id);
+      const parent = threads.get(current.parentThreadId);
+      if (!parent || parent.projectId !== null) break;
+      current = parent;
+    }
+    return current.id;
+  };
+  return rootId(left) === rootId(right);
+}
+
 function childThreads(threads: CollaborationServices['threads'], parent: Thread): Thread[] {
   return threads
     .list(parent.projectId)
-    .filter((thread) => thread.parentThreadId === parent.id && thread.archivedAt == null && thread.deletedAt == null)
+    .filter(
+      (thread) =>
+        sameThreadScope(threads, parent, thread) &&
+        thread.parentThreadId === parent.id &&
+        thread.archivedAt == null &&
+        thread.deletedAt == null,
+    )
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
 
@@ -333,7 +357,7 @@ export const collaborationPlugin: PicoPlugin = {
       {
         name: 'send_thread_message',
         description:
-          'Send a normal message to another Thread in this Project, including a parent or child. Delivery does not wait for a reply or resume paused Threads.',
+          'Send a normal message to another Thread in this Project or independent Thread tree, including a parent or child. Delivery does not wait for a reply or resume paused Threads.',
         parameters: {
           type: 'object',
           properties: {
@@ -352,8 +376,8 @@ export const collaborationPlugin: PicoPlugin = {
         if (!targetId || !content) throw new Error('thread_id and message are required');
         if (content.length > 20_000) throw new Error('Message must be at most 20,000 characters');
         const target = threads.get(targetId);
-        if (!target || target.projectId !== sender.projectId) {
-          throw new Error('Target Thread must belong to the same Project');
+        if (!target || !sameThreadScope(threads, sender, target)) {
+          throw new Error('Target Thread must belong to the same Project or independent Thread tree');
         }
         if (target.id === sender.id) throw new Error('Cannot send a message to the current Thread');
         return threads.send(sender.id, target.id, content, `${toolContext.executionId}:message`);
@@ -364,7 +388,7 @@ export const collaborationPlugin: PicoPlugin = {
       {
         name: 'list_project_threads',
         description:
-          'List visible, non-archived Threads in the current Project, newest first. Use this to discover a Thread before reading its history with read_thread_history. Results are paginated; pass offset=next_offset to continue.',
+          'List visible, non-archived Threads in the current Project or independent Thread tree, newest first. Use this to discover a Thread before reading its history with read_thread_history. Results are paginated; pass offset=next_offset to continue.',
         parameters: {
           type: 'object',
           properties: {
@@ -386,7 +410,10 @@ export const collaborationPlugin: PicoPlugin = {
         }
         const visible = threads
           .list(current.projectId)
-          .filter((thread) => thread.archivedAt == null && thread.deletedAt == null)
+          .filter(
+            (thread) =>
+              sameThreadScope(threads, current, thread) && thread.archivedAt == null && thread.deletedAt == null,
+          )
           .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
         const page = visible.slice(offset as number, (offset as number) + (limit as number));
         const nextOffset = (offset as number) + page.length;
@@ -430,7 +457,7 @@ export const collaborationPlugin: PicoPlugin = {
       {
         name: 'read_thread_history',
         description:
-          'Read input/output records from a Thread in this Project, indexed by Canonical seq. Omit thread_id to read the current Thread. ' +
+          'Read input/output records from a Thread in this Project or independent Thread tree, indexed by Canonical seq. Omit thread_id to read the current Thread. ' +
           'Choose exactly one mode; omit unused fields entirely rather than filling defaults or null. ' +
           'PAGE mode: use after_seq and limit, for example {"after_seq":0,"limit":10}; never include record_seq, offset, or chunk_chars. ' +
           'Each page is limited to 16,000 JSON characters. Continue with next_after_seq; if a page is too large, reduce limit with the same after_seq. ' +
@@ -477,8 +504,8 @@ export const collaborationPlugin: PicoPlugin = {
         if (!sender) throw new Error('Thread context is missing');
         const targetId = typeof args.thread_id === 'string' ? args.thread_id.trim() : sender.id;
         const target = threads.get(targetId);
-        if (!target || target.projectId !== sender.projectId)
-          throw new Error('Target Thread must belong to the same Project');
+        if (!target || !sameThreadScope(threads, sender, target))
+          throw new Error('Target Thread must belong to the same Project or independent Thread tree');
         const hasAfterSeq = Object.prototype.hasOwnProperty.call(args, 'after_seq');
         if (
           hasAfterSeq &&
@@ -582,7 +609,7 @@ export const collaborationPlugin: PicoPlugin = {
       const child = threads.get(typeof request.childThreadId === 'string' ? request.childThreadId : '');
       const content = typeof request.message === 'string' ? request.message.trim() : '';
       const operationId = typeof request.operationId === 'string' ? request.operationId.trim() : '';
-      if (!parent || !child || child.parentThreadId !== parent.id || child.projectId !== parent.projectId)
+      if (!parent || !child || child.parentThreadId !== parent.id || !sameThreadScope(threads, parent, child))
         throw new Error('Child Thread does not belong to this parent');
       if (!content || content.length > 20_000) throw new Error('Message must contain 1 to 20,000 characters');
       if (!/^[a-zA-Z0-9._:-]{1,160}$/.test(operationId)) throw new Error('A valid operationId is required');
@@ -593,7 +620,7 @@ export const collaborationPlugin: PicoPlugin = {
       const request = body as Record<string, unknown>;
       const parent = threads.get(typeof request.parentThreadId === 'string' ? request.parentThreadId : '');
       const child = threads.get(typeof request.childThreadId === 'string' ? request.childThreadId : '');
-      if (!parent || !child || child.parentThreadId !== parent.id || child.projectId !== parent.projectId)
+      if (!parent || !child || child.parentThreadId !== parent.id || !sameThreadScope(threads, parent, child))
         throw new Error('Child Thread does not belong to this parent');
       if (request.action === 'pause') return threads.pause(child.id, 'Paused from parent collaboration panel');
       if (request.action === 'resume') return threads.resume(child.id);
