@@ -42,8 +42,9 @@ describe('First-party plugin Runtime integration', () => {
         : response('Saved.'),
     );
     const env = await setupRuntime(model, { pluginDirectory: resolve(process.cwd(), 'plugins') });
-    const thread = env.createThread();
+    const thread = env.createThread('runtime');
     try {
+      await env.runtime.setThreadToolEnabled(thread.id, 'save_thread_note', true);
       expect(env.runtime.pluginInfo().plugins.some((plugin) => plugin.id === 'pico.example-notes')).toBe(true);
       expect(env.runtime.availableCommands().some((command) => command.name === 'notes')).toBe(true);
       expect(env.runtime.availableCommands().some((command) => command.name === 'project-context')).toBe(true);
@@ -73,7 +74,7 @@ describe('First-party plugin Runtime integration', () => {
           .listRecords(thread.id)
           .some((record) => record.kind === 'plugin' && record.payload.pluginId === 'pico.example-notes'),
       ).toBe(true);
-      const command = await env.runtime.submit(thread.id, 'plugin-command', '/notes');
+      const command = await env.runtime.executeCommand(thread.id, 'plugin-command', '/notes');
       expect(command.command?.text).toContain('Keep the setup small.');
     } finally {
       await env.cleanup();
