@@ -8,6 +8,7 @@ describe('workflow plugin boundaries', () => {
       id: 'test.runtime-tools',
       name: 'Runtime tool fixture',
       version: '1',
+      defaultToolsEnabled: true,
       activate({ tools }) {
         tools.register(
           {

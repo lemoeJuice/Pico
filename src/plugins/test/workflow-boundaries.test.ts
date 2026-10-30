@@ -152,6 +152,15 @@ describe('workflow plugin boundaries', () => {
   });
 
   it('discovers and executes Host executor plugin tools that are absent from the Runtime catalog', async () => {
+    let setToolEnabled: ((threadId: string, toolName: string, enabled: boolean) => Promise<void>) | undefined;
+    const visibilityPlugin: PicoPlugin = {
+      id: 'test.tool-visibility',
+      name: 'Tool visibility fixture',
+      version: '1',
+      activate({ threads }) {
+        setToolEnabled = threads.setToolEnabled;
+      },
+    };
     const executorPluginDirectory = await temporaryDirectory('pico-host-plugin-boundary-');
     await writeExecutorPlugin(
       executorPluginDirectory,
@@ -172,10 +181,11 @@ describe('workflow plugin boundaries', () => {
         ? response('', [{ id: 'host-executor-plugin', name: 'executor_echo', arguments: { value: 'host-value' } }])
         : response('The Host Executor plugin tool ran.'),
     );
-    const env = await setupRuntime(model, { executorPluginDirectory });
+    const env = await setupRuntime(model, { executorPluginDirectory, plugins: [visibilityPlugin] });
     const thread = env.createThread('host');
     env.store.setPluginState('pico.permissions', 'rules', { [thread.id]: { executor_echo: 'allow' } });
     try {
+      await setToolEnabled!(thread.id, 'executor_echo', true);
       await env.runtime.submit(thread.id, 'host-executor-plugin-message', 'Run the Host Executor plugin tool.');
       await env.runtime.drain();
 
@@ -196,19 +206,29 @@ describe('workflow plugin boundaries', () => {
   });
 
   it('discovers and executes Remote Executor schemas without a local Tool definition', async () => {
+    let setToolEnabled: ((threadId: string, toolName: string, enabled: boolean) => Promise<void>) | undefined;
+    const visibilityPlugin: PicoPlugin = {
+      id: 'test.tool-visibility',
+      name: 'Tool visibility fixture',
+      version: '1',
+      activate({ threads }) {
+        setToolEnabled = threads.setToolEnabled;
+      },
+    };
     const remote = await startRemoteSchemaServer();
     const model = new FakeModel((_prompt, callNumber) =>
       callNumber === 1
         ? response('', [{ id: 'remote-custom-tool', name: 'remote_custom', arguments: { value: 'from-remote' } }])
         : response('The Remote Executor custom tool ran.'),
     );
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, { plugins: [visibilityPlugin] });
     try {
       const connection = await env.runtime.addRemoteExecutorConnection('Custom remote', remote.url, remoteToken);
       const thread = await env.runtime.createRemoteThread(env.project.id, connection.id, '/remote-workspaces/project');
       env.runtime.updateThreadModelSelection(thread.id, env.catalog.select());
       env.store.setPluginState('pico.permissions', 'rules', { [thread.id]: { remote_custom: 'allow' } });
 
+      await setToolEnabled!(thread.id, 'remote_custom', true);
       await env.runtime.submit(thread.id, 'remote-custom-tool-message', 'Run the remote custom tool.');
       await env.runtime.drain();
 

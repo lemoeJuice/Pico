@@ -16,6 +16,7 @@ describe('framework model configuration', () => {
           id: 'test.aux',
           name: 'Auxiliary',
           version: '1',
+          modelCalls: true,
           activate(context) {
             complete = context.models.complete;
           },

@@ -35,8 +35,15 @@ describe('ChatGPT plugin server authorization', () => {
       expect(pluginCsp).toContain(`style-src 'self' ${base} 'unsafe-inline'`);
       expect(pluginCsp).toContain("connect-src 'none'");
       expect(pluginCsp).toContain("frame-ancestors 'self'");
-      expect(await pluginPage.text()).toContain('./build/webui.js');
-      const pluginBundle = await fetch(`${base}/_pico/plugin-ui/pico.chatgpt-plan/webui/build/webui.js`, {
+      const page = await pluginPage.text();
+      const bundlePath = page.match(/<script\s+src="([^"]*\/build\/webui\.js)"/i)?.[1];
+      expect(bundlePath).toBeDefined();
+      const bundleUrl = new URL(bundlePath!, pluginPage.url);
+      expect(bundleUrl.origin).toBe(base);
+      expect(bundleUrl.pathname).toMatch(
+        /^\/_pico\/plugin-ui\/pico\.chatgpt-plan\/webui\/(?:releases\/[^/]+\/)?build\/webui\.js$/,
+      );
+      const pluginBundle = await fetch(bundleUrl, {
         headers: { connection: 'close' },
       });
       expect(pluginBundle.status).toBe(200);

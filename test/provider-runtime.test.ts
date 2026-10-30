@@ -228,6 +228,7 @@ describe('Runtime model provider dispatch', () => {
       id: 'test.auxiliary',
       name: 'Test Auxiliary',
       version: '1',
+      modelCalls: true,
       activate(context) {
         complete = context.models.complete;
       },
@@ -292,6 +293,7 @@ describe('Runtime model provider dispatch', () => {
       id: 'test.fingerprinted-call',
       name: 'Test Fingerprinted Call',
       version: '1',
+      modelCalls: true,
       activate(context) {
         complete = context.models.complete;
       },
@@ -475,6 +477,7 @@ describe('Runtime model provider dispatch', () => {
       id: 'test.auxiliary-cancel',
       name: 'Test Auxiliary Cancellation',
       version: '1',
+      modelCalls: true,
       activate(context) {
         complete = context.models.complete;
       },

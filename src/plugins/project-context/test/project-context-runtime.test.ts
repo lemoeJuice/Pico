@@ -10,9 +10,11 @@ describe('Project Context Runtime integration', () => {
     const otherExecutorThread = env.runtime.createThread(env.project.id, 'host', 'Host continuation');
     const isolatedProject = await env.runtime.createProject('Separate Project', env.workspace);
     const isolatedThread = env.runtime.createThread(isolatedProject.id, 'host', 'Isolated context');
+    env.runtime.updateThreadModelSelection(otherExecutorThread.id, env.catalog.select());
+    env.runtime.updateThreadModelSelection(isolatedThread.id, env.catalog.select());
     const contextText = 'Keep canonical history append-only.\nUse Project Context for decisions shared across Threads.';
     try {
-      const saved = await env.runtime.submit(
+      const saved = await env.runtime.executeCommand(
         sourceThread.id,
         'project-context-set',
         `/project-context set\n${contextText}`,
@@ -79,7 +81,7 @@ describe('Project Context Runtime integration', () => {
         false,
       );
 
-      const cleared = await env.runtime.submit(sourceThread.id, 'project-context-clear', '/project-context clear');
+      const cleared = await env.runtime.executeCommand(sourceThread.id, 'project-context-clear', '/project-context clear');
       expect(cleared.command?.text).toContain('Manual Project Context cleared');
       expect(env.store.listRecords(sourceThread.id).filter((record) => record.kind === 'message')).toHaveLength(0);
       await env.runtime.submit(otherExecutorThread.id, 'context-cleared-message', 'Check the updated guidance.');

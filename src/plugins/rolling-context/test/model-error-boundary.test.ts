@@ -36,6 +36,7 @@ describe('Rolling Context model error handling', () => {
       id: 'test.model-error-recorder',
       name: 'Model error recorder',
       version: '1',
+      modelCalls: true as const,
       activate(context: PluginContext) {
         completeAuxiliary = context.models.complete;
         setPluginState = context.state.set;

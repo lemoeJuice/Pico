@@ -291,7 +291,8 @@ describe('Goal plugin', () => {
     env.records.push({
       id: 'actual-canonical-id',
       threadId: env.thread.id,
-      seq: 1,
+      // Creating the Goal already appends a plugin record at seq 1.
+      seq: 2,
       kind: 'tool_result',
       payload: { toolName: 'test', status: 'completed', result: 'pass' },
       createdAt: '',
@@ -300,7 +301,7 @@ describe('Goal plugin', () => {
     env.records.push({
       id: 'checkpoint-assistant-record',
       threadId: env.thread.id,
-      seq: 2,
+      seq: 3,
       kind: 'assistant',
       payload: { content: '', toolCalls: [] },
       createdAt: '',
@@ -310,7 +311,7 @@ describe('Goal plugin', () => {
       {
         progress: 'The regression test passed and the fix is complete.',
         status: 'completed',
-        verificationRecordSeq: 1,
+        verificationRecordSeq: 2,
       },
       { thread: env.thread },
     );
