@@ -43,6 +43,8 @@ describe('Permission Auto-review', () => {
         const evidence = JSON.parse(prompt.turns[0]!.kind === 'message' ? prompt.turns[0]!.content : '{}');
         expect(evidence.requestedAction).toEqual({ tool: 'read_file', arguments: { path: 'facts.txt' } });
         expect(evidence.executionBoundary.statement).toContain('No broader access');
+        expect(evidence.executionBoundary.workspaceRole).toBe('reference');
+        expect(prompt.system).toContain('A target outside that path or an absent workspace is not itself grounds for denial');
         return response('{"decision":"allow","reason":"The requested file is within the workspace."}');
       }
       mainCalls += 1;
