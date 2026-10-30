@@ -46,7 +46,6 @@ export interface RollingEconomics {
   cachedInputPerMillion: number;
   cacheWritePerMillion: number;
   expectedFutureCalls: number;
-  charactersPerToken: number;
 }
 export type RollingCompactEstimate =
   | {
@@ -54,8 +53,8 @@ export type RollingCompactEstimate =
       keepRecentRounds: number;
       candidateCount: number;
       estimatedSavings: number;
-      unit: 'configured-cost-units';
-      method: 'serialized-character-token-estimate';
+      unit: 'price-weighted-million-characters';
+      method: 'serialized-character-cost-comparison';
       firstChangedTurnIndex: number;
       oldSuffixChars: number;
       newSuffixChars: number;
@@ -67,8 +66,8 @@ export type RollingCompactEstimate =
       keepRecentRounds: number;
       candidateCount: number;
       estimatedSavings: number;
-      unit: 'configured-cost-units';
-      method: 'serialized-character-token-estimate';
+      unit: 'price-weighted-million-characters';
+      method: 'serialized-character-cost-comparison';
       firstChangedTurnIndex: number;
       oldSuffixChars: number;
       newSuffixChars: number;
@@ -119,6 +118,26 @@ function modelRoundContent(records: readonly CanonicalRecord[]): string {
   return describeRecords(records);
 }
 
+function unpriceableProjectionReason(
+  projection: Pick<ProjectionInput, 'systemPrompt' | 'tools' | 'turns'>,
+): string | null {
+  const hasImage = (value: unknown): boolean => {
+    if (!value || typeof value !== 'object') return false;
+    if (Array.isArray(value)) return value.some(hasImage);
+    const item = value as Record<string, unknown>;
+    return item.type === 'image' || 'images' in item || 'image_url' in item || Object.values(item).some(hasImage);
+  };
+  // Tool schemas can declare an "images" property without containing image input.
+  if (hasImage(projection.turns)) return 'Multimodal turns cannot be priced from the serialized text projection.';
+  if (
+    projection.turns.some(
+      (turn) => (turn.kind === 'assistant_tools' || turn.kind === 'message') && Object.hasOwn(turn, 'reasoningReplay'),
+    )
+  )
+    return 'Opaque reasoning replay data cannot be estimated from serialized text.';
+  return null;
+}
+
 export function estimateCompactEconomics(input: {
   economics: RollingEconomics | null | undefined;
   currentProjection: Pick<ProjectionInput, 'systemPrompt' | 'tools' | 'turns'> | null | undefined;
@@ -137,21 +156,16 @@ export function estimateCompactEconomics(input: {
       economics.cachedInputPerMillion,
       economics.cacheWritePerMillion,
       economics.expectedFutureCalls,
-      economics.charactersPerToken,
     ].some((value) => typeof value !== 'number' || !Number.isFinite(value) || value < 0)
   )
     return {
       status: 'cannot_estimate',
       reason: 'Complete non-negative input, cache-read, cache-write prices and future-call count are required.',
     };
-  if (
-    economics.charactersPerToken <= 0 ||
-    !Number.isSafeInteger(economics.expectedFutureCalls) ||
-    economics.expectedFutureCalls < 1
-  )
+  if (!Number.isSafeInteger(economics.expectedFutureCalls) || economics.expectedFutureCalls < 1)
     return {
       status: 'cannot_estimate',
-      reason: 'charactersPerToken and expectedFutureCalls must be positive (future calls must be an integer).',
+      reason: 'expectedFutureCalls must be a positive integer.',
     };
   if (!currentProjection || !candidateProjection)
     return { status: 'cannot_estimate', reason: 'Exact current and candidate final projections are unavailable.' };
@@ -163,26 +177,9 @@ export function estimateCompactEconomics(input: {
       status: 'cannot_estimate',
       reason: 'System prompt or tool definitions differ; the changed input boundary cannot be priced safely.',
     };
-  const hasImage = (value: unknown): boolean => {
-    if (!value || typeof value !== 'object') return false;
-    if (Array.isArray(value)) return value.some(hasImage);
-    const item = value as Record<string, unknown>;
-    return item.type === 'image' || 'images' in item || 'image_url' in item || Object.values(item).some(hasImage);
-  };
-  if (hasImage(currentProjection) || hasImage(candidateProjection))
-    return {
-      status: 'cannot_estimate',
-      reason: 'Multimodal turns cannot be priced from the serialized text projection.',
-    };
-  if (
-    [...currentProjection.turns, ...candidateProjection.turns].some(
-      (turn) => (turn.kind === 'assistant_tools' || turn.kind === 'message') && Object.hasOwn(turn, 'reasoningReplay'),
-    )
-  )
-    return {
-      status: 'cannot_estimate',
-      reason: 'Opaque reasoning replay data cannot be estimated from serialized text.',
-    };
+  const unpriceableReason =
+    unpriceableProjectionReason(currentProjection) ?? unpriceableProjectionReason(candidateProjection);
+  if (unpriceableReason) return { status: 'cannot_estimate', reason: unpriceableReason };
   const comparableTurns = (turns: ModelPrompt['turns']) =>
     turns.map((turn) => {
       if (turn.kind === 'assistant_tools')
@@ -202,28 +199,26 @@ export function estimateCompactEconomics(input: {
     firstChangedTurnIndex += 1;
   const oldSuffixChars = JSON.stringify(oldComparable.slice(firstChangedTurnIndex)).length;
   const newSuffixChars = JSON.stringify(newComparable.slice(firstChangedTurnIndex)).length;
-  const oldTokens = oldSuffixChars / economics.charactersPerToken;
-  const newTokens = newSuffixChars / economics.charactersPerToken;
   const n = economics.expectedFutureCalls;
   // Explicit user model: old suffix is read from cache n times; new suffix is written once,
   // then read n-1 times. Cache hits are assumed, never claimed as observed facts.
   const estimatedSavings =
-    (oldTokens * economics.cachedInputPerMillion * n -
-      newTokens * (economics.cacheWritePerMillion + economics.cachedInputPerMillion * (n - 1))) /
+    (oldSuffixChars * economics.cachedInputPerMillion * n -
+      newSuffixChars * (economics.cacheWritePerMillion + economics.cachedInputPerMillion * (n - 1))) /
     1_000_000;
   return {
     status: estimatedSavings > 0 ? 'estimated' : 'not_profitable',
     keepRecentRounds: input.keepRecentRounds,
     candidateCount: input.candidateCount,
     estimatedSavings,
-    unit: 'configured-cost-units',
-    method: 'serialized-character-token-estimate',
+    unit: 'price-weighted-million-characters',
+    method: 'serialized-character-cost-comparison',
     firstChangedTurnIndex,
     oldSuffixChars,
     newSuffixChars,
     futureCallCount: n,
     limitations: [
-      'charactersPerToken is a manual approximation, not observed token usage.',
+      'Character counts approximate relative token counts; the price-weighted result is not a monetary amount.',
       'Assumes the old suffix is cached for every future call and the new suffix is written once then cached; provider cache behavior can differ.',
       'Estimates the complete projected suffix after the first changed turn, but excludes summary generation cost.',
     ],
@@ -251,13 +246,7 @@ function validateEconomics(value: unknown): RollingEconomics {
   const input = object(value);
   const provider = typeof input.provider === 'string' ? input.provider.trim() : '';
   const model = typeof input.model === 'string' ? input.model.trim() : '';
-  const numeric = [
-    'inputPerMillion',
-    'cachedInputPerMillion',
-    'cacheWritePerMillion',
-    'expectedFutureCalls',
-    'charactersPerToken',
-  ] as const;
+  const numeric = ['inputPerMillion', 'cachedInputPerMillion', 'cacheWritePerMillion', 'expectedFutureCalls'] as const;
   if (!provider || !model || numeric.some((key) => typeof input[key] !== 'number' || !Number.isFinite(input[key])))
     throw new Error('provider, model, and all economics fields are required.');
   const economics = {
@@ -267,17 +256,22 @@ function validateEconomics(value: unknown): RollingEconomics {
     cachedInputPerMillion: input.cachedInputPerMillion as number,
     cacheWritePerMillion: input.cacheWritePerMillion as number,
     expectedFutureCalls: input.expectedFutureCalls as number,
-    charactersPerToken: input.charactersPerToken as number,
   };
   if (Object.values(economics).some((item) => typeof item === 'number' && item < 0))
     throw new Error('Economics values must be non-negative.');
-  if (
-    !Number.isSafeInteger(economics.expectedFutureCalls) ||
-    economics.expectedFutureCalls < 1 ||
-    economics.charactersPerToken <= 0
-  )
-    throw new Error('expectedFutureCalls must be a positive integer and charactersPerToken must be positive.');
+  if (!Number.isSafeInteger(economics.expectedFutureCalls) || economics.expectedFutureCalls < 1)
+    throw new Error('expectedFutureCalls must be a positive integer.');
   return economics;
+}
+function usableEconomics(context: PluginContext, threadId: string): RollingEconomics | null {
+  try {
+    const economics = validateEconomics(getEconomics(context, threadId));
+    const selection = context.threads.modelSelection(threadId);
+    return economics.provider === selection.provider && economics.model === selection.model ? economics : null;
+  } catch {
+    // Missing, stale, or invalid pricing must never start a paid summary call.
+    return null;
+  }
 }
 function saveSegments(
   context: PluginContext,
@@ -671,9 +665,12 @@ export const rollingContextPlugin: PicoPlugin = {
       records: readonly CanonicalRecord[],
       modelStep = false,
       runtimeCompaction: ReturnType<typeof runtimeContextCompaction> = runtimeContextCompaction(records),
+      projection?: ProjectionInput,
     ): Promise<RollingSegment[]> => {
       const previous = list(thread.id);
       if (!modelStep) return previous;
+      if (!usableEconomics(context, thread.id)) return previous;
+      if (!projection || unpriceableProjectionReason(projection)) return previous;
       const known = new Set(previous.map((segment) => segment.id));
       const safeRecords = omitConsumedThreadHistoryResults(records);
       const completeRounds = completedModelRounds(safeRecords);
@@ -697,6 +694,7 @@ export const rollingContextPlugin: PicoPlugin = {
             ? context.models.history({ pluginId: 'pico.rolling-context', threadId: thread.id })
             : [];
         for (const segment of pendingSegments) {
+          if (!usableEconomics(context, thread.id)) return next;
           const round = roundsByStart.get(segment.startSeq);
           if (
             !round ||
@@ -730,6 +728,7 @@ export const rollingContextPlugin: PicoPlugin = {
         }
       }
       for (const block of sealable) {
+        if (!usableEconomics(context, thread.id)) return next;
         const sourceIds = block.map((record) => record.id);
         const originalBlock = sourceIds
           .map((id) => records.find((record) => record.id === id))
@@ -804,7 +803,7 @@ export const rollingContextPlugin: PicoPlugin = {
     pipelines.use('projection', async (input, next) => {
       const modelStep = (input as ProjectionInput & { modelStep?: boolean }).modelStep === true;
       const runtimeCompaction = runtimeContextCompactionForProjection(input);
-      const segments = await reconcile(input.thread, input.records, modelStep, runtimeCompaction);
+      const segments = await reconcile(input.thread, input.records, modelStep, runtimeCompaction, input);
       const projected = allTurns(context, input, segments, runtimeCompaction);
       return next({
         ...input,
@@ -1103,6 +1102,15 @@ export const rollingContextPlugin: PicoPlugin = {
       }
       if (!segment) throw new Error('Rolling segment not found.');
       if (value.action === 'retry-summary') {
+        if (!usableEconomics(context, threadId))
+          throw new Error(
+            'Configure complete cost estimates for the Thread current provider and model before generating a summary.',
+          );
+        const preview = await context.threads.previewModelInput(threadId);
+        const unpriceableReason = unpriceableProjectionReason(preview);
+        if (unpriceableReason) throw new Error(`Cannot generate a rolling summary: ${unpriceableReason}`);
+        if (!usableEconomics(context, threadId))
+          throw new Error('Cost estimate or model selection changed before generating a summary.');
         if (!canManualCompact(canonical.list(threadId), segment))
           throw new Error('Segment is not at a safe complete-turn boundary.');
         sourceFor(threadId, segment); // Verify the immutable raw source hash before filtering historical tool output.

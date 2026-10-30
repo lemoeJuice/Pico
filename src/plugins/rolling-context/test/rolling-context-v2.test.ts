@@ -50,7 +50,6 @@ const economics = {
   cachedInputPerMillion: 2,
   cacheWritePerMillion: 4,
   expectedFutureCalls: 3,
-  charactersPerToken: 4,
 };
 
 describe('Rolling Context v2 model rounds and cost gate', () => {
@@ -105,7 +104,8 @@ describe('Rolling Context v2 model rounds and cost gate', () => {
       expect(result.estimatedSavings).toBeGreaterThan(0);
       expect(result.firstChangedTurnIndex).toBe(0);
       expect(result.oldSuffixChars).toBeGreaterThan(result.newSuffixChars);
-      expect(result.limitations.join(' ')).toContain('manual approximation');
+      expect(result.unit).toBe('price-weighted-million-characters');
+      expect(result.limitations.join(' ')).toContain('not a monetary amount');
     }
   });
 

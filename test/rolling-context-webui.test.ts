@@ -62,7 +62,6 @@ it('edits the selected thread cost assumptions without exposing legacy cold acti
     cachedInputPerMillion: '0.1',
     cacheWritePerMillion: '2.5',
     expectedFutureCalls: '10',
-    charactersPerToken: '3',
   }))
     action(`economics:${key}`, value);
   action('economics:save');
@@ -76,9 +75,9 @@ it('edits the selected thread cost assumptions without exposing legacy cold acti
     cachedInputPerMillion: 0.1,
     cacheWritePerMillion: 2.5,
     expectedFutureCalls: 10,
-    charactersPerToken: 3,
   });
   expect(JSON.stringify(tree)).not.toContain('Move cold');
+  expect(JSON.stringify(tree)).not.toContain('Estimated characters per token');
   port.onmessage?.({ data: { type: 'pico:plugin-ui:context', context: { thread: { id: 'thread-b' } } } });
   await flush();
   expect(requests.some((request) => request.path.endsWith('/economics?threadId=thread-b'))).toBe(true);

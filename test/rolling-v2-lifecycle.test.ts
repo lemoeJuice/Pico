@@ -7,6 +7,25 @@ import { FakeModel, response, setupRuntime } from './helpers.js';
 const isRollingSummary = (prompt: { system: string }) =>
   prompt.system.includes('Summarize exactly one sealed model-response round');
 
+async function configureRollingEconomics(env: Awaited<ReturnType<typeof setupRuntime>>, threadId: string) {
+  const selection = env.runtime.threadModelSelection(threadId);
+  const route = env.runtime.pluginHttpRoute('pico.rolling-context', 'PUT', '/economics');
+  expect(route).toBeDefined();
+  await route!.handler({
+    body: {
+      threadId,
+      provider: selection.provider,
+      model: selection.model,
+      inputPerMillion: 100,
+      cachedInputPerMillion: 100,
+      cacheWritePerMillion: 0,
+      expectedFutureCalls: 10,
+    },
+    query: new URLSearchParams(),
+    origin: null,
+  });
+}
+
 describe('Rolling Context v2 lifecycle', () => {
   it('waits for the next user input; previews and manual /compact do not seal or summarize rounds', async () => {
     let previewModelInput: ((threadId: string) => Promise<ProjectionInput>) | undefined;
@@ -27,6 +46,7 @@ describe('Rolling Context v2 lifecycle', () => {
     const env = await setupRuntime(model, { plugins: [rollingContextPlugin, previewServicePlugin] });
     const thread = env.createThread('runtime');
     try {
+      await configureRollingEconomics(env, thread.id);
       await env.runtime.submit(thread.id, 'rolling-lifecycle-first', 'private first user message');
       await env.runtime.drain();
 
@@ -103,6 +123,7 @@ describe('Rolling Context v2 lifecycle', () => {
     const env = await setupRuntime(model, { plugins: [rollingContextPlugin, toolPlugin] });
     const thread = env.createThread('runtime');
     try {
+      await configureRollingEconomics(env, thread.id);
       await env.runtime.submit(thread.id, 'rolling-tool-round', 'private user request for a tool check');
       await env.runtime.drain();
 
@@ -157,25 +178,7 @@ describe('Rolling Context v2 lifecycle', () => {
     const env = await setupRuntime(model, { plugins: [rollingContextPlugin] });
     const thread = env.createThread('runtime');
     try {
-      if (configureEconomics) {
-        const selection = env.runtime.threadModelSelection(thread.id);
-        const route = env.runtime.pluginHttpRoute('pico.rolling-context', 'PUT', '/economics');
-        expect(route).toBeDefined();
-        await route!.handler({
-          body: {
-            threadId: thread.id,
-            provider: selection.provider,
-            model: selection.model,
-            inputPerMillion: 100,
-            cachedInputPerMillion: 100,
-            cacheWritePerMillion: 0,
-            expectedFutureCalls: 10,
-            charactersPerToken: 1,
-          },
-          query: new URLSearchParams(),
-          origin: null,
-        });
-      }
+      if (configureEconomics) await configureRollingEconomics(env, thread.id);
       await env.runtime.submit(thread.id, 'rolling-compact-user-1', 'USER_ONE_PRIVATE_SOURCE');
       await env.runtime.drain();
       await env.runtime.submit(thread.id, 'rolling-compact-user-2', 'USER_TWO_PRIVATE_SOURCE');
@@ -219,11 +222,41 @@ describe('Rolling Context v2 lifecycle', () => {
     const finalInput = JSON.stringify(result.finalTurns);
 
     expect(result.toolResult).toMatchObject({ status: 'cannot_estimate' });
+    expect(result.rollingSummaryInputs).toEqual([]);
     expect(finalInput).toContain('ROUND_ONE_RAW_FACT');
     expect(finalInput).toContain('ROUND_TWO_RAW_FACT');
     expect(finalInput).not.toContain('ROUND_ONE_WARM_SUMMARY');
     expect(finalInput).toContain('USER_ONE_PRIVATE_SOURCE');
     expect(finalInput).toContain('USER_TWO_PRIVATE_SOURCE');
     expect(finalInput).toContain('USER_THREE_PRIVATE_SOURCE');
+  });
+
+  it('resumes at the latest eligible round after pricing is configured without backfilling missed rounds', async () => {
+    let mainCall = 0;
+    const model = new FakeModel((prompt) => {
+      if (isRollingSummary(prompt)) return response(JSON.stringify({ summary: 'Latest eligible round summary.' }));
+      mainCall += 1;
+      return response(`Assistant response ${mainCall}`);
+    });
+    const env = await setupRuntime(model, { plugins: [rollingContextPlugin] });
+    const thread = env.createThread('runtime');
+    try {
+      for (let i = 1; i <= 3; i += 1) {
+        await env.runtime.submit(thread.id, `missing-price-${i}`, `User request ${i}`);
+        await env.runtime.drain();
+      }
+      expect(model.prompts.filter(isRollingSummary)).toHaveLength(0);
+      await configureRollingEconomics(env, thread.id);
+      expect(model.prompts.filter(isRollingSummary)).toHaveLength(0);
+      await env.runtime.submit(thread.id, 'price-configured', 'User request 4');
+      await env.runtime.drain();
+      const summaries = model.prompts.filter(isRollingSummary);
+      expect(summaries).toHaveLength(1);
+      expect(JSON.stringify(summaries[0]!.turns)).toContain('Assistant response 3');
+      expect(JSON.stringify(summaries[0]!.turns)).not.toContain('Assistant response 1');
+      expect(JSON.stringify(summaries[0]!.turns)).not.toContain('Assistant response 2');
+    } finally {
+      await env.cleanup();
+    }
   });
 });

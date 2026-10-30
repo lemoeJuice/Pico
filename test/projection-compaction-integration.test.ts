@@ -204,7 +204,6 @@ it('does not run Runtime fallback from stale usage after a much smaller full pro
         cachedInputPerMillion: 100,
         cacheWritePerMillion: 0,
         expectedFutureCalls: 10,
-        charactersPerToken: 1,
       },
       query: new URLSearchParams(),
       origin: null,

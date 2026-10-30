@@ -4,7 +4,7 @@
   let openDetail = '', detailPage = 0;
   const pageSize = 10, detailSize = 8000;
   let economics = null, economicsThreadId = null;
-  const emptyEconomics = () => ({ provider: '', model: '', inputPerMillion: '', cachedInputPerMillion: '', cacheWritePerMillion: '', expectedFutureCalls: '', charactersPerToken: '' });
+  const emptyEconomics = () => ({ provider: '', model: '', inputPerMillion: '', cachedInputPerMillion: '', cacheWritePerMillion: '', expectedFutureCalls: '' });
   let economicsDraft = emptyEconomics();
   const requests = new Map(), sourceById = new Map(), openDisclosures = new Set(['inputs']);
   const text = (text) => ({ type: 'text', text: String(text ?? '') });
@@ -38,15 +38,14 @@
     const nodes = [{ type: 'heading', text: `Rolling Context · ${segments.length} model round(s)` }, para('User messages stay verbatim. Completed model rounds may be summarized when the next model step begins; the Agent can compact older rounds when the estimated cost permits. Canonical History stays intact.'),
       { type: 'actions', children: [button('Refresh', 'global:refresh')] }];
     nodes.push({ type: 'disclosure', label: 'Cost estimate settings', open: openDisclosures.has('economics'), actionId: 'disclosure:economics', children: [
-      para('Configure the current provider and model rates, expected future calls, and an estimated characters-per-token ratio. Estimates assume the old suffix is cached and the new suffix is written once, then read from cache; actual token counts and cache hits may differ.'),
+      para('Configure the current provider and model rates and expected future calls. Estimates compare serialized character counts and assume the old suffix is cached and the new suffix is written once, then read from cache; actual token counts and cache hits may differ.'),
       input('Provider', economicsDraft.provider, 'economics:provider'),
       input('Model', economicsDraft.model, 'economics:model'),
       input('Input price / 1M tokens', economicsDraft.inputPerMillion, 'economics:inputPerMillion', 'number'),
       input('Cache read price / 1M tokens', economicsDraft.cachedInputPerMillion, 'economics:cachedInputPerMillion', 'number'),
       input('Cache write price / 1M tokens', economicsDraft.cacheWritePerMillion, 'economics:cacheWritePerMillion', 'number'),
       input('Expected future model calls', economicsDraft.expectedFutureCalls, 'economics:expectedFutureCalls', 'number'),
-      input('Estimated characters per token', economicsDraft.charactersPerToken, 'economics:charactersPerToken', 'number'),
-      para(economics ? `Active estimate: ${economics.provider} / ${economics.model}.` : 'No estimate configured; Agent compaction cannot be evaluated.'),
+      para(economics ? `Saved estimate: ${economics.provider} / ${economics.model}. Summary generation requires it to match the current provider and model.` : 'No estimate configured; summary generation and Agent compaction are paused.'),
       { type: 'actions', children: [button('Save cost estimate', 'economics:save')] },
     ] });
     if (error) nodes.push(para(error));
@@ -103,7 +102,7 @@
       pending = true; error = ''; draw();
       try {
         const body = { ...economicsDraft, threadId: context.thread?.id };
-        for (const key of ['inputPerMillion', 'cachedInputPerMillion', 'cacheWritePerMillion', 'expectedFutureCalls', 'charactersPerToken']) {
+        for (const key of ['inputPerMillion', 'cachedInputPerMillion', 'cacheWritePerMillion', 'expectedFutureCalls']) {
           if (!body[key].trim()) throw new Error(`Enter ${key}.`);
           body[key] = Number(body[key]);
         }

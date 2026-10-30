@@ -81,6 +81,84 @@ function sampleSegment(records = fullTurn): RollingSegment {
   };
 }
 
+const usableEconomics = {
+  provider: 'provider-1',
+  model: 'model-1',
+  inputPerMillion: 1,
+  cachedInputPerMillion: 0.1,
+  cacheWritePerMillion: 0.2,
+  expectedFutureCalls: 3,
+};
+
+function createSummaryGateHarness(options: {
+  records: CanonicalRecord[];
+  pending?: RollingSegment;
+  economics?: unknown;
+  selection?: { provider: string; model: string } | undefined;
+  previewTurns?: ProjectionInput['turns'];
+}) {
+  const thread = { id: 'thread-1', projectId: 'project-1', state: 'idle' } as Thread;
+  const byThread = options.pending ? [options.pending] : [];
+  const values = new Map<string, unknown>([
+    ['rolling-context-v1', { byThread: { [thread.id]: byThread } }],
+    ...(options.economics === undefined
+      ? []
+      : ([['rolling-context-economics-v1', { byThread: { [thread.id]: options.economics } }]] as const)),
+  ]);
+  let summaryCalls = 0;
+  let projection:
+    | ((input: ProjectionInput, next: (input: ProjectionInput) => Promise<ProjectionInput>) => Promise<ProjectionInput>)
+    | null = null;
+  let action: ((request: { body: unknown }) => Promise<unknown>) | null = null;
+  const context = {
+    threads: {
+      get: () => thread,
+      modelSelection: () => options.selection ?? { provider: 'provider-1', model: 'model-1' },
+      previewModelInput: async () => ({
+        thread,
+        records: options.records,
+        through: options.records.at(-1)?.seq ?? 0,
+        systemPrompt: 'system',
+        tools: [],
+        turns: options.previewTurns ?? canonicalRecordsToPromptTurns(options.records, thread),
+      }),
+    },
+    canonical: { list: () => options.records, append() {} },
+    state: {
+      get<T>(key: string, fallback: T): T {
+        return (values.has(key) ? values.get(key) : fallback) as T;
+      },
+      set<T>(key: string, value: T) {
+        values.set(key, structuredClone(value));
+      },
+      transaction<T>(run: () => T): T {
+        return run();
+      },
+    },
+    models: {
+      history: () => [],
+      complete: async () => {
+        summaryCalls += 1;
+        return {
+          id: `summary-${summaryCalls}`,
+          response: { content: JSON.stringify({ summary: 'A useful summary.' }) },
+        };
+      },
+    },
+    pipelines: { use: (_stage: string, handler: typeof projection) => (projection = handler) },
+    tools: { register() {} },
+    http: {
+      register: (method: string, path: string, handler: (request: { body: unknown }) => Promise<unknown>) => {
+        if (method === 'POST' && path === '/action') action = handler;
+      },
+    },
+    commands: { register() {} },
+    ui: { contribute() {}, registerPage() {} },
+  } as unknown as PluginContext;
+  rollingContextPlugin.activate?.(context);
+  return { thread, values, project: () => projection!, action: () => action!, summaryCalls: () => summaryCalls };
+}
+
 function repeatedCompleteTurns(count: number): CanonicalRecord[] {
   const records: CanonicalRecord[] = [];
   for (let turnIndex = 0; turnIndex < count; turnIndex += 1) {
@@ -355,7 +433,9 @@ describe('Rolling Context plugin', () => {
   });
 
   it('summarizes only the last completed model round and rejects legacy compact-all bypass', async () => {
-    const values = new Map<string, unknown>();
+    const values = new Map<string, unknown>([
+      ['rolling-context-economics-v1', { byThread: { 'thread-1': usableEconomics } }],
+    ]);
     const modelPurposes: string[] = [];
     const segmentCount = 4;
     const records = repeatedCompleteTurns(segmentCount);
@@ -369,7 +449,11 @@ describe('Rolling Context plugin', () => {
       | null = null;
     let compactAll: ((request: { body: unknown }) => Promise<unknown>) | null = null;
     const context = {
-      threads: { get: () => thread, pause: () => thread },
+      threads: {
+        get: () => thread,
+        pause: () => thread,
+        modelSelection: () => ({ provider: 'provider-1', model: 'model-1' }),
+      },
       canonical: {
         list: () => {
           canonicalListReads += 1;
@@ -549,7 +633,89 @@ describe('Rolling Context plugin', () => {
     expect(projected.turns.at(-2)).toMatchObject({ role: 'user', content: 'Now inspect the next issue.' });
   });
 
-  it('recovers an interrupted pending summary into an explicit retryable state', async () => {
+  it.each([
+    ['missing pricing', undefined, undefined],
+    ['incomplete pricing', { provider: 'provider-1', model: 'model-1', inputPerMillion: 1 }, undefined],
+    ['pricing for a different model', usableEconomics, { provider: 'provider-1', model: 'another-model' }],
+  ])(
+    'does not generate or recover summaries with %s and rejects manual retry',
+    async (_label, economics, selection) => {
+      const records = [...fullTurn, record(5, 'message', { role: 'user', source: 'user', content: 'Next request.' })];
+      const modelStep: ProjectionInput = {
+        thread: { id: 'thread-1', projectId: 'project-1', state: 'idle' } as Thread,
+        records,
+        through: records.at(-1)!.seq,
+        systemPrompt: 'system',
+        tools: [],
+        turns: [],
+        modelStep: true,
+      };
+
+      const fresh = createSummaryGateHarness({ records, economics, selection });
+      await fresh.project()(modelStep, async (value) => value);
+      expect(fresh.summaryCalls()).toBe(0);
+      expect(
+        (fresh.values.get('rolling-context-v1') as { byThread: Record<string, RollingSegment[]> }).byThread[
+          fresh.thread.id
+        ],
+      ).toEqual([]);
+
+      const pending = sampleSegment(fullTurn);
+      const recovery = createSummaryGateHarness({ records, pending, economics, selection });
+      await recovery.project()(modelStep, async (value) => value);
+      const recovered = (recovery.values.get('rolling-context-v1') as { byThread: Record<string, RollingSegment[]> })
+        .byThread[recovery.thread.id]![0]!;
+      expect(recovered.summaryStatus).toBe('pending');
+      expect(recovery.summaryCalls()).toBe(0);
+      await expect(
+        recovery.action()({ body: { action: 'retry-summary', threadId: recovery.thread.id, segmentId: pending.id } }),
+      ).rejects.toThrow('Configure complete cost estimates');
+      expect(recovery.summaryCalls()).toBe(0);
+    },
+  );
+
+  it.each([
+    [
+      'image input',
+      [
+        {
+          kind: 'tool_result',
+          callId: 'image-call',
+          toolName: 'inspect',
+          content: 'screen',
+          images: [{ type: 'image', mimeType: 'image/png', data: 'aGVsbG8=' }],
+        },
+      ],
+    ],
+    [
+      'opaque reasoning replay',
+      [{ kind: 'message', role: 'assistant', content: 'Reasoned answer.', reasoningReplay: [{ opaque: true }] }],
+    ],
+  ])('does not summarize or retry with usable prices but an unestimable %s projection', async (_label, turns) => {
+    const records = [...fullTurn, record(5, 'message', { role: 'user', source: 'user', content: 'Next request.' })];
+    const previewTurns = turns as ProjectionInput['turns'];
+    const input: ProjectionInput = {
+      thread: { id: 'thread-1', projectId: 'project-1', state: 'idle' } as Thread,
+      records,
+      through: records.at(-1)!.seq,
+      systemPrompt: 'system',
+      tools: [],
+      turns: previewTurns,
+      modelStep: true,
+    };
+    const automatic = createSummaryGateHarness({ records, economics: usableEconomics, previewTurns });
+    await automatic.project()(input, async (value) => value);
+    expect(automatic.summaryCalls()).toBe(0);
+
+    const pending = sampleSegment(fullTurn);
+    const manual = createSummaryGateHarness({ records, pending, economics: usableEconomics, previewTurns });
+    await expect(
+      manual.action()({ body: { action: 'retry-summary', threadId: manual.thread.id, segmentId: pending.id } }),
+    ).rejects.toThrow();
+    expect(manual.summaryCalls()).toBe(0);
+  });
+
+  it('recovers an interrupted pending summary into an explicit retryable state when pricing is usable', async () => {
     const thread = { id: 'thread-1', projectId: 'project-1', state: 'idle' } as Thread;
     const records = [
       record(1, 'message', { role: 'user', source: 'user', content: 'First request.' }),
@@ -564,7 +730,10 @@ describe('Rolling Context plugin', () => {
       record(3, 'message', { role: 'user', source: 'user', content: 'Next request.' }),
     ];
     const pending = sampleSegment([records[1]!]);
-    const values = new Map<string, unknown>([['rolling-context-v1', { byThread: { [thread.id]: [pending] } }]]);
+    const values = new Map<string, unknown>([
+      ['rolling-context-v1', { byThread: { [thread.id]: [pending] } }],
+      ['rolling-context-economics-v1', { byThread: { [thread.id]: usableEconomics } }],
+    ]);
     const keys: string[] = [];
     let projection:
       | ((
@@ -574,7 +743,18 @@ describe('Rolling Context plugin', () => {
       | null = null;
     let action: ((request: { body: unknown }) => Promise<unknown>) | null = null;
     const context = {
-      threads: { get: () => thread },
+      threads: {
+        get: () => thread,
+        modelSelection: () => ({ provider: 'provider-1', model: 'model-1' }),
+        previewModelInput: async () => ({
+          thread,
+          records,
+          through: records.at(-1)!.seq,
+          systemPrompt: 'system',
+          tools: [],
+          turns: canonicalRecordsToPromptTurns(records, thread),
+        }),
+      },
       canonical: { list: () => records, append() {} },
       state: {
         get<T>(key: string, fallback: T): T {
