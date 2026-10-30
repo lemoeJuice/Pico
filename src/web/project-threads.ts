@@ -1,4 +1,4 @@
-export function upsertProjectThread<T extends { id: string; projectId: string }>(
+export function upsertProjectThread<T extends { id: string; projectId: string | null }>(
   threads: T[],
   thread: T,
   selectedProjectId: string | null,

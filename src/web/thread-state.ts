@@ -15,16 +15,21 @@ export function applyThreadStateUpdate(
   selectedProjectId: string | null,
 ): ThreadStateProjection {
   const isActive = !updated.archivedAt && !updated.deletedAt;
-  const projectThreads = current.threadsByProject[updated.projectId] ?? [];
+  const projectThreads = updated.projectId ? (current.threadsByProject[updated.projectId] ?? []) : [];
+  const sameSelection = current.threads.filter((thread) => thread.id !== updated.id);
   return {
     threads: isActive
-      ? upsertProjectThread(current.threads, updated, selectedProjectId)
+      ? upsertProjectThread(sameSelection, updated, selectedProjectId)
       : current.threads.filter((thread) => thread.id !== updated.id),
     threadsByProject: {
       ...current.threadsByProject,
-      [updated.projectId]: isActive
-        ? upsertProjectThread(projectThreads, updated, updated.projectId)
-        : projectThreads.filter((thread) => thread.id !== updated.id),
+      ...(updated.projectId
+        ? {
+            [updated.projectId]: isActive
+              ? upsertProjectThread(projectThreads, updated, updated.projectId)
+              : projectThreads.filter((thread) => thread.id !== updated.id),
+          }
+        : {}),
     },
     snapshot:
       current.snapshot?.thread.id !== updated.id

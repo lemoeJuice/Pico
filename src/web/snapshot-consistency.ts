@@ -71,12 +71,12 @@ export function updateSnapshotForThread<T extends { thread: { id: string } }>(
   return update(snapshot);
 }
 
-export function snapshotForSelection<T extends { thread: { id: string; projectId: string } }>(
+export function snapshotForSelection<T extends { thread: { id: string; projectId: string | null } }>(
   snapshot: T | null,
   threadId: string | null,
   projectId: string | null,
 ): T | null {
-  if (!snapshot || !threadId || !projectId) return null;
+  if (!snapshot || !threadId) return null;
   return snapshotThreadIsSelected(snapshot.thread.id, threadId) && snapshot.thread.projectId === projectId
     ? snapshot
     : null;

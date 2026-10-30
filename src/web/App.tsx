@@ -38,6 +38,7 @@ import { isSessionExpired } from './session.js';
 import { pauseReasonIsError, visiblePauseReason } from './pause-reason.js';
 import { shouldSubmitOnEnter } from './composer-keys.js';
 import { upsertProjectThread } from './project-threads.js';
+import { upsertProject } from './project-list.js';
 import { updateProjectThreadList, updateThreadList, updateThreadSnapshot } from './thread-state.js';
 import { ThreadToolRequestGuard } from './thread-tool-requests.js';
 import { toolsPanelPosition } from './tools-panel-position.js';
@@ -230,6 +231,9 @@ function workspaceDirectoryName(path: string): string {
   const normalized = path.trim().replace(/[\\/]+$/, '');
   return normalized.split(/[\\/]/).filter(Boolean).at(-1) ?? 'Project';
 }
+
+const CONTAINER_WORKSPACE_REBUILD_NOTICE =
+  'Setting this workspace rebuilds affected Containers. Container files and data volumes are preserved, but running processes inside those containers will stop.';
 
 function persistComposerState(state: ComposerState): void {
   try {
@@ -704,6 +708,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [expandedChildThreadIds, setExpandedChildThreadIds] = useState<Set<string>>(() => new Set());
   const [projectId, setProjectId] = useState<string | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
+  const [independentThreads, setIndependentThreads] = useState<Thread[]>([]);
+  const [independentThreadsLoaded, setIndependentThreadsLoaded] = useState(false);
+  const independentThreadVersion = useRef(0);
   const [threadId, setThreadId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<ThreadSnapshot | null>(null);
   const [threadModelSelectionState, setThreadModelSelectionState] = useState<{
@@ -772,6 +779,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [archivedThreadActionId, setArchivedThreadActionId] = useState<string | null>(null);
   const [pluginActionId, setPluginActionId] = useState<string | null>(null);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [projectInfoProjectId, setProjectInfoProjectId] = useState<string | null>(null);
+  const [projectInfoWorkspaceDraft, setProjectInfoWorkspaceDraft] = useState('');
+  const [projectInfoError, setProjectInfoError] = useState('');
+  const [projectFromThreadEditing, setProjectFromThreadEditing] = useState(false);
+  const [projectFromThreadName, setProjectFromThreadName] = useState('');
+  const [projectFromThreadWorkspace, setProjectFromThreadWorkspace] = useState('');
   const [threadInfoOpen, setThreadInfoOpen] = useState(false);
   const [threadHistoryOpen, setThreadHistoryOpen] = useState(false);
   const [threadTitleDraft, setThreadTitleDraft] = useState('');
@@ -790,7 +803,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [desktopSidebarCollapsed, setDesktopSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState<SidebarWidth>(readSidebarWidthPreference);
-  const [defaultWorkspace, setDefaultWorkspace] = useState('');
   const [pluginInfo, setPluginInfo] = useState<PluginInfo | null>(null);
   const [threadTools, setThreadTools] = useState<ThreadToolView[]>([]);
   const [threadToolsLoading, setThreadToolsLoading] = useState(false);
@@ -832,6 +844,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [remoteConnectionNotice, setRemoteConnectionNotice] = useState('');
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectPath, setNewProjectPath] = useState('');
+  const [projectWorkspaceDraft, setProjectWorkspaceDraft] = useState('');
+  const [projectWorkspaceSaving, setProjectWorkspaceSaving] = useState(false);
   const [newThreadTitle, setNewThreadTitle] = useState('');
   const [newThreadExecutor, setNewThreadExecutor] = useState<ThreadExecutorChoice>('container');
   const [newThreadRemoteConnectionId, setNewThreadRemoteConnectionId] = useState('');
@@ -1134,6 +1148,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   };
 
   const selectedProject = projects.find((project) => project.id === projectId) ?? null;
+  const projectInfoProject = projects.find((project) => project.id === projectInfoProjectId) ?? null;
+  const projectInfoNeedsContainerRestart = Boolean(
+    projectInfoProject && !projectInfoProject.workspacePath &&
+      (threadsByProject[projectInfoProject.id] ?? []).some(
+        (thread) => thread.executorKind === 'container' && !thread.executorRemote && !thread.workspacePath,
+      ),
+  );
   const selectedRemoteConnection = remoteConnections.find(
     (connection) => connection.id === newThreadRemoteConnectionId,
   );
@@ -1186,8 +1207,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       : undefined;
   const sidebarPanels = uiContributionsAt(uiContributions, 'sidebar.panel');
   const toolResultContributions = uiContributionsAt(uiContributions, 'tool.result');
-  const newProjectWorkspacePath = newProjectPath || defaultWorkspace;
-  const suggestedNewProjectName = workspaceDirectoryName(newProjectWorkspacePath);
+  const suggestedNewProjectName = newProjectPath.trim() ? workspaceDirectoryName(newProjectPath.trim()) : 'New Project';
 
   const loadThreadTools = useCallback(async (targetThreadId: string): Promise<void> => {
     const request = threadToolRequests.current.begin(targetThreadId);
@@ -1474,7 +1494,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   }, []);
 
   const syncThreadLists = useCallback((updated: Thread): void => {
-    projectThreadVersions.current.set(
+    independentThreadVersion.current += 1;
+    if (updated.projectId) projectThreadVersions.current.set(
       updated.projectId,
       (projectThreadVersions.current.get(updated.projectId) ?? 0) + 1,
     );
@@ -1484,6 +1505,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
     setThreadsByProject((current) => updateProjectThreadList(current, updated));
     setThreads((current) => updateThreadList(current, updated, activeProjectId.current));
+    setIndependentThreads((current) => updated.projectId === null
+      ? updateThreadList(current, updated, null)
+      : current.filter((thread) => thread.id !== updated.id));
     setArchivedThreads((current) =>
       isArchived
         ? upsertProjectThread(current, updated, updated.projectId)
@@ -1496,6 +1520,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           thread.id !== updated.id && thread.projectId === updated.projectId && !thread.archivedAt && !thread.deletedAt,
       );
       setThreadId(next?.id ?? null);
+    }
+    if (isActive && activeThreadId.current === updated.id && activeProjectId.current !== updated.projectId) {
+      if (updated.projectId) localStorage.setItem(`pico.thread.${updated.projectId}`, updated.id);
+      setProjectId(updated.projectId);
     }
     setSnapshot((current) => updateThreadSnapshot(current, updated));
   }, []);
@@ -1564,7 +1592,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         setProjects(projectList);
         setProjectsLoaded(true);
         const remembered = localStorage.getItem('pico.project');
-        const initial = projectList.find((project) => project.id === remembered)?.id ?? projectList[0]?.id ?? null;
+        const initial = remembered === 'none' ? null : projectList.find((project) => project.id === remembered)?.id ?? projectList[0]?.id ?? null;
         setProjectId(initial);
         setExpandedProjectIds(new Set(initial ? [initial] : []));
         if (initial) localStorage.setItem('pico.project', initial);
@@ -1587,9 +1615,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       setCommands,
     );
     load('plugins', () => api<PluginInfo>('/api/plugins'), setPluginInfo);
-    load('workspace information', () => api<{ defaultWorkspace: string }>('/api/info'), (info) =>
-      setDefaultWorkspace(info.defaultWorkspace),
-    );
     load('Executor connections', () => api<RemoteExecutorConnectionView[]>('/api/executor-connections'), setRemoteConnections);
     load('model catalog', () => api<ModelCatalogView>('/api/model-catalog'), (catalog) => {
       setModelCatalog(catalog);
@@ -1610,6 +1635,23 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       });
     }
   }, [loadProjectThreads, projectId, projects]);
+
+  useEffect(() => {
+    if (!projectsLoaded) return;
+    let current = true;
+    void fetchStableSnapshot(
+      () => api<Thread[]>('/api/threads?unassigned=true'),
+      () => independentThreadVersion.current,
+      () => current,
+    ).then((values) => {
+      if (!current || !values) return;
+      setIndependentThreads(values.filter((item) => !item.archivedAt && !item.deletedAt));
+      setIndependentThreadsLoaded(true);
+    }).catch((caught: unknown) => {
+      if (current) setError(caught instanceof Error ? caught.message : String(caught));
+    });
+    return () => { current = false; };
+  }, [projectsLoaded]);
 
   useEffect(() => {
     if (!settingsOpen || !archivedThreadsOpen) return;
@@ -1642,10 +1684,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     setThreads([]);
     setThreadId(null);
     setSnapshot(null);
+    if (!projectsLoaded) return () => { current = false; };
     if (!projectId) {
-      return () => {
-        current = false;
-      };
+      if (!independentThreadsLoaded) return () => { current = false; };
+      localStorage.setItem('pico.project', 'none');
+      const remembered = localStorage.getItem('pico.thread.none');
+      setThreadId(independentThreads.some((item) => item.id === remembered) ? remembered : independentThreads[0]?.id ?? null);
+      return () => { current = false; };
     }
     localStorage.setItem('pico.project', projectId);
     void loadProjectThreads(projectId)
@@ -1661,7 +1706,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     return () => {
       current = false;
     };
-  }, [loadProjectThreads, projectId]);
+  }, [independentThreads, independentThreadsLoaded, loadProjectThreads, projectId, projectsLoaded]);
 
   useEffect(() => {
     if (!threadId) {
@@ -1835,10 +1880,17 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           const sequence = ++pluginEventSequence.current;
           setPluginEvents((current) => [...current.slice(-99), { sequence, event: pluginEvent }]);
         }
+        if ((event.type === 'project.created' || event.type === 'project.updated') && event.project && typeof event.project === 'object') {
+          const project = event.project as Project;
+          if (typeof project.id === 'string' && typeof project.name === 'string' && typeof project.workspacePath === 'string') {
+            setProjects((current) => upsertProject(current, project));
+          }
+        }
         if (event.type === 'thread.created') {
           const created = event.thread as Thread | undefined;
           if (created) {
-            projectThreadVersions.current.set(
+            independentThreadVersion.current += 1;
+            if (created.projectId) projectThreadVersions.current.set(
               created.projectId,
               (projectThreadVersions.current.get(created.projectId) ?? 0) + 1,
             );
@@ -1847,10 +1899,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             if (created.archivedAt || created.deletedAt) {
               syncThreadLists(created);
             } else {
-              setThreadsByProject((current) => ({
+              const projectKey = created.projectId;
+              if (projectKey) setThreadsByProject((current) => ({
                 ...current,
-                [created.projectId]: upsertProjectThread(current[created.projectId] ?? [], created, created.projectId),
+                [projectKey]: upsertProjectThread(current[projectKey] ?? [], created, projectKey),
               }));
+              else setIndependentThreads((items) => upsertProjectThread(items, created, null));
               setThreads((items) => upsertProjectThread(items, created, activeProjectId.current));
             }
             setSnapshot((current) =>
@@ -2332,13 +2386,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     event.preventDefault();
     setBusy(true);
     setError('');
-    const workspacePath = newProjectPath || defaultWorkspace;
+    const workspacePath = newProjectPath.trim();
     try {
       const project = await api<Project>('/api/projects', {
         method: 'POST',
-        body: JSON.stringify({ name: newProjectName.trim() || workspaceDirectoryName(workspacePath), workspacePath }),
+        body: JSON.stringify({ ...(newProjectName.trim() ? { name: newProjectName.trim() } : {}), ...(workspacePath ? { workspacePath } : {}) }),
       });
-      setProjects((items) => [project, ...items]);
+      setProjects((items) => upsertProject(items, project));
       projectThreadLoads.current.add(project.id);
       setThreadsByProject((current) => ({ ...current, [project.id]: [] }));
       setProjectId(project.id);
@@ -2485,10 +2539,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       } else {
         archivedThreadVersion.current += 1;
         setArchivedThreads((current) => current.filter((item) => item.id !== thread.id));
-        setThreadsByProject((current) => ({
+        const projectKey = thread.projectId;
+        if (projectKey) setThreadsByProject((current) => ({
           ...current,
-          [thread.projectId]: (current[thread.projectId] ?? []).filter((item) => item.id !== thread.id),
+          [projectKey]: (current[projectKey] ?? []).filter((item) => item.id !== thread.id),
         }));
+        else setIndependentThreads((current) => current.filter((item) => item.id !== thread.id));
         setThreads((current) => current.filter((item) => item.id !== thread.id));
       }
     } catch (caught) {
@@ -2500,30 +2556,32 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
   const createThread = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
-    if (!projectId) return;
     setBusy(true);
     setError('');
     try {
-      const thread = await api<Thread>(`/api/projects/${projectId}/threads`, {
+      const thread = await api<Thread>(projectId ? `/api/projects/${encodeURIComponent(projectId)}/threads` : '/api/threads', {
         method: 'POST',
         body: JSON.stringify({
-          title: newThreadTitle,
+          ...(newThreadTitle.trim() ? { title: newThreadTitle.trim() } : {}),
           executorKind: newThreadExecutor === 'remote' ? 'host' : newThreadExecutor,
           ...(newThreadExecutor === 'remote'
-            ? {
-                remoteConnectionId: newThreadRemoteConnectionId,
-                remoteWorkspacePath: newThreadRemoteWorkspacePath,
-              }
+            ? { remoteConnectionId: newThreadRemoteConnectionId, ...(projectId ? { remoteWorkspacePath: newThreadRemoteWorkspacePath } : {}) }
             : {}),
         }),
       });
-      setThreads((items) => [thread, ...items.filter((item) => item.id !== thread.id)]);
-      setThreadsByProject((current) => ({
-        ...current,
-        [projectId]: [thread, ...(current[projectId] ?? []).filter((item) => item.id !== thread.id)],
-      }));
+      if (projectId) {
+        setThreads((items) => [thread, ...items.filter((item) => item.id !== thread.id)]);
+        setThreadsByProject((current) => ({
+          ...current,
+          [projectId]: [thread, ...(current[projectId] ?? []).filter((item) => item.id !== thread.id)],
+        }));
+      } else {
+        independentThreadVersion.current += 1;
+        setIndependentThreads((items) => [thread, ...items.filter((item) => item.id !== thread.id)]);
+        setIndependentThreadsLoaded(true);
+      }
       setThreadId(thread.id);
-      localStorage.setItem(`pico.thread.${projectId}`, thread.id);
+      localStorage.setItem(`pico.thread.${projectId ?? 'none'}`, thread.id);
       setSnapshot(null);
       setNewThreadOpen(false);
       setNewThreadTitle('');
@@ -2955,9 +3013,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   };
 
   const chooseThread = (id: string, targetProjectId = projectId): void => {
-    if (!targetProjectId) return;
-    setExpandedProjectIds((current) => new Set(current).add(targetProjectId));
-    localStorage.setItem(`pico.thread.${targetProjectId}`, id);
+    if (targetProjectId) setExpandedProjectIds((current) => new Set(current).add(targetProjectId));
+    localStorage.setItem(`pico.thread.${targetProjectId ?? 'none'}`, id);
     if (targetProjectId !== projectId) {
       setProjectId(targetProjectId);
       setThreadId(null);
@@ -2984,6 +3041,68 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     setNewThreadRemoteConnectionId('');
     setNewThreadRemoteWorkspacePath('');
     setNewThreadOpen(true);
+  };
+
+  const startIndependentThread = (): void => {
+    if (projectId !== null) {
+      setProjectId(null);
+      setThreads([]);
+      setThreadId(null);
+      setSnapshot(null);
+    }
+    setNewThreadTitle('');
+    setNewThreadExecutor('container');
+    setNewThreadRemoteConnectionId('');
+    setNewThreadRemoteWorkspacePath('');
+    setNewThreadOpen(true);
+  };
+
+  const createProjectFromThread = async (): Promise<void> => {
+    if (!selectedThread || selectedThread.projectId !== null) return;
+    setThreadInfoError('');
+    setThreadTitleSaving(true);
+    try {
+      const result = await api<{ project: Project; threads: Thread[] }>(`/api/threads/${encodeURIComponent(selectedThread.id)}/project`, {
+        method: 'POST',
+        body: JSON.stringify({
+          ...(projectFromThreadName.trim() ? { name: projectFromThreadName.trim() } : {}),
+          ...(projectFromThreadWorkspace.trim() ? { workspacePath: projectFromThreadWorkspace.trim() } : {}),
+        }),
+      });
+      const { project } = result;
+      const movedThreads = result.threads;
+      independentThreadVersion.current += 1;
+      setProjects((items) => upsertProject(items, project));
+      setThreadsByProject((current) => ({ ...current, [project.id]: movedThreads }));
+      setIndependentThreads((items) => items.filter((item) => !movedThreads.some((moved) => moved.id === item.id)));
+      setProjectFromThreadEditing(false);
+      setThreadInfoOpen(false);
+      setProjectId(project.id);
+      setExpandedProjectIds((current) => new Set(current).add(project.id));
+      setThreadId(selectedThread.id);
+      setSnapshot(null);
+    } catch (caught) {
+      setThreadInfoError(caught instanceof Error ? caught.message : 'Could not create a Project from this Thread.');
+    } finally { setThreadTitleSaving(false); }
+  };
+
+  const saveProjectWorkspace = async (targetProject: Project, workspaceDraft = projectWorkspaceDraft): Promise<void> => {
+    if (targetProject.workspacePath || !workspaceDraft.trim()) return;
+    setProjectWorkspaceSaving(true);
+    setThreadInfoError('');
+    try {
+      const updated = await api<Project>(`/api/projects/${encodeURIComponent(targetProject.id)}/workspace`, {
+        method: 'POST', body: JSON.stringify({ workspacePath: workspaceDraft.trim() }),
+      });
+      setProjects((items) => upsertProject(items, updated));
+      setProjectWorkspaceDraft('');
+      setProjectInfoWorkspaceDraft('');
+      setProjectInfoError('');
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : 'Could not set the Project workspace.';
+      if (targetProject.id === projectInfoProjectId) setProjectInfoError(message);
+      else setThreadInfoError(message);
+    } finally { setProjectWorkspaceSaving(false); }
   };
 
   const dismissNotice = (): void => {
@@ -3110,6 +3229,28 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       <div className="sidebar-empty project-thread-empty">No Threads yet. Start one with the + button.</div>
     );
   };
+  const renderIndependentThreadTree = (thread: Thread, all: Thread[], depth = 0): ReactNode => {
+    const children = all.filter((item) => item.parentThreadId === thread.id);
+    return (
+      <div key={thread.id} style={depth ? { marginLeft: `${Math.min(depth, 5) * 8}px` } : undefined}>
+        <ThreadListItem
+          thread={thread}
+          active={thread.id === threadId && projectId === null}
+          child={depth > 0}
+          hasChildren={children.length > 0}
+          childrenExpanded={expandedChildThreadIds.has(thread.id)}
+          onToggleChildren={() => setExpandedChildThreadIds((current) => {
+            const next = new Set(current);
+            if (next.has(thread.id)) next.delete(thread.id);
+            else next.add(thread.id);
+            return next;
+          })}
+          onSelect={() => chooseThread(thread.id, null)}
+        />
+        {expandedChildThreadIds.has(thread.id) ? children.map((child) => renderIndependentThreadTree(child, all, depth + 1)) : null}
+      </div>
+    );
+  };
   const renderedRecords = timelineRecords.filter(
     (record) =>
       record.kind === 'message' ||
@@ -3175,6 +3316,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           <div className="brand-name">pico</div>
         </div>
         <div className="project-section-heading">
+          <span className="eyebrow">INDEPENDENT THREADS</span>
+          <button className="icon-button small" aria-label="Create independent Thread" title="Create independent Thread" disabled={bootstrapping} onClick={startIndependentThread}>
+            <Plus size={14} aria-hidden="true" />
+          </button>
+        </div>
+        {independentThreads.length ? (
+          <div className="project-thread-list">{independentThreads.filter((thread) => !thread.parentThreadId || !independentThreads.some((item) => item.id === thread.parentThreadId)).map((thread) => renderIndependentThreadTree(thread, independentThreads))}</div>
+        ) : <div className="sidebar-empty project-thread-empty">No independent Threads yet.</div>}
+        <div className="project-section-heading">
           <span className="eyebrow">PROJECTS</span>
           <button
             className="icon-button small"
@@ -3233,6 +3383,24 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                     onClick={() => startThreadInProject(project.id)}
                   >
                     <Plus size={14} aria-hidden="true" />
+                  </button>
+                  <button
+                    className="icon-button small project-new-thread"
+                    type="button"
+                    aria-label={`Project info for ${project.name}`}
+                    title={`Project info for ${project.name}`}
+                    onClick={() => {
+                      setProjectInfoProjectId(project.id);
+                      setProjectInfoWorkspaceDraft('');
+                      setProjectInfoError('');
+                      if (!projectThreadLoads.current.has(project.id)) {
+                        void loadProjectThreads(project.id).catch((caught: unknown) =>
+                          setProjectInfoError(caught instanceof Error ? caught.message : String(caught)),
+                        );
+                      }
+                    }}
+                  >
+                    <Info size={14} aria-hidden="true" />
                   </button>
                 </div>
                 {expanded ? renderProjectThreads(project) : null}
@@ -4677,7 +4845,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         >
           <form className="form-stack" onSubmit={(event) => void createProject(event)}>
               <p className="form-intro">
-                A Project groups Threads that share the same workspace and long-term context.
+                A Project groups related Threads under shared context. You can choose a workspace folder now or set one later.
               </p>
             <label>
               Project name
@@ -4692,20 +4860,64 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               <input
                 value={newProjectPath}
                 onChange={(event) => setNewProjectPath(event.target.value)}
-                placeholder={defaultWorkspace || '/path/to/folder'}
+                placeholder="Optional; can be set later"
               />
             </label>
-            <button type="button" className="path-suggestion" onClick={() => setNewProjectPath(defaultWorkspace)}>
-              <span>Use this Pico folder</span>
-              <code>{defaultWorkspace}</code>
-            </button>
             <div className="form-actions">
-              <span className="field-note">The selected Executor receives access to this folder.</span>
-              <button className="button button-primary" disabled={busy || !newProjectWorkspacePath.trim()}>
+              <span className="field-note">The workspace folder is optional and can be set after creating the Project.</span>
+              <button className="button button-primary" disabled={busy}>
                 {busy ? 'Creating…' : 'Create Project'}
               </button>
             </div>
           </form>
+        </Modal>
+      ) : null}
+
+      {projectInfoProject ? (
+        <Modal
+          title="Project info"
+          contextLabel="PICO · PROJECT DETAILS"
+          onClose={() => setProjectInfoProjectId(null)}
+          error={projectInfoError}
+          onDismissError={() => setProjectInfoError('')}
+        >
+          <div className="form-stack">
+            <div>
+              <span className="eyebrow">PROJECT NAME</span>
+              <strong>{projectInfoProject.name}</strong>
+            </div>
+            <label>
+              Workspace folder
+              {projectInfoProject.workspacePath ? (
+                <code>{projectInfoProject.workspacePath}</code>
+              ) : (
+                <div className="project-workspace-fill">
+                  <input
+                    aria-label="Project workspace folder"
+                    value={projectInfoWorkspaceDraft}
+                    onChange={(event) => setProjectInfoWorkspaceDraft(event.target.value)}
+                    placeholder="Choose a folder"
+                  />
+                  <button
+                    type="button"
+                    className="button button-quiet"
+                    onClick={() => void saveProjectWorkspace(projectInfoProject, projectInfoWorkspaceDraft)}
+                    disabled={projectWorkspaceSaving || !projectInfoWorkspaceDraft.trim()}
+                  >
+                    {projectWorkspaceSaving ? 'Saving…' : 'Set folder'}
+                  </button>
+                </div>
+              )}
+            </label>
+            <p className="field-note">
+              {projectInfoProject.workspacePath
+                ? 'The Project workspace folder is read-only after it has been set.'
+                : 'Choose a folder to give Project Threads a shared workspace. This can only be set once.'}
+            </p>
+            {!projectInfoProject.workspacePath && projectInfoNeedsContainerRestart ? (
+              <p className="field-note">{CONTAINER_WORKSPACE_REBUILD_NOTICE}</p>
+            ) : null}
+          </div>
         </Modal>
       ) : null}
 
@@ -4747,9 +4959,82 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               </div>
               <div>
                 <span>Workspace folder</span>
-                <code>{selectedThread.workspacePath || 'No workspace'}</code>
+                {selectedProject && !selectedProject.workspacePath ? (
+                  <div className="project-workspace-fill">
+                    <input aria-label="Project workspace folder" value={projectWorkspaceDraft} onChange={(event) => setProjectWorkspaceDraft(event.target.value)} placeholder="Set workspace folder" />
+                    <button type="button" className="button button-quiet" onClick={() => selectedProject && void saveProjectWorkspace(selectedProject)} disabled={projectWorkspaceSaving || !projectWorkspaceDraft.trim()}>{projectWorkspaceSaving ? 'Saving…' : 'Set folder'}</button>
+                  </div>
+                ) : <code>{selectedProject?.workspacePath ?? selectedThread.workspacePath ?? 'No workspace'}</code>}
               </div>
             </div>
+            {selectedThread.projectId === null ? <>
+              {!projectFromThreadEditing ? (
+                <>
+                  <button
+                    type="button"
+                    className="button button-soft"
+                    disabled={threadTitleSaving}
+                    onClick={() => {
+                      setProjectFromThreadName(selectedThread.title.trim());
+                      setProjectFromThreadWorkspace('');
+                      setProjectFromThreadEditing(true);
+                      setThreadInfoError('');
+                    }}
+                  >
+                    Create Project from this Thread
+                  </button>
+                  <p className="field-note">This Thread and its child Threads will move into the Project.</p>
+                </>
+              ) : (
+                <div
+                  className="form-stack project-from-thread-form"
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter' || !(event.target instanceof HTMLInputElement)) return;
+                    event.preventDefault();
+                    if (!threadTitleSaving && projectFromThreadName.trim()) void createProjectFromThread();
+                  }}
+                >
+                  <label>
+                    Project name
+                    <input
+                      value={projectFromThreadName}
+                      onChange={(event) => setProjectFromThreadName(event.target.value)}
+                      autoFocus
+                    />
+                  </label>
+                  <label>
+                    Workspace folder <span className="field-note">Optional</span>
+                    <input
+                      value={projectFromThreadWorkspace}
+                      onChange={(event) => setProjectFromThreadWorkspace(event.target.value)}
+                      placeholder="Leave empty to choose later"
+                    />
+                  </label>
+                  {selectedThread.executorKind === 'container' && projectFromThreadWorkspace.trim() ? (
+                    <p className="field-note">{CONTAINER_WORKSPACE_REBUILD_NOTICE}</p>
+                  ) : null}
+                  <p className="field-note">The Thread and its child Threads will move into this Project.</p>
+                  <div className="form-actions">
+                    <button
+                      type="button"
+                      className="button button-quiet"
+                      disabled={threadTitleSaving}
+                      onClick={() => setProjectFromThreadEditing(false)}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="button button-primary"
+                      disabled={threadTitleSaving || !projectFromThreadName.trim()}
+                      onClick={() => void createProjectFromThread()}
+                    >
+                      {threadTitleSaving ? 'Creating…' : 'Create Project'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </> : null}
             {activeSnapshot?.thread.id === selectedThread.id &&
             (activeSnapshot.hasInactiveHistory || (activeSnapshot.historyBranches?.length ?? 0) > 0) ? (
               <div className="thread-info-history-entry">
@@ -4905,7 +5190,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   <Box size={15} aria-hidden="true" />
                 </span>
                 <strong>Container</strong>
-                <small>Isolated workspace, root inside the container</small>
+                <small>Isolated container environment; workspace depends on whether this Thread belongs to a Project</small>
                 <i>{newThreadExecutor === 'container' ? 'Selected' : 'Choose'}</i>
               </button>
               <button
@@ -4917,7 +5202,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   <Monitor size={15} aria-hidden="true" />
                 </span>
                 <strong>Host</strong>
-                <small>Use tools and software already on this machine</small>
+                <small>Use tools and software on this machine; commands ask before running</small>
                 <i>{newThreadExecutor === 'host' ? 'Selected' : 'Choose'}</i>
               </button>
               <button
@@ -4937,11 +5222,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   <Cloud size={15} aria-hidden="true" />
                 </span>
                 <strong>Remote</strong>
-                <small>Configure a machine and run tools there</small>
+                <small>Run tools on a configured Remote Executor</small>
                 <i>{newThreadExecutor === 'remote' ? 'Selected' : 'Choose'}</i>
               </button>
             </div>
-            {newThreadExecutor === 'remote' ? (
+            {newThreadExecutor === 'remote' && projectId ? (
               remoteConnections.length > 0 ? (
                 <>
                   <label>
@@ -4979,9 +5264,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 {newThreadExecutor === 'runtime'
                   ? 'Chat mode can coordinate Threads but cannot access project files or run shell commands.'
                   : newThreadExecutor === 'container'
-                    ? 'Container is the default and runs tools inside the selected workspace.'
+                    ? projectId
+                      ? 'Container tools use the Project workspace when one is set.'
+                      : 'Independent Container Threads start without a workspace. Add this Thread to a Project to choose a folder.'
                     : newThreadExecutor === 'remote'
-                      ? 'Tools run on the selected Remote Executor and use a workspace under its configured root.'
+                      ? projectId ? 'This Thread will join the selected Project and use its Remote Executor workspace.' : 'This independent Thread has no workspace. Add it to a Project when you are ready to choose a folder.'
                       : 'Host Executor tools ask before running.'}
               </span>
               <button

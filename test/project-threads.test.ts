@@ -22,4 +22,18 @@ describe('selected Project Thread list', () => {
       upsertProjectThread(current, { id: 'child', projectId: 'project-a', title: 'Updated child title' }, 'project-a'),
     ).toEqual([current[0], { id: 'child', projectId: 'project-a', title: 'Updated child title' }]);
   });
+
+  it('keeps independent Threads in their own navigation list', () => {
+    const independent: { id: string; projectId: string | null; title: string } = {
+      id: 'standalone',
+      projectId: null,
+      title: 'Independent',
+    };
+    expect(upsertProjectThread([], independent, null)).toEqual([independent]);
+    const current = [independent];
+    expect(upsertProjectThread(current, { ...independent, title: 'Renamed' }, null)).toEqual([
+      { ...independent, title: 'Renamed' },
+    ]);
+    expect(upsertProjectThread(current, { id: 'project-thread', projectId: 'project-a', title: 'Project' }, null)).toBe(current);
+  });
 });

@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { Thread } from '../src/core/types.js';
 import type { ThreadSnapshot } from '../src/contracts/runtime.js';
-import { applyThreadStateUpdate } from '../src/web/thread-state.js';
+import { applyThreadStateUpdate, updateThreadList } from '../src/web/thread-state.js';
 
-function thread(id: string, projectId = 'project-a', archivedAt: string | null = null): Thread {
+function thread(id: string, projectId: string | null = 'project-a', archivedAt: string | null = null): Thread {
   return { id, projectId, archivedAt, deletedAt: null } as Thread;
 }
 
@@ -49,5 +49,38 @@ describe('applyThreadStateUpdate', () => {
         'project-a',
       ).snapshot,
     ).toEqual(snapshot(other));
+  });
+
+  it('moves a selected independent Thread into its Project projection and updates its snapshot', () => {
+    const standalone = thread('thread-a', null);
+    const current = { threads: [standalone], threadsByProject: {}, snapshot: snapshot(standalone) };
+    const moved = thread('thread-a', 'project-b');
+
+    const next = applyThreadStateUpdate(current, moved, null);
+
+    expect(next.threads).toEqual([]);
+    expect(next.threadsByProject['project-b']).toEqual([moved]);
+    expect(next.snapshot?.thread).toEqual(moved);
+  });
+
+  it('adds every moved subtree row to the new Project list', () => {
+    const root = thread('root', null);
+    const child = { ...thread('child', null), parentThreadId: 'root' };
+    const current = { threads: [root, child], threadsByProject: {}, snapshot: snapshot(root) };
+    const movedRoot = thread('root', 'project-b');
+    const movedChild = { ...thread('child', 'project-b'), parentThreadId: 'root' };
+
+    const next = applyThreadStateUpdate(current, movedRoot, null);
+    const withChild = applyThreadStateUpdate(next, movedChild, null);
+
+    expect(withChild.threads).toEqual([]);
+    expect(withChild.threadsByProject['project-b']?.map((item) => item.id)).toEqual(['child', 'root']);
+  });
+
+  it('removes a converted Thread from the currently selected navigation list', () => {
+    const standalone = thread('thread-a', null);
+    expect(updateThreadList([standalone], thread('thread-a', 'project-a'), null)).toEqual([]);
+    const projectThread = thread('thread-b', 'project-a');
+    expect(updateThreadList([projectThread], thread('thread-b', 'project-a'), 'project-b')).toEqual([]);
   });
 });

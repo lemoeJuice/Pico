@@ -145,6 +145,15 @@ describe('snapshot refresh consistency', () => {
     expect(snapshotForSelection(snapshot, 'thread-a', 'project-a')).toBe(snapshot);
   });
 
+  it('keeps the active snapshot for an independent Thread and reloads it after Project conversion', () => {
+    const standalone = { thread: { id: 'thread-a', projectId: null }, records: ['conversation'] };
+    const converted = { thread: { id: 'thread-a', projectId: 'project-a' }, records: ['conversation'] };
+
+    expect(snapshotForSelection(standalone, 'thread-a', null)).toBe(standalone);
+    expect(snapshotForSelection(converted, 'thread-a', null)).toBeNull();
+    expect(snapshotForSelection(converted, 'thread-a', 'project-a')).toBe(converted);
+  });
+
   it('does not start a background refresh for a Thread that is no longer selected', () => {
     expect(snapshotThreadIsSelected('thread-a', 'thread-b')).toBe(false);
     expect(snapshotThreadIsSelected('thread-b', 'thread-b')).toBe(true);

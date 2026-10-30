@@ -266,6 +266,15 @@
 .thread-info-details code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+.project-workspace-fill {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.project-workspace-fill input {
+  min-width: 0;
+  flex: 1;
+}
 .remote-token-form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -358,4 +367,3 @@
 .mobile-scrim {
   display: none;
 }
-
