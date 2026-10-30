@@ -779,9 +779,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [archivedThreadActionId, setArchivedThreadActionId] = useState<string | null>(null);
   const [pluginActionId, setPluginActionId] = useState<string | null>(null);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
-  const [projectInfoProjectId, setProjectInfoProjectId] = useState<string | null>(null);
-  const [projectInfoWorkspaceDraft, setProjectInfoWorkspaceDraft] = useState('');
-  const [projectInfoError, setProjectInfoError] = useState('');
   const [projectFromThreadEditing, setProjectFromThreadEditing] = useState(false);
   const [projectFromThreadName, setProjectFromThreadName] = useState('');
   const [projectFromThreadWorkspace, setProjectFromThreadWorkspace] = useState('');
@@ -1148,13 +1145,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   };
 
   const selectedProject = projects.find((project) => project.id === projectId) ?? null;
-  const projectInfoProject = projects.find((project) => project.id === projectInfoProjectId) ?? null;
-  const projectInfoNeedsContainerRestart = Boolean(
-    projectInfoProject && !projectInfoProject.workspacePath &&
-      (threadsByProject[projectInfoProject.id] ?? []).some(
-        (thread) => thread.executorKind === 'container' && !thread.executorRemote && !thread.workspacePath,
-      ),
-  );
   const selectedRemoteConnection = remoteConnections.find(
     (connection) => connection.id === newThreadRemoteConnectionId,
   );
@@ -1165,6 +1155,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     activeSnapshot?.thread ??
     threads.find((thread) => thread.id === threadId && thread.projectId === projectId) ??
     null;
+  const canSetProjectWorkspace = Boolean(
+    selectedProject && !selectedProject.workspacePath && selectedThread && !selectedThread.executorRemote &&
+      (selectedThread.executorKind === 'container' || selectedThread.executorKind === 'host'),
+  );
   const selectedThreadId = selectedThread?.id ?? null;
   useLayoutEffect(() => {
     const scroll = listRef.current;
@@ -3086,22 +3080,18 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     } finally { setThreadTitleSaving(false); }
   };
 
-  const saveProjectWorkspace = async (targetProject: Project, workspaceDraft = projectWorkspaceDraft): Promise<void> => {
-    if (targetProject.workspacePath || !workspaceDraft.trim()) return;
+  const saveProjectWorkspace = async (targetProject: Project): Promise<void> => {
+    if (targetProject.workspacePath || !projectWorkspaceDraft.trim()) return;
     setProjectWorkspaceSaving(true);
     setThreadInfoError('');
     try {
       const updated = await api<Project>(`/api/projects/${encodeURIComponent(targetProject.id)}/workspace`, {
-        method: 'POST', body: JSON.stringify({ workspacePath: workspaceDraft.trim() }),
+        method: 'POST', body: JSON.stringify({ workspacePath: projectWorkspaceDraft.trim() }),
       });
       setProjects((items) => upsertProject(items, updated));
       setProjectWorkspaceDraft('');
-      setProjectInfoWorkspaceDraft('');
-      setProjectInfoError('');
     } catch (caught) {
-      const message = caught instanceof Error ? caught.message : 'Could not set the Project workspace.';
-      if (targetProject.id === projectInfoProjectId) setProjectInfoError(message);
-      else setThreadInfoError(message);
+      setThreadInfoError(caught instanceof Error ? caught.message : 'Could not set the Project workspace.');
     } finally { setProjectWorkspaceSaving(false); }
   };
 
@@ -3384,24 +3374,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   >
                     <Plus size={14} aria-hidden="true" />
                   </button>
-                  <button
-                    className="icon-button small project-new-thread"
-                    type="button"
-                    aria-label={`Project info for ${project.name}`}
-                    title={`Project info for ${project.name}`}
-                    onClick={() => {
-                      setProjectInfoProjectId(project.id);
-                      setProjectInfoWorkspaceDraft('');
-                      setProjectInfoError('');
-                      if (!projectThreadLoads.current.has(project.id)) {
-                        void loadProjectThreads(project.id).catch((caught: unknown) =>
-                          setProjectInfoError(caught instanceof Error ? caught.message : String(caught)),
-                        );
-                      }
-                    }}
-                  >
-                    <Info size={14} aria-hidden="true" />
-                  </button>
                 </div>
                 {expanded ? renderProjectThreads(project) : null}
               </section>
@@ -3661,6 +3633,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   aria-haspopup="dialog"
                   onClick={() => {
                     setThreadTitleDraft(selectedThread.title);
+                    setProjectWorkspaceDraft('');
                     setThreadInfoError('');
                     setThreadInfoOpen(true);
                     setToolsMenuOpen(false);
@@ -4873,54 +4846,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         </Modal>
       ) : null}
 
-      {projectInfoProject ? (
-        <Modal
-          title="Project info"
-          contextLabel="PICO · PROJECT DETAILS"
-          onClose={() => setProjectInfoProjectId(null)}
-          error={projectInfoError}
-          onDismissError={() => setProjectInfoError('')}
-        >
-          <div className="form-stack">
-            <div>
-              <span className="eyebrow">PROJECT NAME</span>
-              <strong>{projectInfoProject.name}</strong>
-            </div>
-            <label>
-              Workspace folder
-              {projectInfoProject.workspacePath ? (
-                <code>{projectInfoProject.workspacePath}</code>
-              ) : (
-                <div className="project-workspace-fill">
-                  <input
-                    aria-label="Project workspace folder"
-                    value={projectInfoWorkspaceDraft}
-                    onChange={(event) => setProjectInfoWorkspaceDraft(event.target.value)}
-                    placeholder="Choose a folder"
-                  />
-                  <button
-                    type="button"
-                    className="button button-quiet"
-                    onClick={() => void saveProjectWorkspace(projectInfoProject, projectInfoWorkspaceDraft)}
-                    disabled={projectWorkspaceSaving || !projectInfoWorkspaceDraft.trim()}
-                  >
-                    {projectWorkspaceSaving ? 'Saving…' : 'Set folder'}
-                  </button>
-                </div>
-              )}
-            </label>
-            <p className="field-note">
-              {projectInfoProject.workspacePath
-                ? 'The Project workspace folder is read-only after it has been set.'
-                : 'Choose a folder to give Project Threads a shared workspace. This can only be set once.'}
-            </p>
-            {!projectInfoProject.workspacePath && projectInfoNeedsContainerRestart ? (
-              <p className="field-note">{CONTAINER_WORKSPACE_REBUILD_NOTICE}</p>
-            ) : null}
-          </div>
-        </Modal>
-      ) : null}
-
       {threadInfoOpen && selectedThread ? (
         <Modal
           title="Thread info"
@@ -4959,14 +4884,19 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               </div>
               <div>
                 <span>Workspace folder</span>
-                {selectedProject && !selectedProject.workspacePath ? (
+                {canSetProjectWorkspace ? (
                   <div className="project-workspace-fill">
                     <input aria-label="Project workspace folder" value={projectWorkspaceDraft} onChange={(event) => setProjectWorkspaceDraft(event.target.value)} placeholder="Set workspace folder" />
                     <button type="button" className="button button-quiet" onClick={() => selectedProject && void saveProjectWorkspace(selectedProject)} disabled={projectWorkspaceSaving || !projectWorkspaceDraft.trim()}>{projectWorkspaceSaving ? 'Saving…' : 'Set folder'}</button>
                   </div>
-                ) : <code>{selectedProject?.workspacePath ?? selectedThread.workspacePath ?? 'No workspace'}</code>}
+                ) : <code>{(selectedThread.executorKind !== 'runtime' && !selectedThread.executorRemote ? selectedProject?.workspacePath : '') || selectedThread.workspacePath || 'No workspace'}</code>}
               </div>
             </div>
+            {canSetProjectWorkspace ? (
+                <p className="field-note">
+                  If this Project has Container Threads, setting the workspace rebuilds their containers. Container files and data volumes are preserved, but running processes inside those containers will stop.
+                </p>
+              ) : null}
             {selectedThread.projectId === null ? <>
               {!projectFromThreadEditing ? (
                 <>
