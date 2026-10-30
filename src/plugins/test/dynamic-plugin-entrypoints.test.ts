@@ -124,6 +124,7 @@ describe('dynamic first-party plugin entries', () => {
         'pico.global-memory',
         'pico.collaboration',
         'pico.permissions',
+        'pico.runtime-context-state',
         'pico.vision',
       ]);
       for (const dependencyCandidate of ['pico.goal', 'pico.project-context', 'pico.global-memory']) {

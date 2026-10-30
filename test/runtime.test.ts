@@ -351,9 +351,11 @@ describe('durable Thread runtime invariants', () => {
       expect(
         (await env.runtime.listThreadTools(hostThread.id)).find((tool) => tool.name === 'optional_runtime_tool')
           ?.enabled,
-      ).toBe(true);
-      const disabled = await env.runtime.setThreadToolEnabled(hostThread.id, 'optional_runtime_tool', false);
-      expect(disabled.find((tool) => tool.name === 'optional_runtime_tool')?.enabled).toBe(false);
+      ).toBe(false);
+      expect(
+        (await env.runtime.listThreadTools(containerThread.id)).find((tool) => tool.name === 'optional_runtime_tool')
+          ?.enabled,
+      ).toBe(false);
 
       await env.runtime.submit(hostThread.id, 'tool-toggle-message', 'Continue without the optional tool.');
       await env.runtime.drain();
@@ -370,12 +372,18 @@ describe('durable Thread runtime invariants', () => {
       expect(
         (await env.runtime.listThreadTools(containerThread.id)).find((tool) => tool.name === 'optional_runtime_tool')
           ?.enabled,
-      ).toBe(true);
+      ).toBe(false);
       const enabled = await env.runtime.setThreadToolEnabled(hostThread.id, 'optional_runtime_tool', true);
       expect(enabled.find((tool) => tool.name === 'optional_runtime_tool')?.enabled).toBe(true);
       await env.runtime.submit(hostThread.id, 'tool-toggle-message-enabled', 'Continue with the optional tool.');
       await env.runtime.drain();
       expect(model.prompts[2]?.tools.some((tool) => tool.name === 'optional_runtime_tool')).toBe(true);
+
+      const disabled = await env.runtime.setThreadToolEnabled(hostThread.id, 'optional_runtime_tool', false);
+      expect(disabled.find((tool) => tool.name === 'optional_runtime_tool')?.enabled).toBe(false);
+      await env.runtime.submit(hostThread.id, 'tool-toggle-message-disabled-again', 'Continue without the optional tool.');
+      await env.runtime.drain();
+      expect(model.prompts[3]?.tools.some((tool) => tool.name === 'optional_runtime_tool')).toBe(false);
     } finally {
       await env.cleanup();
     }
@@ -517,9 +525,9 @@ describe('durable Thread runtime invariants', () => {
     const project = await runtime.createProject('Command retries', workspace);
     const thread = runtime.createThread(project.id, 'host');
     try {
-      const firstPromise = runtime.submit(thread.id, 'stable-command-id', '/count');
+      const firstPromise = runtime.executeCommand(thread.id, 'stable-command-id', '/count');
       await commandStarted.promise;
-      const racingRetry = await runtime.submit(thread.id, 'stable-command-id', '/count');
+      const racingRetry = await runtime.executeCommand(thread.id, 'stable-command-id', '/count');
       expect(racingRetry.duplicate).toBe(true);
       expect(racingRetry.command?.text).toContain('already accepted');
       releaseCommand.resolve({ text: `Invocation ${invocations}` });
@@ -536,7 +544,7 @@ describe('durable Thread runtime invariants', () => {
         pluginDirectory: join(directory, 'empty-plugins'),
       });
       await runtime.initialize();
-      const retry = await runtime.submit(thread.id, 'stable-command-id', '/count');
+      const retry = await runtime.executeCommand(thread.id, 'stable-command-id', '/count');
 
       expect(retry.duplicate).toBe(true);
       expect(retry.command?.text).toBe('Invocation 1');
@@ -552,7 +560,7 @@ describe('durable Thread runtime invariants', () => {
           .listRecords(thread.id)
           .filter((record) => record.kind === 'plugin' && record.payload.action === 'invocation-completed'),
       ).toMatchObject([{ payload: { result: { text: 'Invocation 1' } } }]);
-      await expect(runtime.submit(thread.id, 'stable-command-id', '/other')).rejects.toThrow(
+      await expect(runtime.executeCommand(thread.id, 'stable-command-id', '/other')).rejects.toThrow(
         /reused with different content/i,
       );
     } finally {
@@ -614,7 +622,7 @@ describe('durable Thread runtime invariants', () => {
         pluginDirectory: join(directory, 'empty-plugins'),
       });
       await runtime.initialize();
-      const retry = await runtime.submit(thread.id, id, commandText);
+      const retry = await runtime.executeCommand(thread.id, id, commandText);
 
       expect(retry.duplicate).toBe(true);
       expect(retry.command?.text).toContain('already accepted');
@@ -747,13 +755,15 @@ describe('durable Thread runtime invariants', () => {
       callNumber === 1
         ? response('', [
             { id: 'alpha', name: 'batch_alpha', arguments: {} },
-            { id: 'alpha', name: 'batch_beta', arguments: {} },
+            { id: 'beta', name: 'batch_beta', arguments: {} },
           ])
         : response('Both tools finished.'),
     );
     const env = await setupRuntime(model, { plugins: [batchPlugin] });
     const thread = env.createThread();
     try {
+      await env.runtime.setThreadToolEnabled(thread.id, 'batch_alpha', true);
+      await env.runtime.setThreadToolEnabled(thread.id, 'batch_beta', true);
       await env.runtime.submit(thread.id, 'parallel-message', 'Run both tools');
       await started.promise;
       expect(starts).toBe(2);
@@ -859,6 +869,7 @@ describe('durable Thread runtime invariants', () => {
     const env = await setupRuntime(model, { plugins: [plugin] });
     const thread = env.createThread();
     try {
+      await env.runtime.setThreadToolEnabled(thread.id, 'pause_batch_tool', true);
       await env.runtime.submit(thread.id, 'pause-batch-message', 'Start the current iteration');
       await until(() => model.calls === 1);
       const signal = model.signals[0]!;
@@ -1044,6 +1055,7 @@ describe('durable Thread runtime invariants', () => {
     store = env.store;
     const thread = env.createThread();
     try {
+      await env.runtime.setThreadToolEnabled(thread.id, 'wait_for_interrupt', true);
       await env.runtime.submit(thread.id, 'paused-active-tool-message', 'Start a long tool');
       await toolStarted.promise;
       await env.runtime.drain();
