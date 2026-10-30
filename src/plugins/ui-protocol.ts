@@ -14,12 +14,13 @@ export const PLUGIN_UI_PROTOCOL_VERSION = 1;
 export const PLUGIN_COMPOSER_CONTROL_HEIGHT_PX = 32;
 export type PluginUiSlot = UiContribution['slot'];
 export type PluginUiGroupLayout =
-  'row' | 'spread' | 'form-row' | 'grid-2' | 'grid-compact' | 'grid-standard' | 'masonry' | 'stack-compact';
+  'row' | 'spread' | 'form-row' | 'grid-2' | 'grid-compact' | 'grid-standard' | 'masonry' | 'stack-compact' | 'nested';
 /** Serializable, host-rendered UI vocabulary. It intentionally has no HTML, CSS, URL or DOM escape hatch. */
 export type PluginUiNode =
   | { type: 'text'; text: string }
   | { type: 'heading'; text: string; level?: 2 | 3 | 4 }
   | { type: 'paragraph'; text: string }
+  | { type: 'separator' }
   | { type: 'group'; children: PluginUiNode[]; layout?: PluginUiGroupLayout }
   | { type: 'card' | 'actions'; children: PluginUiNode[] }
   | {
@@ -48,6 +49,7 @@ export type PluginUiNode =
       step?: number | 'any';
       maxLength?: number;
       disabled?: boolean;
+      visuallyHidden?: boolean;
     }
   | { type: 'checkbox'; label: string; checked: boolean; actionId: string; disabled?: boolean }
   | {
@@ -99,13 +101,13 @@ const UI_LIMITS = {
   nodes: 2048,
   depth: 12,
   actions: 512,
-  options: 80,
+  options: 101,
   tableRows: 300,
   tableCells: 2100,
 } as const;
 const uiNodeTypesBySlot: Record<PluginUiSlot, ReadonlySet<PluginUiNode['type']>> = {
   'thread.card': new Set([
-    'text', 'status', 'heading', 'paragraph', 'group', 'card', 'actions', 'button', 'fieldButton',
+    'text', 'status', 'heading', 'paragraph', 'separator', 'group', 'card', 'actions', 'button', 'fieldButton',
     'textInput', 'checkbox', 'switch', 'range', 'textArea', 'select', 'disclosure', 'list', 'table',
   ]),
   'thread.toolbar': new Set([
@@ -113,6 +115,7 @@ const uiNodeTypesBySlot: Record<PluginUiSlot, ReadonlySet<PluginUiNode['type']>>
     'status',
     'heading',
     'paragraph',
+    'separator',
     'group',
     'card',
     'actions',
@@ -136,6 +139,7 @@ const uiNodeTypesBySlot: Record<PluginUiSlot, ReadonlySet<PluginUiNode['type']>>
     'status',
     'heading',
     'paragraph',
+    'separator',
     'group',
     'card',
     'actions',
@@ -157,6 +161,7 @@ const uiNodeTypesBySlot: Record<PluginUiSlot, ReadonlySet<PluginUiNode['type']>>
     'status',
     'heading',
     'paragraph',
+    'separator',
     'group',
     'card',
     'actions',
@@ -185,6 +190,7 @@ export function validatePluginUiTree(value: unknown, slot: PluginUiSlot | 'setti
           'status',
           'heading',
           'paragraph',
+          'separator',
           'group',
           'card',
           'actions',
@@ -217,6 +223,7 @@ export function validatePluginUiTree(value: unknown, slot: PluginUiSlot | 'setti
       text: ['type', 'text'],
       heading: ['type', 'text', 'level'],
       paragraph: ['type', 'text'],
+      separator: ['type'],
       group: ['type', 'children', 'layout'],
       card: ['type', 'children'],
       actions: ['type', 'children'],
@@ -233,6 +240,7 @@ export function validatePluginUiTree(value: unknown, slot: PluginUiSlot | 'setti
         'step',
         'maxLength',
         'disabled',
+        'visuallyHidden',
       ],
       checkbox: ['type', 'label', 'checked', 'actionId', 'disabled'],
       switch: ['type', 'label', 'checked', 'actionId', 'disabled', 'visuallyHidden'],
@@ -251,6 +259,8 @@ export function validatePluginUiTree(value: unknown, slot: PluginUiSlot | 'setti
       !actions.has(item.actionId) &&
       (actions.add(item.actionId), actions.size <= UI_LIMITS.actions);
     switch (item.type) {
+      case 'separator':
+        return true;
       case 'text':
       case 'heading':
       case 'paragraph':
@@ -271,6 +281,7 @@ export function validatePluginUiTree(value: unknown, slot: PluginUiSlot | 'setti
             'grid-standard',
             'masonry',
             'stack-compact',
+            'nested',
           ].includes(String(item.layout))
         )
           return false;
@@ -367,6 +378,9 @@ export function validatePluginUiTree(value: unknown, slot: PluginUiSlot | 'setti
                 (item.inputType === 'number' &&
                   (item.step === 'any' || (Number.isFinite(item.step) && (item.step as number) > 0)))))) &&
           (item.disabled === undefined || typeof item.disabled === 'boolean') &&
+          (item.type !== 'textInput' ||
+            item.visuallyHidden === undefined ||
+            typeof item.visuallyHidden === 'boolean') &&
           action() &&
           (item.maxLength === undefined || (Number.isSafeInteger(item.maxLength) && (item.maxLength as number) >= 0)) &&
           (item.type !== 'textArea' ||

@@ -172,9 +172,7 @@ describe('dynamic plugin UI boundary', () => {
         'mcp.server.card',
       ),
     ).toBe(true);
-    expect(
-      validatePluginUiTree([{ type: 'paragraph', text: 'Unsupported slot.' }], 'composer.status'),
-    ).toBe(false);
+    expect(validatePluginUiTree([{ type: 'paragraph', text: 'Unsupported slot.' }], 'composer.status')).toBe(false);
     expect(
       validatePluginUiTree(
         [
@@ -259,7 +257,7 @@ describe('dynamic plugin UI boundary', () => {
             type: 'select',
             label: 'Model',
             actionId: 'model',
-            options: Array.from({ length: 81 }, () => ({ label: 'x', value: 'x' })),
+            options: Array.from({ length: 102 }, () => ({ label: 'x', value: 'x' })),
           },
         ],
         'composer.model',
@@ -293,6 +291,40 @@ describe('dynamic plugin UI boundary', () => {
   });
 
   it('enforces each slot allowlist and exact select option fields', () => {
+    expect(validatePluginUiTree([{ type: 'separator' }], 'thread.toolbar')).toBe(true);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'group', layout: 'nested', children: [{ type: 'text', text: 'Child task' }] }],
+        'thread.toolbar',
+      ),
+    ).toBe(true);
+    expect(validatePluginUiTree([{ type: 'separator', label: 'unexpected' }], 'thread.toolbar')).toBe(false);
+    expect(validatePluginUiTree([{ type: 'separator' }], 'composer.model')).toBe(false);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'textInput', label: 'Title', actionId: 'title', visuallyHidden: true }],
+        'thread.toolbar',
+      ),
+    ).toBe(true);
+    expect(
+      validatePluginUiTree(
+        [{ type: 'textInput', label: 'Title', actionId: 'title', visuallyHidden: 'yes' }],
+        'thread.toolbar',
+      ),
+    ).toBe(false);
+    expect(
+      validatePluginUiTree(
+        [
+          {
+            type: 'select',
+            label: 'Phase',
+            actionId: 'phase',
+            options: Array.from({ length: 101 }, (_, i) => ({ label: String(i), value: String(i) })),
+          },
+        ],
+        'thread.toolbar',
+      ),
+    ).toBe(true);
     expect(
       validatePluginUiTree(
         [{ type: 'textInput', label: 'Temperature', value: '0.5', actionId: 'temperature' }],

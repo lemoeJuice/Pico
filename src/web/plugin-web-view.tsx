@@ -1,7 +1,8 @@
 import { createPortal } from 'react-dom';
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactElement } from 'react';
 import type { PublicSettings } from '../core/types.js';
 import { PluginUiTreeView } from './plugin-ui-tree.js';
+import { pluginUiPopoverPathIncludesOwner } from './plugin-ui-popover.js';
 import { clampPluginPopoverWidth } from './plugin-ui-sizing.js';
 import {
   validatePluginAuthPopupCallback,
@@ -88,6 +89,7 @@ function containsExternalAuthButton(node: PluginUiNode): boolean {
 }
 
 export function PluginWebView(props: PluginWebViewProps): ReactElement {
+  const instanceId = useId().replaceAll(':', '');
   const frame = useRef<HTMLIFrameElement>(null);
   const toolbarAnchor = useRef<HTMLButtonElement>(null);
   const popoverSurface = useRef<HTMLDivElement>(null);
@@ -329,6 +331,10 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
     props.supportsPopover === true &&
     props.controlLabel !== undefined &&
     props.controlClassName !== undefined;
+  const popoverOwner =
+    hostPopover && props.uiSlot === 'thread.toolbar'
+      ? `${props.pluginId}:${props.viewType}:${props.viewId}:${instanceId}`
+      : undefined;
 
   const setToolbarPopover = (next: { width: number; height: number } | null): void => {
     popoverOpenRef.current = next !== null;
@@ -444,11 +450,9 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       portRef.current?.postMessage({ type: 'pico:plugin-ui:popover-dismiss' });
     };
     const onPointerDown = (event: PointerEvent): void => {
-      if (
-        popoverSurface.current?.contains(event.target as Node) ||
-        toolbarAnchor.current?.contains(event.target as Node)
-      )
-        return;
+      const target = event.target;
+      if (popoverOwner && pluginUiPopoverPathIncludesOwner(event.composedPath(), popoverOwner)) return;
+      if (popoverSurface.current?.contains(target as Node) || toolbarAnchor.current?.contains(target as Node)) return;
       dismiss();
     };
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -460,7 +464,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       document.removeEventListener('pointerdown', onPointerDown, true);
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [hostPopover, popover]);
+  }, [hostPopover, popover, popoverOwner]);
 
   useEffect(() => {
     portRef.current?.postMessage({ type: 'pico:plugin-ui:settings', settings: props.settings });
@@ -848,6 +852,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
       <PluginUiTreeView
         nodes={uiTree}
         compactComposerControls={props.uiSlot === 'composer.model' && !hostPopover}
+        {...(popoverOwner ? { popoverOwner } : {})}
         onAction={handleUiAction}
       />
     ) : (
@@ -902,6 +907,7 @@ export function PluginWebView(props: PluginWebViewProps): ReactElement {
         <div
           ref={popoverSurface}
           className="plugin-toolbar-popover"
+          data-plugin-ui-popover-owner={popoverOwner}
           role="dialog"
           aria-label={`${props.controlLabel} panel`}
           style={(() => {

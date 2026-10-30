@@ -104,10 +104,12 @@ export const PluginUiTreeView = memo(function PluginUiTreeView({
   nodes,
   onAction,
   compactComposerControls = false,
+  popoverOwner,
 }: {
   nodes: PluginUiNode[];
   onAction(actionId: string, value?: string, event?: 'submit', externalAuth?: boolean): void;
   compactComposerControls?: boolean;
+  popoverOwner?: string;
 }): ReactElement {
   const previousNodes = useRef(nodes);
   const sharedNodes = sharePluginUiTree(previousNodes.current, nodes);
@@ -117,6 +119,8 @@ export const PluginUiTreeView = memo(function PluginUiTreeView({
   const render = (node: PluginUiNode, key: string): ReactElement => {
     const renderNode = (): ReactElement => {
       switch (node.type) {
+        case 'separator':
+          return <hr className="plugin-ui-separator" key={key} />;
         case 'text':
           return <span key={key}>{node.text}</span>;
         case 'heading': {
@@ -281,6 +285,7 @@ export const PluginUiTreeView = memo(function PluginUiTreeView({
                 options={node.options}
                 disabled={node.disabled ?? false}
                 compact={compactComposerControls}
+                {...(popoverOwner ? { popoverOwner } : {})}
                 onChange={(value) => onAction(node.actionId, value)}
               />
             </div>
@@ -367,7 +372,11 @@ export const PluginUiDraftInput = memo(function PluginUiDraftInput({
     <label className="plugin-ui-field">
       {node.type === 'textInput' ? (
         <>
-          <span className={compact ? 'plugin-ui-field-label plugin-ui-sr-only' : 'plugin-ui-field-label'}>
+          <span
+            className={
+              node.visuallyHidden || compact ? 'plugin-ui-field-label plugin-ui-sr-only' : 'plugin-ui-field-label'
+            }
+          >
             {node.label}
           </span>
           <input
@@ -419,6 +428,7 @@ export function PluginUiSelect({
   options,
   disabled = false,
   compact,
+  popoverOwner,
   onChange,
 }: {
   label: string;
@@ -426,6 +436,7 @@ export function PluginUiSelect({
   options: Array<{ label: string; value: string }>;
   disabled?: boolean;
   compact: boolean;
+  popoverOwner?: string;
   onChange(value: string): void;
 }): ReactElement {
   const id = `plugin-ui-select-${useId().replaceAll(':', '')}`;
@@ -563,6 +574,7 @@ export function PluginUiSelect({
               role="listbox"
               aria-label={label}
               className="plugin-ui-select-menu"
+              data-plugin-ui-popover-owner={popoverOwner}
               style={placement}
             >
               {options.map((option, index) => (

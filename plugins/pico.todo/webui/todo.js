@@ -10,33 +10,27 @@
   let loading = false;
   let error = '';
   let notice = '';
-  let showDone = true;
-  let rootPage = 0;
-  let phasePage = 0;
-  const childPages = new Map();
   let pendingBlockedId = '';
   let blockerDraft = '';
   let blockerRevision = 0;
   let form = { type: 'phase', title: '', phaseId: '', note: '', nextAction: '', blocker: '' };
   let editingId = '';
+  let expandedOperationsId = '';
   let edit = {};
   let editingRevision = 0;
   let sequence = 0;
   let refreshGeneration = 0;
   let contextGeneration = 0;
   const pending = new Map();
-  const ROOT_PAGE_SIZE = 4;
-  const CHILD_PAGE_SIZE = 4;
-  const PHASE_OPTION_PAGE_SIZE = 10;
   const paragraph = (value) => ({ type: 'paragraph', text: String(value ?? '') });
   const group = (...children) => {
-    const layouts = ['row', 'spread', 'form-row', 'grid-2', 'grid-compact', 'grid-standard', 'stack-compact'];
+    const layouts = ['row', 'spread', 'form-row', 'grid-2', 'grid-compact', 'grid-standard', 'stack-compact', 'nested'];
     const layout = layouts.includes(children.at(-1)) ? children.pop() : undefined;
     return { type: 'group', children, ...(layout ? { layout } : {}) };
   };
   const card = (...children) => ({ type: 'card', children: [group(...children, 'stack-compact')] });
   const button = (label, actionId, options = {}) => ({ type: 'button', label, actionId, ...options });
-  const input = (label, value, actionId, placeholder = '') => ({ type: 'textInput', label, value: String(value ?? ''), placeholder, actionId, maxLength: 240, disabled: busy });
+  const input = (label, value, actionId, placeholder = '', visuallyHidden = false) => ({ type: 'textInput', label, value: String(value ?? ''), placeholder, actionId, maxLength: 240, disabled: busy, ...(visuallyHidden ? { visuallyHidden: true } : {}) });
   const area = (label, value, actionId) => ({ type: 'textArea', label, value: String(value ?? ''), actionId, rows: 'compact', maxLength: 4000, disabled: busy });
   const preview = (value) => {
     const content = String(value ?? '');
@@ -56,8 +50,9 @@
   }
   function phaseItems() { return items.filter((item) => item.type === 'phase'); }
   function taskItems(phaseId) { return items.filter((item) => item.type === 'task' && (item.phaseId ?? '') === phaseId); }
-  function statusLabel(item) { return item.status.replace('_', ' '); }
-  function completed(item) { return item.status === 'done'; }
+  function statusLabel(item) {
+    return ({ open: 'Open', in_progress: 'In progress', blocked: 'Blocked', done: 'Done' })[item.status] ?? item.status;
+  }
   function rootItems() { return items.filter((item) => item.type === 'phase' || !item.phaseId); }
   function siblings(item) { return item.phaseId ? taskItems(item.phaseId) : rootItems(); }
   function move(item, direction) {
@@ -65,35 +60,39 @@
     const index = list.findIndex((entry) => entry.id === item.id);
     const target = list[index + direction];
     if (!target) return;
+    expandedOperationsId = '';
     const beforeId = direction < 0 ? target.id : (list[index + 2]?.id ?? null);
     void mutate([{ action: 'move', id: item.id, ...(item.type === 'task' ? { phaseId: item.phaseId ?? null } : {}), beforeId }]);
   }
   function itemNode(item, siblingIndex, siblingCount) {
     const isEditing = editingId === item.id;
+    const operationsOpen = expandedOperationsId === item.id;
     const details = [item.note && `Note: ${preview(item.note)}`, item.nextAction && `Next: ${preview(item.nextAction)}`, item.blocker && `Blocked: ${preview(item.blocker)}`].filter(Boolean);
-    const controls = [
-      button('↑', `move-up:${item.id}`, { tone: 'quiet', disabled: busy || siblingIndex === 0 }),
-      button('↓', `move-down:${item.id}`, { tone: 'quiet', disabled: busy || siblingIndex === siblingCount - 1 }),
-      button('Edit', `edit:${item.id}`, { tone: 'quiet', disabled: busy }),
-      button('Delete', `delete:${item.id}`, { tone: 'danger', disabled: busy }),
-    ];
-    const nodes = [
-      ...(item.type === 'task' ? [{ type: 'heading', text: item.title, level: 4 }] : []),
-      group(...controls, 'row'),
-    ];
+    const nodes = [group(
+      { type: 'heading', text: item.title, level: item.type === 'phase' ? 3 : 4 },
+      { type: 'status', text: statusLabel(item), tone: item.status === 'done' ? 'success' : item.status === 'blocked' ? 'danger' : 'neutral' },
+      ...(!isEditing ? [button(operationsOpen ? 'Less' : 'More', `more:${item.id}`, { tone: 'quiet', disabled: busy })] : []),
+      'spread')];
     if (details.length) nodes.push(paragraph(details.join(' · ')));
-    if (item.type === 'task') {
+    if (operationsOpen && !isEditing) {
       nodes.push(group(
-        { type: 'select', label: 'Status', value: item.status, actionId: `status:${item.id}`, disabled: busy, options: [
-          { label: 'Open', value: 'open' }, { label: 'In progress', value: 'in_progress' }, { label: 'Blocked', value: 'blocked' }, { label: 'Done', value: 'done' },
-        ] },
-        { type: 'select', label: 'Phase', value: item.phaseId ?? '', actionId: `phase:${item.id}`, disabled: busy, options: phaseOptions(item.phaseId) },
-        'grid-2'));
-    } else {
-      nodes.push(group({ type: 'select', label: 'Status', value: item.status, actionId: `status:${item.id}`, disabled: busy, options: [{ label: 'Open', value: 'open' }, { label: 'Done', value: 'done' }] }, 'row'));
+        button('↑', `move-up:${item.id}`, { tone: 'quiet', disabled: busy || siblingIndex === 0 }),
+        button('↓', `move-down:${item.id}`, { tone: 'quiet', disabled: busy || siblingIndex === siblingCount - 1 }),
+        ...(item.type === 'phase' ? [button('Add task', `add-task:${item.id}`, { tone: 'quiet', disabled: busy })] : []),
+        button('Edit', `edit:${item.id}`, { tone: 'quiet', disabled: busy }),
+        button('Delete', `delete:${item.id}`, { tone: 'danger', disabled: busy }),
+        'row'));
+      nodes.push(item.type === 'task'
+        ? group(
+          { type: 'select', label: 'Status', value: item.status, actionId: `status:${item.id}`, disabled: busy, options: [
+            { label: 'Open', value: 'open' }, { label: 'In progress', value: 'in_progress' }, { label: 'Blocked', value: 'blocked' }, { label: 'Done', value: 'done' },
+          ] },
+          { type: 'select', label: 'Phase', value: item.phaseId ?? '', actionId: `phase:${item.id}`, disabled: busy, options: phaseOptions(item.phaseId) },
+          'grid-2')
+        : group({ type: 'select', label: 'Status', value: item.status, actionId: `status:${item.id}`, disabled: busy, options: [{ label: 'Open', value: 'open' }, { label: 'Done', value: 'done' }] }, 'row'));
     }
     if (isEditing) {
-      nodes.push(input('Title', edit.title, 'edit.title'), area('Note', edit.note, 'edit.note'));
+      nodes.push(input('Item title', edit.title, 'edit.title', 'Describe the outcome', true), area('Note', edit.note, 'edit.note'));
       if (item.type === 'task') nodes.push(area('Next action', edit.nextAction, 'edit.nextAction'), area('Blocker', edit.blocker, 'edit.blocker'));
       nodes.push(group(button('Save', `save:${item.id}`, { tone: 'primary', disabled: busy || !String(edit.title ?? '').trim() || (item.type === 'task' && item.status === 'blocked' && !String(edit.blocker ?? '').trim()) }), button('Cancel', 'cancel-edit', { disabled: busy }), 'row'));
     }
@@ -105,31 +104,16 @@
   }
   function phaseOptions(selectedId = '') {
     const phases = phaseItems();
-    const start = phasePage * PHASE_OPTION_PAGE_SIZE;
-    const page = phases.slice(start, start + PHASE_OPTION_PAGE_SIZE);
     const selected = phases.find((phase) => phase.id === selectedId);
-    return [{ label: 'No phase', value: '' }, ...page.map((phase) => ({ label: phase.title, value: phase.id })), ...(selected && !page.includes(selected) ? [{ label: `Current: ${selected.title}`, value: selected.id }] : [])];
-  }
-  function phaseOptionPager() {
-    const pages = Math.max(1, Math.ceil(phaseItems().length / PHASE_OPTION_PAGE_SIZE));
-    return group(
-      button('Previous phases', 'phase-page:prev', { tone: 'quiet', disabled: busy || phasePage <= 0 }),
-      { type: 'text', text: `Phase choices ${Math.min(phaseItems().length, phasePage * PHASE_OPTION_PAGE_SIZE + 1)}–${Math.min(phaseItems().length, (phasePage + 1) * PHASE_OPTION_PAGE_SIZE)} of ${phaseItems().length}` },
-      button('Next phases', 'phase-page:next', { tone: 'quiet', disabled: busy || phasePage + 1 >= pages }),
-      'spread');
+    return [{ label: 'No phase', value: '' }, ...phases.map((phase) => ({ label: phase.title, value: phase.id })), ...(selected && !phases.includes(selected) ? [{ label: `Current: ${selected.title}`, value: selected.id }] : [])];
   }
   function phaseNode(phase, index) {
-    const allTasks = taskItems(phase.id).filter((item) => showDone || !completed(item));
-    const page = Math.min(childPages.get(phase.id) ?? 0, Math.max(0, Math.ceil(allTasks.length / CHILD_PAGE_SIZE) - 1));
-    childPages.set(phase.id, page);
-    const tasks = allTasks.slice(page * CHILD_PAGE_SIZE, (page + 1) * CHILD_PAGE_SIZE);
-    const pages = Math.max(1, Math.ceil(allTasks.length / CHILD_PAGE_SIZE));
+    const allTasks = taskItems(phase.id);
     return card(
-      group({ type: 'heading', text: phase.title, level: 3 }, 'spread'),
       itemNode(phase, rootItems().indexOf(phase), rootItems().length),
-      ...(tasks.length ? tasks.map((task) => itemNode(task, taskItems(phase.id).indexOf(task), taskItems(phase.id).length)) : [paragraph('No tasks in this phase.')]),
-      ...(allTasks.length > CHILD_PAGE_SIZE ? [group(button('Previous tasks', `child-page:${phase.id}:prev`, { tone: 'quiet', disabled: busy || page === 0 }), { type: 'text', text: `Tasks ${page * CHILD_PAGE_SIZE + 1}–${Math.min(allTasks.length, (page + 1) * CHILD_PAGE_SIZE)} of ${allTasks.length}` }, button('Next tasks', `child-page:${phase.id}:next`, { tone: 'quiet', disabled: busy || page + 1 >= pages }), 'spread')] : []),
-      group(button('Add task', `add-task:${phase.id}`, { tone: 'quiet', disabled: busy }), 'row'),
+      ...(allTasks.length
+        ? [group(...allTasks.map((task) => itemNode(task, allTasks.indexOf(task), allTasks.length)), 'nested')]
+        : [paragraph('No tasks in this phase.')]),
     );
   }
   function draw() {
@@ -137,27 +121,22 @@
       port?.postMessage({ type: 'pico:plugin-ui:render', tree: [card(paragraph('Select a Thread to manage its Todo plan.'))] });
       return;
     }
-    const phases = phaseItems();
-    phasePage = Math.min(phasePage, Math.max(0, Math.ceil(phases.length / PHASE_OPTION_PAGE_SIZE) - 1));
-    const roots = rootItems().filter((item) => showDone || !completed(item) || (item.type === 'phase' && taskItems(item.id).some((task) => !completed(task))));
-    const pageCount = Math.max(1, Math.ceil(roots.length / ROOT_PAGE_SIZE));
-    rootPage = Math.min(rootPage, pageCount - 1);
-    const visibleRoots = roots.slice(rootPage * ROOT_PAGE_SIZE, (rootPage + 1) * ROOT_PAGE_SIZE);
-    const nodes = [card(
+    const roots = rootItems();
+    const nodes = [
+      card(
       group({ type: 'heading', text: 'Todo' }, { type: 'status', text: loading ? 'Loading…' : `${openCount} unfinished`, tone: openCount ? 'neutral' : 'success' }, 'spread'),
-      group({ type: 'select', label: 'Add item type', value: form.type, actionId: 'form.type', disabled: busy, options: [{ label: 'Phase', value: 'phase' }, { label: 'Independent task', value: 'task' }, { label: 'Task in phase', value: 'phase-task' }] },
+      group({ type: 'select', label: 'Add item', value: form.type, actionId: 'form.type', disabled: busy, options: [{ label: 'Phase', value: 'phase' }, { label: 'Independent task', value: 'task' }, { label: 'Task in phase', value: 'phase-task' }] },
         ...(form.type === 'phase-task' ? [{ type: 'select', label: 'Phase', value: form.phaseId, actionId: 'form.phase', disabled: busy, options: phaseOptions(form.phaseId) }] : []), 'grid-2'),
-      ...(form.type === 'phase-task' || items.some((item) => item.type === 'task') ? [phaseOptionPager()] : []),
-      input('Title', form.title, 'form.title', 'Describe the outcome'),
-      group(button('Add', 'add', { tone: 'primary', disabled: busy || !form.title.trim() || (form.type === 'phase-task' && !form.phaseId) }), 'row'),
-      group({ type: 'switch', label: 'Show completed', checked: showDone, actionId: 'show-done', disabled: busy }, 'row'),
-      ...(loading ? [paragraph('Loading Todo items…')] : visibleRoots.map((item) => item.type === 'phase'
+      group(input('Item title', form.title, 'form.title', 'Describe the outcome', true), button('Add', 'add', { tone: 'primary', disabled: busy || !form.title.trim() || (form.type === 'phase-task' && !form.phaseId) }), 'form-row'),
+      ),
+      { type: 'separator' },
+      { type: 'heading', text: 'Todo items', level: 3 },
+      ...(loading ? [paragraph('Loading Todo items…')] : roots.map((item) => item.type === 'phase'
         ? phaseNode(item, roots.indexOf(item))
         : itemNode(item, rootItems().indexOf(item), rootItems().length))),
-      ...(roots.length > ROOT_PAGE_SIZE ? [group(button('Previous items', 'root-page:prev', { tone: 'quiet', disabled: busy || rootPage === 0 }), { type: 'text', text: `Items ${rootPage * ROOT_PAGE_SIZE + 1}–${Math.min(roots.length, (rootPage + 1) * ROOT_PAGE_SIZE)} of ${roots.length}` }, button('Next items', 'root-page:next', { tone: 'quiet', disabled: busy || rootPage + 1 >= pageCount }), 'spread')] : []),
       ...(notice ? [{ type: 'status', text: notice, tone: 'success' }] : []),
       ...(error ? [{ type: 'status', text: error, tone: 'danger' }] : []),
-    )];
+    ];
     port?.postMessage({ type: 'pico:plugin-ui:render', tree: nodes });
   }
   async function refresh() {
@@ -179,7 +158,7 @@
   async function mutate(operations, onSuccess, expectedRevision = revision) {
     if (busy || !context.thread) return;
     const generation = contextGeneration;
-    busy = true; error = ''; notice = ''; draw();
+    expandedOperationsId = ''; busy = true; error = ''; notice = ''; draw();
     try {
       const result = await api('/edit', 'POST', { threadId: context.thread.id, expectedRevision, operations });
       if (generation !== contextGeneration) return;
@@ -204,14 +183,9 @@
     if (id.startsWith('edit.')) { edit[id.slice(5)] = value; draw(); return; }
     if (id === 'blocked.value') { blockerDraft = value; draw(); return; }
     if (busy) return;
-    if (id === 'show-done') { showDone = !showDone; draw(); return; }
-    if (id === 'root-page:prev') { rootPage = Math.max(0, rootPage - 1); draw(); return; }
-    if (id === 'root-page:next') { rootPage += 1; draw(); return; }
-    if (id === 'phase-page:prev') { phasePage = Math.max(0, phasePage - 1); draw(); return; }
-    if (id === 'phase-page:next') { phasePage += 1; draw(); return; }
-    if (id.startsWith('child-page:')) {
-      const [, phaseId, direction] = id.split(':');
-      childPages.set(phaseId, Math.max(0, (childPages.get(phaseId) ?? 0) + (direction === 'next' ? 1 : -1)));
+    if (id.startsWith('more:')) {
+      const itemId = id.slice(5);
+      expandedOperationsId = expandedOperationsId === itemId ? '' : itemId;
       draw(); return;
     }
     if (id === 'blocked.cancel') { pendingBlockedId = ''; blockerDraft = ''; draw(); return; }
@@ -228,14 +202,14 @@
     }
     if (id.startsWith('edit:')) {
       const item = items.find((entry) => entry.id === id.slice(5)); if (!item) return;
-      editingId = item.id; editingRevision = revision; edit = { title: item.title, note: item.note ?? '', nextAction: item.nextAction ?? '', blocker: item.blocker ?? '' }; draw(); return;
+      expandedOperationsId = ''; editingId = item.id; editingRevision = revision; edit = { title: item.title, note: item.note ?? '', nextAction: item.nextAction ?? '', blocker: item.blocker ?? '' }; draw(); return;
     }
-    if (id === 'cancel-edit') { editingId = ''; edit = {}; draw(); return; }
+    if (id === 'cancel-edit') { editingId = ''; edit = {}; expandedOperationsId = ''; draw(); return; }
     if (id.startsWith('save:')) {
       const itemId = id.slice(5); const item = items.find((entry) => entry.id === itemId); if (!item || !String(edit.title ?? '').trim()) return;
       const op = { action: 'update', id: itemId, title: edit.title.trim(), note: edit.note ?? '' };
       if (item.type === 'task') Object.assign(op, { nextAction: edit.nextAction ?? '', blocker: edit.blocker ?? '' });
-      void mutate([op], () => { editingId = ''; edit = {}; }, editingRevision); return;
+      void mutate([op], () => { editingId = ''; edit = {}; expandedOperationsId = ''; }, editingRevision); return;
     }
     if (id.startsWith('done:')) {
       const item = items.find((entry) => entry.id === id.slice(5)); if (!item) return;
@@ -248,7 +222,7 @@
     }
     if (id.startsWith('phase:')) { const item = items.find((entry) => entry.id === id.slice(6)); if (!item) return; void mutate([{ action: 'move', id: item.id, phaseId: value || null, beforeId: null }]); return; }
     if (id.startsWith('move-up:') || id.startsWith('move-down:')) { const item = items.find((entry) => entry.id === id.slice(id.indexOf(':') + 1)); if (item) move(item, id.startsWith('move-up:') ? -1 : 1); return; }
-    if (id.startsWith('add-task:')) { form.type = 'phase-task'; form.phaseId = id.slice(9); draw(); return; }
+    if (id.startsWith('add-task:')) { expandedOperationsId = ''; form.type = 'phase-task'; form.phaseId = id.slice(9); draw(); return; }
     if (id.startsWith('delete:')) {
       const itemId = id.slice(7);
       const item = items.find((entry) => entry.id === itemId);
@@ -262,7 +236,7 @@
     else if (message.type === 'pico:plugin-ui:action') act(message);
     else if (message.type === 'pico:plugin-ui:context') {
       const next = message.context ?? { thread: null };
-      if (context.thread?.id !== next.thread?.id) { contextGeneration++; items = []; revision = 0; openCount = 0; busy = false; loading = Boolean(next.thread); error = ''; notice = ''; editingId = ''; edit = {}; rootPage = 0; phasePage = 0; childPages.clear(); pendingBlockedId = ''; blockerDraft = ''; form = { type: 'phase', title: '', phaseId: '', note: '', nextAction: '', blocker: '' }; }
+      if (context.thread?.id !== next.thread?.id) { contextGeneration++; items = []; revision = 0; openCount = 0; busy = false; loading = Boolean(next.thread); error = ''; notice = ''; editingId = ''; expandedOperationsId = ''; edit = {}; pendingBlockedId = ''; blockerDraft = ''; form = { type: 'phase', title: '', phaseId: '', note: '', nextAction: '', blocker: '' }; }
       context = next; draw(); void refresh();
     } else if (message.type === 'pico:plugin-ui:event' && message.event?.type === 'plugin.updated' && message.event.pluginId === pluginId) void refresh();
   }

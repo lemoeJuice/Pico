@@ -69,6 +69,11 @@ const flush = async () => {
 };
 const text = (tree: unknown) => JSON.stringify(tree);
 const assertValid = (tree: unknown) => expect(validatePluginUiTree(tree, 'thread.toolbar')).toBe(true);
+const actionIds = (node: any): string[] => {
+  if (Array.isArray(node)) return node.flatMap(actionIds);
+  if (!node || typeof node !== 'object') return [];
+  return [...(typeof node.actionId === 'string' ? [node.actionId] : []), ...Object.values(node).flatMap(actionIds)];
+};
 const threadResponse = (items: unknown[], revision = 1) => ({
   revision,
   items,
@@ -94,10 +99,90 @@ it('renders phases and independent tasks in their server order and keeps the tre
   await flush();
   assertValid(h.tree);
   const rendered = text(h.tree);
-  expect(rendered.indexOf('move-up:phase-a')).toBeLessThan(rendered.indexOf('move-up:task-root-a'));
-  expect(rendered.indexOf('move-up:task-root-a')).toBeLessThan(rendered.indexOf('move-up:phase-b'));
-  expect(rendered.indexOf('move-up:phase-b')).toBeLessThan(rendered.indexOf('move-up:task-root-b'));
+  expect(rendered.indexOf('"text":"Phase A"')).toBeLessThan(rendered.indexOf('"text":"Independent A"'));
+  expect(rendered.indexOf('"text":"Independent A"')).toBeLessThan(rendered.indexOf('"text":"Phase B"'));
+  expect(rendered.indexOf('"text":"Phase B"')).toBeLessThan(rendered.indexOf('"text":"Independent B"'));
   expect(rendered).toContain('Child task');
+  expect(rendered).toContain('"text":"Open"');
+  expect(rendered).not.toContain('move-up:phase-a');
+  expect(rendered).not.toContain('delete:task-root-a');
+  expect(rendered).not.toContain('add-task:phase-a');
+  expect(actionIds(h.tree).length).toBe(new Set(actionIds(h.tree)).size);
+  const nestedGroups = (node: any): any[] => {
+    if (Array.isArray(node)) return node.flatMap(nestedGroups);
+    if (!node || typeof node !== 'object') return [];
+    return [
+      ...(node.type === 'group' && node.layout === 'nested' ? [node] : []),
+      ...Object.values(node).flatMap(nestedGroups),
+    ];
+  };
+  const nested = nestedGroups(h.tree);
+  expect(nested).toHaveLength(1);
+  expect(text(nested[0])).toContain('Child task');
+  expect(text(nested[0])).not.toContain('Independent A');
+  expect(text(nested[0])).not.toContain('Independent B');
+});
+
+it('shows completed items, keeps status and phase controls inside Edit, and uses the compact add layout', async () => {
+  const h = createHarness();
+  initialLoad(h, [
+    { id: 'phase-a', type: 'phase', title: 'Phase A', status: 'done' },
+    { id: 'task-a', type: 'task', title: 'Completed task', phaseId: 'phase-a', status: 'done' },
+  ]);
+  await flush();
+  assertValid(h.tree);
+  let rendered = text(h.tree);
+  expect(rendered).toContain('Completed task');
+  expect(rendered).not.toContain('Show completed');
+  expect(rendered).not.toContain('Previous phases');
+  expect(rendered).not.toContain('"label":"Title"');
+  expect(rendered).toContain('"label":"Add item"');
+  expect(rendered).toContain('"label":"Add"');
+  expect(rendered).toContain('"layout":"form-row"');
+  expect(rendered).toContain('"type":"separator"');
+  expect(rendered).toContain('Todo items');
+  expect(rendered).not.toContain('"label":"Status"');
+  expect(rendered).not.toContain('"label":"Phase","value":"phase-a"');
+  expect(rendered).toContain('"text":"Done"');
+
+  h.action('more:task-a');
+  rendered = text(h.tree);
+  expect(rendered).toContain('"label":"Status"');
+  expect(rendered).toContain('"actionId":"phase:task-a"');
+  expect(actionIds(h.tree).filter((id) => id === 'more:task-a')).toHaveLength(1);
+  h.action('more:phase-a');
+  rendered = text(h.tree);
+  expect(rendered).not.toContain('"actionId":"phase:task-a"');
+  expect(rendered).toContain('"actionId":"status:phase-a"');
+  expect(rendered).toContain('"actionId":"add-task:phase-a"');
+  expect(actionIds(h.tree).length).toBe(new Set(actionIds(h.tree)).size);
+
+  h.action('add-task:phase-a');
+  rendered = text(h.tree);
+  expect(rendered).toContain('"value":"phase-task"');
+  expect(rendered).toContain('"actionId":"form.phase"');
+  expect(rendered).toContain('"value":"phase-a"');
+  expect(rendered).not.toContain('"actionId":"add-task:phase-a"');
+  assertValid(h.tree);
+
+  h.action('more:task-a');
+  h.action('edit:task-a');
+  rendered = text(h.tree);
+  expect(rendered).toContain('"actionId":"edit.title"');
+  expect(rendered).not.toContain('"actionId":"phase:task-a"');
+  assertValid(h.tree);
+});
+
+it('shows a phase selector only when Task in phase is selected', async () => {
+  const h = createHarness();
+  initialLoad(h, [{ id: 'phase-a', type: 'phase', title: 'Phase A', status: 'open' }]);
+  await flush();
+  expect(text(h.tree)).not.toContain('"actionId":"form.phase"');
+  h.action('form.type', 'phase-task');
+  const rendered = text(h.tree);
+  expect(rendered).toContain('"actionId":"form.phase"');
+  expect(rendered).toContain('"label":"Phase A"');
+  assertValid(h.tree);
 });
 
 it('sends add, edit, and move operations with the UI camelCase revision contract', async () => {
@@ -143,6 +228,7 @@ it('sends add, edit, and move operations with the UI camelCase revision contract
   );
   await flush();
 
+  h.action('more:task-a');
   h.action('edit:task-a');
   h.action('edit.title', 'Renamed task');
   h.action('edit.note', 'Keep the useful context');
@@ -186,6 +272,7 @@ it('sends add, edit, and move operations with the UI camelCase revision contract
   );
   await flush();
 
+  h.action('more:task-a');
   h.action('move-down:task-a');
   editRequest = h.requests.at(-1)!;
   expect(bodyOf(editRequest)).toEqual({
@@ -200,6 +287,7 @@ it('requires blocker text before committing a blocked task status', async () => 
   initialLoad(h, [{ id: 'task-a', type: 'task', title: 'Resolve dependency', status: 'in_progress' }], 3);
   await flush();
   assertValid(h.tree);
+  h.action('more:task-a');
   h.action('status:task-a', 'blocked');
   expect(h.requests).toHaveLength(1);
   expect(text(h.tree)).toContain('Blocker');
@@ -219,7 +307,8 @@ it('sends a status change when a task checkbox is toggled', async () => {
   const h = createHarness();
   initialLoad(h, [{ id: 'task-a', type: 'task', title: 'Task', status: 'open' }], 3);
   await flush();
-  h.action('done:task-a');
+  h.action('more:task-a');
+  h.action('status:task-a', 'done');
   expect(bodyOf(h.requests.at(-1)!)).toEqual({
     threadId: 'thread-a',
     expectedRevision: 3,
@@ -231,6 +320,7 @@ it('keeps the editing revision if a background refresh observes a concurrent cha
   const h = createHarness();
   initialLoad(h, [{ id: 'task-a', type: 'task', title: 'Original', status: 'open' }], 3);
   await flush();
+  h.action('more:task-a');
   h.action('edit:task-a');
   h.action('edit.title', 'Local change');
   h.context('thread-a');
@@ -244,7 +334,7 @@ it('keeps the editing revision if a background refresh observes a concurrent cha
   expect(bodyOf(h.requests.at(-1)!).expectedRevision).toBe(3);
 });
 
-it('paginates large root and phase task lists without producing invalid or oversized trees', async () => {
+it('shows all root and phase tasks without pagination controls', async () => {
   const h = createHarness();
   const items = [
     { id: 'phase-a', type: 'phase', title: 'Paged phase', status: 'open' },
@@ -265,22 +355,53 @@ it('paginates large root and phase task lists without producing invalid or overs
   initialLoad(h, items);
   await flush();
   assertValid(h.tree);
-  expect(text(h.tree)).toContain('Items 1–4 of 10');
-  expect(text(h.tree)).toContain('Tasks 1–4 of 10');
+  expect(text(h.tree)).not.toContain('Previous items');
+  expect(text(h.tree)).not.toContain('Next items');
+  expect(text(h.tree)).not.toContain('Previous tasks');
+  expect(text(h.tree)).not.toContain('Next tasks');
   expect(text(h.tree)).toContain('Root task 0');
-  expect(text(h.tree)).not.toContain('Root task 8');
-  h.action('child-page:phase-a:next');
-  assertValid(h.tree);
-  expect(text(h.tree)).toContain('Tasks 5–8 of 10');
-  expect(text(h.tree)).toContain('Child task 7');
-  h.action('root-page:next');
-  assertValid(h.tree);
-  expect(text(h.tree)).toContain('Items 5–8 of 10');
-  expect(text(h.tree)).toContain('Root task 3');
-  h.action('root-page:next');
-  assertValid(h.tree);
-  expect(text(h.tree)).toContain('Items 9–10 of 10');
   expect(text(h.tree)).toContain('Root task 8');
+  expect(text(h.tree)).toContain('Child task 9');
+});
+
+it('keeps a maximum 100-item Todo tree within host limits', async () => {
+  const h = createHarness();
+  initialLoad(h, [
+    { id: 'phase-a', type: 'phase', title: 'Phase A', status: 'open' },
+    ...Array.from({ length: 99 }, (_, index) => ({
+      id: `task-${index}`,
+      type: 'task',
+      title: `Task ${index}`,
+      phaseId: 'phase-a',
+      status: 'open',
+    })),
+  ]);
+  await flush();
+  assertValid(h.tree);
+  expect(text(h.tree)).toContain('Task 98');
+  expect(actionIds(h.tree).length).toBeLessThanOrEqual(512);
+});
+
+it('clears the open menu on thread changes and returns cleanly from Edit', async () => {
+  const h = createHarness();
+  initialLoad(h, [{ id: 'task-a', type: 'task', title: 'Thread A task', status: 'open' }]);
+  await flush();
+  h.action('more:task-a');
+  expect(text(h.tree)).toContain('delete:task-a');
+
+  h.context('thread-b');
+  expect(text(h.tree)).not.toContain('delete:task-a');
+  const threadBLoad = h.requests.at(-1)!;
+  expect(threadBLoad.path).toBe('/api/plugins/pico.todo/threads?threadId=thread-b');
+  h.respond(threadBLoad, threadResponse([{ id: 'task-b', type: 'task', title: 'Thread B task', status: 'open' }]));
+  await flush();
+  h.action('more:task-b');
+  h.action('edit:task-b');
+  expect(text(h.tree)).toContain('edit.title');
+  h.action('cancel-edit');
+  expect(text(h.tree)).not.toContain('edit.title');
+  expect(text(h.tree)).not.toContain('delete:task-b');
+  assertValid(h.tree);
 });
 
 it('keeps the rendered tree within host limits with long notes and many long phase names', async () => {
@@ -311,6 +432,7 @@ it('shows a revision conflict, reloads the latest server revision, and displays 
   const h = createHarness();
   initialLoad(h, [{ id: 'task-a', type: 'task', title: 'Old title', status: 'open' }], 2);
   await flush();
+  h.action('more:task-a');
   h.action('edit:task-a');
   h.action('edit.title', 'Local title');
   h.action('save:task-a');
