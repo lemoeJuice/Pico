@@ -30,13 +30,11 @@
   gap: 6px;
 }
 .native-tools-popover {
-  position: absolute;
+  position: fixed;
   z-index: 20;
-  top: calc(100% + 9px);
-  left: 0;
   display: flex;
   width: min(360px, calc(100vw - 28px));
   max-height: min(460px, calc(100vh - 100px));
   flex-direction: column;
-  overflow: hidden;
+  overflow: auto;
 }

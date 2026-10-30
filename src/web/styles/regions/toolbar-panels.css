@@ -37,6 +37,7 @@
 }
 .native-tools-heading {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -151,6 +152,7 @@
 }
 .native-tools-empty,
 .native-tools-error {
+  flex-shrink: 0;
   margin: 0;
   padding: 15px;
   color: #87928a;

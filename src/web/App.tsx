@@ -14,6 +14,7 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
+import { createPortal } from 'react-dom';
 import type {
   AssistantPayload,
   CanonicalRecord,
@@ -39,6 +40,7 @@ import { shouldSubmitOnEnter } from './composer-keys.js';
 import { upsertProjectThread } from './project-threads.js';
 import { updateProjectThreadList, updateThreadList, updateThreadSnapshot } from './thread-state.js';
 import { ThreadToolRequestGuard } from './thread-tool-requests.js';
+import { toolsPanelPosition } from './tools-panel-position.js';
 import { fetchStableSnapshot, snapshotForSelection, snapshotThreadIsSelected } from './snapshot-consistency.js';
 import { loadBootstrapResource } from './bootstrap-load.js';
 import { fetchWithGetTimeout } from './fetch-with-get-timeout.js';
@@ -791,6 +793,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [threadToolsLoading, setThreadToolsLoading] = useState(false);
   const [threadToolsError, setThreadToolsError] = useState('');
   const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
+  const [toolsPanelStyle, setToolsPanelStyle] = useState<CSSProperties | null>(null);
   const [savingToolName, setSavingToolName] = useState<string | null>(null);
   const [pluginEvents, setPluginEvents] = useState<Array<{ sequence: number; event: PluginUiEvent }>>([]);
   const [commands, setCommands] = useState<Array<{ name: string; description: string; pluginId: string }>>([]);
@@ -889,6 +892,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   } | null>(null);
   const messageTextareaRef = useRef<HTMLTextAreaElement>(null);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
+  const toolsPanelRef = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
   const snapshotRequest = useRef(0);
   const snapshotLoad = useRef<{ threadId: string; request: number; promise: Promise<void> } | null>(null);
@@ -1217,7 +1221,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   useEffect(() => {
     if (!toolsMenuOpen) return;
     const dismissOutside = (event: PointerEvent): void => {
-      if (event.target instanceof Node && !toolsMenuRef.current?.contains(event.target)) setToolsMenuOpen(false);
+      if (
+        event.target instanceof Node &&
+        !toolsMenuRef.current?.contains(event.target) &&
+        !toolsPanelRef.current?.contains(event.target)
+      ) {
+        setToolsMenuOpen(false);
+      }
     };
     const dismissEscape = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') setToolsMenuOpen(false);
@@ -1229,6 +1239,46 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       window.removeEventListener('keydown', dismissEscape);
     };
   }, [toolsMenuOpen]);
+
+  useLayoutEffect(() => {
+    if (!toolsMenuOpen) {
+      setToolsPanelStyle(null);
+      return;
+    }
+    const anchor = toolsMenuRef.current;
+    const panel = toolsPanelRef.current;
+    if (!anchor || !panel) return;
+    const updatePosition = (): void => {
+      const anchorRect = anchor.getBoundingClientRect();
+      const contentHeight = Array.from(panel.children).reduce((height, child) => height + child.scrollHeight, 2);
+      const position = toolsPanelPosition(anchorRect, panel.getBoundingClientRect().width, contentHeight, {
+        width: window.innerWidth,
+        height: window.innerHeight,
+      });
+      setToolsPanelStyle((previous) =>
+        previous &&
+        previous.left === position.left &&
+        previous.top === position.top &&
+        previous.bottom === position.bottom &&
+        previous.maxHeight === position.maxHeight
+          ? previous
+          : position,
+      );
+    };
+    updatePosition();
+    const observer = new ResizeObserver(updatePosition);
+    observer.observe(anchor);
+    if (anchor.parentElement) observer.observe(anchor.parentElement);
+    observer.observe(panel);
+    Array.from(panel.children).forEach((child) => observer.observe(child));
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [toolsMenuOpen, threadTools, threadToolsLoading, threadToolsError]);
 
   const toggleThreadTool = async (tool: ThreadToolView): Promise<void> => {
     if (!selectedThread || savingToolName) return;
@@ -3465,61 +3515,70 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                       {threadTools.filter((tool) => tool.enabled).length}
                     </span>
                   </button>
-                  {toolsMenuOpen ? (
-                    <div className="native-tools-popover" role="dialog" aria-label="Thread tools">
-                      <div className="native-tools-heading">
-                        <div>
-                          <strong>Available tools</strong>
-                          <span>Choose which tools this Thread can use.</span>
-                        </div>
-                        <button
-                          type="button"
-                          className="native-tools-refresh"
-                          disabled={threadToolsLoading}
-                          onClick={() => selectedThreadId && void loadThreadTools(selectedThreadId)}
+                  {toolsMenuOpen
+                    ? createPortal(
+                        <div
+                          ref={toolsPanelRef}
+                          className="native-tools-popover"
+                          role="dialog"
+                          aria-label="Thread tools"
+                          style={toolsPanelStyle ?? { visibility: 'hidden' }}
                         >
-                          {threadToolsLoading ? 'Loading…' : 'Refresh'}
-                        </button>
-                      </div>
-                      {threadToolsError ? (
-                        <p className="native-tools-error" role="status">
-                          {threadToolsError}
-                        </p>
-                      ) : null}
-                      {threadToolsLoading && threadTools.length === 0 ? (
-                        <p className="native-tools-empty">Loading Thread tools…</p>
-                      ) : threadTools.length === 0 ? (
-                        <p className="native-tools-empty">No tools are available in this Thread.</p>
-                      ) : (
-                        <div className="native-tools-list">
-                          {threadTools.map((tool) => (
-                            <div className="native-tool-row" key={tool.name}>
-                              <div className="native-tool-copy">
-                                <div className="native-tool-title">
-                                  <strong>{tool.name}</strong>
-                                  <span className={`native-tool-source source-${tool.source}`}>
-                                    {threadToolSourceLabel(tool.source)}
-                                  </span>
-                                </div>
-                                <p>{tool.description}</p>
-                              </div>
-                              <button
-                                type="button"
-                                className={`native-tool-switch ${tool.enabled ? 'is-enabled' : ''}`}
-                                role="switch"
-                                aria-checked={tool.enabled}
-                                aria-label={`${tool.enabled ? 'Disable' : 'Enable'} ${tool.name}`}
-                                disabled={savingToolName !== null}
-                                onClick={() => void toggleThreadTool(tool)}
-                              >
-                                <span />
-                              </button>
+                          <div className="native-tools-heading">
+                            <div>
+                              <strong>Available tools</strong>
+                              <span>Choose which tools this Thread can use.</span>
                             </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ) : null}
+                            <button
+                              type="button"
+                              className="native-tools-refresh"
+                              disabled={threadToolsLoading}
+                              onClick={() => selectedThreadId && void loadThreadTools(selectedThreadId)}
+                            >
+                              {threadToolsLoading ? 'Loading…' : 'Refresh'}
+                            </button>
+                          </div>
+                          {threadToolsError ? (
+                            <p className="native-tools-error" role="status">
+                              {threadToolsError}
+                            </p>
+                          ) : null}
+                          {threadToolsLoading && threadTools.length === 0 ? (
+                            <p className="native-tools-empty">Loading Thread tools…</p>
+                          ) : threadTools.length === 0 ? (
+                            <p className="native-tools-empty">No tools are available in this Thread.</p>
+                          ) : (
+                            <div className="native-tools-list">
+                              {threadTools.map((tool) => (
+                                <div className="native-tool-row" key={tool.name}>
+                                  <div className="native-tool-copy">
+                                    <div className="native-tool-title">
+                                      <strong>{tool.name}</strong>
+                                      <span className={`native-tool-source source-${tool.source}`}>
+                                        {threadToolSourceLabel(tool.source)}
+                                      </span>
+                                    </div>
+                                    <p>{tool.description}</p>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className={`native-tool-switch ${tool.enabled ? 'is-enabled' : ''}`}
+                                    role="switch"
+                                    aria-checked={tool.enabled}
+                                    aria-label={`${tool.enabled ? 'Disable' : 'Enable'} ${tool.name}`}
+                                    disabled={savingToolName !== null}
+                                    onClick={() => void toggleThreadTool(tool)}
+                                  >
+                                    <span />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>,
+                        document.body,
+                      )
+                    : null}
                 </div>
                 {toolbarContributions.map((item) => (
                   <PluginContributionView
