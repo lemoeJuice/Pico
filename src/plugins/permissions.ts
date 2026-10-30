@@ -2,6 +2,7 @@ import type { PicoPlugin } from './host.js';
 import type { Thread, ToolDefinition, UiContribution } from '../core/types.js';
 import type { ToolInvocationInput } from '../contracts/plugin-pipeline.js';
 import type { ModelPrompt } from '../contracts/model.js';
+import { randomUUID } from 'node:crypto';
 
 type PermissionPolicy = 'allow' | 'deny' | 'ask';
 
@@ -95,7 +96,9 @@ export const permissionPlugin: PicoPlugin = {
   activate(pluginContext) {
     const context = pluginContext;
     const { pipelines, state, cache, canonical, ui, http, executions, threads, models } = context;
-    const decisionWaiters = new Map<string, Set<(allow: boolean) => void>>();
+    type DecisionWake = boolean | 'recheck';
+    const decisionWaiters = new Map<string, Set<(result: DecisionWake) => void>>();
+    const reviewGenerations = new Map<string, number>();
     const readAutoReview = (): Record<string, boolean> =>
       objectValue<Record<string, boolean>>(state.get('autoReview', {}));
     const readAutoReviewDenials = (): Record<string, boolean> =>
@@ -232,9 +235,9 @@ export const permissionPlugin: PicoPlugin = {
       return approval;
     };
 
-    const reviewAsk = async (input: ToolInvocationInput): Promise<PermissionApproval | null> => {
+    const reviewAsk = async (input: ToolInvocationInput, retry = false): Promise<PermissionApproval | null> => {
       if (!readAutoReview()[input.thread.id]) return null;
-      const callId = `permission-review:${input.executionId}`;
+      const callId = `permission-review:${input.executionId}${retry ? `:retry:${randomUUID()}` : ''}`;
       const controller = new AbortController();
       let timedOut = false;
       const abortFromExecution = (): void => controller.abort(input.signal.reason);
@@ -420,18 +423,25 @@ export const permissionPlugin: PicoPlugin = {
       }
     };
 
-    const awaitDecision = (approval: PermissionApproval, signal: AbortSignal): Promise<boolean> => {
+    const wakePendingApprovals = (threadId: string): void => {
+      for (const approval of Object.values(readApprovals())) {
+        if (approval.threadId !== threadId || approval.status !== 'pending') continue;
+        for (const wake of decisionWaiters.get(approval.executionId) ?? []) wake('recheck');
+      }
+    };
+
+    const awaitDecision = (approval: PermissionApproval, signal: AbortSignal): Promise<DecisionWake> => {
       if (approval.status !== 'pending') return Promise.resolve(approval.status === 'allowed');
-      return new Promise<boolean>((resolve, reject) => {
+      return new Promise<DecisionWake>((resolve, reject) => {
         let onAbort = (): void => undefined;
-        const finish = (allow: boolean): void => {
+        const finish = (result: DecisionWake): void => {
           signal.removeEventListener('abort', onAbort);
           const currentWaiters = decisionWaiters.get(approval.executionId);
           currentWaiters?.delete(finish);
           if (currentWaiters?.size === 0) decisionWaiters.delete(approval.executionId);
-          resolve(allow);
+          resolve(result);
         };
-        const waiters = decisionWaiters.get(approval.executionId) ?? new Set<(allow: boolean) => void>();
+        const waiters = decisionWaiters.get(approval.executionId) ?? new Set<(result: DecisionWake) => void>();
         waiters.add(finish);
         decisionWaiters.set(approval.executionId, waiters);
         onAbort = (): void => {
@@ -544,14 +554,40 @@ export const permissionPlugin: PicoPlugin = {
       }
       if (policy === 'ask') {
         let approval = createApproval(input);
-        if (readAutoReview()[input.thread.id]) {
-          approval = (await reviewAsk(input)) ?? approval;
+        let notified = false;
+        let lastReviewGeneration = -1;
+        while (true) {
+          approval = readApprovals()[input.executionId] ?? approval;
+          const generation = reviewGenerations.get(input.thread.id) ?? 0;
+          if (
+            approval.status === 'pending' &&
+            readAutoReview()[input.thread.id] &&
+            (!approval.reviewer || (approval.reviewer.outcome === 'unavailable' && generation !== lastReviewGeneration))
+          ) {
+            lastReviewGeneration = generation;
+            approval = (await reviewAsk(input, approval.reviewer?.outcome === 'unavailable')) ?? approval;
+            if (approval.status === 'pending' && (reviewGenerations.get(input.thread.id) ?? 0) !== generation) continue;
+          }
           if (approval.status === 'allowed') return next(input);
           if (approval.status === 'failed' && approval.reviewer?.failure) {
             const reason = approval.reviewer.reason;
             return input.fail(reason, reviewFailureResult(reason, approval.reviewer));
           }
-          if (approval.reviewer?.outcome === 'deny' && readAutoReviewDenials()[input.thread.id]) {
+          if (
+            approval.status === 'pending' &&
+            readAutoReview()[input.thread.id] &&
+            readAutoReviewDenials()[input.thread.id] &&
+            approval.reviewer?.outcome === 'unavailable'
+          ) {
+            approval = writeDecision(approval, 'failed', { source: 'reviewer', reason: approval.reviewer.reason });
+            continue;
+          }
+          if (
+            approval.status === 'pending' &&
+            approval.reviewer?.outcome === 'deny' &&
+            readAutoReview()[input.thread.id] &&
+            readAutoReviewDenials()[input.thread.id]
+          ) {
             const reason = `Denied after Auto-review: ${approval.reviewer.reason}`;
             const denied = writeDecision(approval, 'denied', {
               source: 'reviewer',
@@ -559,21 +595,25 @@ export const permissionPlugin: PicoPlugin = {
             });
             return input.fail(reason, deniedResult(reason, denied.reviewer ? { reviewer: denied.reviewer } : {}));
           }
-        }
-        if (approval.status === 'pending') {
-          threads.notifyParent(
-            input.thread.id,
-            `permission:${approval.executionId}`,
-            `Child Thread "${input.thread.title}" (${input.thread.id}) is waiting for user approval of ${approval.toolName}. The user can review the request in the parent Thread.`,
-          );
-        }
-        const approved = await awaitDecision(approval, input.signal);
-        if (!approved) {
-          const reason =
-            approval.reviewer?.outcome === 'deny'
-              ? `Denied after Auto-review: ${approval.reviewer.reason}`
-              : 'Denied by the user.';
-          return input.fail(reason, deniedResult(reason, approval.reviewer ? { reviewer: approval.reviewer } : {}));
+          if (approval.status === 'pending' && !notified) {
+            threads.notifyParent(
+              input.thread.id,
+              `permission:${approval.executionId}`,
+              `Child Thread "${input.thread.title}" (${input.thread.id}) is waiting for user approval of ${approval.toolName}. The user can review the request in the parent Thread.`,
+            );
+            notified = true;
+          }
+          const approved = await awaitDecision(approval, input.signal);
+          if (approved === 'recheck') continue;
+          approval = readApprovals()[input.executionId] ?? approval;
+          if (!approved) {
+            const reason =
+              approval.decisionSource === 'reviewer' && approval.reviewer?.outcome === 'deny'
+                ? `Denied after Auto-review: ${approval.reviewer.reason}`
+                : 'Denied by the user.';
+            return input.fail(reason, deniedResult(reason, approval.reviewer ? { reviewer: approval.reviewer } : {}));
+          }
+          break;
         }
       }
       return next(input);
@@ -712,6 +752,7 @@ export const permissionPlugin: PicoPlugin = {
       }
       if (!isDescendant) throw new Error('Approval is not from an active descendant Thread in the same Project');
 
+      const wasAutoReview = readAutoReview()[approval.threadId] === true;
       state.transaction(() => {
         const autoReview = readAutoReview();
         const autoReviewDenials = readAutoReviewDenials();
@@ -721,6 +762,8 @@ export const permissionPlugin: PicoPlugin = {
         canonical.append(approval.threadId, { action: 'reviewer.mode', mode: 'auto' });
         canonical.append(approval.threadId, { action: 'reviewer.denial-mode', mode: 'direct' });
       });
+      if (!wasAutoReview) reviewGenerations.set(approval.threadId, (reviewGenerations.get(approval.threadId) ?? 0) + 1);
+      wakePendingApprovals(approval.threadId);
 
       return {
         parentThreadId,
@@ -736,8 +779,13 @@ export const permissionPlugin: PicoPlugin = {
       const threadId = typeof value.threadId === 'string' ? value.threadId : '';
       if (!threadId || typeof value.enabled !== 'boolean') throw new Error('threadId and enabled are required');
       if (!threads.get(threadId)) throw new Error('Thread not found');
-      state.set('autoReview', { ...readAutoReview(), [threadId]: value.enabled });
+      const autoReview = readAutoReview();
+      state.set('autoReview', { ...autoReview, [threadId]: value.enabled });
       canonical.append(threadId, { action: 'reviewer.mode', mode: value.enabled ? 'auto' : 'user' });
+      if (value.enabled && autoReview[threadId] !== true) {
+        reviewGenerations.set(threadId, (reviewGenerations.get(threadId) ?? 0) + 1);
+      }
+      if (value.enabled) wakePendingApprovals(threadId);
       return { threadId, autoReview: value.enabled };
     });
     http.register('PUT', '/reviewer-denials', ({ body }) => {
@@ -747,6 +795,7 @@ export const permissionPlugin: PicoPlugin = {
       if (!threads.get(threadId)) throw new Error('Thread not found');
       state.set('autoReviewDenials', { ...readAutoReviewDenials(), [threadId]: value.enabled });
       canonical.append(threadId, { action: 'reviewer.denial-mode', mode: value.enabled ? 'direct' : 'human' });
+      if (value.enabled) wakePendingApprovals(threadId);
       return { threadId, autoReviewDenials: value.enabled };
     });
     http.register('POST', '/approvals', ({ body }) => {

@@ -35,6 +35,200 @@ function isReviewer(prompt: ModelPrompt): boolean {
 }
 
 describe('Permission Auto-review', () => {
+  it('retries an unavailable reviewer after Auto-review is disabled and enabled again', async () => {
+    let mainCalls = 0;
+    let reviewerCalls = 0;
+    const model = new FakeModel((prompt) => {
+      if (isReviewer(prompt)) {
+        reviewerCalls += 1;
+        if (reviewerCalls === 1) throw new Error('Reviewer temporarily unavailable.');
+        return response('{"decision":"allow","reason":"The requested read is appropriate."}');
+      }
+      mainCalls += 1;
+      return mainCalls === 1
+        ? response('', [{ id: 'retry-review-read', name: 'read_file', arguments: { path: 'facts.txt' } }])
+        : response('The file was read.');
+    });
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
+    environments.push(env);
+    const thread = env.createThread('host');
+    try {
+      await route(env.runtime, 'PUT', '/reviewer', { threadId: thread.id, enabled: true });
+      await env.runtime.submit(thread.id, 'retry-auto-review', 'Read facts.txt');
+      let view = await route<{ approvals: Array<Record<string, unknown>> }>(
+        env.runtime,
+        'GET',
+        '/threads',
+        undefined,
+        thread.id,
+      );
+      for (let i = 0; i < 100 && view.approvals[0]?.reviewer === undefined; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        view = await route(env.runtime, 'GET', '/threads', undefined, thread.id);
+      }
+      expect(view.approvals[0]).toMatchObject({
+        status: 'pending',
+        reviewer: { outcome: 'unavailable' },
+      });
+      expect(reviewerCalls).toBe(1);
+
+      await route(env.runtime, 'PUT', '/reviewer', { threadId: thread.id, enabled: false });
+      await route(env.runtime, 'PUT', '/reviewer', { threadId: thread.id, enabled: true });
+      for (let i = 0; i < 100; i += 1) {
+        view = await route(env.runtime, 'GET', '/threads', undefined, thread.id);
+        if (view.approvals[0]?.status === 'allowed') break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(view.approvals[0]).toMatchObject({
+        status: 'allowed',
+        decisionSource: 'reviewer',
+        reviewer: { outcome: 'allow', reason: 'The requested read is appropriate.' },
+      });
+      expect(reviewerCalls).toBe(2);
+      await env.runtime.drain();
+    } finally {
+      await env.runtime.interrupt(thread.id);
+    }
+  });
+
+  it('reviews an existing pending request when Auto-review is enabled', async () => {
+    let mainCalls = 0;
+    const model = new FakeModel((prompt) => {
+      if (isReviewer(prompt)) return response('{"decision":"allow","reason":"The requested read is appropriate."}');
+      mainCalls += 1;
+      return mainCalls === 1
+        ? response('', [{ id: 'late-review-read', name: 'read_file', arguments: { path: 'facts.txt' } }])
+        : response('The file was read.');
+    });
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
+    environments.push(env);
+    const thread = env.createThread('host');
+    await writeFile(`${env.workspace}/facts.txt`, 'reviewed content', 'utf8');
+    try {
+      await env.runtime.submit(thread.id, 'late-auto-review', 'Read facts.txt');
+      let view = await route<{ approvals: Array<Record<string, unknown>> }>(
+        env.runtime,
+        'GET',
+        '/threads',
+        undefined,
+        thread.id,
+      );
+      for (let i = 0; i < 100 && view.approvals[0]?.status !== 'pending'; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        view = await route(env.runtime, 'GET', '/threads', undefined, thread.id);
+      }
+      const approval = view.approvals[0]!;
+      expect(approval).toMatchObject({ status: 'pending' });
+      expect(approval.reviewer).toBeUndefined();
+
+      await route(env.runtime, 'PUT', '/reviewer', { threadId: thread.id, enabled: true });
+      for (let i = 0; i < 100; i += 1) {
+        view = await route(env.runtime, 'GET', '/threads', undefined, thread.id);
+        if (view.approvals[0]?.status === 'allowed') break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(view.approvals[0]).toMatchObject({
+        status: 'allowed',
+        decisionSource: 'reviewer',
+        reviewer: { outcome: 'allow', reason: 'The requested read is appropriate.' },
+      });
+      expect(model.prompts.filter(isReviewer)).toHaveLength(1);
+      await env.runtime.drain();
+    } finally {
+      await env.runtime.interrupt(thread.id);
+    }
+  });
+
+  it('applies an existing reviewer denial when automatic denials are enabled without rerunning review', async () => {
+    let mainCalls = 0;
+    const model = new FakeModel((prompt) => {
+      if (isReviewer(prompt)) return response('{"decision":"deny","reason":"The request is not justified."}');
+      mainCalls += 1;
+      return mainCalls === 1
+        ? response('', [{ id: 'late-deny-read', name: 'read_file', arguments: { path: 'facts.txt' } }])
+        : response('This should not be reached.');
+    });
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
+    environments.push(env);
+    const thread = env.createThread('host');
+    try {
+      await route(env.runtime, 'PUT', '/reviewer', { threadId: thread.id, enabled: true });
+      await env.runtime.submit(thread.id, 'late-auto-denial', 'Read facts.txt');
+      let view = await route<{ approvals: Array<Record<string, unknown>> }>(
+        env.runtime,
+        'GET',
+        '/threads',
+        undefined,
+        thread.id,
+      );
+      for (let i = 0; i < 100 && view.approvals[0]?.reviewer === undefined; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        view = await route(env.runtime, 'GET', '/threads', undefined, thread.id);
+      }
+      expect(view.approvals[0]).toMatchObject({
+        status: 'pending',
+        reviewer: { outcome: 'deny', reason: 'The request is not justified.' },
+      });
+
+      await route(env.runtime, 'PUT', '/reviewer-denials', { threadId: thread.id, enabled: true });
+      for (let i = 0; i < 100; i += 1) {
+        view = await route(env.runtime, 'GET', '/threads', undefined, thread.id);
+        if (view.approvals[0]?.status === 'denied') break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(view.approvals[0]).toMatchObject({ status: 'denied', decisionSource: 'reviewer' });
+      expect(model.prompts.filter(isReviewer)).toHaveLength(1);
+      await env.runtime.drain();
+    } finally {
+      await env.runtime.interrupt(thread.id);
+    }
+  });
+
+  it('keeps a human approval when it wins a race with a newly triggered review', async () => {
+    const reviewStarted = deferred<void>();
+    const reviewResult = deferred<ReturnType<typeof response>>();
+    let mainCalls = 0;
+    const model = new FakeModel((prompt) => {
+      if (isReviewer(prompt)) {
+        reviewStarted.resolve();
+        return reviewResult.promise;
+      }
+      mainCalls += 1;
+      return mainCalls === 1
+        ? response('', [{ id: 'racing-review-read', name: 'read_file', arguments: { path: 'facts.txt' } }])
+        : response('The user approved the read.');
+    });
+    const env = await setupRuntime(model, { plugins: [permissionPlugin] });
+    environments.push(env);
+    const thread = env.createThread('host');
+    try {
+      await env.runtime.submit(thread.id, 'racing-auto-review', 'Read facts.txt');
+      let view = await route<{ approvals: Array<Record<string, unknown>> }>(
+        env.runtime,
+        'GET',
+        '/threads',
+        undefined,
+        thread.id,
+      );
+      for (let i = 0; i < 100 && view.approvals[0]?.status !== 'pending'; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        view = await route(env.runtime, 'GET', '/threads', undefined, thread.id);
+      }
+      const executionId = String(view.approvals[0]?.executionId);
+      await route(env.runtime, 'PUT', '/reviewer', { threadId: thread.id, enabled: true });
+      await reviewStarted.promise;
+      await route(env.runtime, 'POST', '/approvals', { executionId, allow: true });
+      reviewResult.resolve(response('{"decision":"deny","reason":"Late reviewer denial."}'));
+      await env.runtime.drain();
+      view = await route(env.runtime, 'GET', '/threads', undefined, thread.id);
+      expect(view.approvals[0]).toMatchObject({ status: 'allowed', decisionSource: 'user' });
+      expect(model.prompts.filter(isReviewer)).toHaveLength(1);
+    } finally {
+      reviewResult.resolve(response('{"decision":"deny","reason":"Late reviewer denial."}'));
+      await env.runtime.interrupt(thread.id);
+    }
+  });
+
   it('reviews only ask requests and binds an allow to the single invocation', async () => {
     let mainCalls = 0;
     const model = new FakeModel((prompt) => {
@@ -44,7 +238,9 @@ describe('Permission Auto-review', () => {
         expect(evidence.requestedAction).toEqual({ tool: 'read_file', arguments: { path: 'facts.txt' } });
         expect(evidence.executionBoundary.statement).toContain('No broader access');
         expect(evidence.executionBoundary.workspaceRole).toBe('reference');
-        expect(prompt.system).toContain('A target outside that path or an absent workspace is not itself grounds for denial');
+        expect(prompt.system).toContain(
+          'A target outside that path or an absent workspace is not itself grounds for denial',
+        );
         return response('{"decision":"allow","reason":"The requested file is within the workspace."}');
       }
       mainCalls += 1;

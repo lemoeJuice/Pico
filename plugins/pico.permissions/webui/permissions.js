@@ -59,7 +59,7 @@
             { type: 'switch', label: 'Apply reviewer denials directly', checked: data.autoReviewDenials, actionId: 'reviewer-denials', disabled: busy || !data.autoReview, visuallyHidden: true },
           ] },
         ] },
-        para('Skip manual review for denials. A timeout fails temporarily without a decision; other reviewer errors still need human review.'),
+        para('Skip manual review for denials. Reviewer failures do not make an approval decision.'),
       ] },
     ];
     if (error) content.push({ type: 'status', text: error, tone: 'danger' });
@@ -91,12 +91,20 @@
     return data.descendantApprovals.map((approval) => { const token = childActionToken(approval.executionId); return ({ type: 'card', children: [{ type: 'group', layout: 'stack-compact', children: [
       { type: 'heading', text: `${approval.threadTitle || 'Child Thread'} · ${approval.toolName}` },
       para('This child Thread is waiting for permission.'),
-      { type: 'group', layout: 'spread', children: [
-        { type: 'status', text: `Auto-review ${approval.autoReview ? 'on' : 'off'} · automatic denials ${approval.autoReviewDenials ? 'on' : 'off'}`, tone: approval.autoReview && approval.autoReviewDenials ? 'success' : 'neutral' },
-        button('Switch to auto', `child-auto:${token}`, busy || (approval.autoReview === true && approval.autoReviewDenials === true), 'soft'),
-      ] },
-      para('For future requests, automatic review can allow or deny without asking. This request still needs a decision.'),
+      { type: 'status', text: `Auto-review ${approval.autoReview ? 'on' : 'off'} · automatic denials ${approval.autoReviewDenials ? 'on' : 'off'}`, tone: approval.autoReview && approval.autoReviewDenials ? 'success' : 'neutral' },
+      para('Allow in Thread handles this request and future requests for this tool. Switch to auto can decide this request and future requests without asking.'),
       ...(error ? [{ type: 'status', text: error, tone: 'danger' }] : []),
+      { type: 'group', layout: 'spread', children: [
+        { type: 'actions', children: [
+          button('Deny', `child-deny:${token}`, busy, 'danger'),
+          button('Allow once', `child-allow:${token}`, busy, 'primary'),
+          ...(!approval.reviewer ? [button('Allow in Thread', `child-allow-thread:${token}`, busy)] : []),
+        ] },
+        { type: 'actions', children: [
+          button('Open Thread', `child-open:${token}`, busy),
+          button('Switch to auto', `child-auto:${token}`, busy || (approval.autoReview === true && approval.autoReviewDenials === true), 'soft'),
+        ] },
+      ] },
       { type: 'disclosure', label: 'View tool call details', open: expandedChildApprovals.has(approval.executionId), actionId: `child-expand:${token}`, children: [
         ...(approval.reviewer ? [
           { type: 'status', text: `Auto-review: ${approval.reviewer.outcome}`, tone: approval.reviewer.outcome === 'allow' ? 'success' : approval.reviewer.outcome === 'deny' ? 'danger' : 'neutral' },
@@ -105,11 +113,6 @@
         ] : []),
         { type: 'heading', level: 4, text: 'Tool arguments' },
         para(JSON.stringify(approval.arguments ?? {}, null, 2)),
-        { type: 'actions', children: [
-          button('Deny', `child-deny:${token}`, busy, 'danger'),
-          button('Allow once', `child-allow:${token}`, busy, 'primary'),
-          button('Open Thread', `child-open:${token}`, busy),
-        ] },
       ] },
     ] }] }); });
   }
@@ -147,14 +150,15 @@
     const id = action.actionId;
     if (id === 'mcp-server') { if (!context.mcpServer?.id) return; await update({ path: '/mcp-servers' }, { serverId: context.mcpServer.id, enabled: action.value === 'true' }); return; }
     if (id.startsWith('open:')) { try { await send('open-thread', { threadId: id.slice(5) }); } catch (reason) { error = reason instanceof Error ? reason.message : String(reason); draw(); } return; }
-    if (/^child-(expand|allow|deny|open|auto):[0-9]+$/.test(id)) {
+    if (/^child-(expand|allow|allow-thread|deny|open|auto):[0-9]+$/.test(id)) {
       const [kind, token] = id.split(':'), executionId = childExecutionByAction.get(token);
       const approval = data.descendantApprovals.find((item) => item.executionId === executionId);
       if (!approval) return;
       if (kind === 'child-expand') { if (expandedChildApprovals.has(executionId)) expandedChildApprovals.delete(executionId); else expandedChildApprovals.add(executionId); draw(); return; }
       if (kind === 'child-open') { try { await send('open-thread', { threadId: approval.threadId }); } catch (reason) { error = reason instanceof Error ? reason.message : String(reason); draw(); } return; }
       if (kind === 'child-auto') { const parentThreadId = context.threadId ?? context.thread?.id; if (!parentThreadId || busy || (approval.autoReview && approval.autoReviewDenials)) return; await update({ path: '/child-auto-review', method: 'POST' }, { parentThreadId, executionId }); return; }
-      await update({ path: '/approvals', method: 'POST' }, { executionId, allow: kind === 'child-allow', rememberForThread: false }); return;
+      const allow = kind === 'child-allow' || kind === 'child-allow-thread';
+      await update({ path: '/approvals', method: 'POST' }, { executionId, allow, rememberForThread: kind === 'child-allow-thread' }); return;
     }
     if (id.startsWith('tool:')) { const toolName = id.slice(5), tool = data.tools.find((x) => x.name === toolName); if (!tool || !context.thread) return; await update({ path: '/rules' }, { threadId: context.thread.id, toolName, policy: action.value === 'true' ? 'allow' : 'ask' }); return; }
     if (id === 'reviewer' || id === 'reviewer-denials') { if (!context.thread) return; await update({ path: id === 'reviewer' ? '/reviewer' : '/reviewer-denials' }, { threadId: context.thread.id, enabled: action.value === 'true' }); return; }
