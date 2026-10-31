@@ -5,6 +5,21 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 
 const validId = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
+/** Find loaded plugins whose registered WebUI entry permits published asset checks. */
+export function registeredPluginWebUis(pluginInfo) {
+  const registered = new Set();
+  for (const contribution of [...(pluginInfo?.pages ?? []), ...(pluginInfo?.ui ?? [])]) {
+    if (contribution?.entry === 'webui' && typeof contribution.pluginId === 'string') registered.add(contribution.pluginId);
+  }
+  for (const theme of pluginInfo?.themes ?? []) {
+    if (
+      typeof theme?.pluginId === 'string' &&
+      (theme.background?.entry === 'webui' || theme.brandIcon?.entry === 'webui')
+    ) registered.add(theme.pluginId);
+  }
+  return registered;
+}
+
 async function copyTree(source, target) {
   const info = await lstat(source);
   if (info.isSymbolicLink()) throw new Error(`Refusing symlink in web snapshot: ${source}`);

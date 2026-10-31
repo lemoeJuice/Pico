@@ -32,7 +32,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { buildReleaseManifest, diagnoseChanges, readReleaseBaseline, writeReleaseBaseline } from './deploy/manifest.mjs';
 import { createSourceSnapshot, removeSourceSnapshot } from './deploy/snapshot.mjs';
-import { prepareWebPublication } from './deploy/publish-web.mjs';
+import { prepareWebPublication, registeredPluginWebUis } from './deploy/publish-web.mjs';
 import { compareInstalledLock } from './deploy/dependencies.mjs';
 import { runtimeArtifactHashes } from './deploy/artifacts.mjs';
 import { selectDeploymentScope } from './deploy/selection.mjs';
@@ -870,8 +870,7 @@ function requireUnchangedPluginEntrypoints(snapshotManifest) {
 }
 
 async function verifyPublication(baseUrl, cookie, publication, pluginInfo) {
-  const registrations = [...(pluginInfo?.pages ?? []), ...(pluginInfo?.ui ?? [])];
-  const registered = new Set(registrations.filter((entry) => entry.entry === 'webui').map((entry) => entry.pluginId));
+  const registered = registeredPluginWebUis(pluginInfo);
   for (const url of publication.urls) {
     const plugin = /^\/_pico\/plugin-ui\/([^/]+)\//.exec(url)?.[1];
     if (plugin && !registered.has(plugin)) continue; // Disabled plugins have no accessible route.

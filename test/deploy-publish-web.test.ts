@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 // @ts-expect-error Deployment scripts are JavaScript and have no declaration files.
-import { prepareWebPublication } from '../scripts/deploy/publish-web.mjs';
+import { prepareWebPublication, registeredPluginWebUis } from '../scripts/deploy/publish-web.mjs';
 
 const roots: string[] = [];
 async function makeRoot() {
@@ -15,6 +15,19 @@ async function makeRoot() {
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+it('includes plugins registered solely through theme image assets in publication checks', () => {
+  const registered = registeredPluginWebUis({
+    pages: [{ pluginId: 'page.plugin', entry: 'webui' }],
+    ui: [{ pluginId: 'ui.plugin', entry: 'webui' }],
+    themes: [
+      { pluginId: 'background.plugin', background: { entry: 'webui', path: 'background.svg' } },
+      { pluginId: 'icon.plugin', brandIcon: { entry: 'webui', path: 'icon.svg' } },
+      { pluginId: 'other.entry', brandIcon: { entry: 'other', path: 'icon.svg' } },
+    ],
+  });
+  expect([...registered].sort()).toEqual(['background.plugin', 'icon.plugin', 'page.plugin', 'ui.plugin']);
 });
 
 it('prepares versioned main and plugin assets, commits entrypoints, and rolls them back', async () => {
