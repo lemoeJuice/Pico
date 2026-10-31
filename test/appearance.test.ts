@@ -2,13 +2,21 @@ import { describe, expect, it } from 'vitest';
 import {
   applyPluginThemeVariables,
   appearanceOptions,
+  appearanceSelectionState,
   normalizePluginThemes,
   nextExplicitAppearance,
+  latestAvailableAppearancePreference,
+  parseRecentAppearancePreferences,
+  readRecentAppearancePreferencesFromStorage,
+  RECENT_APPEARANCE_STORAGE_KEY,
+  RECENT_APPEARANCE_STORAGE_KEYS,
   parseAppearancePreference,
   pluginThemeBackgroundUrl,
+  pluginThemeBrandIconUrl,
   resolveAppearance,
   resolveThemeId,
   subscribeToAppearanceStorage,
+  subscribeToRecentAppearanceStorage,
   themeColorForAppearance,
 } from '../src/web/appearance.js';
 
@@ -35,11 +43,53 @@ describe('built-in appearance preference', () => {
     expect(themeColorForAppearance('dark', '#123456')).toBe('#123456');
   });
 
+  it('prefers an available paired theme, then recent matching themes, then built-ins', () => {
+    const themes = normalizePluginThemes([
+      {
+        pluginId: 'pico.reader',
+        id: 'pico.reader:night',
+        label: 'Night',
+        appearance: 'dark',
+        pairedThemeId: 'day',
+        variables: {},
+      },
+      { pluginId: 'pico.reader', id: 'pico.reader:day', label: 'Day', appearance: 'light', variables: {} },
+      { pluginId: 'pico.other', id: 'pico.other:mist', label: 'Mist', appearance: 'light', variables: {} },
+    ]);
+    const recent = { light: 'pico.other:mist' as const, dark: 'pico.reader:night' as const };
+    const night = themes.find((theme) => theme.id === 'pico.reader:night');
+
+    expect(nextExplicitAppearance('dark', night, themes, recent)).toBe('pico.reader:day');
+    expect(nextExplicitAppearance('dark', undefined, themes, recent)).toBe('pico.other:mist');
+    expect(nextExplicitAppearance('dark', night, [themes[0]!], recent)).toBe('pico.light');
+    expect(nextExplicitAppearance('dark', undefined, [], recent)).toBe('pico.light');
+    expect(latestAvailableAppearancePreference('dark', recent, [])).toBe('pico.dark');
+    expect(latestAvailableAppearancePreference('light', recent, themes)).toBe('pico.other:mist');
+  });
+
+  it('retains recent choices through temporary theme unavailability and follows system appearance', () => {
+    const stored = parseRecentAppearancePreferences(JSON.stringify({ light: 'pico.reader:day', dark: 'pico.dark' }));
+    expect(latestAvailableAppearancePreference('light', stored, [])).toBe('pico.light');
+    const restored = normalizePluginThemes([
+      { pluginId: 'pico.reader', id: 'pico.reader:day', label: 'Day', appearance: 'light', variables: {} },
+    ]);
+    expect(latestAvailableAppearancePreference('light', stored, restored)).toBe('pico.reader:day');
+    expect(resolveAppearance('system', true, restored)).toBe('dark');
+    expect(nextExplicitAppearance(resolveAppearance('system', true, restored), undefined, restored, stored)).toBe(
+      'pico.reader:day',
+    );
+    expect(parseRecentAppearancePreferences('{invalid')).toEqual({ light: null, dark: null });
+  });
+
   it('preserves plugin preferences while falling back until their themes are registered', () => {
     const preference = parseAppearancePreference('pico.reader:midnight');
     expect(preference).toBe('pico.reader:midnight');
     expect(resolveAppearance(preference!, true)).toBe('light');
     expect(resolveThemeId(preference!, true)).toBe('pico.light');
+    expect(appearanceSelectionState(preference!, 'pico.light', appearanceOptions([]))).toEqual({
+      value: 'pico.light',
+      unavailable: true,
+    });
 
     const themes = normalizePluginThemes([
       {
@@ -49,15 +99,25 @@ describe('built-in appearance preference', () => {
         appearance: 'dark',
         variables: { '--pico-page-bg': '#121714' },
         background: { entry: 'webui', path: 'assets/night.png' },
+        brandIcon: { entry: 'webui', path: 'assets/whale.svg' },
+        pairedThemeId: 'day',
+        brandLabel: 'reader-theme',
       },
     ]);
     expect(resolveAppearance(preference!, false, themes)).toBe('dark');
     expect(resolveThemeId(preference!, false, themes)).toBe('pico.reader:midnight');
     expect(appearanceOptions(themes).map((option) => option.value)).toContain('pico.reader:midnight');
+    expect(appearanceSelectionState(preference!, resolveThemeId(preference!, false, themes), appearanceOptions(themes))).toEqual({
+      value: 'pico.reader:midnight',
+      unavailable: false,
+    });
     expect(themes[0]?.background).toEqual({ entry: 'webui', path: 'assets/night.png' });
     expect(pluginThemeBackgroundUrl(themes[0])).toBe(
       'url("/_pico/plugin-ui/pico.reader/webui/current/assets/night.png")',
     );
+    expect(themes[0]?.brandIcon).toEqual({ entry: 'webui', path: 'assets/whale.svg' });
+    expect(pluginThemeBrandIconUrl(themes[0])).toBe('/_pico/plugin-ui/pico.reader/webui/current/assets/whale.svg');
+    expect(themes[0]).toMatchObject({ pairedThemeId: 'day', brandLabel: 'reader-theme' });
   });
 
   it('retains the full supported plugin palette without accepting an unbounded one', () => {
@@ -77,6 +137,9 @@ describe('built-in appearance preference', () => {
         label: 'Midnight',
         appearance: 'dark',
         background: { entry: 'webui', path: 'assets/night.png' },
+        brandIcon: { entry: 'webui', path: '../escape.svg' },
+        pairedThemeId: 'other.plugin:day',
+        brandLabel: 'safe <script>',
         variables: {
           '--pico-page-bg': '#121714',
           '--pico-page-bg; color': 'red',
@@ -96,6 +159,9 @@ describe('built-in appearance preference', () => {
       '--pico-page-bg': '#121714',
       '--pico-unregistered-role': '#fff',
     });
+    expect(theme?.brandIcon).toBeUndefined();
+    expect(theme?.pairedThemeId).toBeUndefined();
+    expect(theme?.brandLabel).toBeUndefined();
 
     const values = new Map([
       ['--pico-page-bg', '#f4f6f2'],
@@ -169,5 +235,56 @@ describe('built-in appearance preference', () => {
 
     expect(received).toEqual(['pico.dark', 'pico.reader:midnight', 'pico.light', 'pico.light']);
     expect(writes).toBe(0);
+  });
+
+  it('syncs recent explicit appearances across tabs and clears them with storage', () => {
+    const events = new EventTarget();
+    const values = new Map<string, string>([
+      [RECENT_APPEARANCE_STORAGE_KEYS.light, 'pico.light'],
+      [RECENT_APPEARANCE_STORAGE_KEYS.dark, 'pico.dark'],
+    ]);
+    const localStorage = { getItem: (key: string) => values.get(key) ?? null } as unknown as Storage;
+    const received: string[] = [];
+    const unsubscribe = subscribeToRecentAppearanceStorage(events, localStorage, (preferences) => {
+      received.push(`${preferences.light ?? '-'}|${preferences.dark ?? '-'}`);
+    });
+    const dispatch = (key: string | null, newValue: string | null, storageArea: Storage) => {
+      if (key === null) values.clear();
+      else if (newValue === null) values.delete(key);
+      else values.set(key, newValue);
+      const event = new Event('storage');
+      Object.defineProperties(event, {
+        key: { value: key },
+        newValue: { value: newValue },
+        storageArea: { value: storageArea },
+      });
+      events.dispatchEvent(event);
+    };
+    dispatch(RECENT_APPEARANCE_STORAGE_KEYS.light, 'pico.reader:day', localStorage);
+    dispatch(RECENT_APPEARANCE_STORAGE_KEYS.dark, 'pico.reader:night', localStorage);
+    dispatch(RECENT_APPEARANCE_STORAGE_KEYS.light, 'system', localStorage);
+    dispatch(null, null, localStorage);
+    unsubscribe();
+    dispatch(RECENT_APPEARANCE_STORAGE_KEYS.light, 'pico.light', localStorage);
+    expect(received).toEqual([
+      'pico.reader:day|pico.dark',
+      'pico.reader:day|pico.reader:night',
+      '-|pico.reader:night',
+      '-|-',
+    ]);
+  });
+
+  it('reads legacy combined history while preferring newer per-scheme values', () => {
+    const values = new Map<string, string>([
+      [RECENT_APPEARANCE_STORAGE_KEY, JSON.stringify({ light: 'pico.reader:day', dark: 'pico.reader:night' })],
+      [RECENT_APPEARANCE_STORAGE_KEYS.light, 'system'],
+      [RECENT_APPEARANCE_STORAGE_KEYS.dark, 'pico.dark'],
+    ]);
+    const storage = { getItem: (key: string) => values.get(key) ?? null } as unknown as Storage;
+
+    expect(readRecentAppearancePreferencesFromStorage(storage)).toEqual({
+      light: 'pico.reader:day',
+      dark: 'pico.dark',
+    });
   });
 });

@@ -70,6 +70,7 @@
 .plugin-ui-select-menu {
   position: fixed;
   z-index: 10020;
+  backdrop-filter: var(--pico-material-backdrop);
   box-sizing: border-box;
   max-width: calc(100vw - 24px);
   overflow-x: hidden;

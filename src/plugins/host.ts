@@ -113,6 +113,24 @@ const THEME_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const THEME_ENTRY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const THEME_VARIABLE_PATTERN = /^--pico-[a-z0-9-]{1,120}$/;
 
+function validateThemeAssetReference(value: unknown, label: string): { entry: string; path: string } {
+  if (!isPlainRecord(value)) throw new Error(`Plugin theme ${label} must be a plain object.`);
+  const { entry, path } = value;
+  if (
+    typeof entry !== 'string' ||
+    !THEME_ENTRY_PATTERN.test(entry) ||
+    typeof path !== 'string' ||
+    path.length > 256 ||
+    path.startsWith('/') ||
+    path.includes('\\') ||
+    path.split('/').some((segment) => !segment || segment === '.' || segment === '..') ||
+    !/^[a-zA-Z0-9._/-]+$/.test(path)
+  ) {
+    throw new Error(`Plugin theme ${label} must reference a safe relative Web UI asset path.`);
+  }
+  return { entry, path };
+}
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
@@ -149,6 +167,9 @@ function cloneTheme(theme: RegisteredTheme): RegisteredTheme {
     appearance: theme.appearance,
     variables: Object.fromEntries(Object.entries(theme.variables)),
     ...(theme.background ? { background: { entry: theme.background.entry, path: theme.background.path } } : {}),
+    ...(theme.brandIcon ? { brandIcon: { entry: theme.brandIcon.entry, path: theme.brandIcon.path } } : {}),
+    ...(theme.pairedThemeId ? { pairedThemeId: theme.pairedThemeId } : {}),
+    ...(theme.brandLabel ? { brandLabel: theme.brandLabel } : {}),
   };
 }
 
@@ -559,7 +580,9 @@ export class PluginHost {
     const registered =
       this.pages.some((page) => page.pluginId === pluginId && page.entry === entry) ||
       this.contributions.some((contribution) => contribution.pluginId === pluginId && contribution.entry === entry) ||
-      this.themes.some((theme) => theme.pluginId === pluginId && theme.background?.entry === entry);
+      this.themes.some(
+        (theme) => theme.pluginId === pluginId && (theme.background?.entry === entry || theme.brandIcon?.entry === entry),
+      );
     if (!registered) return undefined;
     const pluginsRoot =
       this.loaded.find((plugin) => plugin.id === pluginId)?.source === 'built-in'
@@ -912,6 +935,15 @@ export class PluginHost {
           if (theme.appearance !== 'light' && theme.appearance !== 'dark') {
             throw new Error('Plugin theme appearance must be light or dark.');
           }
+          if (
+            theme.brandLabel !== undefined &&
+            (typeof theme.brandLabel !== 'string' || !theme.brandLabel.trim() || theme.brandLabel.length > 40 || /[\u0000-\u001f\u007f-\u009f<>]/.test(theme.brandLabel))
+          ) {
+            throw new Error('Plugin theme brandLabel must contain 1 to 40 printable characters.');
+          }
+          if (theme.pairedThemeId !== undefined && (typeof theme.pairedThemeId !== 'string' || !THEME_ID_PATTERN.test(theme.pairedThemeId))) {
+            throw new Error('Plugin theme pairedThemeId must be a plugin-local theme ID.');
+          }
           if (!isPlainRecord(theme.variables) || Object.keys(theme.variables).length > MAX_THEME_VARIABLES) {
             throw new Error(`Plugin themes may define at most ${MAX_THEME_VARIABLES} variables in a plain object.`);
           }
@@ -924,22 +956,12 @@ export class PluginHost {
             Object.defineProperty(variables, key, { value, enumerable: true, configurable: true, writable: true });
           }
           let background: RegisteredTheme['background'];
+          let brandIcon: RegisteredTheme['brandIcon'];
+          if (theme.brandIcon !== undefined) {
+            brandIcon = validateThemeAssetReference(theme.brandIcon, 'brand icon');
+          }
           if (theme.background !== undefined) {
-            if (!isPlainRecord(theme.background)) throw new Error('Plugin theme background must be a plain object.');
-            const { entry, path } = theme.background;
-            if (
-              typeof entry !== 'string' ||
-              !THEME_ENTRY_PATTERN.test(entry) ||
-              typeof path !== 'string' ||
-              path.length > 256 ||
-              path.startsWith('/') ||
-              path.includes('\\') ||
-              path.split('/').some((segment) => !segment || segment === '.' || segment === '..') ||
-              !/^[a-zA-Z0-9._/-]+$/.test(path)
-            ) {
-              throw new Error('Plugin theme background must reference a safe relative Web UI asset path.');
-            }
-            background = { entry, path };
+            background = validateThemeAssetReference(theme.background, 'background');
           }
           if (this.themes.filter((item) => item.pluginId === plugin.id).length >= MAX_PLUGIN_THEMES) {
             throw new Error(`Plugin may register at most ${MAX_PLUGIN_THEMES} themes.`);
@@ -954,6 +976,9 @@ export class PluginHost {
             appearance: theme.appearance,
             variables,
             ...(background ? { background } : {}),
+            ...(brandIcon ? { brandIcon } : {}),
+            ...(theme.pairedThemeId ? { pairedThemeId: theme.pairedThemeId } : {}),
+            ...(theme.brandLabel ? { brandLabel: theme.brandLabel } : {}),
           };
           this.themes.push(registered);
           return cloneTheme(registered);

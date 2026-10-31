@@ -10,9 +10,9 @@
   overflow-wrap: anywhere;
 }
 .plugin-ui-status--success {
-  border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
-  color: var(--accent-strong, var(--pico-control-status-success-text));
-  background: color-mix(in srgb, var(--accent) 8%, var(--pico-control-status-success-blend-base));
+  border-color: color-mix(in srgb, var(--pico-control-status-success-text) 28%, var(--line));
+  color: var(--pico-control-status-success-text);
+  background: color-mix(in srgb, var(--pico-control-status-success-text) 8%, var(--pico-control-status-success-blend-base));
 }
 .plugin-ui-status--danger {
   border-color: color-mix(in srgb, var(--pico-control-status-danger-border) 28%, var(--line));

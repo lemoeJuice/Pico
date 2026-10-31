@@ -60,6 +60,12 @@
   border: 0;
   cursor: pointer;
 }
+.brand-mark.theme-toggle--plugin-icon,
+.welcome-mark.welcome-mark--plugin-icon {
+  background: none;
+  border-radius: 0;
+  box-shadow: none;
+}
 .brand-mark span,
 .welcome-mark span {
   font-family: var(--pico-font-display);
@@ -70,6 +76,19 @@
 .brand-mark svg,
 .welcome-mark svg {
   stroke-width: 1.8;
+}
+.theme-brand-icon {
+  width: 21px;
+  height: 21px;
+  object-fit: contain;
+}
+.brand-mark .theme-brand-icon {
+  width: 22px;
+  height: 22px;
+}
+.welcome-mark .theme-brand-icon {
+  width: 32px;
+  height: 32px;
 }
 .brand-mark i,
 .welcome-mark i {
@@ -83,6 +102,10 @@
   border-radius: 50%;
 }
 .brand-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--pico-shell-brand-name-text);
   font-size: var(--pico-shell-brand-name-font-size);
   font-weight: var(--pico-shell-brand-name-font-weight);

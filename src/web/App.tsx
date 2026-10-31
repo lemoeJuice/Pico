@@ -50,7 +50,12 @@ import { threadCanBeInterrupted } from './thread-controls.js';
 import { executorStatusFromProbe } from './executor-status.js';
 import { shouldCloseModalOnEscape } from './modal-behavior.js';
 import { SettingsNavigation } from './settings-navigation.js';
-import { useAppearance, type RegisteredThemeContribution } from './appearance.js';
+import {
+  appearanceSelectionState,
+  pluginThemeBrandIconUrl,
+  useAppearance,
+  type RegisteredThemeContribution,
+} from './appearance.js';
 import {
   assistantStreamsAfterDisconnect,
   canAppendAssistantDelta,
@@ -3282,6 +3287,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const showPluginNotice = pluginNoticeKey !== null && dismissedPluginNoticeKey !== pluginNoticeKey;
   const showExecutorNotice = executorNoticeKey !== null && dismissedExecutorNoticeKey !== executorNoticeKey;
   const showPauseNotice = pauseReason !== null && pauseNoticeKey !== null && dismissedPauseNoticeKey !== pauseNoticeKey;
+  const themeSelection = appearanceSelectionState(appearance.preference, appearance.themeId, appearance.options);
 
   useEffect(() => {
     if (dismissedPluginNoticeKey !== null && dismissedPluginNoticeKey !== pluginNoticeKey) {
@@ -3313,14 +3319,18 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         <div className="brand-row">
           <button
             type="button"
-            className="brand-mark theme-toggle"
+            className={`brand-mark theme-toggle${appearance.activeTheme?.brandIcon ? ' theme-toggle--plugin-icon' : ''}`}
             aria-label={`Switch to ${appearance.resolved === 'light' ? 'dark' : 'light'} theme`}
             title={`Switch to ${appearance.resolved === 'light' ? 'dark' : 'light'} theme`}
             onClick={appearance.toggleExplicitTheme}
           >
-            <Sparkles size={17} aria-hidden="true" />
+            {pluginThemeBrandIconUrl(appearance.activeTheme) ? (
+              <img className="theme-brand-icon" src={pluginThemeBrandIconUrl(appearance.activeTheme)} alt="" aria-hidden="true" />
+            ) : (
+              <Sparkles size={17} aria-hidden="true" />
+            )}
           </button>
-          <div className="brand-name">pico</div>
+          <div className="brand-name">{appearance.activeTheme?.brandLabel ?? 'pico'}</div>
         </div>
         <div className="project-section-heading">
           <span className="eyebrow">INDEPENDENT THREADS</span>
@@ -3597,8 +3607,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
         {!selectedThread ? (
           <section className="welcome-screen">
-            <div className="welcome-mark">
-              <Sparkles size={21} aria-hidden="true" />
+            <div className={`welcome-mark${appearance.activeTheme?.brandIcon ? ' welcome-mark--plugin-icon' : ''}`}>
+              {pluginThemeBrandIconUrl(appearance.activeTheme) ? (
+                <img className="theme-brand-icon" src={pluginThemeBrandIconUrl(appearance.activeTheme)} alt="" aria-hidden="true" />
+              ) : (
+                <Sparkles size={21} aria-hidden="true" />
+              )}
             </div>
             <p className="eyebrow">A SMALL PLACE TO THINK WITH AGENTS</p>
             <h1>
@@ -4592,19 +4606,19 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   </div>
                   <p>Choose the appearance for this browser.</p>
                 </div>
-                <div className="sidebar-width-options theme-options" role="group" aria-label="Theme">
-                  {appearance.options.map((option) => (
-                    <button
-                      className="sidebar-width-option"
-                      type="button"
-                      key={option.value}
-                      aria-pressed={appearance.preference === option.value}
-                      title={`${option.label} theme`}
-                      onClick={() => appearance.setPreference(option.value)}
-                    >
-                      {option.label}
-                    </button>
-                  ))}
+                <div className="theme-select">
+                  <PluginUiSelect
+                    label="Theme"
+                    value={themeSelection.value}
+                    options={appearance.options}
+                    compact={false}
+                    onChange={(value) => appearance.setPreference(value as typeof appearance.preference)}
+                  />
+                  {themeSelection.unavailable ? (
+                    <p className="theme-unavailable-note" role="status">
+                      Saved theme is unavailable. It will be restored if it becomes available again.
+                    </p>
+                  ) : null}
                 </div>
               </article>
               <article className="native-tool-row general-setting-row">

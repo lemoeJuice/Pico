@@ -89,9 +89,18 @@
   flex: 0 1 210px;
   min-width: 150px;
 }
-.theme-options .sidebar-width-option:nth-child(n + 4) {
-  grid-column: 1 / -1;
-  overflow-wrap: anywhere;
+.theme-select {
+  flex: 0 1 250px;
+  min-width: 150px;
+}
+.theme-select .plugin-ui-select-trigger {
+  width: 100%;
+}
+.theme-unavailable-note {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
 }
 .native-tool-copy {
   min-width: 0;

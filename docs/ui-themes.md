@@ -49,3 +49,9 @@ URL and the server serves only paths in the package's theme asset manifest;
 the release publisher snapshots and verifies those assets with the plugin UI.
 `--pico-material-backdrop` controls the optional glass blur of framework-owned
 surfaces. Its default is `none`, so the built-in themes retain their appearance.
+
+An optional brand icon and label replace the sidebar mark and name only while
+that theme is active; the host still owns the controls and their behavior. A
+theme can name an opposite-scheme counterpart from the same plugin. The sidebar
+toggle prefers this counterpart, otherwise it restores the latest available
+explicit choice for the target scheme, falling back to the built-in theme.

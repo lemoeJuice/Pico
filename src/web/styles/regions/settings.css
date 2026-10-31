@@ -280,9 +280,9 @@
   letter-spacing: var(--pico-settings-plugin-manager-status-letter-spacing);
 }
 .plugin-manager-status.is-loaded {
-  border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
-  color: var(--accent-strong, var(--pico-settings-plugin-manager-status-is-loaded-text));
-  background: color-mix(in srgb, var(--accent) 8%, var(--pico-settings-plugin-manager-status-is-loaded-surface));
+  border-color: color-mix(in srgb, var(--pico-settings-plugin-manager-status-is-loaded-text) 28%, var(--line));
+  color: var(--pico-settings-plugin-manager-status-is-loaded-text);
+  background: color-mix(in srgb, var(--pico-settings-plugin-manager-status-is-loaded-text) 8%, var(--pico-settings-plugin-manager-status-is-loaded-surface));
 }
 .plugin-manager-actions {
   display: flex;

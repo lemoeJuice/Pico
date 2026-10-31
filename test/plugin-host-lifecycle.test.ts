@@ -109,6 +109,9 @@ describe('PluginHost lifecycle', () => {
             '--pico-panel': 'linear-gradient(90deg, #223322, rgba(1, 2, 3, .4))',
           },
           background: { entry: 'webui', path: 'assets/bg.png' },
+          brandIcon: { entry: 'webui', path: 'assets/whale.svg' },
+          pairedThemeId: 'forest-light',
+          brandLabel: 'deepseek-theme',
         });
       },
     };
@@ -121,6 +124,8 @@ describe('PluginHost lifecycle', () => {
       leaked[0]!.variables['--pico-page-bg'] = '#ffffff';
       if (returned) returned.variables['--pico-page-bg'] = '#000000';
       expect(host.uiThemes()[0]!.variables['--pico-page-bg']).toBe('#223322');
+      expect(host.uiThemes()[0]?.brandIcon).toEqual({ entry: 'webui', path: 'assets/whale.svg' });
+      expect(host.uiThemes()[0]).toMatchObject({ pairedThemeId: 'forest-light', brandLabel: 'deepseek-theme' });
       await host.setEnabled(plugin.id, false);
       expect(host.uiThemes()).toEqual([]);
       expect(host.webUiAssetLocation(plugin.id, 'webui')).toBeUndefined();
@@ -160,6 +165,78 @@ describe('PluginHost lifecycle', () => {
       await host.load([plugin]);
       expect(host.uiThemes()).toEqual([]);
       expect(host.errors().join('\n')).toContain('Invalid plugin theme variable');
+    } finally {
+      await host.shutdown();
+      store.close();
+    }
+  });
+
+  it('rejects unsafe theme brand icon paths', async () => {
+    const store = new PicoStore(':memory:');
+    const directory = mkdtempSync(join(tmpdir(), 'pico-theme-icon-invalid-'));
+    temporaryDirectories.push(directory);
+    const host = new PluginHost(
+      store,
+      new ToolCatalog(),
+      new ExecutionPipelines(),
+      new CommandRegistry(),
+      directory,
+      unavailablePluginServices,
+    );
+    const plugin: PicoPlugin = {
+      id: 'pico.theme-icon-invalid',
+      name: 'Invalid icon theme',
+      version: '1.0.0',
+      activate(context) {
+        context.ui.registerTheme({
+          id: 'unsafe-icon',
+          label: 'Unsafe icon',
+          appearance: 'dark',
+          variables: {},
+          brandIcon: { entry: 'webui', path: '../outside.svg' },
+        });
+      },
+    };
+    try {
+      await host.load([plugin]);
+      expect(host.uiThemes()).toEqual([]);
+      expect(host.errors().join('\n')).toContain('brand icon');
+    } finally {
+      await host.shutdown();
+      store.close();
+    }
+  });
+
+  it('rejects paired theme IDs outside the plugin-local namespace', async () => {
+    const store = new PicoStore(':memory:');
+    const directory = mkdtempSync(join(tmpdir(), 'pico-theme-pair-invalid-'));
+    temporaryDirectories.push(directory);
+    const host = new PluginHost(
+      store,
+      new ToolCatalog(),
+      new ExecutionPipelines(),
+      new CommandRegistry(),
+      directory,
+      unavailablePluginServices,
+    );
+    const plugin: PicoPlugin = {
+      id: 'pico.theme-pair-invalid',
+      name: 'Invalid paired theme',
+      version: '1.0.0',
+      activate(context) {
+        context.ui.registerTheme({
+          id: 'night',
+          label: 'Night',
+          appearance: 'dark',
+          variables: {},
+          pairedThemeId: 'other.plugin:day',
+        });
+      },
+    };
+    try {
+      await host.load([plugin]);
+      expect(host.uiThemes()).toEqual([]);
+      expect(host.errors().join('\n')).toContain('plugin-local theme ID');
     } finally {
       await host.shutdown();
       store.close();
