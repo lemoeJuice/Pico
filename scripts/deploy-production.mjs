@@ -49,6 +49,7 @@ import {
 
 const projectRoot = realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
 const runtimeLauncher = path.join(projectRoot, 'scripts/start-runtime.sh');
+const containerScopeHelper = path.join(projectRoot, 'scripts/deploy/systemd-container-scope.py');
 const defaultLogPath = '/tmp/pico-runtime-production.log';
 const lockPath = path.join(projectRoot, '.pico-deploy.lock');
 const backupPrefix = '.pico-deploy-backup-';
@@ -173,6 +174,59 @@ function processStartTime(pid) {
   const startTime = fieldsAfterCommand[19];
   if (!startTime) throw new Error(`Cannot read process identity for ${pid}.`);
   return startTime;
+}
+
+function processBelongsToControlGroup(pid, controlGroup) {
+  const expected = controlGroup.replace(/\/$/, '') || '/';
+  const entries = readFileSync(`/proc/${pid}/cgroup`, 'utf8')
+    .split('\n')
+    .map((line) => line.slice(line.lastIndexOf(':') + 1))
+    .filter(Boolean);
+  return entries.some((entry) => entry === expected || (expected !== '/' && entry.startsWith(`${expected}/`)));
+}
+
+function isolateRuntimeContainerProcesses(systemdContext, runtimePid, expectedStartTime) {
+  if (!systemdContext?.supported) {
+    throw new Error('Container preservation requires a verified systemd manager; no Runtime was stopped.');
+  }
+  const busMode = systemdContext.args?.includes('--user') ? '--user' : '--system';
+  if (busMode === '--user' && !process.env.XDG_RUNTIME_DIR) {
+    throw new Error('The user systemd bus is unavailable; no Runtime was stopped.');
+  }
+  const controlGroup = systemdShow(systemdContext, 'ControlGroup');
+  if (!controlGroup.startsWith('/') || !isPicoProcess(runtimePid, expectedStartTime)) {
+    throw new Error('Cannot verify the Pico Runtime unit cgroup; no Runtime was stopped.');
+  }
+  if (!processBelongsToControlGroup(runtimePid, controlGroup)) {
+    throw new Error('The Pico Runtime process is outside its verified systemd cgroup; no Runtime was stopped.');
+  }
+
+  const scopePrefix = `pico-container-preserve-${randomUUID()}`;
+  const helperEnvironment = { PATH: process.env.PATH ?? '/usr/bin:/bin' };
+  if (busMode === '--user') helperEnvironment.XDG_RUNTIME_DIR = process.env.XDG_RUNTIME_DIR;
+  const result = spawnSync(
+    'python3',
+    [containerScopeHelper, busMode, systemdContext.unit, controlGroup, scopePrefix],
+    {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      env: helperEnvironment,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 30_000,
+    },
+  );
+  const summary = /^OK (\d+)\s*$/.exec(result.stdout ?? '');
+  if (result.error || result.status !== 0 || !summary) {
+    throw new Error('Could not isolate Runtime Container processes; no Runtime was stopped.');
+  }
+  if (
+    systemdShow(systemdContext, 'ControlGroup') !== controlGroup ||
+    !isPicoProcess(runtimePid, expectedStartTime) ||
+    !processBelongsToControlGroup(runtimePid, controlGroup)
+  ) {
+    throw new Error('The Runtime or its systemd cgroup changed during Container isolation; no Runtime was stopped.');
+  }
+  return Number(summary[1]);
 }
 
 function isPicoProcess(pid, expectedStartTime) {
@@ -498,7 +552,7 @@ async function runBuild(scriptName, sourceRoot = projectRoot) {
 async function runTests(sourceRoot, { runtime = false, changedChecks = [] } = {}) {
   const args = ['exec', '--', 'vitest', 'run'];
   const tests = new Set(runtime
-    ? ['test/deploy-plan.test.ts', 'test/deploy-selection.test.ts', 'test/deploy-cli.test.ts', 'test/deploy-dependencies.test.ts', 'test/deploy-artifacts.test.ts', 'test/deploy-publish-web.test.ts', 'test/deploy-server.test.ts', 'test/deploy-systemd.test.ts', 'test/deploy-systemd-credentials.test.ts', 'test/deploy-systemd-recovery.test.ts',
+    ? ['test/deploy-plan.test.ts', 'test/deploy-selection.test.ts', 'test/deploy-cli.test.ts', 'test/deploy-dependencies.test.ts', 'test/deploy-artifacts.test.ts', 'test/deploy-publish-web.test.ts', 'test/deploy-server.test.ts', 'test/deploy-systemd.test.ts', 'test/deploy-systemd-credentials.test.ts', 'test/deploy-systemd-recovery.test.ts', 'test/deploy-systemd-container-scope.test.ts',
       'test/server.test.ts', 'test/server-auth.test.ts', 'test/server-errors.test.ts',
       'test/store.test.ts', 'test/plugin-host-lifecycle.test.ts']
     : ['test/plugin-ui.test.ts', 'test/ui-contributions.test.ts', 'test/model-selection-ui.test.tsx']);
@@ -1012,6 +1066,16 @@ async function deploy(plan, currentManifest, baseline, sourceRoot) {
       if ((systemdShow(systemdContext, 'Transient') === 'yes') !== transientSystemdUnit) {
         throw new Error('The systemd unit type changed during deployment; no Runtime was stopped.');
       }
+      if (unitReference) await unitReference.check();
+      const isolatedProcesses = isolateRuntimeContainerProcesses(systemdContext, oldPid, oldStartTime);
+      if (isolatedProcesses > 0) {
+        console.log(`已将 ${isolatedProcesses} 个已核验的 Container 辅助进程移入独立 scope。`);
+      }
+      const postIsolationActiveCount = await getActiveThreadCount(baseUrl, oldSession);
+      if (postIsolationActiveCount !== 0) {
+        throw new Error(`${postIsolationActiveCount} Thread(s) became active during Container isolation; the Runtime is still running.`);
+      }
+      requirePicoListener(oldPid, oldStartTime);
       if (unitReference) await unitReference.check();
     }
 
