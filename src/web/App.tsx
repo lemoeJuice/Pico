@@ -781,9 +781,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [archivedThreadActionId, setArchivedThreadActionId] = useState<string | null>(null);
   const [pluginActionId, setPluginActionId] = useState<string | null>(null);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
-  const [projectFromThreadEditing, setProjectFromThreadEditing] = useState(false);
-  const [projectFromThreadName, setProjectFromThreadName] = useState('');
-  const [projectFromThreadWorkspace, setProjectFromThreadWorkspace] = useState('');
+  const [projectSourceThread, setProjectSourceThread] = useState<Thread | null>(null);
   const [threadInfoOpen, setThreadInfoOpen] = useState(false);
   const [threadHistoryOpen, setThreadHistoryOpen] = useState(false);
   const [threadTitleDraft, setThreadTitleDraft] = useState('');
@@ -2380,28 +2378,54 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     }
   };
 
+  const openNewProject = (sourceThread: Thread | null = null): void => {
+    setProjectSourceThread(sourceThread);
+    setNewProjectName(sourceThread?.title.trim() ?? '');
+    setNewProjectPath('');
+    setError('');
+    setThreadInfoOpen(false);
+    setNewProjectOpen(true);
+  };
+
   const createProject = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
     setBusy(true);
     setError('');
     const workspacePath = newProjectPath.trim();
+    const body = JSON.stringify({
+      name: newProjectName.trim() || suggestedNewProjectName,
+      ...(workspacePath ? { workspacePath } : {}),
+    });
     try {
-      const project = await api<Project>('/api/projects', {
-        method: 'POST',
-        body: JSON.stringify({ ...(newProjectName.trim() ? { name: newProjectName.trim() } : {}), ...(workspacePath ? { workspacePath } : {}) }),
-      });
-      setProjects((items) => upsertProject(items, project));
-      projectThreadLoads.current.add(project.id);
-      setThreadsByProject((current) => ({ ...current, [project.id]: [] }));
-      setProjectId(project.id);
-      setExpandedProjectIds((current) => new Set(current).add(project.id));
-      localStorage.setItem('pico.project', project.id);
+      if (projectSourceThread) {
+        const { project, threads: movedThreads } = await api<{ project: Project; threads: Thread[] }>(
+          `/api/threads/${encodeURIComponent(projectSourceThread.id)}/project`,
+          { method: 'POST', body },
+        );
+        independentThreadVersion.current += 1;
+        setProjects((items) => upsertProject(items, project));
+        setThreadsByProject((current) => ({ ...current, [project.id]: movedThreads }));
+        setIndependentThreads((items) => items.filter((item) => !movedThreads.some((moved) => moved.id === item.id)));
+        setProjectId(project.id);
+        setExpandedProjectIds((current) => new Set(current).add(project.id));
+        setThreadId(projectSourceThread.id);
+        setSnapshot(null);
+      } else {
+        const project = await api<Project>('/api/projects', { method: 'POST', body });
+        setProjects((items) => upsertProject(items, project));
+        projectThreadLoads.current.add(project.id);
+        setThreadsByProject((current) => ({ ...current, [project.id]: [] }));
+        setProjectId(project.id);
+        setExpandedProjectIds((current) => new Set(current).add(project.id));
+        localStorage.setItem('pico.project', project.id);
+        setThreads([]);
+        setThreadId(null);
+        setSnapshot(null);
+      }
       setNewProjectOpen(false);
+      setProjectSourceThread(null);
       setNewProjectName('');
       setNewProjectPath('');
-      setThreads([]);
-      setThreadId(null);
-      setSnapshot(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -3055,35 +3079,6 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     setNewThreadOpen(true);
   };
 
-  const createProjectFromThread = async (): Promise<void> => {
-    if (!selectedThread || selectedThread.projectId !== null) return;
-    setThreadInfoError('');
-    setThreadTitleSaving(true);
-    try {
-      const result = await api<{ project: Project; threads: Thread[] }>(`/api/threads/${encodeURIComponent(selectedThread.id)}/project`, {
-        method: 'POST',
-        body: JSON.stringify({
-          ...(projectFromThreadName.trim() ? { name: projectFromThreadName.trim() } : {}),
-          ...(projectFromThreadWorkspace.trim() ? { workspacePath: projectFromThreadWorkspace.trim() } : {}),
-        }),
-      });
-      const { project } = result;
-      const movedThreads = result.threads;
-      independentThreadVersion.current += 1;
-      setProjects((items) => upsertProject(items, project));
-      setThreadsByProject((current) => ({ ...current, [project.id]: movedThreads }));
-      setIndependentThreads((items) => items.filter((item) => !movedThreads.some((moved) => moved.id === item.id)));
-      setProjectFromThreadEditing(false);
-      setThreadInfoOpen(false);
-      setProjectId(project.id);
-      setExpandedProjectIds((current) => new Set(current).add(project.id));
-      setThreadId(selectedThread.id);
-      setSnapshot(null);
-    } catch (caught) {
-      setThreadInfoError(caught instanceof Error ? caught.message : 'Could not create a Project from this Thread.');
-    } finally { setThreadTitleSaving(false); }
-  };
-
   const saveProjectWorkspace = async (targetProject: Project): Promise<void> => {
     if (targetProject.workspacePath || !projectWorkspaceDraft.trim()) return;
     setProjectWorkspaceSaving(true);
@@ -3325,7 +3320,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             aria-label="Create Project"
             disabled={!projectsLoaded}
             title="Create Project"
-            onClick={() => setNewProjectOpen(true)}
+            onClick={() => openNewProject()}
           >
             <Plus size={14} aria-hidden="true" />
           </button>
@@ -3604,7 +3599,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   <button
                     className="button button-primary"
                     disabled={bootstrapping}
-                    onClick={() => setNewProjectOpen(true)}
+                    onClick={() => openNewProject()}
                   >
                     Create a Project <ArrowUpRight size={14} aria-hidden="true" />
                   </button>
@@ -4840,6 +4835,12 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                 placeholder="Optional; can be set later"
               />
             </label>
+            {projectSourceThread ? (
+              <p className="field-note">This Thread and its child Threads will move into the Project.</p>
+            ) : null}
+            {projectSourceThread && newProjectPath.trim() ? (
+              <p className="field-note">{CONTAINER_WORKSPACE_REBUILD_NOTICE}</p>
+            ) : null}
             <div className="form-actions">
               <span className="field-note">The workspace folder is optional and can be set after creating the Project.</span>
               <button className="button button-primary" disabled={busy}>
@@ -4901,74 +4902,19 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   If this Project has Container Threads, setting the workspace rebuilds their containers. Container files and data volumes are preserved, but running processes inside those containers will stop.
                 </p>
               ) : null}
-            {selectedThread.projectId === null ? <>
-              {!projectFromThreadEditing ? (
-                <>
-                  <button
-                    type="button"
-                    className="button button-soft"
-                    disabled={threadTitleSaving}
-                    onClick={() => {
-                      setProjectFromThreadName(selectedThread.title.trim());
-                      setProjectFromThreadWorkspace('');
-                      setProjectFromThreadEditing(true);
-                      setThreadInfoError('');
-                    }}
-                  >
-                    Create Project from this Thread
-                  </button>
-                  <p className="field-note">This Thread and its child Threads will move into the Project.</p>
-                </>
-              ) : (
-                <div
-                  className="form-stack project-from-thread-form"
-                  onKeyDown={(event) => {
-                    if (event.key !== 'Enter' || !(event.target instanceof HTMLInputElement)) return;
-                    event.preventDefault();
-                    if (!threadTitleSaving && projectFromThreadName.trim()) void createProjectFromThread();
-                  }}
+            {selectedThread.projectId === null ? (
+              <>
+                <button
+                  type="button"
+                  className="button button-soft"
+                  disabled={threadTitleSaving}
+                  onClick={() => openNewProject(selectedThread)}
                 >
-                  <label>
-                    Project name
-                    <input
-                      value={projectFromThreadName}
-                      onChange={(event) => setProjectFromThreadName(event.target.value)}
-                      autoFocus
-                    />
-                  </label>
-                  <label>
-                    Workspace folder <span className="field-note">Optional</span>
-                    <input
-                      value={projectFromThreadWorkspace}
-                      onChange={(event) => setProjectFromThreadWorkspace(event.target.value)}
-                      placeholder="Leave empty to choose later"
-                    />
-                  </label>
-                  {selectedThread.executorKind === 'container' && projectFromThreadWorkspace.trim() ? (
-                    <p className="field-note">{CONTAINER_WORKSPACE_REBUILD_NOTICE}</p>
-                  ) : null}
-                  <p className="field-note">The Thread and its child Threads will move into this Project.</p>
-                  <div className="form-actions">
-                    <button
-                      type="button"
-                      className="button button-quiet"
-                      disabled={threadTitleSaving}
-                      onClick={() => setProjectFromThreadEditing(false)}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="button button-primary"
-                      disabled={threadTitleSaving || !projectFromThreadName.trim()}
-                      onClick={() => void createProjectFromThread()}
-                    >
-                      {threadTitleSaving ? 'Creating…' : 'Create Project'}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </> : null}
+                  Create Project from this Thread
+                </button>
+                <p className="field-note">This Thread and its child Threads will move into the Project.</p>
+              </>
+            ) : null}
             {activeSnapshot?.thread.id === selectedThread.id &&
             (activeSnapshot.hasInactiveHistory || (activeSnapshot.historyBranches?.length ?? 0) > 0) ? (
               <div className="thread-info-history-entry">
