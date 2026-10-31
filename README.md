@@ -75,6 +75,8 @@ The database defaults to `data/pico.sqlite`; the database file is created with o
 
 ## Plugins
 
+The [Deepsea Liquid Glass theme](plugins/pico.deepsea-theme/README.md) includes a DeepSeek brand asset. Do not use that theme unless you actually use a DeepSeek service; see its README for the asset source and usage conditions.
+
 Place an ES module ending in `.mjs` in `plugins/` (or `PICO_PLUGIN_DIR`). A default export must provide `id`, `name`, `version`, and at least one of `activate(context)` or `activateExecutor(context)`. Plugins may contribute tools, interceptors for the `step`, `projection`, `model`, `toolBatch`, and `toolInvocation` stages, slash commands, UI actions in semantic slots, plugin-local persistent state, and namespaced append-only canonical records. See [plugins/README.md](plugins/README.md) and the runnable [example plugin](plugins/example-plugin.mjs).
 
 Set `PICO_DISABLED_PLUGINS` to a comma-separated list to replace default workflows. Install environment tool bundles in `executor-plugins/` or `PICO_EXECUTOR_PLUGIN_DIR`; Host, Remote, and Container tools execute in their selected environment. Chat Threads can use Runtime plugin tools.
@@ -92,3 +94,7 @@ npm run build
 ```
 
 The invariant tests exercise Message and Execution deduplication, concurrent Tool Batches, pause/interrupt behavior, Executor reconnection and restart recovery, incomplete streaming, child Thread messaging, plugin surfaces, workspace boundaries, and append-only canonical history.
+
+## License
+
+Pico is licensed under the [Apache License, Version 2.0](LICENSE). Third-party materials remain subject to their own terms; in particular, the DeepSeek brand asset in the Deepsea theme is subject to the usage conditions in the [theme README](plugins/pico.deepsea-theme/README.md#deepseek-brand-asset-usage).
