@@ -1784,7 +1784,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       alive = false;
       window.clearInterval(timer);
     };
-  }, [selectedThread?.executorKind, threadId]);
+  }, [selectedThread?.executorId, selectedThread?.executorKind, threadId]);
 
   useEffect(() => {
     let closed = false;

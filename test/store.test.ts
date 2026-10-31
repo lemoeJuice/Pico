@@ -15,7 +15,9 @@ describe('PicoStore migrations', () => {
       const project = store.createProject('Legacy Project', directory);
       const thread = store.createThread(project.id, 'host');
       store.appendMessage(thread.id, 'legacy-owned-thread-record', {
-        role: 'user', content: 'preserve', source: 'user',
+        role: 'user',
+        content: 'preserve',
+        source: 'user',
       });
       store.close();
       store = null;
@@ -173,6 +175,80 @@ describe('PicoStore migrations', () => {
 });
 
 describe('independent Thread Project assignment', () => {
+  it('reuses a direct parent Container binding and includes inheritance in idempotency identity', () => {
+    const store = new PicoStore(':memory:');
+    try {
+      const project = store.createProject('Shared Container', '/workspace');
+      const parent = store.createThread(project.id, 'container', 'Parent');
+      const parentBinding = store.getExecutorBinding(parent.executorId)!;
+
+      const first = store.createThreadWithResult(project.id, 'container', 'Child', {
+        parentThreadId: parent.id,
+        inheritExecutorId: parent.executorId,
+        idempotencyKey: 'shared-child',
+      });
+      const retry = store.createThreadWithResult(project.id, 'container', 'Child', {
+        parentThreadId: parent.id,
+        inheritExecutorId: parent.executorId,
+        idempotencyKey: 'shared-child',
+      });
+
+      expect(first.created).toBe(true);
+      expect(retry.created).toBe(false);
+      expect(retry.thread.id).toBe(first.thread.id);
+      expect(first.thread.executorId).toBe(parent.executorId);
+      expect(first.thread.workspacePath).toBe(parent.workspacePath);
+      expect(store.getExecutorBinding(first.thread.executorId)).toEqual(parentBinding);
+      expect(() =>
+        store.createThreadWithResult(project.id, 'container', 'Other', {
+          parentThreadId: parent.id,
+          inheritExecutorId: parent.executorId,
+          idempotencyKey: 'shared-child',
+        }),
+      ).toThrow(/different parameters/);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rejects inherited Container bindings unless they belong to the direct parent in the same Project', () => {
+    const store = new PicoStore(':memory:');
+    try {
+      const project = store.createProject('Shared Container', '/workspace');
+      const otherProject = store.createProject('Other Project', '/other');
+      const parent = store.createThread(project.id, 'container', 'Parent');
+      const otherParent = store.createThread(project.id, 'container', 'Other parent');
+      const hostParent = store.createThread(project.id, 'host', 'Host parent');
+
+      expect(() =>
+        store.createThread(project.id, 'container', 'Wrong binding', {
+          parentThreadId: parent.id,
+          inheritExecutorId: otherParent.executorId,
+        }),
+      ).toThrow(/belong to the parent/);
+      expect(() =>
+        store.createThread(project.id, 'container', 'Wrong kind', {
+          parentThreadId: hostParent.id,
+          inheritExecutorId: hostParent.executorId,
+        }),
+      ).toThrow(/Container Executor/);
+      expect(() =>
+        store.createThread(otherProject.id, 'container', 'Wrong Project', {
+          parentThreadId: parent.id,
+          inheritExecutorId: parent.executorId,
+        }),
+      ).toThrow(/same Project/);
+      expect(() =>
+        store.createThread(project.id, 'host', 'Wrong child kind', {
+          parentThreadId: parent.id,
+          inheritExecutorId: parent.executorId,
+        }),
+      ).toThrow(/Only local Container/);
+    } finally {
+      store.close();
+    }
+  });
+
   it('keeps standalone roots isolated and assigns an entire child tree atomically', () => {
     const store = new PicoStore(':memory:');
     try {
@@ -180,7 +256,9 @@ describe('independent Thread Project assignment', () => {
       const child = store.createThread(null, 'container', 'Child', { parentThreadId: root.id });
       const other = store.createThread(null, 'runtime', 'Other root');
 
-      expect(store.listThreads(null).map(({ id }) => id)).toEqual(expect.arrayContaining([root.id, child.id, other.id]));
+      expect(store.listThreads(null).map(({ id }) => id)).toEqual(
+        expect.arrayContaining([root.id, child.id, other.id]),
+      );
       const { project, threads } = store.createProjectForThreadSubtree(root.id, 'New Project', '');
 
       expect(threads.map(({ projectId }) => projectId)).toEqual([project.id, project.id]);
@@ -188,6 +266,26 @@ describe('independent Thread Project assignment', () => {
       expect(store.getThread(child.id)?.projectId).toBe(project.id);
       expect(store.getThread(other.id)?.projectId).toBeNull();
       expect(store.listThreads(null).map(({ id }) => id)).toEqual([other.id]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('updates a shared executor label only once when assigning a subtree to a Project', () => {
+    const store = new PicoStore(':memory:');
+    try {
+      const root = store.createThread(null, 'container', 'Independent root');
+      const child = store.createThread(null, 'container', 'Child', {
+        parentThreadId: root.id,
+        inheritExecutorId: root.executorId,
+      });
+
+      const { project } = store.createProjectForThreadSubtree(root.id, 'Moved Project', '');
+
+      expect(store.getThread(root.id)?.executorLabel).toBe('Container · Moved Project');
+      expect(store.getThread(child.id)?.executorLabel).toBe('Container · Moved Project');
+      expect(store.getExecutorBinding(root.executorId)?.label).toBe('Container · Moved Project');
+      expect(store.getThread(root.id)?.projectId).toBe(project.id);
     } finally {
       store.close();
     }

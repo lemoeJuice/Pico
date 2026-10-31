@@ -290,6 +290,9 @@ export const collaborationPlugin: PicoPlugin = {
               parentThreadId: parent.id,
               createdByAgent: true,
               idempotencyKey: taskKey,
+              ...(requestedExecutor === 'inherit' && executorKind === 'container'
+                ? { inheritExecutorId: parent.executorId }
+                : {}),
               ...(preserveRemoteBinding && parentBinding?.remoteConnectionId
                 ? { remoteConnectionId: parentBinding.remoteConnectionId }
                 : {}),

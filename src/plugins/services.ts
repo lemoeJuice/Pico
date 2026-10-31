@@ -40,6 +40,8 @@ export interface PluginServices {
         createdByAgent?: boolean;
         remoteConnectionId?: string;
         workspacePath?: string;
+        /** Reuse the direct parent's local Container Executor binding. */
+        inheritExecutorId?: string;
         idempotencyKey?: string;
         modelSelection?: CatalogSelection;
         /** Sparse per-tool visibility overrides applied when this Thread is first created. */

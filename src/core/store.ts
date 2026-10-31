@@ -778,6 +778,7 @@ export class PicoStore {
       createdByAgent?: boolean;
       remoteConnectionId?: string | null;
       workspacePath?: string;
+      inheritExecutorId?: string;
       idempotencyKey?: string;
       modelSelection?: ThreadModelSelection;
       toolOverrides?: Record<string, boolean>;
@@ -788,32 +789,30 @@ export class PicoStore {
     const remoteConnection = options.remoteConnectionId
       ? this.getRemoteExecutorConnection(options.remoteConnectionId)
       : null;
-    if (options.remoteConnectionId && !remoteConnection) throw new ServiceError(404, 'Remote Executor connection not found');
+    if (options.remoteConnectionId && !remoteConnection)
+      throw new ServiceError(404, 'Remote Executor connection not found');
     if (remoteConnection && executorKind !== 'host')
       throw new ServiceError(400, 'Remote Host Executor must use Host execution kind');
     const workspacePath = executorKind === 'runtime' ? '' : (options.workspacePath ?? project?.workspacePath ?? '');
     const idempotencyKey = options.idempotencyKey?.trim();
-    if (idempotencyKey && idempotencyKey.length > 240) throw new ServiceError(400, 'Thread creation idempotency key is too long.');
+    if (idempotencyKey && idempotencyKey.length > 240)
+      throw new ServiceError(400, 'Thread creation idempotency key is too long.');
+    const requestIdentity = {
+      projectId,
+      executorKind,
+      title,
+      parentThreadId: options.parentThreadId ?? null,
+      createdByAgent: options.createdByAgent ?? false,
+      remoteConnectionId: remoteConnection?.id ?? null,
+      workspacePath,
+      modelSelection: options.modelSelection ?? null,
+      toolOverrides: options.toolOverrides
+        ? Object.fromEntries(Object.entries(options.toolOverrides).sort(([left], [right]) => left.localeCompare(right)))
+        : null,
+      ...(options.inheritExecutorId === undefined ? {} : { inheritExecutorId: options.inheritExecutorId }),
+    };
     const requestHash = idempotencyKey
-      ? createHash('sha256')
-          .update(
-            JSON.stringify({
-              projectId,
-              executorKind,
-              title,
-              parentThreadId: options.parentThreadId ?? null,
-              createdByAgent: options.createdByAgent ?? false,
-              remoteConnectionId: remoteConnection?.id ?? null,
-              workspacePath,
-              modelSelection: options.modelSelection ?? null,
-              toolOverrides: options.toolOverrides
-                ? Object.fromEntries(
-                    Object.entries(options.toolOverrides).sort(([left], [right]) => left.localeCompare(right)),
-                  )
-                : null,
-            }),
-          )
-          .digest('hex')
+      ? createHash('sha256').update(JSON.stringify(requestIdentity)).digest('hex')
       : null;
     const kindLabel = remoteConnection
       ? `Remote Host · ${remoteConnection.name}`
@@ -838,13 +837,41 @@ export class PicoStore {
         }
       }
       const id = randomUUID();
-      const executorId = randomUUID();
       const createdAt = isoNow();
-      this.db
-        .prepare(
-          'INSERT INTO executors (id, kind, label, workspace_path, remote_connection_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-        )
-        .run(executorId, executorKind, label, workspacePath, remoteConnection?.id ?? null, createdAt);
+      let executorId: string;
+      let executorLabel = label;
+      let threadWorkspacePath = workspacePath;
+      let executorRemote = Boolean(remoteConnection);
+      if (options.inheritExecutorId !== undefined) {
+        if (executorKind !== 'container' || remoteConnection || options.remoteConnectionId) {
+          throw new ServiceError(400, 'Only local Container Executors can be inherited.');
+        }
+        const parentThreadId = options.parentThreadId;
+        const parent = parentThreadId ? this.getThread(parentThreadId) : null;
+        if (!parent || parent.executorKind !== 'container' || parent.executorRemote) {
+          throw new ServiceError(400, 'A child Thread can inherit only its parent Container Executor.');
+        }
+        if (parent.projectId !== projectId) {
+          throw new ServiceError(400, 'Parent and child Threads must belong to the same Project.');
+        }
+        if (parent.executorId !== options.inheritExecutorId) {
+          throw new ServiceError(400, 'The inherited Executor must belong to the parent Thread.');
+        }
+        if (options.workspacePath !== undefined && options.workspacePath !== parent.workspacePath) {
+          throw new ServiceError(400, 'An inherited Container Executor must keep the parent workspace.');
+        }
+        executorId = parent.executorId;
+        executorLabel = parent.executorLabel;
+        threadWorkspacePath = parent.workspacePath;
+        executorRemote = false;
+      } else {
+        executorId = randomUUID();
+        this.db
+          .prepare(
+            'INSERT INTO executors (id, kind, label, workspace_path, remote_connection_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+          )
+          .run(executorId, executorKind, label, workspacePath, remoteConnection?.id ?? null, createdAt);
+      }
       this.db
         .prepare(
           `
@@ -887,9 +914,9 @@ export class PicoStore {
         projectId,
         executorId,
         executorKind,
-        executorRemote: Boolean(remoteConnection),
-        executorLabel: label,
-        workspacePath,
+        executorRemote,
+        executorLabel,
+        workspacePath: threadWorkspacePath,
         title,
         parentThreadId: options.parentThreadId ?? null,
         createdByAgent: options.createdByAgent ?? false,
@@ -935,26 +962,40 @@ export class PicoStore {
       const root = this.getThread(threadId);
       if (!root) throw new ServiceError(404, 'Thread not found');
       if (root.projectId !== null) throw new ServiceError(409, 'Thread already belongs to a Project');
-      if (root.parentThreadId !== null) throw new ServiceError(409, 'Only an independent Thread root can become a Project.');
-      if (root.archivedAt || root.deletedAt) throw new ServiceError(409, 'Only an active Thread root can become a Project.');
-      const members = this.db.prepare(`
+      if (root.parentThreadId !== null)
+        throw new ServiceError(409, 'Only an independent Thread root can become a Project.');
+      if (root.archivedAt || root.deletedAt)
+        throw new ServiceError(409, 'Only an active Thread root can become a Project.');
+      const members = this.db
+        .prepare(
+          `
         WITH RECURSIVE subtree(id) AS (
           SELECT id FROM threads WHERE id = ?
           UNION SELECT child.id FROM threads child JOIN subtree parent ON child.parent_thread_id = parent.id
         ) SELECT id FROM subtree
-      `).all(threadId) as Array<{ id: string }>;
+      `,
+        )
+        .all(threadId) as Array<{ id: string }>;
       const ids = members.map(({ id }) => String(id));
       const nowRunning = ids.some((id) => this.listActiveExecutions(id).length > 0);
       if (nowRunning) throw new ServiceError(409, 'Cannot assign a Thread subtree while a task is running.');
-      this.db.prepare(`WITH RECURSIVE subtree(id) AS (
+      this.db
+        .prepare(
+          `WITH RECURSIVE subtree(id) AS (
         SELECT id FROM threads WHERE id = ?
         UNION SELECT child.id FROM threads child JOIN subtree parent ON child.parent_thread_id = parent.id
-      ) UPDATE threads SET project_id = ? WHERE id IN (SELECT id FROM subtree)`).run(threadId, project.id);
+      ) UPDATE threads SET project_id = ? WHERE id IN (SELECT id FROM subtree)`,
+        )
+        .run(threadId, project.id);
       const setLabel = this.db.prepare('UPDATE executors SET label = ? WHERE id = ?');
-      const setWorkspace = this.db.prepare("UPDATE executors SET workspace_path = ? WHERE id = ? AND kind != 'runtime' AND remote_connection_id IS NULL AND workspace_path = ''");
+      const setWorkspace = this.db.prepare(
+        "UPDATE executors SET workspace_path = ? WHERE id = ? AND kind != 'runtime' AND remote_connection_id IS NULL AND workspace_path = ''",
+      );
+      const seenExecutors = new Set<string>();
       for (const id of ids) {
         const thread = this.getThread(id);
-        if (!thread) continue;
+        if (!thread || seenExecutors.has(thread.executorId)) continue;
+        seenExecutors.add(thread.executorId);
         setLabel.run(`${thread.executorLabel} · ${project.name}`, thread.executorId);
         if (thread.executorKind !== 'runtime' && !thread.executorRemote && !thread.workspacePath)
           setWorkspace.run(project.workspacePath, thread.executorId);

@@ -8,6 +8,145 @@ import { PicoRuntime } from '../../../runtime/runtime.js';
 import { FakeModel, response, setupTestCatalog } from '../../../../test/helpers.js';
 
 describe('collaboration Runtime persistence', () => {
+  it('inherits a Container parent Executor by default for a child Thread', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-collaboration-container-inherit-'));
+    const store = new PicoStore(join(directory, 'runtime.sqlite'));
+    const runtime = new PicoRuntime(store, {
+      model: new FakeModel(() => response('Container inheritance is complete.')),
+      plugins: [collaborationPlugin],
+      pluginDirectory: join(directory, 'empty-plugins'),
+    });
+
+    try {
+      await runtime.initialize();
+      const parent = runtime.createIndependentThread('container', 'Container parent');
+      const spawn = runtime.tools.get('spawn_thread');
+      if (!spawn) throw new Error('spawn_thread was not registered');
+      const result = (await spawn.execute(
+        { prompt: 'Continue in the inherited Container' },
+        {
+          thread: parent,
+          executionId: 'container-inherit-child',
+          workspacePath: parent.workspacePath,
+          signal: new AbortController().signal,
+        },
+      )) as { threadId: string };
+      const child = runtime.getThread(result.threadId);
+
+      expect(child).toMatchObject({
+        executorKind: 'container',
+        executorId: parent.executorId,
+        projectId: parent.projectId,
+        parentThreadId: parent.id,
+      });
+      expect(store.executorForThread(child!.id)?.id).toBe(store.executorForThread(parent.id)?.id);
+    } finally {
+      await runtime.shutdown();
+      store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('creates an independent Container Executor for an explicit Container child and applies its tool override', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-collaboration-container-explicit-'));
+    const store = new PicoStore(join(directory, 'runtime.sqlite'));
+    const runtime = new PicoRuntime(store, {
+      model: new FakeModel(() => response('Explicit Container selection is complete.')),
+      plugins: [collaborationPlugin],
+      pluginDirectory: join(directory, 'empty-plugins'),
+    });
+
+    try {
+      await runtime.initialize();
+      const parent = runtime.createIndependentThread('container', 'Container parent');
+      await runtime.setThreadToolEnabled(parent.id, 'spawn_thread', false);
+      const spawn = runtime.tools.get('spawn_thread');
+      if (!spawn) throw new Error('spawn_thread was not registered');
+      const result = (await spawn.execute(
+        {
+          prompt: 'Use a separate Container Executor',
+          executor: 'container',
+          tool_settings: [{ name: 'spawn_thread', enabled: true }],
+        },
+        {
+          thread: parent,
+          executionId: 'container-explicit-child',
+          workspacePath: parent.workspacePath,
+          signal: new AbortController().signal,
+        },
+      )) as { threadId: string };
+      const child = runtime.getThread(result.threadId);
+
+      expect(child).toMatchObject({
+        executorKind: 'container',
+        projectId: parent.projectId,
+        parentThreadId: parent.id,
+      });
+      expect(child?.executorId).not.toBe(parent.executorId);
+      expect(store.executorForThread(child!.id)?.id).not.toBe(store.executorForThread(parent.id)?.id);
+      expect((await runtime.listThreadTools(parent.id)).find((tool) => tool.name === 'spawn_thread')?.enabled).toBe(
+        false,
+      );
+      expect((await runtime.listThreadTools(child!.id)).find((tool) => tool.name === 'spawn_thread')?.enabled).toBe(
+        true,
+      );
+    } finally {
+      await runtime.shutdown();
+      store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('inherits the same Container Executor through a grandchild Thread by default', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-collaboration-container-grandchild-'));
+    const store = new PicoStore(join(directory, 'runtime.sqlite'));
+    const runtime = new PicoRuntime(store, {
+      model: new FakeModel(() => response('Container inheritance is complete.')),
+      plugins: [collaborationPlugin],
+      pluginDirectory: join(directory, 'empty-plugins'),
+    });
+
+    try {
+      await runtime.initialize();
+      const parent = runtime.createIndependentThread('container', 'Container root');
+      const spawn = runtime.tools.get('spawn_thread');
+      if (!spawn) throw new Error('spawn_thread was not registered');
+      const childResult = (await spawn.execute(
+        { prompt: 'Continue in the inherited Container', title: 'Container child' },
+        {
+          thread: parent,
+          executionId: 'container-grandchild-child',
+          workspacePath: parent.workspacePath,
+          signal: new AbortController().signal,
+        },
+      )) as { threadId: string };
+      const child = runtime.getThread(childResult.threadId)!;
+      const grandchildResult = (await spawn.execute(
+        { prompt: 'Continue in the inherited Container', title: 'Container grandchild' },
+        {
+          thread: child,
+          executionId: 'container-grandchild-grandchild',
+          workspacePath: child.workspacePath,
+          signal: new AbortController().signal,
+        },
+      )) as { threadId: string };
+      const grandchild = runtime.getThread(grandchildResult.threadId);
+
+      expect(child.parentThreadId).toBe(parent.id);
+      expect(grandchild).toMatchObject({
+        executorKind: 'container',
+        executorId: parent.executorId,
+        parentThreadId: child.id,
+        projectId: parent.projectId,
+      });
+      expect(store.executorForThread(grandchild!.id)?.id).toBe(store.executorForThread(parent.id)?.id);
+    } finally {
+      await runtime.shutdown();
+      store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('uses target executor tool defaults when a child crosses executor types', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pico-collaboration-executor-'));
     const workspace = join(directory, 'workspace');

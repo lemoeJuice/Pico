@@ -66,6 +66,33 @@ describe('independent Thread workspace attachment', () => {
     }
   });
 
+  it('attaches a shared parent and child Container only once when creating a Project', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const parent = env.runtime.createIndependentThread('container', 'Parent');
+    const child = env.store.createThread(null, 'container', 'Child', {
+      parentThreadId: parent.id,
+      inheritExecutorId: parent.executorId,
+    });
+    const adapter = (env.runtime as unknown as { containerExecutor: ContainerExecutor }).containerExecutor;
+    const attach = vi.spyOn(adapter, 'attachWorkspace').mockResolvedValue();
+    const copy = vi.spyOn(adapter, 'copyIndependentWorkspace').mockResolvedValue();
+    const finalize = vi.spyOn(adapter, 'finalizeWorkspaceAttachment').mockResolvedValue();
+    try {
+      const { project } = await env.runtime.createProjectFromThread(parent.id, 'Shared', env.workspace);
+      expect(attach).toHaveBeenCalledOnce();
+      expect(copy).toHaveBeenCalledOnce();
+      expect(finalize).toHaveBeenCalledOnce();
+      expect(env.store.getThread(child.id)).toMatchObject({
+        projectId: project.id,
+        executorId: parent.executorId,
+        workspacePath: env.workspace,
+      });
+    } finally {
+      attach.mockRestore(); copy.mockRestore(); finalize.mockRestore();
+      await env.cleanup();
+    }
+  });
+
   it('copies staged container files including hidden files into the new workspace', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.runtime.createIndependentThread('container', 'Independent');
