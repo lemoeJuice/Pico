@@ -4,6 +4,8 @@
  * Update legacy overrides deliberately when dark appearance roles are changed.
  */
 :root[data-pico-theme='pico.dark-legacy'] {
+  --pico-conversation-assistant-avatar-gradient: linear-gradient(145deg, #283c35, #283c35);
+  --pico-conversation-avatar-foreground: #bce4cc;
   --pico-shell-sidebar-border-right: #405148;
   --pico-shell-project-thread-list-border-left: #354139;
   --pico-shell-sidebar-bottom-border-top: #354139;

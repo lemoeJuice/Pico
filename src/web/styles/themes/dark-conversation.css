@@ -128,8 +128,8 @@
   --pico-conversation-history-hover-surface: #354344;
   --pico-conversation-history-hover-border: #66816b;
   --pico-conversation-history-disabled-text: #95a397;
-  --pico-conversation-assistant-avatar-gradient: linear-gradient(145deg, #5e886b, #395d47);
-  --pico-conversation-avatar-foreground: #f4faf5;
+  --pico-conversation-assistant-avatar-gradient: linear-gradient(145deg, #283c35, #283c35);
+  --pico-conversation-avatar-foreground: #bce4cc;
   --pico-conversation-avatar-hover-ring: rgba(143, 185, 154, 0.5);
   --pico-conversation-avatar-focus: #8FB9A4;
   --pico-conversation-user-avatar-text: #E8EEEB;

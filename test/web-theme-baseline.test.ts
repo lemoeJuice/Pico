@@ -51,6 +51,28 @@ describe('WebUI light appearance baseline', () => {
     expect(missing).toEqual([]);
   });
 
+  it('keeps the built-in dark conversation avatar aligned with the Pico mark', () => {
+    const definitions = (filename: string) =>
+      new Map(
+        [
+          ...readFileSync(resolve(root, 'src/web/styles/themes', filename), 'utf8').matchAll(
+            /(--pico-[\w-]+)\s*:\s*([^;]+);/g,
+          ),
+        ].map((match) => [match[1]!, match[2]!.trim()]),
+      );
+    for (const [shell, conversation] of [
+      [definitions('dark-shell.css'), definitions('dark-conversation.css')],
+      [definitions('dark-legacy.css'), definitions('dark-legacy.css')],
+    ] as const) {
+      expect(conversation.get('--pico-conversation-avatar-foreground')).toBe(
+        shell.get('--pico-shell-brand-mark-welcome-mark-text'),
+      );
+      expect(conversation.get('--pico-conversation-assistant-avatar-gradient')).toBe(
+        `linear-gradient(145deg, ${shell.get('--pico-shell-brand-mark-welcome-mark-surface-gradient-start')}, ${shell.get('--pico-shell-brand-mark-welcome-mark-surface-gradient-end')})`,
+      );
+    }
+  });
+
   it('keeps host color and typography values theme-tokenized', () => {
     const hostCss = [
       ...cssFiles(resolve(root, 'src/web/styles')).filter((file) => !file.includes('/styles/themes/')),

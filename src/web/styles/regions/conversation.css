@@ -154,6 +154,9 @@
   color: var(--pico-conversation-avatar-foreground);
   background: var(--pico-conversation-assistant-avatar-gradient);
 }
+:root[data-pico-color-scheme='dark'] .assistant-avatar {
+  box-shadow: inset 0 0 0 1px var(--pico-shell-brand-mark-welcome-mark-border);
+}
 .assistant-avatar-toggle {
   padding: 0;
   border: 0;
@@ -162,6 +165,11 @@
 }
 .assistant-avatar-toggle:hover {
   box-shadow: 0 0 0 3px var(--pico-conversation-avatar-hover-ring);
+}
+:root[data-pico-color-scheme='dark'] .assistant-avatar-toggle:hover {
+  box-shadow:
+    inset 0 0 0 1px var(--pico-shell-brand-mark-welcome-mark-border),
+    0 0 0 3px var(--pico-conversation-avatar-hover-ring);
 }
 .assistant-avatar-toggle:focus-visible {
   outline: 2px solid var(--pico-conversation-avatar-focus);
