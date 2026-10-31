@@ -63,9 +63,14 @@ body[data-pico-hide-theme-background] {
   border: 1px solid var(--pico-control-form-input-border);
   border-radius: 9px;
 }
+.background-image-blur span {
+  flex: 0 0 6.5em;
+  width: 6.5em;
+}
 .background-image-blur input {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
+  width: 0;
   accent-color: var(--pico-control-range-accent);
 }
 .native-tool-copy .background-image-error {
