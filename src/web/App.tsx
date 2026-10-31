@@ -50,6 +50,7 @@ import { threadCanBeInterrupted } from './thread-controls.js';
 import { executorStatusFromProbe } from './executor-status.js';
 import { shouldCloseModalOnEscape } from './modal-behavior.js';
 import { SettingsNavigation } from './settings-navigation.js';
+import { BackgroundImageSetting, useMainBackgroundImage } from './background-image-view.js';
 import {
   appearanceSelectionState,
   pluginThemeBrandIconUrl,
@@ -708,6 +709,11 @@ function formatTokenCount(tokens: number): string {
 
 export function App({ authRequired = false, onSignOut }: { authRequired?: boolean; onSignOut?(): Promise<void> }) {
   const appearance = useAppearance();
+  const backgroundThemeId = appearance.preference === 'system' ? appearance.themeId : appearance.preference;
+  const backgroundImage = useMainBackgroundImage(backgroundThemeId);
+  const showBackgroundLayer =
+    (backgroundImage.mode === 'image' && !!backgroundImage.url) ||
+    (backgroundImage.mode === 'theme' && backgroundImage.blur > 0 && !!appearance.activeTheme?.background);
   const composerState = useRef<ComposerState | null>(null);
   if (composerState.current === null) composerState.current = readComposerState();
   const [projects, setProjects] = useState<Project[]>([]);
@@ -3471,7 +3477,19 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         </div>
       </aside>
 
-      <main className="main-panel">
+      <main className={`main-panel${showBackgroundLayer ? ' has-user-background' : ''}`}>
+        {showBackgroundLayer ? (
+          <div
+            className={`main-panel-background${backgroundImage.mode === 'image' ? ' is-user-image' : ''}`}
+            aria-hidden="true"
+          >
+            {backgroundImage.mode === 'image' && backgroundImage.url ? (
+              <img src={backgroundImage.url} alt="" style={{ filter: `blur(${backgroundImage.blur}px)` }} />
+            ) : (
+              <div className="main-panel-theme-background" style={{ filter: `blur(${backgroundImage.blur}px)` }} />
+            )}
+          </div>
+        ) : null}
         <header className="topbar">
           <button
             className="icon-button menu-button"
@@ -4621,6 +4639,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   ) : null}
                 </div>
               </article>
+              <BackgroundImageSetting background={backgroundImage} />
               <article className="native-tool-row general-setting-row">
                 <div className="native-tool-copy">
                   <div className="native-tool-title">

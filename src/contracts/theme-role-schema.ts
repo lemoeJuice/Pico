@@ -987,6 +987,7 @@ export const THEME_ROLE_SCHEMA = [
   '--pico-topbar-tiny-spinner-border-top',
   '--pico-topbar-topbar-border-bottom',
   '--pico-topbar-topbar-surface',
+  '--pico-user-background-tint',
   '--pico-welcome-welcome-actions-button-font-size',
   '--pico-welcome-welcome-copy-font-size',
   '--pico-welcome-welcome-copy-line-height',

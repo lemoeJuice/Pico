@@ -12,6 +12,7 @@
   --pico-theme-background-position: center;
   --pico-theme-background-repeat: no-repeat;
   --pico-material-backdrop: none;
+  --pico-user-background-tint: rgba(255, 255, 255, 0.32);
   --pico-surface-primary: #fbfcfa;
   --pico-text-primary: #28332e;
   --pico-text-muted: #7a867f;

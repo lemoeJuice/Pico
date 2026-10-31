@@ -13,6 +13,7 @@
 @import './styles/themes/dark-conversation.css';
 @import './styles/base/document.css';
 @import './styles/regions/shell-sidebar.css';
+@import './styles/regions/background-image.css';
 @import './styles/regions/auth.css';
 @import './styles/regions/topbar-notices.css';
 @import './styles/regions/toolbar.css';

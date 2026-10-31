@@ -1,4 +1,5 @@
 :root[data-pico-color-scheme='dark'] {
+  --pico-user-background-tint: rgba(17, 25, 21, 0.46);
   --pico-page-bg: #171f1a;
   --pico-surface-primary: #202a23;
   --pico-text-primary: #e3ebe4;

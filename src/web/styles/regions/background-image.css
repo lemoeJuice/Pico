@@ -1,0 +1,73 @@
+/* The user's local image sits behind only the main panel and never intercepts input. */
+.main-panel.has-user-background {
+  isolation: isolate;
+}
+body[data-pico-hide-theme-background] {
+  background-image: none;
+}
+.main-panel-background {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+}
+.main-panel-background img,
+.main-panel-theme-background {
+  position: absolute;
+  inset: -8px;
+  width: calc(100% + 16px);
+  height: calc(100% + 16px);
+  object-fit: cover;
+}
+.main-panel-theme-background {
+  background-image: var(--pico-theme-background-image);
+  background-size: var(--pico-theme-background-size);
+  background-position: var(--pico-theme-background-position);
+  background-repeat: var(--pico-theme-background-repeat);
+}
+.main-panel-background.is-user-image::after {
+  position: absolute;
+  inset: 0;
+  content: '';
+  background: var(--pico-user-background-tint);
+}
+.background-image-actions {
+  display: grid;
+  justify-items: stretch;
+  gap: 6px;
+}
+.background-image-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.background-image-buttons button,
+.background-image-blur span {
+  white-space: nowrap;
+}
+.background-image-buttons button {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.background-image-blur {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-height: 36px;
+  padding: 6px 10px;
+  color: var(--pico-text-muted);
+  font-size: var(--pico-toolbar-panels-native-tool-copy-font-size);
+  background: var(--pico-control-form-input-fill);
+  border: 1px solid var(--pico-control-form-input-border);
+  border-radius: 9px;
+}
+.background-image-blur input {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--pico-control-range-accent);
+}
+.native-tool-copy .background-image-error {
+  color: var(--pico-control-status-danger-text);
+}

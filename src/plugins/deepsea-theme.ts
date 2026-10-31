@@ -833,6 +833,7 @@ export const deepseaThemePlugin: PicoPlugin = {
         '--pico-public-focus': '#4176e6',
         '--pico-markdown-link': '#315fc4',
         // Explicit Deepsea values for the remaining non-state light color roles.
+        '--pico-user-background-tint': 'rgba(65, 118, 230, 0.08)',
         '--pico-decor-lavender': '#eaf0ff',
         '--pico-decor-peach': '#f2f6ff',
         '--pico-shell-project-thread-list-border-left': 'rgba(65, 118, 230, 0.2)',
