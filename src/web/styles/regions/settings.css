@@ -1,3 +1,6 @@
+.modal.settings-modal {
+  scrollbar-gutter: stable;
+}
 .plugin-settings-pages {
   display: flex;
   flex-wrap: wrap;

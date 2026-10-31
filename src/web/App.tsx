@@ -4255,6 +4255,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
 
       {settingsOpen ? (
         <Modal
+          className="settings-modal"
           title={
             mcpManagerOpen
               ? 'MCP servers'
