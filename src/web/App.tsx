@@ -4836,7 +4836,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               />
             </label>
             {projectSourceThread ? (
-              <p className="field-note">This Thread and its child Threads will move into the Project.</p>
+              <p className="field-note">
+                This Thread and its child Threads will move into the Project. The workspace folder must be empty, even if set later.
+                Existing independent Container files remain at /pico-thread-work and are not copied into the new workspace.
+              </p>
             ) : null}
             {projectSourceThread && newProjectPath.trim() ? (
               <p className="field-note">{CONTAINER_WORKSPACE_REBUILD_NOTICE}</p>
@@ -4899,7 +4902,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             </div>
             {canSetProjectWorkspace ? (
                 <p className="field-note">
-                  If this Project has Container Threads, setting the workspace rebuilds their containers. Container files and data volumes are preserved, but running processes inside those containers will stop.
+                  If this Project has Container Threads, setting the workspace rebuilds their containers. Container files and data volumes are preserved, but running processes inside those containers will stop. Projects created from independent Threads require an empty folder; existing independent Container files remain at /pico-thread-work and are not copied into it.
                 </p>
               ) : null}
             {selectedThread.projectId === null ? (

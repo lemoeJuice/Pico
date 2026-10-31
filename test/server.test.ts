@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
@@ -529,6 +529,88 @@ describe('Pico server access boundary', () => {
 });
 
 describe('independent Thread Project API', () => {
+  it('rejects non-empty workspaces for conversion and later assignment, but accepts empty ones', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-independent-workspace-validation-'));
+    let server: Awaited<ReturnType<typeof startServer>> | undefined;
+    try {
+      process.env.PICO_HOST = '127.0.0.1';
+      process.env.PICO_PORT = '0';
+      process.env.PICO_DB_PATH = join(directory, 'pico.sqlite');
+      delete process.env.PICO_ACCESS_TOKEN;
+      server = await startServer();
+      const base = `http://127.0.0.1:${server.port}`;
+      const headers = { 'content-type': 'application/json' };
+      const nonEmpty = join(directory, 'non-empty');
+      const hiddenNonEmpty = join(directory, 'hidden-non-empty');
+      const empty = join(directory, 'empty');
+      const laterNonEmpty = join(directory, 'later-non-empty');
+      const laterEmpty = join(directory, 'later-empty');
+      await Promise.all([nonEmpty, hiddenNonEmpty, empty, laterNonEmpty, laterEmpty].map((path) => mkdir(path)));
+      await writeFile(join(nonEmpty, 'note.txt'), 'keep');
+      await writeFile(join(hiddenNonEmpty, '.hidden'), 'keep hidden');
+      await writeFile(join(laterNonEmpty, '.hidden'), 'keep later hidden');
+
+      const createThread = async (title: string) => {
+        const response = await fetch(`${base}/api/threads`, {
+          method: 'POST', headers, body: JSON.stringify({ executorKind: 'host', title }),
+        });
+        expect(response.status).toBe(201);
+        return response.json() as Promise<{ id: string; projectId: string | null }>;
+      };
+
+      for (const [title, workspacePath, filename] of [
+        ['Non-empty conversion', nonEmpty, 'note.txt'],
+        ['Hidden conversion', hiddenNonEmpty, '.hidden'],
+      ]) {
+        const thread = await createThread(title);
+        const rejected = await fetch(`${base}/api/threads/${thread.id}/project`, {
+          method: 'POST', headers, body: JSON.stringify({ name: title, workspacePath }),
+        });
+        expect(rejected.status).toBe(409);
+        expect(server.runtime.store.getThread(thread.id)?.projectId).toBeNull();
+        expect(server.runtime.store.listProjects().some((project) => project.name === title)).toBe(false);
+        expect(await readdir(workspacePath)).toContain(filename);
+      }
+
+      const emptyThread = await createThread('Empty conversion');
+      const converted = await fetch(`${base}/api/threads/${emptyThread.id}/project`, {
+        method: 'POST', headers, body: JSON.stringify({ name: 'Empty conversion', workspacePath: empty }),
+      });
+      expect(converted.status).toBe(201);
+      const convertedResult = await converted.json();
+      expect(convertedResult.project.workspacePath).toBe(empty);
+
+      const laterThread = await createThread('Later assignment');
+      const projectResponse = await fetch(`${base}/api/threads/${laterThread.id}/project`, {
+        method: 'POST', headers, body: JSON.stringify({ name: 'Later assignment' }),
+      });
+      expect(projectResponse.status).toBe(201);
+      const project = await projectResponse.json();
+      const laterRejected = await fetch(`${base}/api/projects/${project.project.id}/workspace`, {
+        method: 'POST', headers, body: JSON.stringify({ workspacePath: laterNonEmpty }),
+      });
+      expect(laterRejected.status).toBe(409);
+      expect(server.runtime.store.getProject(project.project.id)?.workspacePath).toBe('');
+      expect(server.runtime.store.getThread(laterThread.id)?.projectId).toBe(project.project.id);
+      expect(await readdir(laterNonEmpty)).toContain('.hidden');
+      const laterAccepted = await fetch(`${base}/api/projects/${project.project.id}/workspace`, {
+        method: 'POST', headers, body: JSON.stringify({ workspacePath: laterEmpty }),
+      });
+      expect(laterAccepted.status).toBe(200);
+      expect((await laterAccepted.json()).workspacePath).toBe(laterEmpty);
+
+      // Ordinary project creation remains unrestricted by the empty-directory rule.
+      const ordinary = await fetch(`${base}/api/projects`, {
+        method: 'POST', headers, body: JSON.stringify({ name: 'Ordinary project', workspacePath: nonEmpty }),
+      });
+      expect(ordinary.status).toBe(201);
+      expect((await ordinary.json()).workspacePath).toBe(nonEmpty);
+    } finally {
+      await server?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('creates an independent Thread, assigns its full tree, and sets workspace once', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pico-independent-project-'));
     let server: Awaited<ReturnType<typeof startServer>> | undefined;
@@ -561,11 +643,13 @@ describe('independent Thread Project API', () => {
         result.project.id,
       ]);
 
+      const emptyWorkspace = join(directory, 'workspace');
+      await mkdir(emptyWorkspace);
       const workspace = await fetch(`${base}/api/projects/${result.project.id}/workspace`, {
-        method: 'POST', headers, body: JSON.stringify({ workspacePath: directory }),
+        method: 'POST', headers, body: JSON.stringify({ workspacePath: emptyWorkspace }),
       });
       expect(workspace.status).toBe(200);
-      expect((await workspace.json()).workspacePath).toBe(directory);
+      expect((await workspace.json()).workspacePath).toBe(emptyWorkspace);
       const repeated = await fetch(`${base}/api/projects/${result.project.id}/workspace`, {
         method: 'POST', headers, body: JSON.stringify({ workspacePath: directory }),
       });

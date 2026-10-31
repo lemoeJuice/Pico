@@ -3,7 +3,7 @@ import { ResponsesModelAdapter } from './responses-model.js';
 import type { CatalogSelection } from '../contracts/model-catalog.js';
 import { ServiceError } from '../contracts/service-error.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { realpath, stat } from 'node:fs/promises';
+import { readdir, realpath, stat } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { DEFAULT_THREAD_TITLE } from '../core/types.js';
 import type {
@@ -1732,6 +1732,7 @@ export class PicoRuntime {
       const validatedPath = workspacePath?.trim() ? await this.validateWorkspaceDirectory(workspacePath) : '';
       const cleanedName = name?.trim() || (validatedPath ? basename(validatedPath) : 'Project');
       if (validatedPath) {
+        await this.assertEmptyWorkspaceDirectory(validatedPath);
         for (const thread of members) {
           if (thread.executorKind !== 'container' || thread.executorRemote || thread.workspacePath) continue;
           const binding = this.store.getExecutorBinding(thread.executorId);
@@ -1740,7 +1741,11 @@ export class PicoRuntime {
           attached.push(binding);
         }
       }
-      const result = this.store.createProjectForThreadSubtree(threadId, cleanedName, validatedPath);
+      const result = this.store.transaction(() => {
+        const created = this.store.createProjectForThreadSubtree(threadId, cleanedName, validatedPath);
+        if (!validatedPath) this.store.setSetting(`project-requires-empty-workspace:${created.project.id}`, true);
+        return created;
+      });
       committed = true;
       await this.finalizeWorkspaceAttachments(attached);
       this.publish({ type: 'project.created', project: result.project });
@@ -1770,6 +1775,9 @@ export class PicoRuntime {
     let committed = false;
     try {
       const workspacePath = await this.validateWorkspaceDirectory(requestedPath);
+      if (this.store.getSetting(`project-requires-empty-workspace:${projectId}`, false)) {
+        await this.assertEmptyWorkspaceDirectory(workspacePath);
+      }
       const executorIds: string[] = [];
       const seenExecutors = new Set<string>();
       for (const thread of threads) {
@@ -1809,6 +1817,12 @@ export class PicoRuntime {
     const info = await stat(path);
     if (!info.isDirectory()) throw new ServiceError(400, 'Workspace path must be a directory');
     return path;
+  }
+
+  private async assertEmptyWorkspaceDirectory(path: string): Promise<void> {
+    if ((await readdir(path)).length > 0) {
+      throw new ServiceError(409, 'The workspace folder must be empty when creating a Project from an independent Thread.');
+    }
   }
 
   private async createProjectChecked(name: string | undefined, workspacePath?: string): Promise<Project> {
