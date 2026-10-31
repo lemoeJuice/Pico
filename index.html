@@ -4,6 +4,32 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <meta name="theme-color" content="#f5f7f4" />
+    <script>
+      (() => {
+        const key = 'pico.appearance';
+        let preference = 'pico.light';
+        try {
+          const stored = localStorage.getItem(key);
+          if (stored === 'system' || stored === 'pico.light' || stored === 'pico.dark') preference = stored;
+        } catch {
+          // Use the light default when browser storage is unavailable.
+        }
+        let systemDark = false;
+        try {
+          systemDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches === true;
+        } catch {
+          systemDark = false;
+        }
+        const theme = preference === 'pico.dark' || (preference === 'system' && systemDark) ? 'dark' : 'light';
+        const themeId = theme === 'dark' ? 'pico.dark' : 'pico.light';
+        const root = document.documentElement;
+        root.setAttribute('data-pico-theme', themeId);
+        root.setAttribute('data-pico-appearance-preference', preference);
+        root.style.colorScheme = theme;
+        const themeColor = document.querySelector('meta[name="theme-color"]');
+        if (themeColor) themeColor.setAttribute('content', theme === 'dark' ? '#171f1a' : '#f5f7f4');
+      })();
+    </script>
     <link rel="stylesheet" href="/pico-plugin-ui.css" />
     <title>Pico</title>
   </head>

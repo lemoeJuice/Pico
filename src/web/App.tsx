@@ -50,6 +50,7 @@ import { threadCanBeInterrupted } from './thread-controls.js';
 import { executorStatusFromProbe } from './executor-status.js';
 import { shouldCloseModalOnEscape } from './modal-behavior.js';
 import { SettingsNavigation } from './settings-navigation.js';
+import { APPEARANCE_OPTIONS, useAppearance } from './appearance.js';
 import {
   assistantStreamsAfterDisconnect,
   canAppendAssistantDelta,
@@ -700,6 +701,7 @@ function formatTokenCount(tokens: number): string {
 }
 
 export function App({ authRequired = false, onSignOut }: { authRequired?: boolean; onSignOut?(): Promise<void> }) {
+  const appearance = useAppearance();
   const composerState = useRef<ComposerState | null>(null);
   if (composerState.current === null) composerState.current = readComposerState();
   const [projects, setProjects] = useState<Project[]>([]);
@@ -3299,9 +3301,15 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       ) : null}
       <aside className={`sidebar ${mobileSidebarOpen ? 'sidebar-open' : ''}`}>
         <div className="brand-row">
-          <div className="brand-mark">
+          <button
+            type="button"
+            className="brand-mark theme-toggle"
+            aria-label={`Switch to ${appearance.resolved === 'light' ? 'dark' : 'light'} theme`}
+            title={`Switch to ${appearance.resolved === 'light' ? 'dark' : 'light'} theme`}
+            onClick={appearance.toggleExplicitTheme}
+          >
             <Sparkles size={17} aria-hidden="true" />
-          </div>
+          </button>
           <div className="brand-name">pico</div>
         </div>
         <div className="project-section-heading">
@@ -4561,6 +4569,28 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                         setSidebarWidth(option.value);
                         persistSidebarWidthPreference(option.value);
                       }}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </article>
+              <article className="native-tool-row general-setting-row">
+                <div className="native-tool-copy">
+                  <div className="native-tool-title">
+                    <strong>Theme</strong>
+                  </div>
+                  <p>Choose the appearance for this browser.</p>
+                </div>
+                <div className="sidebar-width-options" role="group" aria-label="Theme">
+                  {APPEARANCE_OPTIONS.map((option) => (
+                    <button
+                      className="sidebar-width-option"
+                      type="button"
+                      key={option.value}
+                      aria-pressed={appearance.preference === option.value}
+                      title={`${option.label} theme`}
+                      onClick={() => appearance.setPreference(option.value)}
                     >
                       {option.label}
                     </button>

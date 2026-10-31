@@ -34,4 +34,20 @@ describe('WebUI light appearance baseline', () => {
     );
     expect(missing).toEqual([]);
   });
+
+  it('provides dark values for every built-in light color role', () => {
+    const directory = resolve(root, 'src/web/styles/themes');
+    const files = readdirSync(directory);
+    const definitions = (names: string[]) =>
+      names.flatMap((name) => [
+        ...readFileSync(resolve(directory, name), 'utf8').matchAll(/(--pico-[\w-]+)\s*:\s*([^;]+);/g),
+      ]);
+    const light = definitions(files.filter((name) => name.endsWith('-light.css')));
+    const dark = new Set(definitions(files.filter((name) => name.startsWith('dark-'))).map((match) => match[1]!));
+    const missing = light
+      .filter((match) => /#[\da-f]{3,8}\b|\b(?:rgba?|hsla?|linear-gradient)\(|^\s*(?:white|black)\s*$/i.test(match[2]!))
+      .map((match) => match[1]!)
+      .filter((name) => !dark.has(name));
+    expect(missing).toEqual([]);
+  });
 });

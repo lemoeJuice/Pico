@@ -8,6 +8,8 @@
   --pico-public-focus: #587a60;
   --pico-public-control-track: #e5e9e5;
   --pico-public-white: #fff;
+  --pico-public-text-on-accent: #fff;
+  --pico-public-button-primary-fill: var(--pico-ui-accent, #4d745f);
   --pico-public-page-bg: var(--pico-page-bg, #f4f6f2);
   --pico-public-surface-primary: var(--pico-surface-primary, #fbfcfa);
   --pico-public-text-primary: var(--pico-text-primary, #28332e);

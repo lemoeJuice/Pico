@@ -14,8 +14,8 @@
 }
 .plugin-ui-button--primary {
   color: var(--pico-control-button-primary-text);
-  background: var(--sage);
-  border-color: var(--sage);
+  background: var(--pico-control-plugin-button-primary-fill);
+  border-color: var(--pico-control-plugin-button-primary-fill);
 }
 .plugin-ui-button--soft {
   color: var(--pico-control-button-soft-text);

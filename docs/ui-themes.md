@@ -28,7 +28,14 @@ roles are absent. In Pico's host document, visible plugin nodes are rendered by
 the framework and inherit the same roles; the hidden plugin logic iframe does
 not style those host-rendered nodes.
 
-These files establish a light appearance baseline; they do not yet implement
-theme selection, a dark theme, or plugin theme registration. Any future plugin
-theme contract must describe stable semantic roles rather than requiring a
-plugin to depend on internal selectors or DOM layout.
+The built-in `pico.light` and `pico.dark` themes use the same appearance roles.
+The `dark-*.css` files override color roles without changing the light theme's
+layout or typography. `AppearanceProvider` owns browser-local selection and
+system-following; an early script in `index.html` applies the stored built-in
+appearance before the application renders. The document root carries the active
+theme ID and native color scheme, so authentication and body-mounted portals
+inherit the same appearance as the main interface.
+
+Plugin theme registration is not implemented yet. Its contract must describe
+stable semantic roles rather than requiring a plugin to depend on internal
+selectors or DOM layout.

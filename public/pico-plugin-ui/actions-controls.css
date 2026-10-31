@@ -25,9 +25,9 @@
 }
 
 .pico-ui-button--primary {
-  color: var(--pico-public-white, #fff);
-  background: var(--pico-ui-accent);
-  border-color: var(--pico-ui-accent);
+  color: var(--pico-public-text-on-accent, #fff);
+  background: var(--pico-public-button-primary-fill, var(--pico-ui-accent));
+  border-color: var(--pico-public-button-primary-fill, var(--pico-ui-accent));
 }
 
 .pico-ui-button--danger {

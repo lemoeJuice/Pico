@@ -53,6 +53,12 @@
   border-radius: 12px 12px 12px 5px;
   box-shadow: 0 4px 10px var(--pico-shell-brand-mark-welcome-mark-shadow);
 }
+.brand-mark.theme-toggle {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  cursor: pointer;
+}
 .brand-mark span,
 .welcome-mark span {
   font-family: var(--pico-font-display);

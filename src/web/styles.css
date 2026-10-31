@@ -8,6 +8,9 @@
 @import './styles/themes/conversation-light.css';
 @import './styles/themes/controls-typography-light.css';
 @import './styles/themes/content-typography-light.css';
+@import './styles/themes/dark-content.css';
+@import './styles/themes/dark-shell.css';
+@import './styles/themes/dark-conversation.css';
 @import './styles/base/document.css';
 @import './styles/regions/shell-sidebar.css';
 @import './styles/regions/auth.css';
