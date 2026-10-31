@@ -3330,7 +3330,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         </div>
         {independentThreads.length ? (
           <div className="project-thread-list">{independentThreads.filter((thread) => !thread.parentThreadId || !independentThreads.some((item) => item.id === thread.parentThreadId)).map((thread) => renderIndependentThreadTree(thread, independentThreads))}</div>
-        ) : <div className="sidebar-empty project-thread-empty">No independent Threads yet.</div>}
+        ) : <div className="sidebar-empty independent-thread-empty">No independent Threads yet.</div>}
         <div className="project-section-heading">
           <span className="eyebrow">PROJECTS</span>
           <button

@@ -362,6 +362,9 @@
   font-size: var(--pico-shell-sidebar-empty-font-size);
   line-height: var(--pico-shell-sidebar-empty-line-height);
 }
+.independent-thread-empty {
+  margin-inline: 2px;
+}
 .project-thread-empty {
   padding: 6px 10px 10px 20px;
   font-size: var(--pico-shell-project-thread-empty-font-size);
