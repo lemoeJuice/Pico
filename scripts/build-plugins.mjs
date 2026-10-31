@@ -9,6 +9,7 @@ if (!['all', 'runtime', 'ui', 'chatgpt'].includes(target)) {
 const plugins = [
   ['pico.auto-thread-title', 'src/plugins/auto-thread-title.ts', 'autoThreadTitlePlugin'],
   ['pico.collaboration', 'src/plugins/collaboration.ts', 'collaborationPlugin'],
+  ['pico.deepsea-theme', 'src/plugins/deepsea-theme.ts', 'deepseaThemePlugin'],
   ['pico.global-memory', 'src/plugins/global-memory.ts', 'globalMemoryPlugin'],
   ['pico.goal', 'src/plugins/goal.ts', 'goalPlugin'],
   ['pico.openai-provider', 'src/plugins/openai-provider.ts', 'openAiProviderPlugin'],

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" fill="none">
+  <defs>
+    <linearGradient id="sea" x1="0" y1="0" x2="1440" y2="900" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffffff"/><stop offset=".5" stop-color="#edf3fe"/><stop offset="1" stop-color="#e4edfd"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="matrix(-460 370 -280 -348 1180 175)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#b7c8fe" stop-opacity=".58"/><stop offset="1" stop-color="#b7c8fe" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="lilac" cx="0" cy="0" r="1" gradientTransform="matrix(420 -260 240 390 225 790)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#d3e2ff" stop-opacity=".65"/><stop offset="1" stop-color="#d3e2ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="wave" x1="0" y1="670" x2="1440" y2="310" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#d3e2ff" stop-opacity=".48"/><stop offset="1" stop-color="#fff" stop-opacity=".55"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#sea)" d="M0 0h1440v900H0z"/>
+  <path fill="url(#glow)" d="M0 0h1440v900H0z"/>
+  <path fill="url(#lilac)" d="M0 0h1440v900H0z"/>
+  <path d="M-80 690c190-143 355-116 543-38 201 84 351 76 518-32 141-92 288-181 539-172v452H-80z" fill="url(#wave)"/>
+  <path d="M-80 743c196-138 366-103 536-27 202 90 360 88 534-27 148-98 289-168 530-154" stroke="#fff" stroke-opacity=".62" stroke-width="2"/>
+  <circle cx="1132" cy="238" r="160" stroke="#fff" stroke-opacity=".42" stroke-width="2"/>
+  <circle cx="1132" cy="238" r="112" fill="#fff" fill-opacity=".15"/>
+</svg>
