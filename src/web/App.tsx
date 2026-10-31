@@ -50,7 +50,7 @@ import { threadCanBeInterrupted } from './thread-controls.js';
 import { executorStatusFromProbe } from './executor-status.js';
 import { shouldCloseModalOnEscape } from './modal-behavior.js';
 import { SettingsNavigation } from './settings-navigation.js';
-import { APPEARANCE_OPTIONS, useAppearance } from './appearance.js';
+import { useAppearance, type RegisteredThemeContribution } from './appearance.js';
 import {
   assistantStreamsAfterDisconnect,
   canAppendAssistantDelta,
@@ -168,6 +168,7 @@ type PluginInfo = {
   }>;
   providers: ModelProviderContribution[];
   pipelines: Array<{ stage: string; pluginId: string; order: number }>;
+  themes?: RegisteredThemeContribution[];
   errors: string[];
 };
 type ModelCatalogView = {
@@ -1624,6 +1625,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   }, []);
 
   useEffect(() => {
+    appearance.setThemes(pluginInfo?.themes ?? []);
+  }, [appearance.setThemes, pluginInfo?.themes]);
+
+  useEffect(() => {
     for (const project of projects) {
       if (project.id === projectId || projectThreadLoads.current.has(project.id)) continue;
       void loadProjectThreads(project.id).catch((caught: unknown) => {
@@ -1877,6 +1882,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           const pluginEvent = { type: event.type, pluginId: event.pluginId } satisfies PluginUiEvent;
           const sequence = ++pluginEventSequence.current;
           setPluginEvents((current) => [...current.slice(-99), { sequence, event: pluginEvent }]);
+        }
+        if (event.type === 'plugin.catalog.updated') {
+          void api<PluginInfo>('/api/plugins')
+            .then(setPluginInfo)
+            .catch(() => undefined);
         }
         if ((event.type === 'project.created' || event.type === 'project.updated') && event.project && typeof event.project === 'object') {
           const project = event.project as Project;
@@ -4583,7 +4593,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   <p>Choose the appearance for this browser.</p>
                 </div>
                 <div className="sidebar-width-options" role="group" aria-label="Theme">
-                  {APPEARANCE_OPTIONS.map((option) => (
+                  {appearance.options.map((option) => (
                     <button
                       className="sidebar-width-option"
                       type="button"

@@ -10,7 +10,12 @@
         let preference = 'pico.light';
         try {
           const stored = localStorage.getItem(key);
-          if (stored === 'system' || stored === 'pico.light' || stored === 'pico.dark') preference = stored;
+          if (
+            stored === 'system' ||
+            stored === 'pico.light' ||
+            stored === 'pico.dark' ||
+            (typeof stored === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}:[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(stored))
+          ) preference = stored;
         } catch {
           // Use the light default when browser storage is unavailable.
         }
@@ -21,9 +26,10 @@
           systemDark = false;
         }
         const theme = preference === 'pico.dark' || (preference === 'system' && systemDark) ? 'dark' : 'light';
-        const themeId = theme === 'dark' ? 'pico.dark' : 'pico.light';
+        const themeId = preference === 'pico.dark' || preference === 'pico.light' ? preference : theme === 'dark' ? 'pico.dark' : 'pico.light';
         const root = document.documentElement;
         root.setAttribute('data-pico-theme', themeId);
+        root.setAttribute('data-pico-color-scheme', theme);
         root.setAttribute('data-pico-appearance-preference', preference);
         root.style.colorScheme = theme;
         const themeColor = document.querySelector('meta[name="theme-color"]');

@@ -44,6 +44,24 @@ function mcpCardPluginSource(): string {
 `;
 }
 
+function themePluginSource(version: string, invalid = false): string {
+  return `export default {
+    id: 'pico.theme-reload-test',
+    name: 'Theme reload test',
+    version: '${version}',
+    activate({ ui }) {
+      ui.registerTheme({
+        id: 'appearance',
+        label: '${version}',
+        appearance: 'light',
+        variables: { '--pico-page-bg': '${invalid ? 'url(https://example.test/)' : '#eeeeee'}' },
+        background: { entry: 'webui', path: 'backgrounds/paper.png' },
+      });
+    },
+  };
+`;
+}
+
 function pluginDirectory(): string {
   const directory = mkdtempSync(join(tmpdir(), 'pico-plugin-lifecycle-'));
   temporaryDirectories.push(directory);
@@ -64,6 +82,117 @@ afterEach(() => {
 });
 
 describe('PluginHost lifecycle', () => {
+  it('registers, copies, serves, and removes plugin themes with their owner', async () => {
+    const store = new PicoStore(':memory:');
+    const directory = mkdtempSync(join(tmpdir(), 'pico-theme-plugin-'));
+    temporaryDirectories.push(directory);
+    const host = new PluginHost(
+      store,
+      new ToolCatalog(),
+      new ExecutionPipelines(),
+      new CommandRegistry(),
+      directory,
+      unavailablePluginServices,
+    );
+    let returned: { pluginId: string; id: string; variables: Record<string, string> } | undefined;
+    const plugin: PicoPlugin = {
+      id: 'pico.theme-test',
+      name: 'Theme test',
+      version: '1.0.0',
+      activate(context) {
+        returned = context.ui.registerTheme({
+          id: 'forest',
+          label: 'Forest',
+          appearance: 'dark',
+          variables: {
+            '--pico-page-bg': '#223322',
+            '--pico-panel': 'linear-gradient(90deg, #223322, rgba(1, 2, 3, .4))',
+          },
+          background: { entry: 'webui', path: 'assets/bg.png' },
+        });
+      },
+    };
+    try {
+      await host.load([plugin]);
+      expect(returned).toMatchObject({ pluginId: plugin.id, id: `${plugin.id}:forest` });
+      expect(host.uiThemes()).toHaveLength(1);
+      expect(host.webUiAssetLocation(plugin.id, 'webui')).toBeDefined();
+      const leaked = host.uiThemes();
+      leaked[0]!.variables['--pico-page-bg'] = '#ffffff';
+      if (returned) returned.variables['--pico-page-bg'] = '#000000';
+      expect(host.uiThemes()[0]!.variables['--pico-page-bg']).toBe('#223322');
+      await host.setEnabled(plugin.id, false);
+      expect(host.uiThemes()).toEqual([]);
+      expect(host.webUiAssetLocation(plugin.id, 'webui')).toBeUndefined();
+    } finally {
+      await host.shutdown();
+      store.close();
+    }
+  });
+
+  it('rejects unsafe theme data and rolls back earlier registrations from failed activation', async () => {
+    const store = new PicoStore(':memory:');
+    const directory = mkdtempSync(join(tmpdir(), 'pico-theme-invalid-'));
+    temporaryDirectories.push(directory);
+    const host = new PluginHost(
+      store,
+      new ToolCatalog(),
+      new ExecutionPipelines(),
+      new CommandRegistry(),
+      directory,
+      unavailablePluginServices,
+    );
+    const plugin: PicoPlugin = {
+      id: 'pico.theme-invalid',
+      name: 'Invalid theme',
+      version: '1.0.0',
+      activate(context) {
+        context.ui.registerTheme({ id: 'first', label: 'First', appearance: 'light', variables: {} });
+        context.ui.registerTheme({
+          id: 'unsafe',
+          label: 'Unsafe',
+          appearance: 'light',
+          variables: { '--pico-page-bg': 'url(https://example.test/a)' },
+        });
+      },
+    };
+    try {
+      await host.load([plugin]);
+      expect(host.uiThemes()).toEqual([]);
+      expect(host.errors().join('\n')).toContain('Invalid plugin theme variable');
+    } finally {
+      await host.shutdown();
+      store.close();
+    }
+  });
+
+  it('restores the previous theme after an invalid plugin reload', async () => {
+    const store = new PicoStore(':memory:');
+    const directory = mkdtempSync(join(tmpdir(), 'pico-theme-reload-'));
+    temporaryDirectories.push(directory);
+    const filename = join(directory, 'pico.theme-reload-test.mjs');
+    writeFileSync(filename, themePluginSource('1.0.0'));
+    const host = new PluginHost(
+      store,
+      new ToolCatalog(),
+      new ExecutionPipelines(),
+      new CommandRegistry(),
+      directory,
+      unavailablePluginServices,
+    );
+    try {
+      await host.load();
+      expect(host.uiThemes()[0]?.label).toBe('1.0.0');
+      writeFileSync(filename, themePluginSource('2.0.0', true));
+      await expect(host.reload('pico.theme-reload-test')).rejects.toThrow('previous version was restored');
+      expect(host.uiThemes()).toMatchObject([{ id: 'pico.theme-reload-test:appearance', label: '1.0.0' }]);
+      expect(host.webUiAssetLocation('pico.theme-reload-test', 'webui')).toBeDefined();
+    } finally {
+      await host.shutdown();
+      store.close();
+    }
+  });
+
   it('registers MCP server card components as plugin UI contributions', async () => {
     const store = new PicoStore(':memory:');
     const commands = new CommandRegistry();

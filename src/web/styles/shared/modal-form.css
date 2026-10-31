@@ -10,6 +10,7 @@
   animation: fade-in 0.16s ease-out;
 }
 .modal {
+  backdrop-filter: var(--pico-material-backdrop);
   width: min(490px, 100%);
   max-height: min(90dvh, 790px);
   overflow-y: auto;

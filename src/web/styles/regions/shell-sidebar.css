@@ -16,6 +16,7 @@
   --sidebar-width: 320px;
 }
 .sidebar {
+  backdrop-filter: var(--pico-material-backdrop);
   position: relative;
   z-index: 5;
   display: flex;

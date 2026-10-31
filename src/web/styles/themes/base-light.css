@@ -7,6 +7,11 @@
   --pico-font-tool-code: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   --pico-page-bg: #f4f6f2;
+  --pico-theme-background-image: none;
+  --pico-theme-background-size: cover;
+  --pico-theme-background-position: center;
+  --pico-theme-background-repeat: no-repeat;
+  --pico-material-backdrop: none;
   --pico-surface-primary: #fbfcfa;
   --pico-text-primary: #28332e;
   --pico-text-muted: #7a867f;

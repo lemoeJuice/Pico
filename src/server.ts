@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
-import { realpath, stat } from 'node:fs/promises';
+import { readFile, realpath, stat } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -145,7 +145,23 @@ function pluginUiUnavailable(request: Request, response: Response): void {
     );
 }
 
-async function servePluginUiAsset(runtime: PicoRuntime, request: Request, response: Response): Promise<void> {
+function safeThemeAssetPath(value: unknown): value is string {
+  if (typeof value !== 'string' || !value || value.startsWith('/') || /[\\%\0?#:]/.test(value)) return false;
+  return value.split('/').every((segment) => segment && segment !== '.' && segment !== '..');
+}
+
+function isThemeImagePath(value: string): boolean {
+  return ['.avif', '.gif', '.jpg', '.jpeg', '.png', '.svg', '.webp'].includes(
+    value.slice(value.lastIndexOf('.')).toLowerCase(),
+  );
+}
+
+async function servePluginUiAsset(
+  runtime: PicoRuntime,
+  request: Request,
+  response: Response,
+  production: boolean,
+): Promise<void> {
   const pathname = new URL(request.originalUrl, 'http://pico.invalid').pathname;
   const match = /^\/_pico\/plugin-ui\/([a-z0-9][a-z0-9._-]*)\/([a-z0-9][a-z0-9._-]*)(?:\/(.*))?$/.exec(pathname);
   if (!match) return notFound(response, 'Plugin UI asset not found');
@@ -166,9 +182,13 @@ async function servePluginUiAsset(runtime: PicoRuntime, request: Request, respon
   }
   let location = runtime.plugins.webUiAssetLocation(pluginId, entry);
   if (!location) return notFound(response, 'Plugin UI asset not found');
+  const currentAsset = segments[0] === 'current';
+  const requestedSegments = currentAsset ? segments.slice(1) : segments;
+  if (currentAsset && requestedSegments.length === 0) return notFound(response, 'Plugin UI asset not found');
   const deployedPackageRoot = resolve(process.cwd(), 'dist', 'plugin-ui', pluginId);
   const deployedAssetRoot = resolve(deployedPackageRoot, 'webui');
   if (
+    production &&
     location.pluginsRoot === resolve(process.cwd(), 'plugins') &&
     existsSync(resolve(deployedAssetRoot, 'index.html'))
   ) {
@@ -177,6 +197,9 @@ async function servePluginUiAsset(runtime: PicoRuntime, request: Request, respon
       packageRoot: deployedPackageRoot,
       assetRoot: deployedAssetRoot,
     };
+  }
+  if (currentAsset && production && location.pluginsRoot !== resolve(process.cwd(), 'dist', 'plugin-ui')) {
+    return notFound(response, 'Plugin UI theme asset not found');
   }
 
   let safeRoot: string;
@@ -190,8 +213,54 @@ async function servePluginUiAsset(runtime: PicoRuntime, request: Request, respon
     if (packageFromPluginsRoot !== pluginId) return notFound(response, 'Plugin UI asset not found');
     safeRoot = await realpath(location.assetRoot);
     if (relative(safePackageRoot, safeRoot) !== 'webui') return notFound(response, 'Plugin UI asset not found');
-    safeFile = await realpath(resolve(safeRoot, ...segments));
-    const pathFromRoot = relative(safeRoot, safeFile);
+    let fileRoot = safeRoot;
+    if (currentAsset) {
+      let releaseRoot = safeRoot;
+      if (production && location.pluginsRoot === resolve(process.cwd(), 'dist', 'plugin-ui')) {
+        const stableIndex = await realpath(resolve(safeRoot, 'index.html'));
+        const stableIndexRelative = relative(safeRoot, stableIndex);
+        if (stableIndexRelative !== 'index.html' || !(await stat(stableIndex)).isFile()) {
+          return notFound(response, 'Plugin UI theme asset not found');
+        }
+        const stableHtml = await readFile(stableIndex, 'utf8');
+        const releaseMatch = /<!--\s*pico-plugin-ui-release:([a-zA-Z0-9][a-zA-Z0-9._-]*)\s*-->/.exec(stableHtml);
+        if (!releaseMatch) return notFound(response, 'Plugin UI theme asset not found');
+        releaseRoot = await realpath(resolve(safeRoot, 'releases', releaseMatch[1]!));
+        const releaseRelative = relative(safeRoot, releaseRoot);
+        if (releaseRelative !== `releases${sep}${releaseMatch[1]}`) {
+          return notFound(response, 'Plugin UI theme asset not found');
+        }
+      }
+      const manifestPath = await realpath(resolve(releaseRoot, 'theme-assets.json'));
+      const manifestRelative = relative(releaseRoot, manifestPath);
+      if (manifestRelative !== 'theme-assets.json' || !(await stat(manifestPath)).isFile()) {
+        return notFound(response, 'Plugin UI theme asset not found');
+      }
+      let manifest: unknown;
+      try {
+        manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+      } catch {
+        return notFound(response, 'Plugin UI theme asset not found');
+      }
+      const assetPath = requestedSegments.join('/');
+      if (
+        !manifest ||
+        typeof manifest !== 'object' ||
+        !('assets' in manifest) ||
+        !Array.isArray(manifest.assets) ||
+        !manifest.assets.every((asset) => safeThemeAssetPath(asset) && isThemeImagePath(asset)) ||
+        !manifest.assets.includes(assetPath) ||
+        !safeThemeAssetPath(assetPath) ||
+        !isThemeImagePath(assetPath)
+      ) {
+        return notFound(response, 'Plugin UI theme asset not found');
+      }
+      fileRoot = releaseRoot;
+      safeFile = await realpath(resolve(releaseRoot, ...requestedSegments));
+    } else {
+      safeFile = await realpath(resolve(safeRoot, ...requestedSegments));
+    }
+    const pathFromRoot = relative(fileRoot, safeFile);
     if (pathFromRoot === '..' || pathFromRoot.startsWith(`..${sep}`) || pathFromRoot.startsWith(sep)) {
       return notFound(response, 'Plugin UI asset not found');
     }
@@ -667,7 +736,7 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     return response.json(await runtime.reloadPlugin(request.params.pluginId!));
   });
   app.use('/_pico/plugin-ui', async (request, response) => {
-    await servePluginUiAsset(runtime, request, response);
+    await servePluginUiAsset(runtime, request, response, production);
   });
   app.use('/api/plugins/:pluginId', async (request, response) => {
     const route = runtime.pluginHttpRoute(request.params.pluginId!, request.method, request.path || '/');

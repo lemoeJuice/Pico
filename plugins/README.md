@@ -18,6 +18,16 @@ A Runtime plugin that calls `context.models.complete` must declare `modelCalls: 
 
 The Runtime serves a plugin's registered UI entry from its own package directory. The entry runs in a sandboxed iframe as a logic controller. It sends a bounded, serializable component tree over the transferred `MessagePort`; the Pico Web UI validates the tree for the active slot and renders all visible controls itself. The iframe's pixels are hidden. There is no HTML, Markdown, URL, image, CSS, class, raw dimension, DOM, or React-tree channel. Invalid or unrecognized descriptions fail closed with a host-owned unavailable message. Plugin UI assets are public static files; credentials and mutable plugin state remain behind authenticated Runtime APIs.
 
+## Theme contributions
+
+Runtime plugins may register host-applied appearance data from `activate` with `context.ui.registerTheme({ id, label, appearance, variables, background? })`. `appearance` is `light` or `dark`; theme IDs are plugin-local and returned records use `pluginId` plus a namespaced `pluginId:id`. `variables` must be a plain object of at most 64 entries, using names matching `--pico-[a-z0-9-]+`. This validates the public token namespace, not whether every token currently has a host consumer. The host applies only recognized, registered roles.
+
+Variable values are inert CSS tokens: color literals, supported color/gradient functions, simple font sizes and font-family lists are accepted; `url()`, `var()`, `expression()`, braces, semicolons, and unsupported functions are rejected. A plugin can register at most 32 themes. Optional `background` identifies a registered Web UI `entry` and a safe relative asset `path` under that package's `webui/` directory. The entry is served only while registered by a page, UI contribution, or theme. Theme records returned from registration and `pluginInfo()` are copies, so callers cannot mutate Host state.
+
+List background images in `webui/theme-assets.json`, for example `{"assets":["assets/background.svg"]}`. Paths are relative to `webui/` and must name existing image files. The framework constructs the background URL; the plugin cannot inject a URL through a variable. Publishing verifies and snapshots the listed images with the UI release. `--pico-theme-background-size`, `--pico-theme-background-position`, and `--pico-theme-background-repeat` control the image placement, and `--pico-material-backdrop` can provide a glass effect such as `blur(16px)` on framework surfaces. Omitting these roles preserves the built-in appearance.
+
+Theme registrations are owned by the plugin and are removed on disable, unload, failed activation, or reload. A reload that fails reactivating the new version restores the previously active plugin and its registrations.
+
 Third-party package layout:
 
 ```text

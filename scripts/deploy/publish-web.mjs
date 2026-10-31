@@ -46,12 +46,49 @@ function contentType(path) {
       jpg: 'image/jpeg',
       jpeg: 'image/jpeg',
       webp: 'image/webp',
+      avif: 'image/avif',
+      gif: 'image/gif',
       woff: 'font/woff',
       woff2: 'font/woff2',
       ico: 'image/x-icon',
       wasm: 'application/wasm',
     }[ext] ?? 'application/octet-stream'
   );
+}
+
+function safeThemeAssetPath(value) {
+  if (typeof value !== 'string' || !value || value.startsWith('/') || /[\\%\0?#:]/.test(value)) return false;
+  const segments = value.split('/');
+  return segments.every((segment) => segment && segment !== '.' && segment !== '..');
+}
+
+function isThemeImage(path) {
+  return ['.avif', '.gif', '.jpg', '.jpeg', '.png', '.svg', '.webp'].includes(
+    path.slice(path.lastIndexOf('.')).toLowerCase(),
+  );
+}
+
+async function readThemeAssets(manifestPath) {
+  if (!existsSync(manifestPath)) return [];
+  let manifest;
+  try {
+    manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  } catch {
+    throw new Error(`Invalid plugin theme asset manifest: ${manifestPath}`);
+  }
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest) || !Array.isArray(manifest.assets)) {
+    throw new Error(`Invalid plugin theme asset manifest: ${manifestPath}`);
+  }
+  if (!manifest.assets.every((path) => safeThemeAssetPath(path))) {
+    throw new Error(`Unsafe path in plugin theme asset manifest: ${manifestPath}`);
+  }
+  if (new Set(manifest.assets).size !== manifest.assets.length) {
+    throw new Error(`Duplicate path in plugin theme asset manifest: ${manifestPath}`);
+  }
+  for (const path of manifest.assets) {
+    if (!isThemeImage(path)) throw new Error(`Plugin theme asset must be an image: ${path}`);
+  }
+  return manifest.assets;
 }
 
 function localEntryReferences(html) {
@@ -157,7 +194,8 @@ export async function prepareWebPublication({ sourceRoot, targetRoot, releaseId,
         if (url.startsWith('/') || /^(?:[a-z]+:|#)/i.test(url)) return url;
         return `/_pico/plugin-ui/${pluginId}/webui/releases/${releaseId}/${url.replace(/^\.\//, '')}`;
       });
-      entries.push({ path: entry, content: stableEntry });
+      const stableEntryWithRelease = `<!-- pico-plugin-ui-release:${releaseId} -->\n${stableEntry}`;
+      entries.push({ path: entry, content: stableEntryWithRelease });
       const pluginIndexUrl = `/_pico/plugin-ui/${pluginId}/webui/releases/${releaseId}/index.html`;
       await addAsset({ url: pluginIndexUrl, file: versionEntry, urls, hashes, assets });
       for (const rawUrl of localEntryReferences(rewritten)) {
@@ -186,8 +224,34 @@ export async function prepareWebPublication({ sourceRoot, targetRoot, releaseId,
           throw new Error(`Plugin UI entry has an unversioned local resource: ${rawUrl}`);
         }
       }
+      const themeAssets = await readThemeAssets(join(webuiSource, 'theme-assets.json'));
+      for (const assetPath of themeAssets) {
+        const assetFile = releaseFile(releaseTarget, assetPath);
+        if (!existsSync(assetFile)) throw new Error(`Plugin theme asset is missing: ${assetPath}`);
+        const info = await lstat(assetFile);
+        if (!info.isFile() || info.isSymbolicLink())
+          throw new Error(`Plugin theme asset is not a regular file: ${assetPath}`);
+        await addAsset({
+          url: `/_pico/plugin-ui/${pluginId}/webui/releases/${releaseId}/${assetPath}`,
+          file: assetFile,
+          urls,
+          hashes,
+          assets,
+        });
+      }
+      if (themeAssets.length) {
+        await addAsset({
+          url: `/_pico/plugin-ui/${pluginId}/webui/releases/${releaseId}/theme-assets.json`,
+          file: join(releaseTarget, 'theme-assets.json'),
+          urls,
+          hashes,
+          assets,
+        });
+      }
       urls.push(`/_pico/plugin-ui/${pluginId}/webui/index.html`);
-      hashes[`/_pico/plugin-ui/${pluginId}/webui/index.html`] = createHash('sha256').update(stableEntry).digest('hex');
+      hashes[`/_pico/plugin-ui/${pluginId}/webui/index.html`] = createHash('sha256')
+        .update(stableEntryWithRelease)
+        .digest('hex');
       assets.push({
         url: `/_pico/plugin-ui/${pluginId}/webui/index.html`,
         sha256: hashes[`/_pico/plugin-ui/${pluginId}/webui/index.html`],

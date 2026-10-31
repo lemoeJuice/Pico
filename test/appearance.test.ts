@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applyPluginThemeVariables,
+  appearanceOptions,
+  normalizePluginThemes,
   nextExplicitAppearance,
   parseAppearancePreference,
+  pluginThemeBackgroundUrl,
   resolveAppearance,
   resolveThemeId,
   subscribeToAppearanceStorage,
@@ -28,6 +32,104 @@ describe('built-in appearance preference', () => {
     expect(nextExplicitAppearance('dark')).toBe('pico.light');
     expect(themeColorForAppearance('dark')).toBe('#171f1a');
     expect(themeColorForAppearance('light')).toBe('#f5f7f4');
+    expect(themeColorForAppearance('dark', '#123456')).toBe('#123456');
+  });
+
+  it('preserves plugin preferences while falling back until their themes are registered', () => {
+    const preference = parseAppearancePreference('pico.reader:midnight');
+    expect(preference).toBe('pico.reader:midnight');
+    expect(resolveAppearance(preference!, true)).toBe('light');
+    expect(resolveThemeId(preference!, true)).toBe('pico.light');
+
+    const themes = normalizePluginThemes([
+      {
+        pluginId: 'pico.reader',
+        id: 'pico.reader:midnight',
+        label: 'Midnight',
+        appearance: 'dark',
+        variables: { '--pico-page-bg': '#121714' },
+        background: { entry: 'webui', path: 'assets/night.png' },
+      },
+    ]);
+    expect(resolveAppearance(preference!, false, themes)).toBe('dark');
+    expect(resolveThemeId(preference!, false, themes)).toBe('pico.reader:midnight');
+    expect(appearanceOptions(themes).map((option) => option.value)).toContain('pico.reader:midnight');
+    expect(themes[0]?.background).toEqual({ entry: 'webui', path: 'assets/night.png' });
+    expect(pluginThemeBackgroundUrl(themes[0])).toBe(
+      'url("/_pico/plugin-ui/pico.reader/webui/current/assets/night.png")',
+    );
+  });
+
+  it('filters unsafe theme data and only applies existing CSS variables', () => {
+    const [theme] = normalizePluginThemes([
+      {
+        pluginId: 'pico.reader',
+        id: 'pico.reader:midnight',
+        label: 'Midnight',
+        appearance: 'dark',
+        background: { entry: 'webui', path: 'assets/night.png' },
+        variables: {
+          '--pico-page-bg': '#121714',
+          '--pico-page-bg; color': 'red',
+          '--pico-surface-danger': 'url(javascript:alert(1))',
+          '--pico-unregistered-role': '#fff',
+        },
+      },
+      {
+        pluginId: 'pico.reader',
+        id: 'other.plugin:invalid-owner',
+        label: 'Invalid owner',
+        appearance: 'light',
+        variables: {},
+      },
+    ]);
+    expect(theme?.variables).toEqual({
+      '--pico-page-bg': '#121714',
+      '--pico-unregistered-role': '#fff',
+    });
+
+    const values = new Map([
+      ['--pico-page-bg', '#f4f6f2'],
+      ['--pico-text-primary', '#28332e'],
+      ['--pico-theme-background-image', 'none'],
+    ]);
+    const priorities = new Map<string, string>();
+    const style = {
+      getPropertyValue: (name: string) => values.get(name) ?? '',
+      getPropertyPriority: (name: string) => priorities.get(name) ?? '',
+      setProperty: (name: string, value: string, priority = '') => {
+        values.set(name, value);
+        priorities.set(name, priority);
+      },
+      removeProperty: (name: string) => {
+        const previous = values.get(name) ?? '';
+        values.delete(name);
+        return previous;
+      },
+    };
+    const available = new Set(['--pico-page-bg', '--pico-text-primary', '--pico-theme-background-image']);
+    const computed = () => ({ getPropertyValue: (name: string) => (available.has(name) ? values.get(name) ?? '' : '') });
+    const prior = new Map<string, { value: string; priority: string }>();
+    const firstTheme = {
+      ...theme!,
+      variables: { '--pico-page-bg': '#121714', '--pico-text-primary': '#eff3ef' },
+    };
+    applyPluginThemeVariables(style, computed, firstTheme, pluginThemeBackgroundUrl(firstTheme), prior);
+    expect(values.get('--pico-page-bg')).toBe('#121714');
+    expect(values.get('--pico-text-primary')).toBe('#eff3ef');
+    expect(values.get('--pico-theme-background-image')).toBe(
+      'url("/_pico/plugin-ui/pico.reader/webui/current/assets/night.png")',
+    );
+
+    const { background: _background, ...firstThemeWithoutBackground } = firstTheme;
+    const nextTheme = { ...firstThemeWithoutBackground, variables: { '--pico-page-bg': '#090d0a' } };
+    applyPluginThemeVariables(style, computed, nextTheme, pluginThemeBackgroundUrl(nextTheme), prior);
+    expect(values.get('--pico-page-bg')).toBe('#090d0a');
+    expect(values.get('--pico-text-primary')).toBe('#28332e');
+    expect(values.get('--pico-theme-background-image')).toBe('none');
+    applyPluginThemeVariables(style, computed, undefined, undefined, prior);
+    expect(values.get('--pico-page-bg')).toBe('#f4f6f2');
+    expect(values.get('--pico-text-primary')).toBe('#28332e');
   });
 
   it('syncs only local appearance storage changes, falls back to light, and cleans up', () => {
@@ -48,6 +150,7 @@ describe('built-in appearance preference', () => {
     };
 
     dispatch('pico.appearance', 'pico.dark', localStorage);
+    dispatch('pico.appearance', 'pico.reader:midnight', localStorage);
     dispatch('pico.appearance', 'system', otherStorage);
     dispatch('other.setting', 'pico.dark', localStorage);
     dispatch('pico.appearance', null, localStorage);
@@ -55,7 +158,7 @@ describe('built-in appearance preference', () => {
     unsubscribe();
     dispatch('pico.appearance', 'pico.dark', localStorage);
 
-    expect(received).toEqual(['pico.dark', 'pico.light', 'pico.light']);
+    expect(received).toEqual(['pico.dark', 'pico.reader:midnight', 'pico.light', 'pico.light']);
     expect(writes).toBe(0);
   });
 });

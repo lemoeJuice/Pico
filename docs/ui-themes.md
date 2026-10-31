@@ -36,6 +36,16 @@ appearance before the application renders. The document root carries the active
 theme ID and native color scheme, so authentication and body-mounted portals
 inherit the same appearance as the main interface.
 
-Plugin theme registration is not implemented yet. Its contract must describe
-stable semantic roles rather than requiring a plugin to depend on internal
-selectors or DOM layout.
+Runtime plugins can register themes as appearance data, as documented in
+`plugins/README.md`. The host validates contributions and applies known
+`--pico-*` appearance roles to its document; plugins do not style host DOM or
+provide arbitrary CSS. The declared light or dark base supplies any roles a
+theme does not override. The selected plugin theme is kept in browser storage
+even while its plugin is unavailable, with the light appearance as a temporary
+fallback. Theme changes update native controls and body-mounted portals too.
+
+Optional backgrounds are plugin-owned Web UI assets. The host constructs the
+URL and the server serves only paths in the package's theme asset manifest;
+the release publisher snapshots and verifies those assets with the plugin UI.
+`--pico-material-backdrop` controls the optional glass blur of framework-owned
+surfaces. Its default is `none`, so the built-in themes retain their appearance.

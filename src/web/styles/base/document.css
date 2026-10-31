@@ -36,6 +36,11 @@ body {
   min-width: 320px;
   min-height: 0;
   background: var(--pico-page-bg);
+  background-image: var(--pico-theme-background-image, none);
+  background-size: var(--pico-theme-background-size);
+  background-position: var(--pico-theme-background-position);
+  background-repeat: var(--pico-theme-background-repeat);
+  background-attachment: fixed;
   touch-action: pan-x pan-y;
 }
 @supports (height: 100dvh) {

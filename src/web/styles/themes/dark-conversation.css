@@ -1,4 +1,4 @@
-:root[data-pico-theme='pico.dark'] {
+:root[data-pico-color-scheme='dark'] {
   --pico-composer-box-fill: #27322a;
   --pico-composer-box-border: #405148;
   --pico-composer-box-shadow: rgba(0, 0, 0, 0.32);

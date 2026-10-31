@@ -1,4 +1,4 @@
-:root[data-pico-theme='pico.dark'] {
+:root[data-pico-color-scheme='dark'] {
   --pico-page-bg: #171f1a;
   --pico-surface-primary: #202a23;
   --pico-text-primary: #e3ebe4;

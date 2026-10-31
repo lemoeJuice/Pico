@@ -49,15 +49,24 @@ describe('appearance preboot', () => {
     const result = runPreboot({ stored: 'pico.dark' });
     expect(result.attributes.get('data-pico-theme')).toBe('pico.dark');
     expect(result.attributes.get('data-pico-appearance-preference')).toBe('pico.dark');
+    expect(result.attributes.get('data-pico-color-scheme')).toBe('dark');
     expect(result.documentElement.style.colorScheme).toBe('dark');
     expect(result.themeColor.content).toBe('#171f1a');
   });
 
   it('uses system appearance and falls back to light when browser storage is unavailable', () => {
-    expect(runPreboot({ stored: 'system', systemDark: true }).attributes.get('data-pico-theme')).toBe('pico.dark');
+    const systemDark = runPreboot({ stored: 'system', systemDark: true });
+    expect(systemDark.attributes.get('data-pico-theme')).toBe('pico.dark');
+    expect(systemDark.attributes.get('data-pico-color-scheme')).toBe('dark');
     const fallback = runPreboot({ storageThrows: true, systemDark: true });
     expect(fallback.attributes.get('data-pico-theme')).toBe('pico.light');
     expect(fallback.attributes.get('data-pico-appearance-preference')).toBe('pico.light');
+    expect(fallback.attributes.get('data-pico-color-scheme')).toBe('light');
     expect(fallback.themeColor.content).toBe('#f5f7f4');
+
+    const pluginFallback = runPreboot({ stored: 'pico.reader:midnight', systemDark: true });
+    expect(pluginFallback.attributes.get('data-pico-appearance-preference')).toBe('pico.reader:midnight');
+    expect(pluginFallback.attributes.get('data-pico-theme')).toBe('pico.light');
+    expect(pluginFallback.attributes.get('data-pico-color-scheme')).toBe('light');
   });
 });

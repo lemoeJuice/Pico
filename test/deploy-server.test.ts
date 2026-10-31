@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { startServer } from '../src/server.js';
 
-const envKeys = ['PICO_HOST', 'PICO_PORT', 'PICO_DB_PATH', 'PICO_PLUGIN_DIR', 'PICO_ENV'] as const;
+const envKeys = ['PICO_HOST', 'PICO_PORT', 'PICO_DB_PATH', 'PICO_PLUGIN_DIR', 'PICO_ENV', 'NODE_ENV'] as const;
 const originalEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
 
 async function put(root: string, relativePath: string, content: string): Promise<void> {
@@ -70,7 +70,7 @@ it('serves versioned main and registered plugin assets from isolated production 
     await put(
       directory,
       'dist/plugin-ui/pico.integration/webui/index.html',
-      '<!doctype html><script src="/_pico/plugin-ui/pico.integration/webui/releases/plugin-current/app.js"></script>',
+      '<!-- pico-plugin-ui-release:plugin-current --><!doctype html><script src="/_pico/plugin-ui/pico.integration/webui/releases/plugin-current/app.js"></script>',
     );
     await put(
       directory,
@@ -78,6 +78,16 @@ it('serves versioned main and registered plugin assets from isolated production 
       '<!doctype html><script src="./app.js"></script>',
     );
     await put(directory, 'dist/plugin-ui/pico.integration/webui/releases/plugin-current/app.js', 'plugin-current');
+    await put(
+      directory,
+      'dist/plugin-ui/pico.integration/webui/releases/plugin-current/theme-assets.json',
+      '{"assets":["themes/background.webp","themes/missing.webp"]}',
+    );
+    await put(
+      directory,
+      'dist/plugin-ui/pico.integration/webui/releases/plugin-current/themes/background.webp',
+      'current theme image',
+    );
     await put(
       directory,
       'dist/plugin-ui/pico.integration/webui/releases/plugin-old/old.js',
@@ -113,6 +123,17 @@ it('serves versioned main and registered plugin assets from isolated production 
     expect(pluginPage.status).toBe(200);
     expect(await pluginPage.text()).toContain('releases/plugin-current/app.js');
     expect(
+      await fetch(`${base}/_pico/plugin-ui/pico.integration/webui/current/themes/background.webp`).then((response) =>
+        response.text(),
+      ),
+    ).toBe('current theme image');
+    expect((await fetch(`${base}/_pico/plugin-ui/pico.integration/webui/current/themes/not-listed.webp`)).status).toBe(
+      404,
+    );
+    expect((await fetch(`${base}/_pico/plugin-ui/pico.integration/webui/current/themes/missing.webp`)).status).toBe(
+      404,
+    );
+    expect(
       await fetch(`${base}/_pico/plugin-ui/pico.integration/webui/releases/plugin-current/app.js`).then((response) =>
         response.text(),
       ),
@@ -134,6 +155,70 @@ it('serves versioned main and registered plugin assets from isolated production 
     );
     expect(traversal.status).toBe(404);
     expect(traversal.body).not.toContain('sibling-private-asset');
+    const themeTraversal = await requestRawPath(
+      server.port,
+      '/_pico/plugin-ui/pico.integration/webui/current/%2e%2e%2f..%2fpico.sibling%2fwebui%2freleases%2fsibling-current%2fsecret.js',
+    );
+    expect(themeTraversal.status).toBe(404);
+    expect(themeTraversal.body).not.toContain('sibling-private-asset');
+  } finally {
+    await server?.close();
+    process.chdir(originalCwd);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+it('serves current theme assets directly from the source manifest in development', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'pico-plugin-theme-dev-'));
+  const originalCwd = process.cwd();
+  let server: Awaited<ReturnType<typeof startServer>> | undefined;
+  try {
+    await put(
+      directory,
+      'plugins/pico.theme-fixture.mjs',
+      `export default {
+        id: 'pico.theme-fixture', name: 'Theme fixture', version: '1.0.0',
+        activate(context) { context.ui.registerPage({ id: 'webui', label: 'Theme', entry: 'webui' }); },
+      };`,
+    );
+    await put(directory, 'plugins/pico.theme-fixture/webui/theme-assets.json', '{"assets":["themes/background.png"]}');
+    await put(directory, 'plugins/pico.theme-fixture/webui/themes/background.png', 'source theme image');
+    await put(
+      directory,
+      'dist/plugin-ui/pico.theme-fixture/webui/index.html',
+      '<!-- pico-plugin-ui-release:stale-release --><!doctype html>',
+    );
+    await put(
+      directory,
+      'dist/plugin-ui/pico.theme-fixture/webui/releases/stale-release/theme-assets.json',
+      '{"assets":["themes/background.png"]}',
+    );
+    await put(
+      directory,
+      'dist/plugin-ui/pico.theme-fixture/webui/releases/stale-release/themes/background.png',
+      'stale image',
+    );
+    process.chdir(directory);
+    process.env.PICO_HOST = '127.0.0.1';
+    process.env.PICO_PORT = '0';
+    process.env.PICO_DB_PATH = join(directory, 'runtime.sqlite');
+    process.env.PICO_PLUGIN_DIR = join(directory, 'plugins');
+    process.env.PICO_ENV = 'development';
+    process.env.NODE_ENV = 'test';
+    server = await startServer();
+
+    const response = await fetch(
+      `http://127.0.0.1:${server.port}/_pico/plugin-ui/pico.theme-fixture/webui/current/themes/background.png`,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('source theme image');
+    expect(
+      (
+        await fetch(
+          `http://127.0.0.1:${server.port}/_pico/plugin-ui/pico.theme-fixture/webui/current/themes/unlisted.png`,
+        )
+      ).status,
+    ).toBe(404);
   } finally {
     await server?.close();
     process.chdir(originalCwd);

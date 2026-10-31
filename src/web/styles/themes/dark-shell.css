@@ -1,5 +1,5 @@
 /* Dark color overrides from shell-light.css, settings-light.css, and responsive-light.css. */
-:root[data-pico-theme='pico.dark'] {
+:root[data-pico-color-scheme='dark'] {
   /* Shell and sidebar */
   --pico-shell-sidebar-border-right: #405148;
   --pico-shell-project-thread-list-border-left: #354139;

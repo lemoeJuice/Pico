@@ -5441,6 +5441,7 @@ export class PicoRuntime {
     catalog: ReturnType<PluginHost['catalog']>;
     ui: ReturnType<PluginHost['uiContributions']>;
     pages: ReturnType<PluginHost['uiPages']>;
+    themes: ReturnType<PluginHost['uiThemes']>;
     providers: ReturnType<PluginHost['modelProviders']>;
     pipelines: ReturnType<ExecutionPipelines['registrations']>;
     errors: string[];
@@ -5450,6 +5451,7 @@ export class PicoRuntime {
       catalog: this.plugins.catalog(),
       ui: this.plugins.uiContributions(),
       pages: this.plugins.uiPages(),
+      themes: this.plugins.uiThemes(),
       providers: this.plugins.modelProviders(),
       pipelines: this.pipelines.registrations(),
       errors: [...this.pluginLoadErrors],
@@ -5457,15 +5459,21 @@ export class PicoRuntime {
   }
 
   async setPluginEnabled(pluginId: string, enabled: boolean): Promise<PluginCatalogEntry[]> {
-    const catalog = await this.plugins.setEnabled(pluginId, enabled);
-    this.pluginLoadErrors = [...this.plugins.errors()];
-    return catalog;
+    try {
+      return await this.plugins.setEnabled(pluginId, enabled);
+    } finally {
+      this.pluginLoadErrors = [...this.plugins.errors()];
+      this.publish({ type: 'plugin.catalog.updated', pluginId });
+    }
   }
 
   async reloadPlugin(pluginId: string): Promise<PluginCatalogEntry[]> {
-    const catalog = await this.plugins.reload(pluginId);
-    this.pluginLoadErrors = [...this.plugins.errors()];
-    return catalog;
+    try {
+      return await this.plugins.reload(pluginId);
+    } finally {
+      this.pluginLoadErrors = [...this.plugins.errors()];
+      this.publish({ type: 'plugin.catalog.updated', pluginId });
+    }
   }
 
   pluginHttpRoute(pluginId: string, method: string, path: string) {

@@ -11,6 +11,7 @@ import { ModelCatalog } from '../runtime/model-catalog.js';
 import { ServiceError } from '../contracts/service-error.js';
 import type { ExecutorPluginContext } from '../executor/plugin-host.js';
 import type { PipelineStage, StageInputs, StageOutputs } from '../contracts/plugin-pipeline.js';
+import type { RegisteredTheme, ThemeContribution } from '../contracts/plugin-theme.js';
 import { unavailablePluginServices, type PluginServices } from './services.js';
 import { existsSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
@@ -107,6 +108,51 @@ interface RegisteredPluginPage extends PluginPageContribution {
   pluginId: string;
 }
 
+const MAX_PLUGIN_THEMES = 32;
+const MAX_THEME_VARIABLES = 64;
+const THEME_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const THEME_ENTRY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const THEME_VARIABLE_PATTERN = /^--pico-[a-z0-9-]{1,120}$/;
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function validThemeValue(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 256 || value.trim() !== value) return false;
+  if (/url\s*\(|var\s*\(|expression\s*\(|javascript\s*:/i.test(value)) return false;
+  if (/[;{}\\\u0000-\u001f\u007f<>]/.test(value)) return false;
+  if (!/^[a-zA-Z0-9#(),.%+/'"\s-]+$/.test(value)) return false;
+  let depth = 0;
+  let quote: string | undefined;
+  for (const character of value) {
+    if (quote) {
+      if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === '"' || character === "'") quote = character;
+    else if (character === '(') depth += 1;
+    else if (character === ')' && --depth < 0) return false;
+  }
+  if (depth !== 0 || quote) return false;
+  const functions = value.match(/[a-zA-Z-]+(?=\s*\()/g) ?? [];
+  if (functions.some((name) => !/^(?:rgb|rgba|hsl|hsla|linear-gradient|radial-gradient|blur)$/i.test(name))) return false;
+  return true;
+}
+
+function cloneTheme(theme: RegisteredTheme): RegisteredTheme {
+  return {
+    pluginId: theme.pluginId,
+    id: theme.id,
+    label: theme.label,
+    appearance: theme.appearance,
+    variables: Object.fromEntries(Object.entries(theme.variables)),
+    ...(theme.background ? { background: { entry: theme.background.entry, path: theme.background.path } } : {}),
+  };
+}
+
 export interface PluginContext extends Omit<PluginServices, 'models' | 'continuations' | 'threads'> {
   threads: Omit<PluginServices['threads'], 'updateTitle'> & {
     updateTitle(threadId: string, title: string): Thread;
@@ -152,6 +198,7 @@ export interface PluginContext extends Omit<PluginServices, 'models' | 'continua
   ui: {
     contribute(contribution: UiContribution): void;
     registerPage(page: PluginPageContribution): void;
+    registerTheme(theme: ThemeContribution): RegisteredTheme;
     invalidate(): void;
   };
   http: {
@@ -258,6 +305,7 @@ export class PluginHost {
   private readonly loaded: LoadedPlugin[] = [];
   private readonly contributions: UiContribution[] = [];
   private readonly pages: RegisteredPluginPage[] = [];
+  private readonly themes: RegisteredTheme[] = [];
   private readonly routes: RegisteredPluginHttpRoute[] = [];
   private readonly activePlugins: PicoPlugin[] = [];
   private readonly subscriptions = new Map<string, Array<() => void>>();
@@ -464,6 +512,7 @@ export class PluginHost {
     const plugin = index < 0 ? undefined : this.activePlugins[index];
     if (!plugin) {
       this.loaded.splice(0, this.loaded.length, ...this.loaded.filter((item) => item.id !== pluginId));
+      this.themes.splice(0, this.themes.length, ...this.themes.filter((item) => item.pluginId !== pluginId));
       return;
     }
     this.activePlugins.splice(index, 1);
@@ -480,6 +529,7 @@ export class PluginHost {
       ...this.contributions.filter((item) => item.pluginId !== pluginId),
     );
     this.pages.splice(0, this.pages.length, ...this.pages.filter((item) => item.pluginId !== pluginId));
+    this.themes.splice(0, this.themes.length, ...this.themes.filter((item) => item.pluginId !== pluginId));
     this.modelCatalog?.removeOwner(pluginId);
     this.routes.splice(0, this.routes.length, ...this.routes.filter((item) => item.pluginId !== pluginId));
     try {
@@ -497,6 +547,10 @@ export class PluginHost {
     return [...this.pages];
   }
 
+  uiThemes(): RegisteredTheme[] {
+    return this.themes.map(cloneTheme);
+  }
+
   webUiAssetLocation(
     pluginId: string,
     entry: string,
@@ -505,7 +559,8 @@ export class PluginHost {
     if (!this.loaded.some((plugin) => plugin.id === pluginId)) return undefined;
     const registered =
       this.pages.some((page) => page.pluginId === pluginId && page.entry === entry) ||
-      this.contributions.some((contribution) => contribution.pluginId === pluginId && contribution.entry === entry);
+      this.contributions.some((contribution) => contribution.pluginId === pluginId && contribution.entry === entry) ||
+      this.themes.some((theme) => theme.pluginId === pluginId && theme.background?.entry === entry);
     if (!registered) return undefined;
     const pluginsRoot =
       this.loaded.find((plugin) => plugin.id === pluginId)?.source === 'built-in'
@@ -655,7 +710,9 @@ export class PluginHost {
         updateTitle: (threadId, title) => this.services.threads.updateTitle(plugin.id, threadId, title),
         patchState: (patch) => {
           this.threadStatePatches.add(patch);
-          const unsubscribe = () => { this.threadStatePatches.delete(patch); };
+          const unsubscribe = () => {
+            this.threadStatePatches.delete(patch);
+          };
           subscriptions.push(unsubscribe);
           return unsubscribe;
         },
@@ -840,6 +897,68 @@ export class PluginHost {
           }
           this.pages.push({ ...page, pluginId: plugin.id });
         },
+        registerTheme: (theme) => {
+          if (!isPlainRecord(theme)) throw new Error('Plugin themes must be plain objects.');
+          if (typeof theme.id !== 'string' || !THEME_ID_PATTERN.test(theme.id)) {
+            throw new Error('Plugin theme IDs must be simple lowercase IDs up to 64 characters.');
+          }
+          if (
+            typeof theme.label !== 'string' ||
+            !theme.label.trim() ||
+            theme.label.length > 80 ||
+            /[\u0000-\u001f\u007f]/.test(theme.label)
+          ) {
+            throw new Error('Plugin theme labels must contain 1 to 80 printable characters.');
+          }
+          if (theme.appearance !== 'light' && theme.appearance !== 'dark') {
+            throw new Error('Plugin theme appearance must be light or dark.');
+          }
+          if (!isPlainRecord(theme.variables) || Object.keys(theme.variables).length > MAX_THEME_VARIABLES) {
+            throw new Error(`Plugin themes may define at most ${MAX_THEME_VARIABLES} variables in a plain object.`);
+          }
+          const variables: Record<string, string> = {};
+          for (const key of Object.keys(theme.variables)) {
+            const value = theme.variables[key];
+            if (!THEME_VARIABLE_PATTERN.test(key) || !validThemeValue(value)) {
+              throw new Error(`Invalid plugin theme variable: ${key}`);
+            }
+            Object.defineProperty(variables, key, { value, enumerable: true, configurable: true, writable: true });
+          }
+          let background: RegisteredTheme['background'];
+          if (theme.background !== undefined) {
+            if (!isPlainRecord(theme.background)) throw new Error('Plugin theme background must be a plain object.');
+            const { entry, path } = theme.background;
+            if (
+              typeof entry !== 'string' ||
+              !THEME_ENTRY_PATTERN.test(entry) ||
+              typeof path !== 'string' ||
+              path.length > 256 ||
+              path.startsWith('/') ||
+              path.includes('\\') ||
+              path.split('/').some((segment) => !segment || segment === '.' || segment === '..') ||
+              !/^[a-zA-Z0-9._/-]+$/.test(path)
+            ) {
+              throw new Error('Plugin theme background must reference a safe relative Web UI asset path.');
+            }
+            background = { entry, path };
+          }
+          if (this.themes.filter((item) => item.pluginId === plugin.id).length >= MAX_PLUGIN_THEMES) {
+            throw new Error(`Plugin may register at most ${MAX_PLUGIN_THEMES} themes.`);
+          }
+          if (this.themes.some((item) => item.pluginId === plugin.id && item.id === `${plugin.id}:${theme.id}`)) {
+            throw new Error(`Plugin theme ${theme.id} is already registered.`);
+          }
+          const registered: RegisteredTheme = {
+            pluginId: plugin.id,
+            id: `${plugin.id}:${theme.id}`,
+            label: theme.label,
+            appearance: theme.appearance,
+            variables,
+            ...(background ? { background } : {}),
+          };
+          this.themes.push(registered);
+          return cloneTheme(registered);
+        },
         invalidate: () => this.options.onChange?.(plugin.id),
       },
       http: {
@@ -900,6 +1019,7 @@ export class PluginHost {
       this.modelCatalog?.removeOwner(plugin.id);
       this.contributions.splice(contributionsStart);
       this.pages.splice(pagesStart);
+      this.themes.splice(0, this.themes.length, ...this.themes.filter((item) => item.pluginId !== plugin.id));
       this.routes.splice(routesStart);
       this.continuations.delete(plugin.id);
       await plugin.deactivate?.();

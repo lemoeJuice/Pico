@@ -2,6 +2,7 @@
 .native-tools-popover,
 .plugin-toolbar-popover,
 .model-selection-more-menu {
+  backdrop-filter: var(--pico-material-backdrop);
   background: var(--pico-control-popover-fill);
   border: 1px solid var(--pico-control-popover-border);
   border-radius: 14px;
