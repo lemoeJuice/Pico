@@ -4,6 +4,7 @@ const PLUGIN_SOURCE_TO_ID = new Map([
   ['auto-thread-title', 'pico.auto-thread-title'],
   ['chatgpt-plan', 'pico.chatgpt-plan'],
   ['collaboration', 'pico.collaboration'],
+  ['deepsea-theme', 'pico.deepsea-theme'],
   ['global-memory', 'pico.global-memory'],
   ['goal', 'pico.goal'],
   ['model-parameters', 'pico.model-parameters'],

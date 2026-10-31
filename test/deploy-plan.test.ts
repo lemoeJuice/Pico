@@ -176,6 +176,22 @@ describe('deploy rules and manifests', () => {
     });
   });
 
+  it('tracks the Deepsea theme runtime and image assets in their respective release targets', () => {
+    const root = fixture();
+    put(root, 'src/plugins/deepsea-theme.ts', 'theme runtime');
+    put(root, 'plugins/pico.deepsea-theme.mjs', 'theme entry');
+    put(root, 'plugins/pico.deepsea-theme/webui/index.html', 'theme assets entry');
+    put(root, 'plugins/pico.deepsea-theme/webui/theme-assets.json', '{"assets":["assets/whale.svg"]}');
+    put(root, 'plugins/pico.deepsea-theme/webui/assets/whale.svg', '<svg/>');
+
+    const manifest = buildReleaseManifest(root);
+    expect(manifest.unknownPaths).toEqual([]);
+    expect(manifest.targets.runtime!.files['src/plugins/deepsea-theme.ts']).toMatch(/^[a-f0-9]{64}$/);
+    expect(manifest.targets.runtime!.files['plugins/pico.deepsea-theme.mjs']).toMatch(/^[a-f0-9]{64}$/);
+    expect(manifest.targets['plugin-ui:pico.deepsea-theme']!.files['plugins/pico.deepsea-theme/webui/assets/whale.svg'])
+      .toMatch(/^[a-f0-9]{64}$/);
+  });
+
   it('reports unknown source paths and check changes without selecting work', () => {
     const root = fixture();
     put(root, 'src/server.ts', 'baseline');
