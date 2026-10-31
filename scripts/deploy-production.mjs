@@ -40,6 +40,12 @@ import { acquireSystemdUnitReference, assertRestartableSystemdUnit } from './dep
 import { assertSystemdTokenSource } from './deploy/systemd-credentials.mjs';
 import { recoverStoppedSystemdUnit } from './deploy/systemd-recovery.mjs';
 import { getActiveThreadCount as countActiveThreads } from './deploy/thread-activity.mjs';
+import {
+  assertAddressesUncontended,
+  assertNoConflictingListeners,
+  listenerPidsConflictingWithAddresses,
+  parseListenerRows,
+} from './deploy/listeners.mjs';
 
 const projectRoot = realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
 const runtimeLauncher = path.join(projectRoot, 'scripts/start-runtime.sh');
@@ -135,7 +141,7 @@ function releaseDeploymentLock(lock) {
   }
 }
 
-function listenerPids() {
+function listenerRows() {
   const result = spawnSync('ss', ['-H', '-ltnp', `sport = :${port}`], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -143,7 +149,11 @@ function listenerPids() {
   if (result.error || result.status !== 0) {
     throw new Error('Cannot inspect the listener. Run this script on the deployment host with permission to inspect it.');
   }
-  return [...new Set([...result.stdout.matchAll(/\bpid=(\d+)/g)].map((match) => Number(match[1])))];
+  return parseListenerRows(result.stdout);
+}
+
+function listenerPids() {
+  return [...new Set(listenerRows().flatMap((row) => row.pids))];
 }
 
 function readProcessEnvironment(pid) {
@@ -187,16 +197,19 @@ function isPicoProcess(pid, expectedStartTime) {
 }
 
 function requirePicoListener(expectedPid, expectedStartTime) {
-  const pids = listenerPids();
-  if (
-    pids.length !== 1 ||
-    pids[0] !== expectedPid ||
-    !isPicoProcess(expectedPid, expectedStartTime)
-  ) {
+  const rows = listenerRows();
+  const targetAddresses = [...new Set(rows.filter((row) => row.pids.includes(expectedPid)).map((row) => row.address))];
+  if (!isPicoProcess(expectedPid, expectedStartTime)) {
     throw new Error(
       `Port ${port} is no longer owned by the verified Pico Runtime from this repository; refusing to stop or replace it.`,
     );
   }
+  assertNoConflictingListeners(rows, expectedPid, targetAddresses);
+}
+
+function otherPicoListenerPids(rows, expectedPid) {
+  return [...new Set(rows.flatMap((row) => row.pids))]
+    .filter((pid) => pid !== expectedPid && isPicoProcess(pid));
 }
 
 function normalizedAddress(address) {
@@ -629,12 +642,14 @@ function recoverInterruptedBuilds() {
       continue;
     }
     if (backup.manifest.phase === 'building' || backup.manifest.phase === 'built') {
-      const pids = listenerPids();
-      if (
-        pids.length === 1 &&
-        pids[0] === backup.manifest.pid &&
-        isPicoProcess(backup.manifest.pid, backup.manifest.startTime)
-      ) {
+      const rows = listenerRows();
+      const targetPid = backup.manifest.pid;
+      const targetAddresses = [...new Set(rows.filter((row) => row.pids.includes(targetPid)).map((row) => row.address))];
+      if (targetAddresses.length > 0 && isPicoProcess(targetPid, backup.manifest.startTime)) {
+        assertNoConflictingListeners(rows, targetPid, targetAddresses);
+        if (otherPicoListenerPids(rows, targetPid).length > 0) {
+          throw new Error('Another Pico Runtime from this repository is running; refusing to restore artifacts beneath it.');
+        }
         restoreBuildArtifacts(backup);
         console.log('已恢复上次中断构建前的产物；原 Runtime 仍在运行。');
         continue;
@@ -646,16 +661,15 @@ function recoverInterruptedBuilds() {
   }
 }
 
-async function waitForOldRuntimeExit(pid, expectedStartTime) {
+async function waitForOldRuntimeExit(pid, expectedStartTime, targetAddresses) {
   const deadline = Date.now() + shutdownTimeoutSeconds * 1000;
   while (Date.now() < deadline) {
     throwIfInterrupted();
-    const pids = listenerPids();
-    if (pids.some((listenerPid) => listenerPid !== pid)) {
-      throw new Error('Another process acquired the deployment port during shutdown; no replacement was started.');
-    }
+    const rows = listenerRows();
+    assertAddressesUncontended(rows, pid, targetAddresses);
     const oldProcessStillPresent = isPicoProcess(pid, expectedStartTime);
-    if (pids.length === 0 && !oldProcessStillPresent) return;
+    const oldListenerStillPresent = rows.some((row) => row.pids.includes(pid));
+    if (!oldListenerStillPresent && !oldProcessStillPresent) return;
     await sleep(1000);
     throwIfInterrupted();
   }
@@ -688,16 +702,16 @@ function launchRuntime(runtimeEnvironment) {
   }
 }
 
-async function waitForNewListener(oldPid, oldStartTime, child) {
+async function waitForNewListener(oldPid, oldStartTime, child, targetAddresses) {
   const deadline = Date.now() + startupTimeoutSeconds * 1000;
   while (Date.now() < deadline) {
     throwIfInterrupted();
-    const pids = listenerPids();
-    if (pids.length > 0) {
-      if (pids.length !== 1 || !isPicoProcess(pids[0])) {
-        throw new Error(`Port ${port} was acquired by an unexpected process; inspect it before proceeding.`);
-      }
-      const pid = pids[0];
+    const rows = listenerRows();
+    const candidates = [...new Set(rows.flatMap((row) => row.pids).filter((pid) => isPicoProcess(pid)))];
+    if (candidates.length > 1) throw new Error('Multiple Pico Runtime processes listen on the deployment port; inspect them before proceeding.');
+    if (candidates.length === 1) {
+      const pid = candidates[0];
+      assertNoConflictingListeners(rows, pid, targetAddresses);
       const startTime = processStartTime(pid);
       if (pid !== oldPid || startTime !== oldStartTime) return { pid, startTime };
     }
@@ -852,14 +866,15 @@ async function deploy(plan, currentManifest, baseline, sourceRoot) {
   const mainWeb = full || plan.scope.mainWeb;
   const pluginIds = frontendPluginIds(sourceRoot, plan, full);
   const releaseId = `${Date.now()}-${randomUUID()}`;
-  const currentPids = listenerPids();
-  if (currentPids.length !== 1) {
-    throw new Error(`Expected one visible listener on port ${port}, found ${currentPids.length}; no process was changed.`);
+  const currentRows = listenerRows();
+  const currentPids = [...new Set(currentRows.flatMap((row) => row.pids))];
+  const picoPids = currentPids.filter((pid) => isPicoProcess(pid));
+  if (picoPids.length !== 1) {
+    throw new Error(`Expected one verifiable Pico listener on port ${port}, found ${picoPids.length}; no process was changed.`);
   }
-  const oldPid = currentPids[0];
-  if (!isPicoProcess(oldPid)) {
-    throw new Error(`The listener on port ${port} is not the Pico Runtime from ${projectRoot}; no process was changed.`);
-  }
+  const oldPid = picoPids[0];
+  const runtimeAddresses = [...new Set(currentRows.filter((row) => row.pids.includes(oldPid)).map((row) => row.address))];
+  assertNoConflictingListeners(currentRows, oldPid, runtimeAddresses);
   const oldStartTime = processStartTime(oldPid);
   if (!isPicoProcess(oldPid, oldStartTime)) {
     throw new Error('The listener changed while it was being inspected; no process was changed.');
@@ -1012,7 +1027,7 @@ async function deploy(plan, currentManifest, baseline, sourceRoot) {
       console.log(`通过 systemd 单元 ${systemdContext.unit} 停止 Runtime。`);
       try {
         await controlSystemdUnit(systemdContext, 'stop');
-        await waitForOldRuntimeExit(oldPid, oldStartTime);
+        await waitForOldRuntimeExit(oldPid, oldStartTime, runtimeAddresses);
         oldProcessStopped = true;
       } catch (error) {
         oldProcessStopped = true;
@@ -1026,7 +1041,7 @@ async function deploy(plan, currentManifest, baseline, sourceRoot) {
     } else {
       try {
         process.kill(oldPid, 'SIGTERM');
-        await waitForOldRuntimeExit(oldPid, oldStartTime);
+        await waitForOldRuntimeExit(oldPid, oldStartTime, runtimeAddresses);
         oldProcessStopped = true;
       } catch (error) {
         oldProcessStopped = true;
@@ -1047,7 +1062,7 @@ async function deploy(plan, currentManifest, baseline, sourceRoot) {
     if (unitReference) await unitReference.check();
     if (systemdContext) await controlSystemdUnit(systemdContext, 'start');
     const child = systemdContext ? undefined : launchRuntime(runtimeEnvironment);
-    const replacement = await waitForNewListener(oldPid, oldStartTime, child);
+    const replacement = await waitForNewListener(oldPid, oldStartTime, child, runtimeAddresses);
     requirePicoListener(replacement.pid, replacement.startTime);
     if (systemdContext && readProcessEnvironment(replacement.pid).PICO_ACCESS_TOKEN !== token) {
       throw new Error('The restarted systemd Runtime did not inherit the existing access token; backup retained for recovery.');
@@ -1079,7 +1094,11 @@ async function deploy(plan, currentManifest, baseline, sourceRoot) {
       try {
         await recoverStoppedSystemdUnit({
           readState: () => ({
-            listenerPids: listenerPids(),
+            listenerPids: (() => {
+              const rows = listenerRows();
+              const otherPids = otherPicoListenerPids(rows, oldPid);
+              return [...new Set([...listenerPidsConflictingWithAddresses(rows, runtimeAddresses), ...otherPids])];
+            })(),
             oldProcessAlive: isPicoProcess(oldPid, oldStartTime),
             activeState: systemdShow(systemdContext, 'ActiveState'),
           }),
@@ -1087,7 +1106,7 @@ async function deploy(plan, currentManifest, baseline, sourceRoot) {
           restore: () => restoreBuildArtifacts(artifactBackup, { discard: false }),
           start: () => controlSystemdUnit(systemdContext, 'start'),
           verify: async () => {
-            const recovered = await waitForNewListener(oldPid, oldStartTime);
+            const recovered = await waitForNewListener(oldPid, oldStartTime, undefined, runtimeAddresses);
             requirePicoListener(recovered.pid, recovered.startTime);
             if (readProcessEnvironment(recovered.pid).PICO_ACCESS_TOKEN !== token) throw new Error('Recovered Runtime token mismatch.', { cause: error });
             const recoverySession = await createSession(baseUrl, token);
