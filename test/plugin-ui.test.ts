@@ -416,7 +416,7 @@ describe('dynamic plugin UI boundary', () => {
     const css = [
       '../src/web/styles/shared/plugin-inputs.css',
       '../src/web/styles/shared/plugin-select.css',
-      '../src/web/styles/shared/plugin-switch.css',
+      '../src/web/styles/shared/switch.css',
       '../src/web/styles/shared/plugin-range.css',
       '../src/web/styles/shared/plugin-status.css',
       '../src/web/styles/shared/plugin-fields.css',
@@ -430,17 +430,19 @@ describe('dynamic plugin UI boundary', () => {
     expect(css).toMatch(/\.plugin-ui-text-input\s*\{[^}]*white-space:\s*nowrap;[^}]*overflow-x:\s*auto;/s);
     expect(css).toMatch(/\.plugin-ui-text-area\s*\{[^}]*line-height:\s*1\.5;[^}]*overflow:\s*hidden;/s);
     expect(css).toMatch(/\.plugin-ui-control\s*\{[^}]*padding:\s*8px 10px;/s);
-    expect(css).toMatch(/\.plugin-ui-switch-control\s*\{[^}]*width:\s*30px;[^}]*height:\s*18px;[^}]*padding:\s*2px;/s);
-    expect(css).toMatch(/\.plugin-ui-switch-thumb\s*\{[^}]*width:\s*14px;[^}]*height:\s*14px;[^}]*flex:\s*0 0 14px;/s);
+    expect(css).toMatch(/\.plugin-ui-switch-control\s*\{[^}]*padding:\s*2px;/s);
+    expect(css).toMatch(/\.plugin-ui-switch-control,\s*\.model-selection-switch-track\s*\{[^}]*width:\s*30px;[^}]*height:\s*18px;/s);
+    expect(css).toMatch(/\.plugin-ui-switch-thumb,\s*\.model-selection-switch-track::after\s*\{[^}]*width:\s*14px;[^}]*height:\s*14px;/s);
     expect(css).not.toContain('.plugin-ui-switch-track');
     expect(css).toMatch(/\.plugin-ui-switch--compact\s*\{[^}]*border-radius:\s*10px;/s);
     expect(css).toMatch(/\.plugin-ui-range-control\s*\{[^}]*accent-color:\s*#698e70;/s);
     expect(renderer).toMatch(/className=\{`plugin-ui-switch/);
     expect(renderer).toMatch(/role="switch"/);
-    expect(renderer).toContain('role="combobox"');
-    expect(renderer).toContain('role="listbox"');
-    expect(renderer).toContain("event.key === 'ArrowDown' || event.key === 'ArrowUp'");
-    expect(renderer).not.toMatch(/<select\b/);
+    const sharedSelect = readFileSync(new URL('../src/web/plugin-ui-select.tsx', import.meta.url), 'utf8');
+    expect(sharedSelect).toContain('role="combobox"');
+    expect(sharedSelect).toContain('role="listbox"');
+    expect(sharedSelect).toContain("event.key === 'ArrowDown' || event.key === 'ArrowUp'");
+    expect(sharedSelect).not.toMatch(/<select\b/);
     expect(css).toContain('.plugin-ui-select-menu {\n  position: fixed;');
     expect(css).toMatch(/\.plugin-ui-status--success\s*\{[^}]*background:\s*color-mix\(/s);
     expect(css).toMatch(/\.composer-plugin-controls\s*\{[^}]*display:\s*flex;[^}]*overflow-x:\s*auto;/s);

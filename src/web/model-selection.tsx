@@ -8,7 +8,7 @@ import type {
   ModelOptionValue,
   ProviderInstance,
 } from '../contracts/model-catalog.js';
-import { PluginUiSelect } from './plugin-ui-tree.js';
+import { PluginUiSelect } from './plugin-ui-select.js';
 
 export interface ModelSelectionProps {
   models: CatalogModel[];

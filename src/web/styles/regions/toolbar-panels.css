@@ -1,12 +1,6 @@
 .native-tools-popover,
 .plugin-toolbar-popover {
   color: #354139;
-  background: #fff;
-  border: 1px solid #d7e2d6;
-  border-radius: 14px;
-  box-shadow:
-    0 16px 38px rgba(45, 62, 51, 0.17),
-    0 3px 9px rgba(45, 62, 51, 0.07);
   font-size: 11px;
   animation: fade-in 140ms ease-out both;
 }
@@ -121,34 +115,6 @@
   font-size: 10px;
   line-height: 1.45;
   overflow-wrap: anywhere;
-}
-.native-tool-switch {
-  position: relative;
-  display: inline-flex;
-  width: 30px;
-  height: 18px;
-  flex: 0 0 auto;
-  align-items: center;
-  padding: 2px;
-  background: #e5e9e5;
-  border: 0;
-  border-radius: 999px;
-  cursor: pointer;
-  transition: background 0.15s ease;
-}
-.native-tool-switch.is-enabled {
-  background: #77937d;
-}
-.native-tool-switch > span {
-  width: 14px;
-  height: 14px;
-  background: #fff;
-  border-radius: 50%;
-  box-shadow: 0 1px 2px rgba(40, 51, 46, 0.16);
-  transition: transform 0.15s ease;
-}
-.native-tool-switch.is-enabled > span {
-  transform: translateX(12px);
 }
 .native-tools-empty,
 .native-tools-error {

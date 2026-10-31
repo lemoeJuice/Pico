@@ -1,8 +1,8 @@
 # WebUI stylesheet layout
 
-The first extraction stage moves existing CSS into files grouped by style type
-and UI location. It does not consolidate styles, introduce tokens, or change
-selectors, declarations, media queries, or their order.
+The initial extraction moved existing CSS into files grouped by style type and
+UI location without changing its declarations or cascade. Subsequent work is
+documented in [ui-style-inventory.md](ui-style-inventory.md).
 
 ## Entry points
 
@@ -14,8 +14,8 @@ selectors, declarations, media queries, or their order.
 | `public/pico-plugin-ui.css` | `index.html` and consumers of the public stylesheet URL | `public/pico-plugin-ui/` |
 
 Each entry contains ordered `@import` rules. Its original loading location and
-public URL stay the same. The imported files are contiguous slices of the former
-entry; concatenating their bytes in import order reconstructs the original CSS.
+public URL stay the same. Shared switch and popover surface rules were later
+consolidated without moving region-specific layout into the shared files.
 
 `pico-plugin-ui.css` is also loaded in the host document. ToolCard uses its
 `pico-ui-*` classes together with the framework's ToolCard rules. Visible plugin
@@ -42,7 +42,8 @@ and its hidden logic iframe are outside this extraction.
 | Toolbar layout, entry controls, counts, popovers and Tools panel | `regions/toolbar.css`, `regions/toolbar-controls.css`, `regions/toolbar-panels.css` |
 | Framework action buttons | `shared/buttons.css` |
 | Plugin groups, card surfaces, actions and status capsules | `shared/plugin-layouts.css`, `shared/plugin-surfaces.css`, `shared/plugin-buttons.css`, `shared/plugin-status.css` |
-| Plugin fields, checkbox labels, Switch, range and Select | `shared/plugin-fields.css`, `shared/plugin-switch.css`, `shared/plugin-range.css`, `shared/plugin-select.css` |
+| Plugin fields, checkbox labels, shared Switch, range and Select | `shared/plugin-fields.css`, `shared/switch.css`, `shared/plugin-range.css`, `shared/plugin-select.css` |
+| Toolbar and model-parameter popover surface | `shared/popover.css`; positioning and content remain in the region files |
 | Plugin text/date/multiline inputs, lists, tables and disclosures | `shared/plugin-inputs.css`, `shared/plugin-data-disclosure.css` |
 | Settings navigation, management lists and settings-specific status capsules | `regions/settings.css` |
 | Composer shell, state controls, send button, commands and status footer | `regions/composer-layout.css`, `regions/composer.css`, `regions/composer-integration.css` |

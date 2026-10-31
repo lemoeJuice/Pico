@@ -5,6 +5,7 @@
 @import './styles/regions/toolbar.css';
 @import './styles/shared/buttons.css';
 @import './styles/regions/toolbar-controls.css';
+@import './styles/shared/popover.css';
 @import './styles/regions/toolbar-panels.css';
 @import './styles/regions/conversation.css';
 @import './styles/regions/composer-layout.css';
@@ -13,7 +14,7 @@
 @import './styles/shared/plugin-buttons.css';
 @import './styles/shared/plugin-status.css';
 @import './styles/shared/plugin-fields.css';
-@import './styles/shared/plugin-switch.css';
+@import './styles/shared/switch.css';
 @import './styles/shared/plugin-range.css';
 @import './styles/shared/plugin-select.css';
 @import './styles/shared/plugin-inputs.css';

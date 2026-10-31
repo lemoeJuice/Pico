@@ -80,7 +80,7 @@ import {
 } from './model-execution-groups.js';
 import { conversationTimeline } from './conversation-timeline.js';
 import { PluginWebView } from './plugin-web-view.js';
-import { PluginUiSelect } from './plugin-ui-tree.js';
+import { PluginUiSelect } from './plugin-ui-select.js';
 import { McpSettings } from './mcp-settings.js';
 import './mcp-settings.css';
 import { LatestModelRequest, ModelSelection } from './model-selection.js';
