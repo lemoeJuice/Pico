@@ -797,67 +797,6 @@ function serializedPromptCharacters(prompt: {
   }
 }
 
-function projectedHistoryClearlyReducesInput(input: {
-  records: readonly CanonicalRecord[];
-  latestAssistant: CanonicalRecord;
-  projection: ProjectionInput;
-  inputTokens: number;
-  thresholdTokens: number;
-  provider: string;
-  model: string;
-  temperature: number;
-}): boolean {
-  if (!input.latestAssistant.id.endsWith(':assistant')) return false;
-  const executionId = input.latestAssistant.id.slice(0, -':assistant'.length);
-  const inputRecord = [...input.records].reverse().find((record) => {
-    if (record.kind !== 'plugin' || record.seq >= input.latestAssistant.seq) return false;
-    const payload = objectValue(record.payload);
-    return (
-      payload?.pluginId === 'pico.runtime' &&
-      payload.action === 'model-input-recorded' &&
-      payload.executionId === executionId
-    );
-  });
-  const recordedPayload = inputRecord ? objectValue(inputRecord.payload) : null;
-  const rawPrompt = recordedPayload ? objectValue(recordedPayload.prompt) : null;
-  // Old snapshots omitted opaque replay data. Only snapshots written with an explicit
-  // negative marker can prove that the prior request had no such data.
-  if (!rawPrompt || rawPrompt.opaqueReplayPresent !== false) return false;
-  const previous = modelInputPromptSnapshotFrom(rawPrompt);
-  const assistantPayload = objectValue(input.latestAssistant.payload);
-  if (
-    !previous ||
-    typeof assistantPayload?.provider !== 'string' ||
-    assistantPayload.provider !== input.provider ||
-    previous.model !== input.model ||
-    previous.temperature !== input.temperature ||
-    previous.system !== input.projection.systemPrompt ||
-    stableJson(previous.tools) !== stableJson(input.projection.tools)
-  )
-    return false;
-  const previousSize = serializedPromptCharacters({
-    system: previous.system,
-    tools: previous.tools,
-    turns: previous.turns as unknown as PromptTurn[],
-    model: previous.model,
-    temperature: previous.temperature,
-  });
-  const currentSize = serializedPromptCharacters({
-    system: input.projection.systemPrompt,
-    tools: input.projection.tools,
-    turns: input.projection.turns,
-    model: input.model,
-    temperature: input.temperature,
-  });
-  if (!previousSize || !currentSize) return false;
-  // Compare like-for-like full request serialization, then calibrate the ratio with
-  // the actual provider usage from the previous request. Require a substantial
-  // reduction and 20% headroom below the configured threshold before skipping fallback.
-  if (currentSize > previousSize * 0.7) return false;
-  const estimatedCurrentInputTokens = input.inputTokens * (currentSize / previousSize);
-  return estimatedCurrentInputTokens <= input.thresholdTokens * 0.8;
-}
-
 function sanitizeRequestStart(details: ProviderRequestStart): ProviderRequestStart {
   const provider = diagnosticText(details.provider, 64);
   const protocol = diagnosticText(details.protocol, 64);
@@ -3211,55 +3150,13 @@ export class PicoRuntime {
     const settings = this.getContextManagementSettings();
     const records = this.store.listRecords(thread.id);
     const latestAssistant = [...records].reverse().find((record) => record.kind === 'assistant');
-    const latestProjectionSeq = latestRuntimeContextProjectionSeq(records);
+    const assistantPayload = latestAssistant ? objectValue(latestAssistant.payload) : null;
+    const inputTokens = diagnosticUsage(assistantPayload?.usage)?.inputTokens;
+    if (inputTokens === undefined || inputTokens < settings.compactionThresholdTokens) return null;
+
     try {
       const through = records.at(-1)?.seq ?? 0;
       const projectedInput = await this.projectModelInput(thread, records, through, true);
-
-      // Use the complete final request shape for a bounded text estimate. The
-      // estimate is intentionally unavailable for images or opaque replay data:
-      // their encoded payload sizes are not text-token counts.
-      const selection = this.threadModelSelection(thread.id);
-      const temperature = selection.parameters.temperature ?? defaultModelSettings.temperature;
-      const promptCharacters = serializedPromptCharacters({
-        system: projectedInput.systemPrompt,
-        tools: projectedInput.tools,
-        turns: projectedInput.turns,
-        model: selection.model,
-        temperature,
-      });
-      const promptEstimate =
-        promptCharacters === null ? null : Math.min(promptCharacters, settings.contextWindowTokens);
-      const projectedOverWindow = promptEstimate !== null && promptEstimate >= settings.contextWindowTokens;
-      const projectionSupersedesLastUsage =
-        latestProjectionSeq !== null && (!latestAssistant || latestProjectionSeq > latestAssistant.seq);
-      const assistantPayload = latestAssistant ? objectValue(latestAssistant.payload) : null;
-      const inputTokens = diagnosticUsage(assistantPayload?.usage)?.inputTokens;
-      const thresholdReached = inputTokens !== undefined && inputTokens >= settings.compactionThresholdTokens;
-
-      // An actual new projection marker invalidates old provider usage. Otherwise
-      // keep that usage as the trigger, but do not compact again when comparable
-      // full request snapshots show a large reduction with safe headroom.
-      const thresholdFallbackNeeded = projectionSupersedesLastUsage
-        ? false
-        : thresholdReached &&
-          !(
-            !projectedOverWindow &&
-            latestAssistant &&
-            inputTokens !== undefined &&
-            projectedHistoryClearlyReducesInput({
-              records,
-              latestAssistant,
-              projection: projectedInput,
-              inputTokens,
-              thresholdTokens: settings.compactionThresholdTokens,
-              provider: selection.provider,
-              model: selection.model,
-              temperature,
-            })
-          );
-      const shouldCompact = projectedOverWindow || thresholdFallbackNeeded;
-      if (!shouldCompact) return projectedInput;
 
       const latestCompaction = [...records].reverse().find((record) => {
         if (record.kind !== 'plugin') return false;
@@ -3315,11 +3212,12 @@ export class PicoRuntime {
       this.store.setPause(thread.id, true, reason);
       this.publishThreadUpdate(thread.id);
       return null;
-    } catch {
+    } catch (error) {
+      const failureType = error instanceof Error ? diagnosticLabel(error.name, 64) : undefined;
       this.store.setPause(
         thread.id,
         true,
-        'Automatic context compaction failed, so the next model request was blocked. Review the selected model and connection, then Continue.',
+        `Automatic context compaction failed after the last request reached ${inputTokens.toLocaleString()} input tokens, so the next model request was blocked.${failureType ? ` Failure type: ${failureType}.` : ''} Review the compaction settings or recent history, then Continue.`,
       );
       this.publishThreadUpdate(thread.id);
       return null;
