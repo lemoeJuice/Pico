@@ -14,6 +14,7 @@
             stored === 'system' ||
             stored === 'pico.light' ||
             stored === 'pico.dark' ||
+            stored === 'pico.dark-legacy' ||
             (typeof stored === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}:[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(stored))
           ) preference = stored;
         } catch {
@@ -25,15 +26,15 @@
         } catch {
           systemDark = false;
         }
-        const theme = preference === 'pico.dark' || (preference === 'system' && systemDark) ? 'dark' : 'light';
-        const themeId = preference === 'pico.dark' || preference === 'pico.light' ? preference : theme === 'dark' ? 'pico.dark' : 'pico.light';
+        const theme = preference === 'pico.dark' || preference === 'pico.dark-legacy' || (preference === 'system' && systemDark) ? 'dark' : 'light';
+        const themeId = preference === 'pico.dark' || preference === 'pico.dark-legacy' || preference === 'pico.light' ? preference : theme === 'dark' ? 'pico.dark' : 'pico.light';
         const root = document.documentElement;
         root.setAttribute('data-pico-theme', themeId);
         root.setAttribute('data-pico-color-scheme', theme);
         root.setAttribute('data-pico-appearance-preference', preference);
         root.style.colorScheme = theme;
         const themeColor = document.querySelector('meta[name="theme-color"]');
-        if (themeColor) themeColor.setAttribute('content', theme === 'dark' ? '#171f1a' : '#f5f7f4');
+        if (themeColor) themeColor.setAttribute('content', themeId === 'pico.dark-legacy' ? '#171f1a' : theme === 'dark' ? '#171f1a' : '#f5f7f4');
       })();
     </script>
     <link rel="stylesheet" href="/pico-plugin-ui.css" />

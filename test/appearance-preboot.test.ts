@@ -54,6 +54,15 @@ describe('appearance preboot', () => {
     expect(result.themeColor.content).toBe('#171f1a');
   });
 
+  it('restores the legacy dark palette and browser chrome before rendering', () => {
+    const result = runPreboot({ stored: 'pico.dark-legacy' });
+    expect(result.attributes.get('data-pico-theme')).toBe('pico.dark-legacy');
+    expect(result.attributes.get('data-pico-appearance-preference')).toBe('pico.dark-legacy');
+    expect(result.attributes.get('data-pico-color-scheme')).toBe('dark');
+    expect(result.documentElement.style.colorScheme).toBe('dark');
+    expect(result.themeColor.content).toBe('#171f1a');
+  });
+
   it('uses system appearance and falls back to light when browser storage is unavailable', () => {
     const systemDark = runPreboot({ stored: 'system', systemDark: true });
     expect(systemDark.attributes.get('data-pico-theme')).toBe('pico.dark');

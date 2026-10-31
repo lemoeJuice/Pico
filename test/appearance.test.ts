@@ -27,6 +27,7 @@ describe('built-in appearance preference', () => {
     expect(parseAppearancePreference('system')).toBe('system');
     expect(parseAppearancePreference('pico.light')).toBe('pico.light');
     expect(parseAppearancePreference('pico.dark')).toBe('pico.dark');
+    expect(parseAppearancePreference('pico.dark-legacy')).toBe('pico.dark-legacy');
     expect(parseAppearancePreference('unknown')).toBeNull();
     expect(parseAppearancePreference(null)).toBeNull();
   });
@@ -34,6 +35,8 @@ describe('built-in appearance preference', () => {
   it('resolves system preference and makes the brand shortcut explicit', () => {
     expect(resolveAppearance('pico.light', true)).toBe('light');
     expect(resolveAppearance('pico.dark', false)).toBe('dark');
+    expect(resolveAppearance('pico.dark-legacy', false)).toBe('dark');
+    expect(resolveThemeId('pico.dark-legacy', false)).toBe('pico.dark-legacy');
     expect(resolveAppearance('system', false)).toBe('light');
     expect(resolveAppearance('system', true)).toBe('dark');
     expect(resolveThemeId('system', false)).toBe('pico.light');
@@ -41,8 +44,17 @@ describe('built-in appearance preference', () => {
     expect(nextExplicitAppearance('light')).toBe('pico.dark');
     expect(nextExplicitAppearance('dark')).toBe('pico.light');
     expect(themeColorForAppearance('dark')).toBe('#171f1a');
+    expect(themeColorForAppearance('dark', undefined, 'pico.dark-legacy')).toBe('#171f1a');
     expect(themeColorForAppearance('light')).toBe('#f5f7f4');
     expect(themeColorForAppearance('dark', '#123456')).toBe('#123456');
+  });
+
+  it('remembers legacy dark across light and dark toggles', () => {
+    const recent = { light: 'pico.light' as const, dark: 'pico.dark-legacy' as const };
+    expect(appearanceOptions([]).find((option) => option.value === 'pico.dark-legacy')?.label).toBe('Dark Legacy');
+    expect(latestAvailableAppearancePreference('dark', recent, [])).toBe('pico.dark-legacy');
+    expect(nextExplicitAppearance('light', undefined, [], recent)).toBe('pico.dark-legacy');
+    expect(nextExplicitAppearance('dark', undefined, [], recent)).toBe('pico.light');
   });
 
   it('prefers an available paired theme, then recent matching themes, then built-ins', () => {

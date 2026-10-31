@@ -60,6 +60,12 @@
   border: 0;
   cursor: pointer;
 }
+:root[data-pico-color-scheme='dark'] .brand-mark:not(.theme-toggle--plugin-icon),
+:root[data-pico-color-scheme='dark'] .welcome-mark:not(.welcome-mark--plugin-icon) {
+  box-shadow:
+    inset 0 0 0 1px var(--pico-shell-brand-mark-welcome-mark-border),
+    0 4px 10px var(--pico-shell-brand-mark-welcome-mark-shadow);
+}
 .brand-mark.theme-toggle--plugin-icon,
 .welcome-mark.welcome-mark--plugin-icon {
   background: none;

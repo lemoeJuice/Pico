@@ -11,6 +11,7 @@
 @import './styles/themes/dark-content.css';
 @import './styles/themes/dark-shell.css';
 @import './styles/themes/dark-conversation.css';
+@import './styles/themes/dark-legacy.css';
 @import './styles/base/document.css';
 @import './styles/regions/shell-sidebar.css';
 @import './styles/regions/background-image.css';

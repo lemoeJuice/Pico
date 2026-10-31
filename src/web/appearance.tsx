@@ -25,6 +25,7 @@ export type PluginThemeId = `${string}:${string}`;
 export const BUILT_IN_THEMES = [
   { id: 'pico.light', label: 'Light', appearance: 'light' },
   { id: 'pico.dark', label: 'Dark', appearance: 'dark' },
+  { id: 'pico.dark-legacy', label: 'Dark Legacy', appearance: 'dark' },
 ] as const;
 
 export type BuiltInThemeId = (typeof BUILT_IN_THEMES)[number]['id'];
@@ -45,6 +46,7 @@ const EMPTY_RECENT_APPEARANCE_PREFERENCES: RecentAppearancePreferences = { light
 const BOOT_PREFERENCE_ATTRIBUTE = 'data-pico-appearance-preference';
 const LIGHT_THEME_COLOR = '#f5f7f4';
 const DARK_THEME_COLOR = '#171f1a';
+const LEGACY_DARK_THEME_COLOR = '#171f1a';
 const SYSTEM_DARK_QUERY = '(prefers-color-scheme: dark)';
 
 export function parseAppearancePreference(value: string | null | undefined): AppearancePreference | null {
@@ -300,12 +302,16 @@ export function nextExplicitAppearance(
   return latestAvailableAppearancePreference(target, recent, themes);
 }
 
-export function themeColorForAppearance(resolved: ResolvedAppearance, pluginPageBackground?: string): string {
+export function themeColorForAppearance(
+  resolved: ResolvedAppearance,
+  pluginPageBackground?: string,
+  themeId?: string,
+): string {
   const candidate = pluginPageBackground?.trim();
   if (candidate && (/^#[\da-f]{3,8}$/i.test(candidate) || globalThis.CSS?.supports?.('color', candidate))) {
     return candidate;
   }
-  return resolved === 'dark' ? DARK_THEME_COLOR : LIGHT_THEME_COLOR;
+  return resolved === 'dark' ? (themeId === 'pico.dark-legacy' ? LEGACY_DARK_THEME_COLOR : DARK_THEME_COLOR) : LIGHT_THEME_COLOR;
 }
 
 function pluginThemeAssetUrl(theme: RegisteredThemeContribution | undefined, asset: ThemeAssetReference | undefined): string | undefined {
@@ -474,7 +480,7 @@ function applyAppearance(
   );
   const pageBackground = pluginTheme?.variables['--pico-page-bg'];
   const themeColor = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
-  themeColor?.setAttribute('content', themeColorForAppearance(resolved, pageBackground));
+  themeColor?.setAttribute('content', themeColorForAppearance(resolved, pageBackground, themeId));
 }
 
 type AppearanceContextValue = {

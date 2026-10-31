@@ -28,7 +28,7 @@ roles are absent. In Pico's host document, visible plugin nodes are rendered by
 the framework and inherit the same roles; the hidden plugin logic iframe does
 not style those host-rendered nodes.
 
-The built-in `pico.light` and `pico.dark` themes use the same appearance roles.
+The built-in `pico.light`, `pico.dark`, and `pico.dark-legacy` themes use the same appearance roles. Dark Legacy preserves the previous green-tinted dark palette, while retaining the updated Pico icon.
 The `dark-*.css` files override color roles without changing the light theme's
 layout or typography. `AppearanceProvider` owns browser-local selection and
 system-following; an early script in `index.html` applies the stored built-in
