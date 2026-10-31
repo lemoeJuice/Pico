@@ -581,7 +581,9 @@ export class ContainerExecutor implements ExecutorAdapter {
     // snapshot and subsequent removal of the original container.
     await this.callPodman(['stop', name]);
     try {
-      await this.callPodman(['commit', name, image]);
+      // A running Container carries its Executor credential in its environment.
+      // Do not preserve that credential in the resulting image configuration.
+      await this.callPodman(['commit', '--change', 'ENV PICO_EXECUTOR_TOKEN=', name, image]);
       this.store.setSetting(setting, {
         image,
         workspace,

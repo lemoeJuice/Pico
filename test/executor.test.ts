@@ -317,6 +317,9 @@ describe('Executor execution identity and recovery', () => {
       await executor.attachWorkspace(binding, env.workspace);
       const runs = calls.filter((args) => args.includes('run'));
       expect(calls.some((args) => args.includes('commit'))).toBe(true);
+      expect(calls.find((args) => args.includes('commit'))).toEqual(
+        expect.arrayContaining(['--change', 'ENV PICO_EXECUTOR_TOKEN=']),
+      );
       expect(calls.findIndex((args) => args.includes('stop'))).toBeLessThan(calls.findIndex((args) => args.includes('commit')));
       expect(runs).toHaveLength(2);
       expect(runs[0]![runs[0]!.indexOf('--name') + 1]).toBe(runs[1]![runs[1]!.indexOf('--name') + 1]);
