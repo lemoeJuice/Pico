@@ -145,6 +145,8 @@
   --pico-toolbar-panels-native-tool-row-border-bottom: #f0f2ef;
   --pico-toolbar-panels-general-setting-row-surface: #fff;
   --pico-toolbar-panels-general-setting-row-border: #edf0eb;
+  --pico-toolbar-panels-theme-unavailable-note-font-size: 11px;
+  --pico-toolbar-panels-theme-unavailable-note-line-height: 1.4;
   --pico-toolbar-panels-native-tool-title-text: #46534a;
   --pico-toolbar-panels-native-tool-title-font-size: 11px;
   --pico-toolbar-panels-native-tool-title-font-weight: 650;

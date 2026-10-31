@@ -6,6 +6,7 @@ import { PicoStore } from '../src/core/store.js';
 import { ExecutionPipelines } from '../src/core/pipeline.js';
 import { ToolCatalog } from '../src/executor/tool-catalog.js';
 import { CommandRegistry, PluginHost, type PicoPlugin } from '../src/plugins/host.js';
+import { THEME_ROLE_SCHEMA } from '../src/contracts/theme-role-schema.js';
 import { unavailablePluginServices } from '../src/plugins/services.js';
 import { FakeModel, response, setupRuntime } from './helpers.js';
 
@@ -94,7 +95,15 @@ describe('PluginHost lifecycle', () => {
       directory,
       unavailablePluginServices,
     );
-    let returned: { pluginId: string; id: string; variables: Record<string, string> } | undefined;
+    let returned:
+      | {
+          pluginId: string;
+          id: string;
+          variables: Record<string, string>;
+          coverage?: 'complete';
+          inheritRoles?: readonly string[];
+        }
+      | undefined;
     const plugin: PicoPlugin = {
       id: 'pico.theme-test',
       name: 'Theme test',
@@ -104,28 +113,42 @@ describe('PluginHost lifecycle', () => {
           id: 'forest',
           label: 'Forest',
           appearance: 'dark',
-          variables: {
-            '--pico-page-bg': '#223322',
-            '--pico-panel': 'linear-gradient(90deg, #223322, rgba(1, 2, 3, .4))',
-          },
+          coverage: 'complete',
+          variables: { '--pico-page-bg': '#223322' },
+          inheritRoles: THEME_ROLE_SCHEMA.filter((role) => role !== '--pico-page-bg'),
           background: { entry: 'webui', path: 'assets/bg.png' },
           brandIcon: { entry: 'webui', path: 'assets/whale.svg' },
           pairedThemeId: 'forest-light',
           brandLabel: 'deepseek-theme',
+        });
+        context.ui.registerTheme({
+          id: 'legacy',
+          label: 'Legacy partial',
+          appearance: 'light',
+          variables: { '--pico-accent': '#345678' },
         });
       },
     };
     try {
       await host.load([plugin]);
       expect(returned).toMatchObject({ pluginId: plugin.id, id: `${plugin.id}:forest` });
-      expect(host.uiThemes()).toHaveLength(1);
+      expect(returned?.coverage).toBe('complete');
+      expect(returned?.inheritRoles).toEqual(THEME_ROLE_SCHEMA.filter((role) => role !== '--pico-page-bg'));
+      expect(host.uiThemes()).toHaveLength(2);
       expect(host.webUiAssetLocation(plugin.id, 'webui')).toBeDefined();
       const leaked = host.uiThemes();
       leaked[0]!.variables['--pico-page-bg'] = '#ffffff';
       if (returned) returned.variables['--pico-page-bg'] = '#000000';
       expect(host.uiThemes()[0]!.variables['--pico-page-bg']).toBe('#223322');
       expect(host.uiThemes()[0]?.brandIcon).toEqual({ entry: 'webui', path: 'assets/whale.svg' });
-      expect(host.uiThemes()[0]).toMatchObject({ pairedThemeId: 'forest-light', brandLabel: 'deepseek-theme' });
+      expect(host.uiThemes()[0]).toMatchObject({
+        coverage: 'complete',
+        inheritRoles: THEME_ROLE_SCHEMA.filter((role) => role !== '--pico-page-bg'),
+        pairedThemeId: 'forest-light',
+        brandLabel: 'deepseek-theme',
+      });
+      returned!.inheritRoles = [];
+      expect(host.uiThemes()[0]?.inheritRoles).toHaveLength(THEME_ROLE_SCHEMA.length - 1);
       await host.setEnabled(plugin.id, false);
       expect(host.uiThemes()).toEqual([]);
       expect(host.webUiAssetLocation(plugin.id, 'webui')).toBeUndefined();
@@ -165,6 +188,45 @@ describe('PluginHost lifecycle', () => {
       await host.load([plugin]);
       expect(host.uiThemes()).toEqual([]);
       expect(host.errors().join('\n')).toContain('Invalid plugin theme variable');
+    } finally {
+      await host.shutdown();
+      store.close();
+    }
+  });
+
+  it('rejects incomplete strict theme coverage and rolls back earlier registrations', async () => {
+    const store = new PicoStore(':memory:');
+    const directory = mkdtempSync(join(tmpdir(), 'pico-theme-coverage-invalid-'));
+    temporaryDirectories.push(directory);
+    const host = new PluginHost(
+      store,
+      new ToolCatalog(),
+      new ExecutionPipelines(),
+      new CommandRegistry(),
+      directory,
+      unavailablePluginServices,
+    );
+    const plugin: PicoPlugin = {
+      id: 'pico.theme-coverage-invalid',
+      name: 'Invalid complete theme',
+      version: '1.0.0',
+      activate(context) {
+        context.ui.registerTheme({ id: 'legacy-first', label: 'Legacy', appearance: 'light', variables: {} });
+        context.ui.registerTheme({
+          id: 'incomplete',
+          label: 'Incomplete',
+          appearance: 'light',
+          coverage: 'complete',
+          variables: { '--pico-accent': '#345678' },
+          inheritRoles: [],
+        });
+      },
+    };
+    try {
+      await host.load([plugin]);
+      expect(host.uiThemes()).toEqual([]);
+      expect(host.errors().join('\n')).toContain('Invalid complete plugin theme coverage');
+      expect(host.errors().join('\n')).toContain('missing theme role coverage');
     } finally {
       await host.shutdown();
       store.close();

@@ -39,8 +39,9 @@ inherit the same appearance as the main interface.
 Runtime plugins can register themes as appearance data, as documented in
 `plugins/README.md`. The host validates contributions and applies known
 `--pico-*` appearance roles to its document; plugins do not style host DOM or
-provide arbitrary CSS. The declared light or dark base supplies any roles a
-theme does not override. The selected plugin theme is kept in browser storage
+provide arbitrary CSS. Complete themes enumerate all roles as overrides or
+explicit inheritance; legacy partial themes inherit unspecified roles from the
+light or dark base. The selected plugin theme is kept in browser storage
 even while its plugin is unavailable, with the light appearance as a temporary
 fallback. Theme changes update native controls and body-mounted portals too.
 
@@ -49,6 +50,13 @@ URL and the server serves only paths in the package's theme asset manifest;
 the release publisher snapshots and verifies those assets with the plugin UI.
 `--pico-material-backdrop` controls the optional glass blur of framework-owned
 surfaces. Its default is `none`, so the built-in themes retain their appearance.
+
+In General settings, each theme defaults to no background and can use its own
+background or a locally selected raster image behind the main panel. Each
+theme's selection and blur settings are remembered independently. The image is
+stored in that browser's IndexedDB and is never uploaded to the Runtime. The
+two image choices remember separate blur amounts: theme backgrounds default to
+0 px and personal images to 4 px; both can be adjusted from 0 to 20 px.
 
 An optional brand icon and label replace the sidebar mark and name only while
 that theme is active; the host still owns the controls and their behavior. A

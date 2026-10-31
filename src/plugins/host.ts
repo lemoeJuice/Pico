@@ -11,7 +11,12 @@ import { ModelCatalog } from '../runtime/model-catalog.js';
 import { ServiceError } from '../contracts/service-error.js';
 import type { ExecutorPluginContext } from '../executor/plugin-host.js';
 import type { PipelineStage, StageInputs, StageOutputs } from '../contracts/plugin-pipeline.js';
-import { MAX_THEME_VARIABLES, type RegisteredTheme, type ThemeContribution } from '../contracts/plugin-theme.js';
+import {
+  MAX_THEME_VARIABLES,
+  themeRoleCoverageErrors,
+  type RegisteredTheme,
+  type ThemeContribution,
+} from '../contracts/plugin-theme.js';
 import { unavailablePluginServices, type PluginServices } from './services.js';
 import { existsSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
@@ -166,6 +171,8 @@ function cloneTheme(theme: RegisteredTheme): RegisteredTheme {
     label: theme.label,
     appearance: theme.appearance,
     variables: Object.fromEntries(Object.entries(theme.variables)),
+    ...(theme.coverage ? { coverage: theme.coverage } : {}),
+    ...(theme.inheritRoles ? { inheritRoles: [...theme.inheritRoles] } : {}),
     ...(theme.background ? { background: { entry: theme.background.entry, path: theme.background.path } } : {}),
     ...(theme.brandIcon ? { brandIcon: { entry: theme.brandIcon.entry, path: theme.brandIcon.path } } : {}),
     ...(theme.pairedThemeId ? { pairedThemeId: theme.pairedThemeId } : {}),
@@ -947,6 +954,17 @@ export class PluginHost {
           if (!isPlainRecord(theme.variables) || Object.keys(theme.variables).length > MAX_THEME_VARIABLES) {
             throw new Error(`Plugin themes may define at most ${MAX_THEME_VARIABLES} variables in a plain object.`);
           }
+          if (theme.coverage !== undefined && theme.coverage !== 'complete') {
+            throw new Error('Plugin theme coverage must be complete when specified.');
+          }
+          if (theme.coverage === 'complete') {
+            const coverageErrors = themeRoleCoverageErrors(theme as ThemeContribution);
+            if (coverageErrors.length > 0) {
+              throw new Error(`Invalid complete plugin theme coverage: ${coverageErrors.join('; ')}`);
+            }
+          } else if (theme.inheritRoles !== undefined) {
+            throw new Error('Plugin theme inheritRoles requires coverage: complete.');
+          }
           const variables: Record<string, string> = {};
           for (const key of Object.keys(theme.variables)) {
             const value = theme.variables[key];
@@ -975,6 +993,8 @@ export class PluginHost {
             label: theme.label,
             appearance: theme.appearance,
             variables,
+            ...(theme.coverage ? { coverage: theme.coverage } : {}),
+            ...(theme.inheritRoles ? { inheritRoles: [...theme.inheritRoles] } : {}),
             ...(background ? { background } : {}),
             ...(brandIcon ? { brandIcon } : {}),
             ...(theme.pairedThemeId ? { pairedThemeId: theme.pairedThemeId } : {}),

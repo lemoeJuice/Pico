@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { MAX_THEME_VARIABLES } from '../src/contracts/plugin-theme.js';
+import { THEME_ROLE_SCHEMA } from '../src/contracts/theme-role-schema.js';
 import {
   applyPluginThemeVariables,
   appearanceOptions,
@@ -121,12 +123,104 @@ describe('built-in appearance preference', () => {
   });
 
   it('retains the full supported plugin palette without accepting an unbounded one', () => {
-    const variables = Object.fromEntries(Array.from({ length: 257 }, (_, index) => [`--pico-role-${index}`, '#123456']));
+    const variables = Object.fromEntries(
+      Array.from({ length: MAX_THEME_VARIABLES + 1 }, (_, index) => [`--pico-role-${index}`, '#123456']),
+    );
     const [theme] = normalizePluginThemes([
       { pluginId: 'pico.reader', id: 'pico.reader:blue', label: 'Blue', appearance: 'light', variables },
     ]);
-    expect(Object.keys(theme!.variables)).toHaveLength(256);
-    expect(theme!.variables['--pico-role-255']).toBe('#123456');
+    expect(Object.keys(theme!.variables)).toHaveLength(MAX_THEME_VARIABLES);
+    expect(theme!.variables[`--pico-role-${MAX_THEME_VARIABLES - 1}`]).toBe('#123456');
+  });
+
+  it('preserves complete coverage metadata and rejects malformed strict themes without truncating', () => {
+    const [firstRole, ...inheritedRoles] = THEME_ROLE_SCHEMA;
+    const [complete] = normalizePluginThemes([
+      {
+        pluginId: 'pico.reader',
+        id: 'pico.reader:complete',
+        label: 'Complete',
+        appearance: 'light',
+        coverage: 'complete',
+        variables: { [firstRole!]: '#123456' },
+        inheritRoles: inheritedRoles,
+      },
+    ]);
+    expect(complete).toMatchObject({
+      coverage: 'complete',
+      variables: { [firstRole!]: '#123456' },
+      inheritRoles: inheritedRoles,
+    });
+
+    const malformed = normalizePluginThemes([
+      {
+        pluginId: 'pico.reader',
+        id: 'pico.reader:missing-role',
+        label: 'Missing role',
+        appearance: 'light',
+        coverage: 'complete',
+        variables: {},
+        inheritRoles: inheritedRoles,
+      },
+      {
+        pluginId: 'pico.reader',
+        id: 'pico.reader:unsafe-value',
+        label: 'Unsafe value',
+        appearance: 'light',
+        coverage: 'complete',
+        variables: Object.fromEntries(
+          THEME_ROLE_SCHEMA.map((role) => [role, role === firstRole ? 'url(javascript:alert(1))' : 'initial']),
+        ),
+        inheritRoles: [],
+      },
+      {
+        pluginId: 'pico.reader',
+        id: 'pico.reader:oversized',
+        label: 'Oversized',
+        appearance: 'light',
+        coverage: 'complete',
+        variables: Object.fromEntries([
+          ...THEME_ROLE_SCHEMA.map((role) => [role, 'initial']),
+          ['--pico-extra-role', 'initial'],
+        ]),
+        inheritRoles: [],
+      },
+      {
+        pluginId: 'pico.reader',
+        id: 'pico.reader:oversized-inheritance',
+        label: 'Oversized inheritance',
+        appearance: 'light',
+        coverage: 'complete',
+        variables: {},
+        inheritRoles: [...THEME_ROLE_SCHEMA, '--pico-extra-role'],
+      },
+      {
+        pluginId: 'pico.reader',
+        id: 'pico.reader:unsafe-background',
+        label: 'Unsafe background',
+        appearance: 'light',
+        coverage: 'complete',
+        variables: Object.fromEntries(
+          THEME_ROLE_SCHEMA.filter((role) => role !== '--pico-theme-background-image').map((role) => [role, 'initial']),
+        ),
+        inheritRoles: ['--pico-theme-background-image'],
+        background: { entry: 'webui', path: '../outside.svg' },
+      },
+    ]);
+    expect(malformed).toEqual([]);
+
+    expect(
+      normalizePluginThemes([
+        {
+          pluginId: 'pico.reader',
+          id: 'pico.reader:legacy-inheritance',
+          label: 'Legacy with invalid metadata',
+          appearance: 'light',
+          variables: {},
+          inheritRoles: [],
+        },
+      ]),
+    ).toEqual([]);
   });
 
   it('filters unsafe theme data and only applies existing CSS variables', () => {

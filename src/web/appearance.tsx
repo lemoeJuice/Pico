@@ -9,7 +9,12 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { MAX_THEME_VARIABLES, type RegisteredTheme, type ThemeAssetReference } from '../contracts/plugin-theme.js';
+import {
+  MAX_THEME_VARIABLES,
+  themeRoleCoverageErrors,
+  type RegisteredTheme,
+  type ThemeAssetReference,
+} from '../contracts/plugin-theme.js';
 
 export type ResolvedAppearance = 'light' | 'dark';
 
@@ -171,13 +176,37 @@ export function normalizePluginThemes(value: unknown): RegisteredThemeContributi
     )
       continue;
     const variables: Record<string, string> = {};
-    if (source.variables && typeof source.variables === 'object' && !Array.isArray(source.variables)) {
-      for (const [name, variableValue] of Object.entries(source.variables).slice(0, MAX_THEME_VARIABLES)) {
-        if (/^--pico-[a-z0-9-]{1,120}$/.test(name) && typeof variableValue === 'string' && safeThemeVariableValue(variableValue)) {
-          variables[name] = variableValue;
+    const strict = source.coverage !== undefined;
+    if (strict && source.coverage !== 'complete') continue;
+    if (!strict && source.inheritRoles !== undefined) continue;
+    const sourceVariables = source.variables;
+    if (sourceVariables && typeof sourceVariables === 'object' && !Array.isArray(sourceVariables)) {
+      const entries = Object.entries(sourceVariables);
+      if (strict && entries.length > MAX_THEME_VARIABLES) continue;
+      let invalidStrictValue = false;
+      for (const [name, variableValue] of strict ? entries : entries.slice(0, MAX_THEME_VARIABLES)) {
+        const validName = /^--pico-[a-z0-9-]{1,120}$/.test(name);
+        const validValue = typeof variableValue === 'string' && safeThemeVariableValue(variableValue);
+        if (strict && (!validName || !validValue)) {
+          invalidStrictValue = true;
+          break;
         }
+        if (validName && validValue) variables[name] = variableValue;
       }
+      if (invalidStrictValue) continue;
+    } else if (strict) {
+      continue;
     }
+    const inherited = source.inheritRoles;
+    if (
+      strict &&
+      themeRoleCoverageErrors({
+        coverage: source.coverage as 'complete',
+        variables,
+        ...(Array.isArray(inherited) ? { inheritRoles: inherited as string[] } : {}),
+      }).length > 0
+    )
+      continue;
     const pairedThemeId = typeof source.pairedThemeId === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(source.pairedThemeId)
       ? source.pairedThemeId
       : undefined;
@@ -186,12 +215,22 @@ export function normalizePluginThemes(value: unknown): RegisteredThemeContributi
       : undefined;
     const background = normalizeThemeAssetReference(source.background);
     const brandIcon = normalizeThemeAssetReference(source.brandIcon);
+    if (
+      strict &&
+      ((source.pairedThemeId !== undefined && pairedThemeId === undefined) ||
+        (source.brandLabel !== undefined && brandLabel === undefined) ||
+        (source.background !== undefined && background === undefined) ||
+        (source.brandIcon !== undefined && brandIcon === undefined))
+    )
+      continue;
     result.push({
       id,
       pluginId,
       label,
       appearance,
       variables,
+      ...(strict ? { coverage: 'complete' as const } : {}),
+      ...(Array.isArray(inherited) ? { inheritRoles: [...(inherited as string[])] } : {}),
       ...(background ? { background } : {}),
       ...(brandIcon ? { brandIcon } : {}),
       ...(pairedThemeId ? { pairedThemeId } : {}),

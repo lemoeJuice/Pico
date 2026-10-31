@@ -50,4 +50,92 @@ describe('WebUI light appearance baseline', () => {
       .filter((name) => !dark.has(name));
     expect(missing).toEqual([]);
   });
+
+  it('keeps host color and typography values theme-tokenized', () => {
+    const hostCss = [
+      ...cssFiles(resolve(root, 'src/web/styles')).filter((file) => !file.includes('/styles/themes/')),
+      resolve(root, 'src/web/settings-navigation.css'),
+    ];
+    const cssWideOrTransparent = /^(?:transparent|currentcolor|inherit|initial|unset|revert|revert-layer|none)$/i;
+    const calculations =
+      /\b(?:var|calc|clamp|min|max|env|color-mix|linear-gradient|radial-gradient|conic-gradient)\s*\(/i;
+    const namedColors = new Set(
+      'aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue cornsilk crimson cyan darkblue darkcyan darkgoldenrod darkgray darkgrey darkgreen darkkhaki darkmagenta darkolivegreen darkorange darkorchid darkred darksalmon darkseagreen darkslateblue darkslategray darkslategrey darkturquoise darkviolet deeppink deepskyblue dimgray dimgrey dodgerblue firebrick floralwhite forestgreen fuchsia gainsboro ghostwhite gold goldenrod gray grey green greenyellow honeydew hotpink indianred indigo ivory khaki lavender lavenderblush lawngreen lemonchiffon lightblue lightcoral lightcyan lightgoldenrodyellow lightgray lightgrey lightgreen lightpink lightsalmon lightseagreen lightskyblue lightslategray lightslategrey lightsteelblue lightyellow lime limegreen linen magenta maroon mediumaquamarine mediumblue mediumorchid mediumpurple mediumseagreen mediumslateblue mediumspringgreen mediumturquoise mediumvioletred midnightblue mintcream mistyrose moccasin navajowhite navy oldlace olive olivedrab orange orangered orchid palegoldenrod palegreen paleturquoise palevioletred papayawhip peachpuff peru pink plum powderblue purple rebeccapurple red rosybrown royalblue saddlebrown salmon sandybrown seagreen seashell sienna silver skyblue slateblue slategray slategrey snow springgreen steelblue tan teal thistle tomato turquoise violet wheat white whitesmoke yellow yellowgreen'.split(' '),
+    );
+    const findings: string[] = [];
+
+    for (const file of hostCss) {
+      const source = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, (comment) =>
+        comment.replace(/[^\n]/g, ' '),
+      );
+      const declarations = /([\w-]+)\s*:\s*([^;{}]+);/g;
+      for (const match of source.matchAll(declarations)) {
+        const property = match[1]!.toLowerCase();
+        const value = match[2]!.trim();
+        const line = source.slice(0, match.index).split('\n').length;
+        const location = `${file.slice(root.length + 1)}:${line} ${property}: ${value}`;
+
+        if (
+          [
+            'color',
+            'background-color',
+            'border-color',
+            'border-top-color',
+            'border-right-color',
+            'border-bottom-color',
+            'border-left-color',
+            'outline-color',
+            'text-decoration-color',
+            'fill',
+            'stroke',
+          ].includes(property)
+        ) {
+          const keyword = value.toLowerCase();
+          const systemColor =
+            /^(?:canvas|canvastext|linktext|visitedtext|activetext|buttonface|buttontext|field|fieldtext|highlight|highlighttext|mark|marktext|graytext)$/i.test(
+              value,
+            );
+          if (
+            !value.includes('var(') &&
+            !calculations.test(value) &&
+            !cssWideOrTransparent.test(keyword) &&
+            !systemColor
+          ) {
+            findings.push(location);
+          }
+        } else if (
+          [
+            'background',
+            'border',
+            'border-top',
+            'border-right',
+            'border-bottom',
+            'border-left',
+            'outline',
+            'box-shadow',
+            'text-shadow',
+          ].includes(property)
+        ) {
+          const hasColorLiteral =
+            /#[\da-f]{3,8}\b|\b(?:rgba?|hsla?)\s*\(/i.test(value) ||
+            value.split(/[\s,]+/).some((part) => namedColors.has(part.toLowerCase()));
+          if (hasColorLiteral) findings.push(location);
+        }
+
+        if (
+          ['font', 'font-family', 'font-size', 'font-weight', 'font-style', 'line-height', 'letter-spacing'].includes(
+            property,
+          )
+        ) {
+          const semanticValue =
+            /^(?:inherit|initial|unset|revert|revert-layer|normal|bold|bolder|lighter|italic|oblique|small-caps)$/i.test(
+              value,
+            );
+          if (!value.includes('var(') && !calculations.test(value) && !semanticValue) findings.push(location);
+        }
+      }
+    }
+
+    expect(findings).toEqual([]);
+  });
 });

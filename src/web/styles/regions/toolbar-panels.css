@@ -99,8 +99,8 @@
 .theme-unavailable-note {
   margin: 6px 0 0;
   color: var(--muted);
-  font-size: 11px;
-  line-height: 1.4;
+  font-size: var(--pico-toolbar-panels-theme-unavailable-note-font-size);
+  line-height: var(--pico-toolbar-panels-theme-unavailable-note-line-height);
 }
 .native-tool-copy {
   min-width: 0;
