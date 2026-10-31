@@ -2,18 +2,18 @@
 .pico-ui-error {
   padding: 8px 10px;
   border-radius: 8px;
-  font-size: 12px;
+  font-size: var(--pico-public-feedback-font-size, 12px);
 }
 
 .pico-ui-empty {
   color: var(--pico-ui-muted);
-  background: color-mix(in srgb, var(--pico-ui-bg) 88%, white);
+  background: color-mix(in srgb, var(--pico-ui-bg) 88%, var(--pico-public-white, #fff));
 }
 
 .pico-ui-error {
   color: var(--pico-ui-error);
-  background: color-mix(in srgb, var(--pico-ui-error) 8%, white);
-  border: 1px solid color-mix(in srgb, var(--pico-ui-error) 24%, white);
+  background: color-mix(in srgb, var(--pico-ui-error) 8%, var(--pico-public-white, #fff));
+  border: 1px solid color-mix(in srgb, var(--pico-ui-error) 24%, var(--pico-public-white, #fff));
 }
 
 .pico-ui-preview {
@@ -21,15 +21,11 @@
   padding: 9px 10px;
   overflow: auto;
   color: var(--pico-ui-muted);
-  background: color-mix(in srgb, var(--pico-ui-bg) 90%, white);
+  background: color-mix(in srgb, var(--pico-ui-bg) 90%, var(--pico-public-white, #fff));
   border: 1px solid var(--pico-ui-border);
   border-radius: 8px;
-  font:
-    11px/1.5 ui-monospace,
-    SFMono-Regular,
-    Menlo,
-    Consolas,
-    monospace;
+  font: var(--pico-public-preview-font-size, 11px)/var(--pico-public-preview-line-height, 1.5)
+    var(--pico-font-tool-code, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

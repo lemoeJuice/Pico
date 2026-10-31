@@ -3,10 +3,10 @@
   display: flex;
   align-items: center;
   gap: 5px;
-  color: #819084;
-  font-size: 10px;
-  font-weight: 600;
+  color: var(--pico-conversation-detail-label);
+  font-size: var(--pico-conversation-font-size-meta);
+  font-weight: var(--pico-conversation-font-weight-semibold);
 }
 .tool-has-error .tool-detail-heading {
-  color: #946b5d;
+  color: var(--pico-conversation-error-text);
 }

@@ -11,11 +11,11 @@
   gap: 11px;
   width: 100%;
   padding: 12px 15px;
-  color: #53695a;
-  background: linear-gradient(135deg, #f2f7f2, #fbfcfa);
-  border: 1px solid #dce8de;
+  color: var(--pico-conversation-compaction-text);
+  background: var(--pico-conversation-compaction-gradient);
+  border: 1px solid var(--pico-conversation-compaction-border);
   border-radius: 12px;
-  box-shadow: 0 3px 12px rgba(52, 69, 58, 0.035);
+  box-shadow: 0 3px 12px var(--pico-conversation-compaction-shadow);
 }
 .context-compaction-icon {
   display: grid;
@@ -23,9 +23,9 @@
   width: 29px;
   height: 29px;
   place-items: center;
-  color: #567460;
-  background: #e6efe7;
-  border: 1px solid #d9e6db;
+  color: var(--pico-conversation-compaction-icon);
+  background: var(--pico-conversation-compaction-icon-surface);
+  border: 1px solid var(--pico-conversation-compaction-icon-border);
   border-radius: 9px;
 }
 .context-compaction-icon > .tiny-spinner {
@@ -44,45 +44,45 @@
   gap: 10px;
 }
 .context-compaction-title {
-  color: #40594a;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.5;
+  color: var(--pico-conversation-compaction-title);
+  font-size: var(--pico-conversation-font-size-compact-body);
+  font-weight: var(--pico-conversation-font-weight-semibold);
+  line-height: var(--pico-conversation-line-height-compact);
 }
 .context-compaction-time {
   flex: 0 0 auto;
-  color: #8a978d;
-  font-size: 10px;
+  color: var(--pico-conversation-compaction-time);
+  font-size: var(--pico-conversation-font-size-meta);
 }
 .context-compaction-copy {
   margin: 4px 0 0;
-  color: #69776d;
-  font-size: 11px;
-  line-height: 1.6;
+  color: var(--pico-conversation-compaction-copy);
+  font-size: var(--pico-conversation-font-size-supporting);
+  line-height: var(--pico-conversation-line-height-supporting);
 }
 .context-compaction-details {
   margin-top: 8px;
-  color: #57715e;
-  font-size: 11px;
+  color: var(--pico-conversation-compaction-details);
+  font-size: var(--pico-conversation-font-size-supporting);
 }
 .context-compaction-details > summary {
   width: fit-content;
   cursor: pointer;
-  font-weight: 600;
+  font-weight: var(--pico-conversation-font-weight-semibold);
 }
 .context-compaction-summary {
   max-height: 320px;
   margin-top: 8px;
   padding: 11px 12px;
   overflow: auto;
-  color: #4b5850;
-  background: rgba(255, 255, 255, 0.76);
-  border: 1px solid #e2ebe3;
+  color: var(--pico-conversation-body-text);
+  background: var(--pico-conversation-compaction-summary-surface);
+  border: 1px solid var(--pico-conversation-compaction-summary-border);
   border-radius: 9px;
 }
 .context-compaction-summary .markdown-body {
-  font-size: 12px;
-  line-height: 1.65;
+  font-size: var(--pico-conversation-font-size-compact-body);
+  line-height: var(--pico-conversation-events-summary-line-height);
 }
 .timeline > .model-execution-branch-group {
   align-items: stretch;
@@ -105,7 +105,7 @@
 .timeline > .model-execution-branch-group + .model-execution-branch-group .assistant-avatar {
   opacity: 0;
   background: transparent;
-  color: #6d8d73;
+  color: var(--pico-conversation-consecutive-avatar);
 }
 .timeline > .assistant-message + .assistant-message > .message-body > .message-author,
 .timeline > .model-execution-branch-group + .assistant-message > .message-body > .message-author,

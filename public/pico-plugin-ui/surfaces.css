@@ -14,8 +14,8 @@
   justify-content: space-between;
   gap: 10px;
   color: var(--pico-ui-text);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: var(--pico-public-heading-font-size, 13px);
+  font-weight: var(--pico-public-heading-font-weight, 600);
 }
 
 .pico-ui-card,
@@ -24,7 +24,7 @@
   min-width: 0;
   padding: 9px 11px;
   color: var(--pico-ui-text);
-  background: color-mix(in srgb, var(--pico-ui-bg) 88%, white);
+  background: color-mix(in srgb, var(--pico-ui-bg) 88%, var(--pico-public-white, #fff));
   border: 1px solid var(--pico-ui-border);
   border-radius: 9px;
 }
@@ -48,4 +48,3 @@
   gap: 7px;
   min-width: 0;
 }
-

@@ -63,7 +63,7 @@
     padding-top: 68px;
     transform: translateX(-105%);
     transition: transform 180ms ease;
-    box-shadow: 12px 0 40px rgba(37, 53, 41, 0.12);
+    box-shadow: 12px 0 40px var(--pico-mobile-sidebar-shadow);
   }
   .sidebar.sidebar-open {
     transform: translateX(0);
@@ -73,7 +73,7 @@
     inset: 0;
     z-index: 19;
     display: block;
-    background: rgba(40, 52, 43, 0.23);
+    background: var(--pico-mobile-sidebar-scrim);
     border: 0;
   }
   .menu-button {
@@ -84,7 +84,7 @@
     width: 40px;
     height: 40px;
     margin-right: 8px;
-    font-size: 16px;
+    font-size: var(--pico-responsive-max-width-680px-menu-button-font-size);
   }
   .topbar {
     justify-content: flex-start;
@@ -95,10 +95,10 @@
     flex: 1;
     margin-right: 0;
     gap: 6px;
-    font-size: 11px;
+    font-size: var(--pico-responsive-max-width-680px-breadcrumbs-font-size);
   }
   .breadcrumbs strong {
-    font-size: 11px;
+    font-size: var(--pico-responsive-max-width-680px-breadcrumbs-font-size);
   }
   .topbar-status {
     gap: 5px;
@@ -106,7 +106,7 @@
   .executor-pill {
     min-height: 30px;
     padding: 4px 7px;
-    font-size: 10px;
+    font-size: var(--pico-responsive-max-width-680px-executor-pill-font-size);
   }
   .executor-glyph {
     display: none;
@@ -123,7 +123,7 @@
     min-height: 40px;
     padding-right: 10px;
     padding-left: 10px;
-    font-size: 11px;
+    font-size: var(--pico-responsive-max-width-680px-conversation-actions-button-font-size);
   }
   .conversation-actions .plugin-action {
     display: inline-flex;
@@ -131,7 +131,7 @@
   .interrupt-button {
     min-height: 40px;
     padding: 0 8px;
-    font-size: 11px;
+    font-size: var(--pico-responsive-max-width-680px-interrupt-button-font-size);
   }
   .conversation-scroll {
     padding: 2px 20px 0 6px;
@@ -146,31 +146,31 @@
   }
   .history-load-more {
     min-height: 40px;
-    font-size: 12px;
+    font-size: var(--pico-responsive-max-width-680px-history-load-more-font-size);
   }
   .message-body {
     max-width: calc(100% - 36px);
   }
   .markdown-like,
   .user-bubble {
-    font-size: 14px;
+    font-size: var(--pico-responsive-max-width-680px-markdown-like-user-bubble-font-size);
   }
   .message-author {
     min-height: 24px;
-    font-size: 11px;
+    font-size: var(--pico-responsive-max-width-680px-message-author-font-size);
   }
   .model-label,
   .usage-label,
   .completion-label {
-    font-size: 10px;
+    font-size: var(--pico-responsive-max-width-680px-model-label-usage-label-completion-label-font-size);
   }
   .inline-link {
     min-height: 32px;
-    font-size: 11px;
+    font-size: var(--pico-responsive-max-width-680px-inline-link-font-size);
   }
   .tool-status {
     padding: 4px 8px;
-    font-size: 10px;
+    font-size: var(--pico-responsive-max-width-680px-tool-status-font-size);
   }
   .composer-wrap {
     padding: 6px 10px 9px;
@@ -194,21 +194,21 @@
     padding: 9px 11px 7px 11px;
   }
   .composer-box textarea {
-    font-size: 16px;
+    font-size: var(--pico-responsive-max-width-680px-composer-box-font-size);
   }
   .composer-footer {
     gap: 8px;
-    color: #78857c;
-    font-size: 10px;
+    color: var(--pico-mobile-meta-text);
+    font-size: var(--pico-responsive-max-width-680px-composer-footer-font-size);
   }
   .composer-caption {
-    color: #849087;
-    font-size: 10px;
+    color: var(--pico-mobile-caption-text);
+    font-size: var(--pico-responsive-max-width-680px-composer-caption-font-size);
   }
   .composer-plugin-action {
     min-height: var(--pico-composer-control-height, 32px);
     padding: 0 10px;
-    font-size: 11px;
+    font-size: var(--pico-responsive-max-width-680px-composer-plugin-action-font-size);
   }
   .send-button {
     width: var(--pico-composer-control-height, 32px);
@@ -220,7 +220,7 @@
     min-height: var(--pico-composer-control-height, 32px);
     padding-right: 11px;
     padding-left: 11px;
-    font-size: 11px;
+    font-size: var(--pico-responsive-max-width-680px-composer-state-control-interrupt-icon-button-font-size);
   }
   .interrupt-icon-button {
     width: var(--pico-composer-control-height, 32px);
@@ -230,11 +230,11 @@
     padding: 40px 28px 55px;
   }
   .welcome-screen h1 {
-    font-size: 42px;
+    font-size: var(--pico-responsive-max-width-680px-welcome-screen-font-size);
   }
   .banner {
     margin: 7px 10px 0;
-    font-size: 10px;
+    font-size: var(--pico-responsive-max-width-680px-banner-font-size);
   }
   .executor-error {
     align-items: flex-start;
@@ -262,26 +262,26 @@
   }
   .modal .button {
     min-height: 42px;
-    font-size: 12px;
+    font-size: var(--pico-responsive-max-width-680px-modal-button-font-size);
   }
   .form-intro {
-    font-size: 12px;
+    font-size: var(--pico-responsive-max-width-680px-form-intro-font-size);
   }
   .form-stack label {
-    font-size: 12px;
+    font-size: var(--pico-responsive-max-width-680px-form-stack-font-size);
   }
   .field-note {
-    font-size: 11px;
+    font-size: var(--pico-responsive-max-width-680px-field-note-font-size);
   }
   .remote-token-form label {
-    font-size: 12px;
+    font-size: var(--pico-responsive-max-width-680px-remote-token-form-font-size);
   }
   .remote-token-form {
     grid-template-columns: minmax(0, 1fr);
   }
   .remote-token-form input {
     min-height: 42px;
-    font-size: 16px;
+    font-size: var(--pico-responsive-max-width-680px-remote-token-form-font-size-variant-2);
   }
   .remote-token-form .button {
     justify-self: start;
@@ -323,7 +323,7 @@
     position: relative;
   }
   .form-stack input:not([type='range']) {
-    font-size: 16px;
+    font-size: var(--pico-responsive-max-width-680px-form-stack-font-size-variant-2);
   }
 }
 
@@ -367,4 +367,3 @@
     transition-duration: 0.01ms !important;
   }
 }
-

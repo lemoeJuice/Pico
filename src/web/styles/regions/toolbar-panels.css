@@ -1,7 +1,7 @@
 .native-tools-popover,
 .plugin-toolbar-popover {
-  color: #354139;
-  font-size: 11px;
+  color: var(--pico-toolbar-panels-native-tools-popover-plugin-toolbar-popover-text);
+  font-size: var(--pico-toolbar-panels-native-tools-popover-plugin-toolbar-popover-font-size);
   animation: fade-in 140ms ease-out both;
 }
 .plugin-toolbar-popover {
@@ -23,7 +23,7 @@
   padding: 0;
   border: 0;
   border-radius: 0;
-  background: transparent;
+  background: var(--pico-toolbar-panels-plugin-toolbar-popover-plugin-ui-card-surface);
 }
 .plugin-toolbar-popover .plugin-ui-card + .plugin-ui-card {
   padding-top: 9px;
@@ -36,33 +36,33 @@
   justify-content: space-between;
   gap: 12px;
   padding: 14px 15px 12px;
-  border-bottom: 1px solid #edf0ec;
+  border-bottom: 1px solid var(--pico-toolbar-panels-native-tools-heading-border-bottom);
 }
 .native-tools-heading > div {
   display: grid;
   gap: 4px;
 }
 .native-tools-heading strong {
-  color: #3e4b42;
-  font-size: 12px;
-  font-weight: 650;
+  color: var(--pico-toolbar-panels-native-tools-heading-text);
+  font-size: var(--pico-toolbar-panels-native-tools-heading-font-size);
+  font-weight: var(--pico-toolbar-panels-native-tools-heading-font-weight);
 }
 .native-tools-heading span {
-  color: #87928a;
-  font-size: 10px;
+  color: var(--pico-toolbar-panels-native-tools-heading-text-variant-2);
+  font-size: var(--pico-toolbar-panels-native-tools-heading-font-size-variant-2);
 }
 .native-tools-refresh {
   flex: 0 0 auto;
   padding: 4px 6px;
-  color: #6d806f;
-  background: transparent;
+  color: var(--pico-toolbar-panels-native-tools-refresh-text);
+  background: var(--pico-toolbar-panels-native-tools-refresh-surface);
   border: 0;
   border-radius: 6px;
-  font-size: 10px;
+  font-size: var(--pico-toolbar-panels-native-tools-refresh-font-size);
   cursor: pointer;
 }
 .native-tools-refresh:hover {
-  background: #f2f6f1;
+  background: var(--pico-toolbar-panels-native-tools-refresh-hover-surface);
 }
 .native-tools-list {
   min-height: 0;
@@ -74,15 +74,15 @@
   justify-content: space-between;
   gap: 14px;
   padding: 11px 14px;
-  border-bottom: 1px solid #f0f2ef;
+  border-bottom: 1px solid var(--pico-toolbar-panels-native-tool-row-border-bottom);
 }
 .native-tool-row:last-child {
   border-bottom: 0;
 }
 .general-setting-row {
   padding: 13px 14px;
-  background: #fff;
-  border: 1px solid #edf0eb;
+  background: var(--pico-toolbar-panels-general-setting-row-surface);
+  border: 1px solid var(--pico-toolbar-panels-general-setting-row-border);
   border-radius: 9px;
 }
 .general-setting-row .sidebar-width-options {
@@ -100,20 +100,20 @@
 .native-tool-title strong {
   min-width: 0;
   overflow-wrap: anywhere;
-  color: #46534a;
-  font-size: 11px;
-  font-weight: 650;
+  color: var(--pico-toolbar-panels-native-tool-title-text);
+  font-size: var(--pico-toolbar-panels-native-tool-title-font-size);
+  font-weight: var(--pico-toolbar-panels-native-tool-title-font-weight);
 }
 .native-tool-title > span {
   flex: 0 0 auto;
-  color: #97a198;
-  font-size: 9px;
+  color: var(--pico-toolbar-panels-native-tool-title-text-variant-2);
+  font-size: var(--pico-toolbar-panels-native-tool-title-font-size-variant-2);
 }
 .native-tool-copy p {
   margin: 4px 0 0;
-  color: #87928a;
-  font-size: 10px;
-  line-height: 1.45;
+  color: var(--pico-toolbar-panels-native-tool-copy-text);
+  font-size: var(--pico-toolbar-panels-native-tool-copy-font-size);
+  line-height: var(--pico-toolbar-panels-native-tool-copy-line-height);
   overflow-wrap: anywhere;
 }
 .native-tools-empty,
@@ -121,25 +121,25 @@
   flex-shrink: 0;
   margin: 0;
   padding: 15px;
-  color: #87928a;
-  font-size: 10px;
-  line-height: 1.5;
+  color: var(--pico-toolbar-panels-native-tools-empty-native-tools-error-text);
+  font-size: var(--pico-toolbar-panels-native-tools-empty-native-tools-error-font-size);
+  line-height: var(--pico-toolbar-panels-native-tools-empty-native-tools-error-line-height);
 }
 .native-tools-error {
-  color: #b45e4e;
-  background: #fff8f5;
-  border-bottom: 1px solid #f2e4de;
+  color: var(--pico-toolbar-panels-native-tools-error-text);
+  background: var(--pico-toolbar-panels-native-tools-error-surface);
+  border-bottom: 1px solid var(--pico-toolbar-panels-native-tools-error-border-bottom);
 }
 .interrupt-button {
   padding: 7px 2px 7px 7px;
-  color: #ac7c6c;
-  background: transparent;
+  color: var(--pico-toolbar-panels-interrupt-button-text);
+  background: var(--pico-toolbar-panels-interrupt-button-surface);
   border: 0;
-  font-size: 10px;
+  font-size: var(--pico-toolbar-panels-interrupt-button-font-size);
   cursor: pointer;
 }
 .interrupt-button:hover {
-  color: #8a5545;
+  color: var(--pico-toolbar-panels-interrupt-button-hover-text);
 }
 .thread-scroll-container {
   position: relative;

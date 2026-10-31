@@ -6,7 +6,7 @@
   justify-content: flex-start;
   min-height: 48px;
   padding: 6px 40px;
-  border-bottom: 1px solid #edf0eb;
+  border-bottom: 1px solid var(--pico-toolbar-conversation-header-border-bottom);
 }
 .conversation-actions {
   display: flex;
@@ -43,10 +43,10 @@
     top: calc(100% + 6px);
     right: 0;
     padding: 5px;
-    background: #fff;
-    border: 1px solid #d7e2d6;
+    background: var(--pico-toolbar-mobile-toolbar-more-panel-surface);
+    border: 1px solid var(--pico-toolbar-mobile-toolbar-more-panel-border);
     border-radius: 10px;
-    box-shadow: 0 12px 30px rgba(45, 62, 51, 0.14);
+    box-shadow: 0 12px 30px var(--pico-toolbar-mobile-toolbar-more-panel-shadow);
     animation: fade-in 140ms ease-out both;
   }
 }

@@ -3,22 +3,22 @@
   place-items: center;
   width: 15px;
   height: 15px;
-  color: #758279;
-  background: #edf1ed;
+  color: var(--pico-toolbar-controls-plugin-toolbar-badge-text);
+  background: var(--pico-toolbar-controls-plugin-toolbar-badge-surface);
   border-radius: 50%;
-  font-size: 9px;
-  line-height: 1;
+  font-size: var(--pico-toolbar-controls-plugin-toolbar-badge-font-size);
+  line-height: var(--pico-toolbar-controls-plugin-toolbar-badge-line-height);
 }
 .toolbar-count-badge {
   display: grid;
   place-items: center;
   width: 15px;
   height: 15px;
-  color: #758279;
-  background: #edf1ed;
+  color: var(--pico-toolbar-controls-toolbar-count-badge-text);
+  background: var(--pico-toolbar-controls-toolbar-count-badge-surface);
   border-radius: 50%;
-  font-size: 9px;
-  line-height: 1;
+  font-size: var(--pico-toolbar-controls-toolbar-count-badge-font-size);
+  line-height: var(--pico-toolbar-controls-toolbar-count-badge-line-height);
 }
 .native-tools-anchor {
   position: relative;

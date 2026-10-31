@@ -98,6 +98,6 @@
 .plugin-ui-tree h3,
 .plugin-ui-tree h4 {
   color: var(--ink);
-  font-size: 14px;
-  font-weight: 650;
+  font-size: var(--pico-control-plugin-heading-font-size);
+  font-weight: var(--pico-control-plugin-heading-font-weight);
 }

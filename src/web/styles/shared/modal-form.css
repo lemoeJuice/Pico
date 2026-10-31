@@ -5,7 +5,7 @@
   display: grid;
   place-items: center;
   padding: 18px;
-  background: rgba(49, 61, 51, 0.22);
+  background: var(--pico-surface-modal-backdrop);
   backdrop-filter: blur(5px);
   animation: fade-in 0.16s ease-out;
 }
@@ -14,10 +14,10 @@
   max-height: min(90dvh, 790px);
   overflow-y: auto;
   padding: 22px;
-  background: #fcfdfb;
-  border: 1px solid rgba(255, 255, 255, 0.9);
+  background: var(--pico-surface-modal-fill);
+  border: 1px solid var(--pico-surface-modal-border);
   border-radius: 20px;
-  box-shadow: 0 24px 80px rgba(42, 56, 44, 0.19);
+  box-shadow: 0 24px 80px var(--pico-surface-modal-shadow);
 }
 .modal.conversation-history-modal {
   width: min(640px, 100%);
@@ -34,11 +34,11 @@
 }
 .modal-heading h2 {
   margin: 0;
-  color: #3d4e42;
-  font-family: 'DM Serif Display', Georgia, serif;
-  font-size: 25px;
-  font-weight: 400;
-  letter-spacing: -0.02em;
+  color: var(--pico-control-modal-heading-text);
+  font-family: var(--pico-font-display);
+  font-size: var(--pico-control-modal-heading-font-size);
+  font-weight: var(--pico-control-modal-heading-font-weight);
+  letter-spacing: var(--pico-control-modal-heading-letter-spacing);
 }
 .modal-heading .icon-button {
   margin: -4px -4px 0 0;
@@ -53,47 +53,47 @@
 }
 .form-intro {
   margin: -8px 0 3px;
-  color: #8e9a90;
-  font-size: 11px;
-  line-height: 1.7;
+  color: var(--pico-control-modal-intro-text);
+  font-size: var(--pico-control-modal-intro-font-size);
+  line-height: var(--pico-control-modal-intro-line-height);
 }
 .form-stack label {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  color: #627066;
-  font-size: 10px;
-  font-weight: 600;
+  color: var(--pico-control-form-label-text);
+  font-size: var(--pico-control-form-label-font-size);
+  font-weight: var(--pico-control-form-label-font-weight);
 }
 .form-stack input:not([type='range']) {
   width: 100%;
   min-height: 38px;
   padding: 0 11px;
-  color: #46564b;
-  background: white;
-  border: 1px solid #e4eae2;
+  color: var(--pico-control-form-input-text);
+  background: var(--pico-control-form-input-fill);
+  border: 1px solid var(--pico-control-form-input-border);
   border-radius: 9px;
-  font-size: 11px;
-  font-weight: 400;
+  font-size: var(--pico-control-form-input-font-size);
+  font-weight: var(--pico-control-form-input-font-weight);
 }
 .form-stack select {
   width: 100%;
   min-height: 38px;
   padding: 0 11px;
-  color: #46564b;
-  background: white;
-  border: 1px solid #e4eae2;
+  color: var(--pico-control-form-input-text);
+  background: var(--pico-control-form-input-fill);
+  border: 1px solid var(--pico-control-form-input-border);
   border-radius: 9px;
-  font-size: 11px;
-  font-weight: 400;
+  font-size: var(--pico-control-form-input-font-size);
+  font-weight: var(--pico-control-form-input-font-weight);
 }
 .form-stack input::placeholder {
-  color: #b3bcb4;
+  color: var(--pico-control-form-placeholder-text);
 }
 .field-note {
-  color: #a0aaa1;
-  font-size: 9px;
-  font-weight: 400;
+  color: var(--pico-control-form-note-text);
+  font-size: var(--pico-control-form-note-font-size);
+  font-weight: var(--pico-control-form-note-font-weight);
 }
 .form-actions {
   display: flex;
@@ -104,7 +104,7 @@
 }
 .form-actions .field-note {
   max-width: 220px;
-  line-height: 1.6;
+  line-height: var(--pico-control-form-actions-note-line-height);
 }
 .path-suggestion {
   display: flex;
@@ -112,20 +112,20 @@
   align-items: flex-start;
   gap: 4px;
   padding: 9px 10px;
-  color: #688071;
-  background: #f4f7f2;
-  border: 1px solid #e8eee6;
+  color: var(--pico-control-path-suggestion-text);
+  background: var(--pico-surface-path-suggestion-fill);
+  border: 1px solid var(--pico-surface-path-suggestion-border);
   border-radius: 9px;
   text-align: left;
   cursor: pointer;
 }
 .path-suggestion span {
-  font-size: 10px;
-  font-weight: 600;
+  font-size: var(--pico-control-path-suggestion-title-font-size);
+  font-weight: var(--pico-control-path-suggestion-title-font-weight);
 }
 .path-suggestion code {
-  color: #9aa69b;
-  font-size: 9px;
+  color: var(--pico-control-path-suggestion-code);
+  font-size: var(--pico-control-path-suggestion-code-font-size);
   overflow-wrap: anywhere;
 }
 
@@ -137,9 +137,9 @@
 }
 .provider-instance {
   overflow: hidden;
-  border: 1px solid #dbe4dc;
+  border: 1px solid var(--pico-surface-provider-card-border);
   border-radius: 12px;
-  background: #fff;
+  background: var(--pico-surface-provider-card-fill);
 }
 .provider-instance summary {
   display: flex;
@@ -154,7 +154,7 @@
 }
 .provider-instance summary::before {
   content: '▸';
-  color: #718377;
+  color: var(--pico-control-provider-caret);
 }
 .provider-instance[open] summary::before {
   content: '▾';
@@ -168,7 +168,7 @@
   align-items: flex-start;
   gap: 12px;
   padding: 15px;
-  border-top: 1px solid #e7ede8;
+  border-top: 1px solid var(--pico-surface-provider-divider);
 }
 .provider-instance-content > :first-child {
   align-self: stretch;
@@ -190,24 +190,24 @@
   flex-direction: column;
   align-self: stretch;
   gap: 6px;
-  color: #627066;
-  font-size: 10px;
+  color: var(--pico-control-provider-label-text);
+  font-size: var(--pico-control-provider-instance-name-font-size);
 }
 .provider-instance-name input {
   width: 100%;
   padding: 9px 10px;
-  border: 1px solid #dbe4dc;
+  border: 1px solid var(--pico-surface-provider-input-border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--pico-surface-provider-input-fill);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--pico-control-provider-instance-input-font-size);
 }
 .provider-instance-actions {
   display: flex;
   gap: 8px;
   align-self: stretch;
   padding-bottom: 12px;
-  border-bottom: 1px solid #e7ede8;
+  border-bottom: 1px solid var(--pico-surface-provider-divider);
 }
 .provider-title-input {
   min-width: 0;

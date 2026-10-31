@@ -5,8 +5,8 @@
   justify-content: space-between;
   min-height: 53px;
   padding: 0 30px;
-  background: rgba(251, 252, 250, 0.92);
-  border-bottom: 1px solid #edf0eb;
+  background: var(--pico-topbar-topbar-surface);
+  border-bottom: 1px solid var(--pico-topbar-topbar-border-bottom);
   backdrop-filter: blur(16px);
 }
 .breadcrumbs {
@@ -15,8 +15,8 @@
   min-width: 0;
   margin-right: auto;
   gap: 10px;
-  color: #9aa39c;
-  font-size: 11px;
+  color: var(--pico-topbar-breadcrumbs-text);
+  font-size: var(--pico-topbar-breadcrumbs-font-size);
 }
 .breadcrumbs span,
 .breadcrumbs strong {
@@ -25,13 +25,13 @@
   white-space: nowrap;
 }
 .breadcrumbs b {
-  color: #c7cdc7;
-  font-weight: 400;
+  color: var(--pico-topbar-breadcrumbs-text-variant-2);
+  font-weight: var(--pico-topbar-breadcrumbs-font-weight);
 }
 .breadcrumbs strong {
-  color: #526257;
-  font-size: 11px;
-  font-weight: 600;
+  color: var(--pico-topbar-breadcrumbs-text-variant-3);
+  font-size: var(--pico-topbar-breadcrumbs-font-size);
+  font-weight: var(--pico-topbar-breadcrumbs-font-weight-variant-2);
 }
 .topbar-status {
   display: flex;
@@ -42,8 +42,8 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  color: #718078;
-  font-size: 10px;
+  color: var(--pico-topbar-snapshot-refresh-status-text);
+  font-size: var(--pico-topbar-snapshot-refresh-status-font-size);
   white-space: nowrap;
 }
 .executor-pill {
@@ -52,70 +52,70 @@
   min-height: 27px;
   gap: 6px;
   padding: 4px 9px;
-  color: #77847b;
-  background: #f3f6f2;
-  border: 1px solid #e9eee8;
+  color: var(--pico-topbar-executor-pill-text);
+  background: var(--pico-topbar-executor-pill-surface);
+  border: 1px solid var(--pico-topbar-executor-pill-border);
   border-radius: 999px;
-  font-size: 10px;
+  font-size: var(--pico-topbar-executor-pill-font-size);
   white-space: nowrap;
 }
 .executor-glyph {
   flex: 0 0 auto;
-  color: #6f9179;
+  color: var(--pico-topbar-executor-glyph-text);
 }
 .connection-dot,
 .state-dot,
 .thread-state-dot {
   width: 6px;
   height: 6px;
-  background: #a6b3a8;
+  background: var(--pico-topbar-connection-dot-state-dot-thread-state-dot-surface);
   border-radius: 50%;
 }
 .connection-dot.online,
 .thread-state-dot.state-running {
-  background: #76a185;
-  box-shadow: 0 0 0 3px rgba(118, 161, 133, 0.16);
+  background: var(--pico-topbar-connection-dot-online-thread-state-dot-state-running-surface);
+  box-shadow: 0 0 0 3px var(--pico-topbar-connection-dot-online-thread-state-dot-state-running-shadow);
 }
 .connection-dot.offline,
 .executor-offline .connection-dot {
-  background: #d18f7b;
-  box-shadow: 0 0 0 3px rgba(209, 143, 123, 0.12);
+  background: var(--pico-topbar-connection-dot-offline-executor-offline-surface);
+  box-shadow: 0 0 0 3px var(--pico-topbar-connection-dot-offline-executor-offline-shadow);
 }
 .thread-state-dot.state-paused {
-  background: #c4a17e;
-  box-shadow: 0 0 0 3px rgba(196, 161, 126, 0.12);
+  background: var(--pico-topbar-thread-state-dot-state-paused-surface);
+  box-shadow: 0 0 0 3px var(--pico-topbar-thread-state-dot-state-paused-shadow);
 }
 .thread-state-dot.state-waiting_permission {
-  background: #c49a67;
-  box-shadow: 0 0 0 3px rgba(196, 154, 103, 0.12);
+  background: var(--pico-topbar-thread-state-dot-state-waiting-permission-surface);
+  box-shadow: 0 0 0 3px var(--pico-topbar-thread-state-dot-state-waiting-permission-shadow);
 }
 .thread-state-dot.state-model_error {
-  background: #c47d69;
-  box-shadow: 0 0 0 3px rgba(196, 125, 105, 0.12);
+  background: var(--pico-topbar-thread-state-dot-state-model-error-surface);
+  box-shadow: 0 0 0 3px var(--pico-topbar-thread-state-dot-state-model-error-shadow);
 }
 .thread-state-dot {
   flex: 0 0 6px;
 }
 .thread-state-dot.state-pausing {
-  background: #c49a67;
+  background: var(--pico-topbar-thread-state-dot-state-pausing-surface);
   animation: pulse 1.4s ease-in-out infinite;
 }
 .thread-state-dot.state-idle {
-  background: #bdc8be;
+  background: var(--pico-topbar-thread-state-dot-state-idle-surface);
 }
 .executor-update-content {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  color: #718075;
-  font-size: 11px;
-  line-height: 1.65;
+  color: var(--pico-topbar-executor-update-content-text);
+  font-size: var(--pico-topbar-executor-update-content-font-size);
+  line-height: var(--pico-topbar-executor-update-content-line-height);
 }
 .executor-update-content p {
   margin: 0;
 }
 .executor-update-content .executor-update-warning {
-  color: #8e5f51;
+  color: var(--pico-topbar-executor-update-content-executor-update-warning-text);
 }
 .executor-update-actions {
   display: flex;
@@ -132,14 +132,14 @@
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  color: #8a968e;
-  font-size: 10px;
+  color: var(--pico-topbar-connection-label-text);
+  font-size: var(--pico-topbar-connection-label-font-size);
 }
 .tiny-spinner {
   width: 10px;
   height: 10px;
-  border: 1.5px solid #d8e1d8;
-  border-top-color: #73957b;
+  border: 1.5px solid var(--pico-topbar-tiny-spinner-border);
+  border-top-color: var(--pico-topbar-tiny-spinner-border-top);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -153,38 +153,38 @@
   padding: 9px 12px;
   border: 1px solid;
   border-radius: 9px;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: var(--pico-topbar-banner-font-size);
+  line-height: var(--pico-topbar-banner-line-height);
 }
 .banner button {
   flex: 0 0 auto;
   color: inherit;
   background: none;
   border: 0;
-  font-size: 11px;
+  font-size: var(--pico-topbar-banner-font-size-variant-2);
   cursor: pointer;
 }
 .banner .bootstrap-retry {
-  color: #4e725a;
-  font-weight: 600;
+  color: var(--pico-topbar-banner-bootstrap-retry-text);
+  font-weight: var(--pico-topbar-banner-bootstrap-retry-font-weight);
 }
 .banner .bootstrap-retry:hover {
-  text-decoration: underline;
+  text-decoration: var(--pico-topbar-banner-bootstrap-retry-hover-text-decoration);
 }
 .banner .bootstrap-retry:focus-visible {
-  outline: 2px solid rgba(105, 142, 112, 0.42);
+  outline: 2px solid var(--pico-topbar-banner-bootstrap-retry-focus-visible-focus-ring);
   outline-offset: 3px;
   border-radius: 3px;
 }
 .banner-error {
-  color: #8f3d3d;
-  background: #fff1f0;
-  border-color: #f2d3d0;
+  color: var(--pico-topbar-banner-error-text);
+  background: var(--pico-topbar-banner-error-surface);
+  border-color: var(--pico-topbar-banner-error-border);
 }
 .banner-notice {
-  color: #5c7663;
-  background: #f1f6f0;
-  border-color: #e0ebe0;
+  color: var(--pico-topbar-banner-notice-text);
+  background: var(--pico-topbar-banner-notice-surface);
+  border-color: var(--pico-topbar-banner-notice-border);
 }
 .executor-error span {
   min-width: 0;
@@ -205,12 +205,12 @@
 }
 .executor-error-actions > button {
   padding: 6px 9px;
-  color: #805b4e;
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid #ecd7ce;
+  color: var(--pico-topbar-executor-error-actions-text);
+  background: var(--pico-topbar-executor-error-actions-surface);
+  border: 1px solid var(--pico-topbar-executor-error-actions-border);
   border-radius: 7px;
-  font-size: 10px;
-  font-weight: 600;
+  font-size: var(--pico-topbar-executor-error-actions-font-size);
+  font-weight: var(--pico-topbar-executor-error-actions-font-weight);
   white-space: nowrap;
   cursor: pointer;
 }
@@ -219,17 +219,17 @@
   opacity: 0.65;
 }
 .executor-error-actions > button:hover {
-  background: #fff;
+  background: var(--pico-topbar-executor-error-actions-hover-surface);
 }
 .executor-error-details {
   position: relative;
-  font-size: 10px;
+  font-size: var(--pico-topbar-executor-error-details-font-size);
 }
 .executor-error:has(.executor-error-details[open]) {
   z-index: 7;
 }
 .executor-error-details summary {
-  color: #8e5f51;
+  color: var(--pico-topbar-executor-error-details-text);
   cursor: pointer;
   white-space: nowrap;
 }
@@ -243,17 +243,12 @@
   overflow: auto;
   margin: 7px 0 0;
   padding: 10px;
-  color: #654b43;
-  background: #fffdfa;
-  border: 1px solid #ecd7ce;
+  color: var(--pico-topbar-executor-error-details-text-variant-2);
+  background: var(--pico-topbar-executor-error-details-surface);
+  border: 1px solid var(--pico-topbar-executor-error-details-border);
   border-radius: 8px;
-  box-shadow: 0 8px 22px rgba(70, 48, 40, 0.12);
-  font:
-    11px/1.45 ui-monospace,
-    SFMono-Regular,
-    Menlo,
-    monospace;
+  box-shadow: 0 8px 22px var(--pico-topbar-executor-error-details-shadow);
+  font: var(--pico-topbar-executor-error-details-font);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-

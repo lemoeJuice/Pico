@@ -13,27 +13,27 @@
   cursor: pointer;
 }
 .plugin-ui-button--primary {
-  color: white;
+  color: var(--pico-control-button-primary-text);
   background: var(--sage);
   border-color: var(--sage);
 }
 .plugin-ui-button--soft {
-  color: #5f7967;
-  background: #f1f6f1;
-  border-color: #e3ece3;
+  color: var(--pico-control-button-soft-text);
+  background: var(--pico-control-button-soft-fill);
+  border-color: var(--pico-control-button-soft-border);
 }
 .plugin-ui-button--soft:hover {
-  background: #e9f1e9;
-  border-color: #d4e4d6;
+  background: var(--pico-control-button-soft-hover-fill);
+  border-color: var(--pico-control-button-soft-hover-border);
 }
 .plugin-ui-button--danger {
-  color: #8a3939;
-  background: white;
-  border-color: #e2c4c1;
+  color: var(--pico-control-button-danger-text);
+  background: var(--pico-control-button-danger-fill);
+  border-color: var(--pico-control-button-danger-border);
 }
 .plugin-ui-button--danger:hover {
-  background: #fff8f7;
-  border-color: #d6aaa5;
+  background: var(--pico-control-button-danger-hover-fill);
+  border-color: var(--pico-control-button-danger-hover-border);
 }
 .plugin-ui-button--quiet {
   background: transparent;

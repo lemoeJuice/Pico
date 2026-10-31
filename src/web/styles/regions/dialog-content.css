@@ -3,21 +3,21 @@
   flex-direction: column;
   gap: 10px;
   padding: 14px;
-  background: #f7faf6;
-  border: 1px solid #e6ede4;
+  background: var(--pico-dialog-chatgpt-account-card-surface);
+  border: 1px solid var(--pico-dialog-chatgpt-account-card-border);
   border-radius: 12px;
 }
 .chatgpt-account-card strong {
-  color: #526557;
-  font-size: 11px;
+  color: var(--pico-dialog-chatgpt-account-card-text);
+  font-size: var(--pico-dialog-chatgpt-account-card-font-size);
 }
 .chatgpt-account-card p {
   margin: 5px 0 0;
-  line-height: 1.65;
+  line-height: var(--pico-dialog-chatgpt-account-card-line-height);
 }
 .chatgpt-account-label {
-  color: #748477;
-  font-size: 10px;
+  color: var(--pico-dialog-chatgpt-account-label-text);
+  font-size: var(--pico-dialog-chatgpt-account-label-font-size);
 }
 .chatgpt-account-actions {
   justify-content: flex-start;
@@ -49,35 +49,35 @@
 .remote-executor-footnote {
   max-width: 320px;
   padding-top: 11px;
-  border-top: 1px solid #e9ede8;
-  line-height: 1.55;
+  border-top: 1px solid var(--pico-dialog-remote-executor-footnote-border-top);
+  line-height: var(--pico-dialog-remote-executor-footnote-line-height);
 }
 .remote-connection-item {
   display: grid;
   gap: 0.45rem;
   border: 1px solid var(--line);
   border-radius: 14px;
-  background: #f8faf7;
+  background: var(--pico-dialog-remote-connection-item-surface);
   padding: 0.75rem 0.9rem;
 }
 .remote-connection-item strong {
   color: var(--ink);
-  font-size: 0.9rem;
+  font-size: var(--pico-dialog-remote-connection-item-font-size);
 }
 .remote-connection-item span,
 .remote-connection-item code {
   color: var(--muted);
-  font-size: 0.78rem;
+  font-size: var(--pico-dialog-remote-connection-item-font-size-variant-2);
   overflow-wrap: anywhere;
 }
 .remote-connection-item code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--pico-font-code);
 }
 .thread-info-details {
   display: grid;
   gap: 11px;
   padding: 13px 14px;
-  background: #f8faf7;
+  background: var(--pico-dialog-thread-info-details-surface);
   border: 1px solid var(--line);
   border-radius: 12px;
 }
@@ -85,7 +85,7 @@
   display: grid;
   gap: 10px;
   padding: 12px 14px;
-  background: #f8faf7;
+  background: var(--pico-dialog-thread-info-history-entry-surface);
   border: 1px solid var(--line);
   border-radius: 12px;
 }
@@ -94,15 +94,15 @@
   gap: 5px;
 }
 .thread-info-history-entry strong {
-  color: #526257;
-  font-size: 11px;
-  font-weight: 600;
+  color: var(--pico-dialog-thread-info-history-entry-text);
+  font-size: var(--pico-dialog-thread-info-history-entry-font-size);
+  font-weight: var(--pico-dialog-thread-info-history-entry-font-weight);
 }
 .thread-info-history-entry p {
   margin: 0;
   color: var(--muted);
-  font-size: 10px;
-  line-height: 1.6;
+  font-size: var(--pico-dialog-thread-info-history-entry-font-size-variant-2);
+  line-height: var(--pico-dialog-thread-info-history-entry-line-height);
 }
 .thread-info-history-entry .button {
   justify-self: start;
@@ -123,15 +123,15 @@
   justify-content: space-between;
   gap: 10px;
   padding: 10px 12px;
-  color: #536457;
-  background: #f3f7f2;
-  border: 1px solid #e1e9e0;
+  color: var(--pico-dialog-history-branch-root-text);
+  background: var(--pico-dialog-history-branch-root-surface);
+  border: 1px solid var(--pico-dialog-history-branch-root-border);
   border-radius: 10px;
-  font-size: 10px;
+  font-size: var(--pico-dialog-history-branch-root-font-size);
 }
 .history-branch-root span {
-  color: #829185;
-  font-size: 9px;
+  color: var(--pico-dialog-history-branch-root-text-variant-2);
+  font-size: var(--pico-dialog-history-branch-root-font-size-variant-2);
 }
 .history-branch-item {
   display: grid;
@@ -142,23 +142,23 @@
   gap: 8px;
   margin-left: 12px;
   padding-left: 12px;
-  border-left: 1px solid #dfe8df;
+  border-left: 1px solid var(--pico-dialog-history-branch-children-border-left);
 }
 .history-branch-node {
   display: grid;
   gap: 6px;
   padding: 10px 12px;
-  color: #657368;
-  background: #fff;
-  border: 1px solid #e4ebe3;
+  color: var(--pico-dialog-history-branch-node-text);
+  background: var(--pico-dialog-history-branch-node-surface);
+  border: 1px solid var(--pico-dialog-history-branch-node-border);
   border-radius: 10px;
 }
 .history-branch-node.is-on-active-path {
-  border-color: #cfddd0;
+  border-color: var(--pico-dialog-history-branch-node-is-on-active-path-border);
 }
 .history-branch-node.is-active {
-  background: #f3f8f2;
-  border-color: #b9cfbb;
+  background: var(--pico-dialog-history-branch-node-is-active-surface);
+  border-color: var(--pico-dialog-history-branch-node-is-active-border);
 }
 .history-branch-heading {
   display: flex;
@@ -167,33 +167,33 @@
   gap: 10px;
 }
 .history-branch-heading strong {
-  color: #526257;
-  font-size: 10px;
-  font-weight: 600;
+  color: var(--pico-dialog-history-branch-heading-text);
+  font-size: var(--pico-dialog-history-branch-heading-font-size);
+  font-weight: var(--pico-dialog-history-branch-heading-font-weight);
 }
 .history-branch-status {
   flex: 0 0 auto;
-  color: #98a39a;
-  font-size: 8px;
+  color: var(--pico-dialog-history-branch-status-text);
+  font-size: var(--pico-dialog-history-branch-status-font-size);
 }
 .history-branch-status.is-active {
-  color: #60816a;
-  font-weight: 600;
+  color: var(--pico-dialog-history-branch-status-is-active-text);
+  font-weight: var(--pico-dialog-history-branch-status-is-active-font-weight);
 }
 .history-branch-node p {
   display: -webkit-box;
   margin: 0;
   overflow: hidden;
-  color: #7c897e;
-  font-size: 9px;
-  line-height: 1.55;
+  color: var(--pico-dialog-history-branch-node-text-variant-2);
+  font-size: var(--pico-dialog-history-branch-node-font-size);
+  line-height: var(--pico-dialog-history-branch-node-line-height);
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
 .history-branch-node time {
-  color: #a0aaa1;
-  font-size: 8px;
+  color: var(--pico-dialog-history-branch-node-text-variant-3);
+  font-size: var(--pico-dialog-history-branch-node-font-size-variant-2);
 }
 .history-dialog-actions {
   display: flex;
@@ -231,20 +231,20 @@
   max-height: 180px;
   overflow: auto;
   padding: 11px 12px;
-  color: #536359;
-  background: #f7faf6;
+  color: var(--pico-dialog-context-rewind-target-text);
+  background: var(--pico-dialog-context-rewind-target-surface);
   border: 1px solid var(--line);
   border-radius: 11px;
 }
 .context-rewind-target > span {
   color: var(--muted);
-  font-size: 9px;
-  font-weight: 600;
+  font-size: var(--pico-dialog-context-rewind-target-font-size);
+  font-weight: var(--pico-dialog-context-rewind-target-font-weight);
 }
 .context-rewind-target p {
   margin: 7px 0 0;
-  font-size: 11px;
-  line-height: 1.65;
+  font-size: var(--pico-dialog-context-rewind-target-font-size-variant-2);
+  line-height: var(--pico-dialog-context-rewind-target-line-height);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -254,17 +254,17 @@
 }
 .thread-info-details span {
   color: var(--muted);
-  font-size: 9px;
+  font-size: var(--pico-dialog-thread-info-details-font-size);
 }
 .thread-info-details strong,
 .thread-info-details code {
-  color: #526257;
-  font-size: 11px;
-  font-weight: 500;
+  color: var(--pico-dialog-thread-info-details-text);
+  font-size: var(--pico-dialog-thread-info-details-font-size-variant-2);
+  font-weight: var(--pico-dialog-thread-info-details-font-weight);
   overflow-wrap: anywhere;
 }
 .thread-info-details code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--pico-font-code);
 }
 .project-workspace-fill {
   display: flex;
@@ -287,31 +287,31 @@
   min-width: 0;
   flex-direction: column;
   gap: 6px;
-  color: #627066;
-  font-size: 10px;
-  font-weight: 600;
+  color: var(--pico-dialog-remote-token-form-text);
+  font-size: var(--pico-dialog-remote-token-form-font-size);
+  font-weight: var(--pico-dialog-remote-token-form-font-weight);
 }
 .remote-token-form input {
   width: 100%;
   min-width: 0;
   min-height: 38px;
   padding: 0 11px;
-  color: #46564b;
-  background: white;
-  border: 1px solid #e4eae2;
+  color: var(--pico-dialog-remote-token-form-text-variant-2);
+  background: var(--pico-dialog-remote-token-form-surface);
+  border: 1px solid var(--pico-dialog-remote-token-form-border);
   border-radius: 9px;
-  font-size: 11px;
-  font-weight: 400;
+  font-size: var(--pico-dialog-remote-token-form-font-size-variant-2);
+  font-weight: var(--pico-dialog-remote-token-form-font-weight-variant-2);
 }
 .remote-token-form .field-note {
   grid-column: 1 / -1;
-  line-height: 1.5;
+  line-height: var(--pico-dialog-remote-token-form-field-note-line-height);
 }
 .remote-connection-notice {
   margin: 0;
-  color: #587760;
-  font-size: 12px;
-  line-height: 1.5;
+  color: var(--pico-dialog-remote-connection-notice-text);
+  font-size: var(--pico-dialog-remote-connection-notice-font-size);
+  line-height: var(--pico-dialog-remote-connection-notice-line-height);
 }
 .executor-choice {
   position: relative;
@@ -320,17 +320,17 @@
   align-items: flex-start;
   min-height: 150px;
   padding: 13px;
-  color: #748178;
-  background: white;
-  border: 1px solid #e6ebe5;
+  color: var(--pico-dialog-executor-choice-text);
+  background: var(--pico-dialog-executor-choice-surface);
+  border: 1px solid var(--pico-dialog-executor-choice-border);
   border-radius: 13px;
   text-align: left;
   cursor: pointer;
 }
 .executor-choice.chosen {
-  background: #f3f7f2;
-  border-color: #b9cfbc;
-  box-shadow: inset 0 0 0 1px #d9e6d8;
+  background: var(--pico-dialog-executor-choice-chosen-surface);
+  border-color: var(--pico-dialog-executor-choice-chosen-border);
+  box-shadow: inset 0 0 0 1px var(--pico-dialog-executor-choice-chosen-shadow);
 }
 .choice-icon {
   display: grid;
@@ -338,27 +338,27 @@
   width: 27px;
   height: 27px;
   margin-bottom: 12px;
-  color: #68866f;
-  background: #ecf2eb;
+  color: var(--pico-dialog-choice-icon-text);
+  background: var(--pico-dialog-choice-icon-surface);
   border-radius: 9px;
-  font-size: 15px;
+  font-size: var(--pico-dialog-choice-icon-font-size);
 }
 .executor-choice strong {
-  color: #526357;
-  font-size: 11px;
+  color: var(--pico-dialog-executor-choice-text-variant-2);
+  font-size: var(--pico-dialog-executor-choice-font-size);
 }
 .executor-choice small {
   margin-top: 5px;
-  color: #9aa59c;
-  font-size: 9px;
-  line-height: 1.5;
+  color: var(--pico-dialog-executor-choice-text-variant-3);
+  font-size: var(--pico-dialog-executor-choice-font-size-variant-2);
+  line-height: var(--pico-dialog-executor-choice-line-height);
 }
 .executor-choice i {
   margin-top: auto;
   padding-top: 10px;
-  color: #7d9a80;
-  font-size: 9px;
-  font-style: normal;
+  color: var(--pico-dialog-executor-choice-text-variant-4);
+  font-size: var(--pico-dialog-executor-choice-font-size-variant-2);
+  font-style: var(--pico-dialog-executor-choice-font-style);
 }
 .plugin-load-notice > span {
   min-width: 0;

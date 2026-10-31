@@ -5,7 +5,7 @@
   min-width: 0;
   max-width: 100%;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--pico-control-plugin-field-label-font-size);
 }
 .plugin-ui-field-label {
   min-width: 0;
@@ -38,5 +38,5 @@
   gap: 8px;
   min-height: 32px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--pico-control-plugin-field-label-font-size);
 }

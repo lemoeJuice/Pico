@@ -25,14 +25,14 @@
 }
 
 .pico-ui-button--primary {
-  color: #fff;
+  color: var(--pico-public-white, #fff);
   background: var(--pico-ui-accent);
   border-color: var(--pico-ui-accent);
 }
 
 .pico-ui-button--danger {
   color: var(--pico-ui-error);
-  background: color-mix(in srgb, var(--pico-ui-error) 8%, white);
+  background: color-mix(in srgb, var(--pico-ui-error) 8%, var(--pico-public-white, #fff));
   border-color: color-mix(in srgb, var(--pico-ui-error) 35%, var(--pico-ui-border));
 }
 
@@ -55,4 +55,3 @@
   outline: 2px solid var(--pico-ui-focus);
   outline-offset: 2px;
 }
-

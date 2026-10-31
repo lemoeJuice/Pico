@@ -25,29 +25,29 @@
 .tool-shell-output {
   min-width: 0;
   padding: 8px;
-  border: 1px solid #e9eee8;
+  border: 1px solid var(--pico-tool-code-border);
   border-radius: 8px;
-  background: #f6f8f5;
+  background: var(--pico-tool-nested-surface);
 }
 
 .tool-shell-output-success {
-  background: #f0f6ef;
-  border-color: #dce9db;
+  background: var(--pico-tool-success-surface);
+  border-color: var(--pico-tool-success-border);
 }
 
 .tool-shell-output-failure {
-  background: #fcf2ef;
-  border-color: #f0dcd5;
+  background: var(--pico-tool-error-surface);
+  border-color: var(--pico-tool-shell-error-border);
 }
 
 .tool-shell-output-running {
-  background: #f2f5f1;
-  border-color: #e4ebe3;
+  background: var(--pico-tool-code-surface);
+  border-color: var(--pico-tool-running-border);
 }
 
 .tool-shell-output-pending {
-  background: #f7f5ef;
-  border-color: #eee8dc;
+  background: var(--pico-tool-pending-surface);
+  border-color: var(--pico-tool-pending-border);
 }
 
 .tool-shell-output .tool-shell-streams,
@@ -57,9 +57,9 @@
 }
 
 .tool-shell-output > .tool-shell-state {
-  color: #768379;
-  font-size: 10px;
-  line-height: 1.5;
+  color: var(--pico-tool-summary-muted);
+  font-size: var(--pico-tool-shell-state-size);
+  line-height: var(--pico-tool-shell-state-line-height);
   overflow-wrap: anywhere;
 }
 
@@ -79,22 +79,17 @@
   overflow: auto;
   margin: 0;
   padding: 0;
-  color: #556258;
+  color: var(--pico-tool-code-text);
   background: transparent;
   border: 0;
   border-radius: 0;
-  font:
-    10px/1.5 ui-monospace,
-    SFMono-Regular,
-    Menlo,
-    Consolas,
-    monospace;
+  font: 10px/1.5 var(--pico-font-tool-code);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .tool-shell-stream-text.tool-shell-stream-stderr {
-  color: #735a51;
+  color: var(--pico-tool-stderr-text);
 }
 
 .tool-shell-output .tool-shell-stream .tool-field-label {
@@ -115,4 +110,3 @@
 .tool-shell-output > .tool-output.tool-output-error {
   background: transparent;
 }
-

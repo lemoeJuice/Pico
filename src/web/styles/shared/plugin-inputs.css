@@ -6,7 +6,7 @@
   min-height: 36px;
   padding: 6px 10px;
   color-scheme: light;
-  line-height: 1.35;
+  line-height: var(--pico-control-plugin-date-input-line-height);
   text-align: left;
   -webkit-appearance: none;
   appearance: none;
@@ -34,7 +34,7 @@
 }
 .plugin-ui-text-area {
   display: block;
-  line-height: 1.5;
+  line-height: var(--pico-control-plugin-text-area-line-height);
   min-height: 0;
   resize: none;
   white-space: pre-wrap;

@@ -2,19 +2,19 @@
   flex: 1 1 auto;
   min-width: 170px;
   padding: 10px 14px 8px 14px;
-  background: white;
-  border: 1px solid #e4eae2;
+  background: var(--pico-composer-box-fill);
+  border: 1px solid var(--pico-composer-box-border);
   border-radius: 15px;
-  box-shadow: 0 6px 19px rgba(52, 69, 58, 0.035);
+  box-shadow: 0 6px 19px var(--pico-composer-box-shadow);
   transition:
     border 0.15s,
     box-shadow 0.15s;
 }
 .composer-box:focus-within {
-  border-color: #b9ceb9;
+  border-color: var(--pico-composer-box-focus-border);
   box-shadow:
-    0 0 0 2px rgba(105, 144, 113, 0.1),
-    0 8px 22px rgba(65, 100, 74, 0.08);
+    0 0 0 2px var(--pico-composer-box-focus-ring),
+    0 8px 22px var(--pico-composer-box-focus-shadow);
 }
 .composer-box textarea {
   display: block;
@@ -24,15 +24,15 @@
   overflow-y: hidden;
   resize: none;
   padding: 2px 0;
-  color: #46564b;
+  color: var(--pico-composer-textarea-text);
   background: transparent;
   border: 0;
   outline: 0;
-  font-size: 12px;
-  line-height: 1.65;
+  font-size: var(--pico-composer-box-textarea-font-size);
+  line-height: var(--pico-composer-box-textarea-line-height);
 }
 .composer-box textarea::placeholder {
-  color: #aab4ac;
+  color: var(--pico-composer-textarea-placeholder);
 }
 .composer-footer {
   display: flex;
@@ -61,12 +61,12 @@
   min-height: var(--pico-composer-control-height, 32px);
   gap: 7px;
   padding: 0 10px;
-  color: #718078;
-  background: #f3f6f2;
-  border: 1px solid #e5ebe4;
+  color: var(--pico-composer-state-control-text);
+  background: var(--pico-composer-state-control-fill);
+  border: 1px solid var(--pico-composer-state-control-border);
   border-radius: 9px;
-  font-size: 10px;
-  font-weight: 600;
+  font-size: var(--pico-composer-state-control-font-size);
+  font-weight: var(--pico-composer-state-control-font-weight);
   white-space: nowrap;
 }
 .composer-state-control:not(:disabled),
@@ -74,33 +74,33 @@
   cursor: pointer;
 }
 .composer-state-control.state-running {
-  color: #557b60;
-  background: #f0f6f0;
-  border-color: #d8e6d8;
-  box-shadow: inset 0 0 0 1px rgba(98, 132, 106, 0.06);
+  color: var(--pico-composer-state-control-running-text);
+  background: var(--pico-composer-state-control-running-fill);
+  border-color: var(--pico-composer-state-control-running-border);
+  box-shadow: inset 0 0 0 1px var(--pico-composer-state-control-running-shadow);
 }
 .composer-state-control.state-waiting_permission {
-  color: #896b42;
-  background: #faf5ec;
-  border-color: #efe1c9;
+  color: var(--pico-composer-state-control-waiting-text);
+  background: var(--pico-composer-state-control-waiting-fill);
+  border-color: var(--pico-composer-state-control-waiting-border);
 }
 .composer-state-control.state-pausing {
-  color: #9a744b;
-  background: #faf5ec;
-  border-color: #f1e7d7;
+  color: var(--pico-composer-state-control-pausing-text);
+  background: var(--pico-composer-state-control-pausing-fill);
+  border-color: var(--pico-composer-state-control-pausing-border);
 }
 .composer-state-control.state-paused {
-  color: #806d5a;
-  background: #f6f2ec;
-  border-color: #eee6dc;
+  color: var(--pico-composer-state-control-paused-text);
+  background: var(--pico-composer-state-control-paused-fill);
+  border-color: var(--pico-composer-state-control-paused-border);
 }
 .composer-state-control.state-model_error {
-  color: #9b5e4c;
-  background: #fbf0ed;
-  border-color: #efd9d3;
+  color: var(--pico-composer-state-control-model-error-text);
+  background: var(--pico-composer-state-control-model-error-fill);
+  border-color: var(--pico-composer-state-control-model-error-border);
 }
 .composer-state-control.state-idle .state-dot {
-  background: #9baa9d;
+  background: var(--pico-composer-state-control-idle-dot);
 }
 .composer-state-control .state-dot {
   flex: 0 0 6px;
@@ -116,29 +116,29 @@
 .interrupt-icon-button {
   width: var(--pico-composer-control-height, 32px);
   padding: 0;
-  color: #a36d5d;
-  background: #fbf2ee;
-  border-color: #f0e0d8;
+  color: var(--pico-composer-interrupt-button-text);
+  background: var(--pico-composer-interrupt-button-fill);
+  border-color: var(--pico-composer-interrupt-button-border);
 }
 .interrupt-icon-button:hover {
-  background: #f7e8e1;
+  background: var(--pico-composer-interrupt-button-hover-fill);
 }
 .composer-plugin-action {
   height: var(--pico-composer-control-height, 32px);
   min-height: var(--pico-composer-control-height, 32px);
   padding: 0 9px;
-  color: #627c67;
-  background: #f0f5f0;
-  border: 1px solid #e0e9df;
+  color: var(--pico-composer-plugin-action-text);
+  background: var(--pico-composer-plugin-action-fill);
+  border: 1px solid var(--pico-composer-plugin-action-border);
   border-radius: 9px;
-  font-size: 10px;
+  font-size: var(--pico-composer-plugin-action-font-size);
   cursor: pointer;
 }
 .composer-plugin-action:hover:not(:disabled) {
-  background: #e6efe6;
+  background: var(--pico-composer-plugin-action-hover-fill);
 }
 .composer-plugin-action:disabled {
-  color: #a4aea5;
+  color: var(--pico-composer-plugin-action-disabled-text);
   cursor: default;
 }
 .send-button {
@@ -149,8 +149,8 @@
   width: var(--pico-composer-control-height, 32px);
   height: var(--pico-composer-control-height, 32px);
   padding: 0;
-  color: white;
-  background: #64866b;
+  color: var(--pico-composer-send-button-text);
+  background: var(--pico-composer-send-button-fill);
   border: 0;
   border-radius: 10px;
   cursor: pointer;
@@ -159,18 +159,18 @@
     transform 0.15s;
 }
 .send-button:hover:not(:disabled) {
-  background: #4f7458;
+  background: var(--pico-composer-send-button-hover-fill);
 }
 .send-button:disabled {
-  color: #a8b5aa;
-  background: #edf2ed;
+  color: var(--pico-composer-send-button-disabled-text);
+  background: var(--pico-composer-send-button-disabled-fill);
 }
 .composer-caption {
   display: block;
   width: 100%;
   margin: 7px 0 0;
-  color: #adb6ae;
-  font-size: 9px;
+  color: var(--pico-composer-caption-text);
+  font-size: var(--pico-composer-caption-font-size);
   text-align: center;
 }
 .composer-caption.composer-meta {
@@ -182,7 +182,7 @@
 }
 .composer-caption span {
   margin: 0 3px;
-  color: #c8d0c8;
+  color: var(--pico-composer-caption-divider);
 }
 .composer-status-info {
   display: flex;
@@ -194,8 +194,8 @@
 .composer-meta .composer-context-usage {
   flex: 0 0 auto;
   padding: 2px 5px;
-  color: #819184;
-  background: #eef2ed;
+  color: var(--pico-composer-context-usage-text);
+  background: var(--pico-composer-context-usage-fill);
   border-radius: 5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -203,7 +203,7 @@
 }
 .composer-meta .composer-tps {
   flex: 0 0 auto;
-  color: #819184;
+  color: var(--pico-composer-tps-text);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   cursor: help;
@@ -214,7 +214,7 @@
   cursor: pointer;
 }
 .setup-caption:hover {
-  color: #618168;
+  color: var(--pico-composer-setup-caption-hover-text);
 }
 .command-menu {
   position: absolute;
@@ -224,12 +224,12 @@
   left: 40px;
   overflow: hidden;
   padding: 5px;
-  background: white;
-  border: 1px solid #dbe5da;
+  background: var(--pico-composer-command-menu-fill);
+  border: 1px solid var(--pico-composer-command-menu-border);
   border-radius: 12px;
   box-shadow:
-    0 12px 30px rgba(45, 62, 51, 0.13),
-    0 2px 6px rgba(45, 62, 51, 0.06);
+    0 12px 30px var(--pico-composer-command-menu-shadow),
+    0 2px 6px var(--pico-composer-command-menu-shadow-soft);
   animation: fade-in 140ms ease-out both;
 }
 .command-menu button {
@@ -238,26 +238,25 @@
   width: 100%;
   gap: 10px;
   padding: 9px;
-  color: #76837a;
-  background: white;
+  color: var(--pico-composer-command-menu-item-text);
+  background: var(--pico-composer-command-menu-item-fill);
   border: 0;
   border-radius: 7px;
   text-align: left;
   cursor: pointer;
 }
 .command-menu button:hover {
-  background: #f2f6f1;
+  background: var(--pico-composer-command-menu-item-hover-fill);
 }
 .command-menu strong {
   min-width: 75px;
-  color: #56745d;
-  font-size: 10px;
+  color: var(--pico-composer-command-menu-name-text);
+  font-size: var(--pico-composer-command-menu-name-font-size);
 }
 .command-menu span {
   overflow: hidden;
-  color: #9aa59c;
-  font-size: 9px;
+  color: var(--pico-composer-command-menu-description-text);
+  font-size: var(--pico-composer-command-menu-description-font-size);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-

@@ -7,16 +7,11 @@
   overflow: auto;
   margin: 0;
   padding: 9px 10px;
-  color: #556258;
-  background: #f2f5f1;
-  border: 1px solid #e9eee8;
+  color: var(--pico-tool-code-text);
+  background: var(--pico-tool-code-surface);
+  border: 1px solid var(--pico-tool-code-border);
   border-radius: 7px;
-  font:
-    11px/1.55 ui-monospace,
-    SFMono-Regular,
-    Menlo,
-    Consolas,
-    monospace;
+  font: 11px/1.55 var(--pico-font-tool-code);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -41,8 +36,8 @@
 }
 
 .tool-card .tool-command-preview {
-  color: #405447;
-  background: #f0f4ef;
+  color: var(--pico-tool-command-text);
+  background: var(--pico-tool-command-surface);
 }
 
 .tool-card .tool-command-caret {
@@ -51,7 +46,7 @@
   height: 1.1em;
   margin-left: 1px;
   vertical-align: -0.17em;
-  background: #607b65;
+  background: var(--pico-tool-caret);
   animation: tool-caret-blink 1s steps(2, start) infinite;
 }
 
@@ -60,4 +55,3 @@
     visibility: hidden;
   }
 }
-

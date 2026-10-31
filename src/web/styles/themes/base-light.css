@@ -1,0 +1,22 @@
+/* Core semantic roles shared by the host and framework-rendered plugin UI. */
+:root {
+  --pico-font-body: 'DM Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --pico-font-display: 'DM Serif Display', Georgia, serif;
+  --pico-font-auth-display: Georgia, 'Times New Roman', serif;
+  --pico-font-code: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --pico-font-tool-code: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --pico-page-bg: #f4f6f2;
+  --pico-surface-primary: #fbfcfa;
+  --pico-text-primary: #28332e;
+  --pico-text-muted: #7a867f;
+  --pico-text-subtle: #a4ada7;
+  --pico-border-subtle: #e6eae4;
+  --pico-accent: #4d745f;
+  --pico-accent-strong: #385a49;
+  --pico-accent-subtle: #e8f0e9;
+  --pico-decor-lavender: #ebe9f4;
+  --pico-decor-peach: #f7e9de;
+  --pico-shadow-panel: 0 20px 60px rgba(52, 69, 58, 0.1), 0 2px 10px rgba(52, 69, 58, 0.04);
+  --pico-focus-ring: rgba(102, 145, 118, 0.25);
+}

@@ -23,28 +23,28 @@
   gap: 12px;
   overflow: hidden;
   padding: 0 10px;
-  color: #46564b;
+  color: var(--pico-model-selection-trigger-text);
   font: inherit;
-  font-size: 12px;
+  font-size: var(--pico-model-selection-trigger-font-size);
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
-  background: #fff;
-  border: 1px solid #d8e1d7;
+  background: var(--pico-model-selection-trigger-fill);
+  border: 1px solid var(--pico-model-selection-trigger-border);
   border-radius: 7px;
-  box-shadow: 0 1px 2px #2030200a;
+  box-shadow: 0 1px 2px var(--pico-model-selection-trigger-shadow);
   cursor: pointer;
 }
 .model-selection .composer-model-name:hover,
 .model-selection .composer-model-name[aria-expanded='true'] {
-  border-color: #9fb3a0;
-  background: #f8faf7;
+  border-color: var(--pico-model-selection-trigger-hover-border);
+  background: var(--pico-model-selection-trigger-hover-fill);
 }
 .model-selection .composer-model-name:focus-visible,
 .composer-model-name-right:focus-visible,
 .model-selection-more:focus-visible,
 .model-selection-panel button:not(.plugin-ui-select-trigger):focus-visible {
-  outline: 2px solid #72927a;
+  outline: 2px solid var(--pico-model-selection-focus-ring);
   outline-offset: 2px;
 }
 .model-selection-inline-parameter,
@@ -53,8 +53,8 @@
   min-width: 0;
   align-items: center;
   gap: 5px;
-  color: #69766c;
-  font-size: 10px;
+  color: var(--pico-model-selection-parameter-label-text);
+  font-size: var(--pico-model-selection-parameter-label-font-size);
   white-space: nowrap;
 }
 .model-selection-inline-parameter > span {
@@ -71,10 +71,10 @@
   min-width: 0;
   height: 28px;
   padding: 0 7px;
-  color: #46564b;
+  color: var(--pico-model-selection-parameter-input-text);
   font: inherit;
-  background: #fff;
-  border: 1px solid #e1e7df;
+  background: var(--pico-model-selection-parameter-input-fill);
+  border: 1px solid var(--pico-model-selection-parameter-input-border);
   border-radius: 6px;
 }
 .model-selection-parameter {
@@ -87,15 +87,15 @@
 .model-selection-more {
   height: 28px;
   padding: 0 8px;
-  color: #66756a;
+  color: var(--pico-model-selection-more-text);
   font: inherit;
   background: transparent;
-  border: 1px solid #e1e7df;
+  border: 1px solid var(--pico-model-selection-more-border);
   border-radius: 6px;
   cursor: pointer;
 }
 .model-selection-more:hover {
-  background: #f4f7f3;
+  background: var(--pico-model-selection-more-hover-fill);
 }
 .model-selection-more-menu {
   position: fixed;
@@ -108,13 +108,13 @@
   gap: 10px;
   overflow: auto;
   padding: 12px;
-  color: #46564b;
+  color: var(--pico-model-selection-panel-text);
   animation: fade-in 140ms ease-out both;
 }
 .model-selection-parameter-note {
   margin: 0;
-  color: #7d897f;
-  font-size: 10px;
+  color: var(--pico-model-selection-parameter-note-text);
+  font-size: var(--pico-model-selection-parameter-note-font-size);
 }
 .model-selection-primary-in-more,
 .model-selection-mobile-temperature,
@@ -124,8 +124,8 @@
 .model-selection-unavailable,
 .model-selection-error {
   overflow: hidden;
-  color: #9b5b49;
-  font-size: 10px;
+  color: var(--pico-model-selection-unavailable-text);
+  font-size: var(--pico-model-selection-unavailable-font-size);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -137,12 +137,12 @@
   gap: 0;
   box-sizing: border-box;
   overflow: auto;
-  color: #46564b;
-  font-size: 12px;
-  background: #fcfdfb;
-  border: 1px solid #d8e1d7;
+  color: var(--pico-model-selection-panel-text);
+  font-size: var(--pico-model-selection-panel-font-size);
+  background: var(--pico-model-selection-panel-fill);
+  border: 1px solid var(--pico-model-selection-panel-border);
   border-radius: 10px;
-  box-shadow: 0 8px 30px #0002;
+  box-shadow: 0 8px 30px var(--pico-model-selection-panel-shadow);
 }
 .model-selection-models,
 .model-selection-adapters {
@@ -153,15 +153,15 @@
   padding: 7px;
 }
 .model-selection-adapters {
-  border-left: 1px solid #e4eae2;
+  border-left: 1px solid var(--pico-model-selection-panel-divider);
 }
 .model-selection-placeholder,
 .model-selection-adapter-heading {
   overflow: hidden;
   padding: 8px 9px;
-  color: #758177;
-  font-size: 10px;
-  font-weight: 600;
+  color: var(--pico-model-selection-panel-label-text);
+  font-size: var(--pico-model-selection-panel-label-font-size);
+  font-weight: var(--pico-model-selection-panel-label-font-weight);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -183,7 +183,7 @@
 }
 .model-selection-panel button:not(.plugin-ui-select-trigger):hover:not(:disabled),
 .model-selection-panel button:not(.plugin-ui-select-trigger)[aria-pressed='true'] {
-  background: #edf3eb;
+  background: var(--pico-model-selection-panel-hover-fill);
 }
 .model-selection-panel button:not(.plugin-ui-select-trigger):disabled {
   opacity: 0.55;
@@ -204,9 +204,9 @@
 .model-selection-adapter small {
   flex: 0 0 auto;
   max-width: 44%;
-  color: #9aa49b;
-  font-size: 10px;
-  font-weight: 400;
+  color: var(--pico-model-selection-panel-source-text);
+  font-size: var(--pico-model-selection-panel-source-font-size);
+  font-weight: var(--pico-model-selection-panel-source-font-weight);
 }
 .model-selection-adapter {
   width: 100%;
@@ -217,17 +217,17 @@
 .model-selection-empty {
   margin: 0;
   padding: 8px 9px;
-  color: #89948b;
-  font-size: 11px;
-  line-height: 1.45;
+  color: var(--pico-model-selection-panel-empty-text);
+  font-size: var(--pico-model-selection-panel-empty-font-size);
+  line-height: var(--pico-model-selection-panel-empty-line-height);
 }
 .model-selection-panel-error {
   grid-column: 1 / -1;
   margin: 0;
   padding: 7px 10px;
-  color: #9b5b49;
-  font-size: 11px;
-  border-top: 1px solid #f1d9d2;
+  color: var(--pico-model-selection-panel-error-text);
+  font-size: var(--pico-model-selection-panel-error-font-size);
+  border-top: 1px solid var(--pico-model-selection-panel-error-border);
 }
 @media (max-width: 600px) {
   .composer-caption.composer-meta {
@@ -246,7 +246,7 @@
     grid-template-columns: minmax(0, 1fr);
   }
   .model-selection-adapters {
-    border-top: 1px solid #e4eae2;
+    border-top: 1px solid var(--pico-model-selection-panel-divider);
     border-left: 0;
   }
 }
@@ -259,7 +259,7 @@
 .model-selection .composer-model-name {
   min-width: 0;
   height: 32px;
-  background: #fafbf9;
+  background: var(--pico-model-selection-inline-trigger-fill);
 }
 .model-selection-trigger-label {
   min-width: 0;
@@ -268,8 +268,8 @@
 }
 .model-selection-trigger-label small {
   margin-left: 5px;
-  color: #9aa49b;
-  font-size: 10px;
+  color: var(--pico-model-selection-trigger-label-text);
+  font-size: var(--pico-model-selection-trigger-label-font-size);
 }
 .model-selection-primary-inline {
   height: 32px;
@@ -284,7 +284,7 @@
 .model-selection-primary-inline .plugin-ui-select-trigger--compact {
   width: auto;
   min-width: 78px;
-  font-size: 12px;
+  font-size: var(--pico-model-selection-primary-select-font-size);
 }
 .model-selection-switch {
   display: inline-flex;
@@ -292,10 +292,10 @@
   align-items: center;
   gap: 7px;
   padding: 0 8px;
-  color: #69766c;
-  font-size: 10px;
-  background: #fafbf9;
-  border: 1px solid #e1e7df;
+  color: var(--pico-model-selection-inline-switch-text);
+  font-size: var(--pico-model-selection-inline-switch-font-size);
+  background: var(--pico-model-selection-inline-switch-fill);
+  border: 1px solid var(--pico-model-selection-inline-switch-border);
   border-radius: 7px;
   cursor: pointer;
 }
@@ -313,7 +313,7 @@
   content: '';
 }
 .model-selection-switch input:focus-visible + .model-selection-switch-track {
-  outline: 2px solid #72927a;
+  outline: 2px solid var(--pico-model-selection-focus-ring);
   outline-offset: 2px;
 }
 .model-selection-panel {
@@ -341,12 +341,12 @@
 }
 .model-selection-adapters .model-selection-adapter {
   display: block;
-  background: #f9fbf8;
-  border: 1px solid #d8e1d7;
+  background: var(--pico-model-selection-adapter-fill);
+  border: 1px solid var(--pico-model-selection-adapter-border);
 }
 .model-selection-adapters .model-selection-adapter[aria-pressed='true'] {
-  border-color: #85a38a;
-  background: #e8f0e8;
+  border-color: var(--pico-model-selection-adapter-selected-border);
+  background: var(--pico-model-selection-adapter-selected-fill);
 }
 .model-selection-adapter > span {
   display: grid;
@@ -362,7 +362,7 @@
 .model-selection-full-parameters label {
   display: grid;
   gap: 4px;
-  font-size: 12px;
+  font-size: var(--pico-model-selection-full-parameter-label-font-size);
 }
 .model-selection-full-parameters input {
   width: 100%;
@@ -371,8 +371,8 @@
   padding: 0 8px;
   font: inherit;
   color: inherit;
-  background: white;
-  border: 1px solid #d8e1d7;
+  background: var(--pico-model-selection-full-parameter-input-fill);
+  border: 1px solid var(--pico-model-selection-full-parameter-input-border);
   border-radius: 6px;
 }
 .model-selection-full-parameters .model-selection-parameter .plugin-ui-select-trigger {
@@ -382,12 +382,12 @@
 .model-selection-panel .model-selection-confirm {
   display: block;
   width: 100%;
-  color: white;
+  color: var(--pico-model-selection-confirm-text);
   text-align: center;
-  background: #577f63;
+  background: var(--pico-model-selection-confirm-fill);
 }
 .model-selection-panel .model-selection-confirm:hover:not(:disabled) {
-  background: #496f55;
+  background: var(--pico-model-selection-confirm-hover-fill);
 }
 .model-selection-submenu {
   position: fixed;
@@ -398,12 +398,12 @@
   max-height: min(60vh, 360px);
   overflow: auto;
   padding: 7px;
-  background: #fcfdfb;
-  border: 1px solid #d8e1d7;
+  background: var(--pico-model-selection-submenu-fill);
+  border: 1px solid var(--pico-model-selection-submenu-border);
   border-radius: 9px;
   box-shadow:
-    0 12px 30px rgba(45, 62, 51, 0.14),
-    0 2px 7px rgba(45, 62, 51, 0.07);
+    0 12px 30px var(--pico-model-selection-submenu-shadow),
+    0 2px 7px var(--pico-model-selection-submenu-shadow-soft);
   animation: fade-in 140ms ease-out both;
 }
 @media (max-width: 600px) {

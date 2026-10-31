@@ -9,7 +9,7 @@
 .plugin-settings-pages .button {
   min-height: 31px;
   padding: 6px 10px;
-  font-size: 10px;
+  font-size: var(--pico-settings-plugin-settings-pages-button-font-size);
 }
 .plugin-settings-page {
   min-height: 120px;
@@ -24,15 +24,15 @@
   display: grid;
   gap: 10px;
   padding: 13px;
-  background: #f6f8f5;
+  background: var(--pico-settings-developer-diagnostic-card-surface);
   border: 1px solid var(--line);
   border-radius: 12px;
 }
 .developer-diagnostic-card h3 {
   margin: 0;
-  color: #536459;
-  font-size: 12px;
-  font-weight: 650;
+  color: var(--pico-settings-developer-diagnostic-card-text);
+  font-size: var(--pico-settings-developer-diagnostic-card-font-size);
+  font-weight: var(--pico-settings-developer-diagnostic-card-font-weight);
 }
 .developer-diagnostic-grid {
   display: grid;
@@ -46,30 +46,32 @@
 .developer-diagnostic-grid dt,
 .developer-plugin-list small {
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--pico-settings-developer-diagnostic-grid-developer-plugin-list-font-size);
 }
 .developer-diagnostic-grid dd {
   margin: 3px 0 0;
   overflow-wrap: anywhere;
-  color: #3c4a40;
-  font-size: 11px;
+  color: var(--pico-settings-developer-diagnostic-grid-text);
+  font-size: var(--pico-settings-developer-diagnostic-grid-font-size);
 }
 .developer-user-agent {
   margin: 0;
   overflow-wrap: anywhere;
-  color: #89948d;
-  font-size: 9px;
-  line-height: 1.5;
+  color: var(--pico-settings-developer-user-agent-text);
+  font-size: var(--pico-settings-developer-user-agent-font-size);
+  line-height: var(--pico-settings-developer-user-agent-line-height);
 }
 .developer-diagnostic-warning,
 .developer-diagnostic-grid .is-warning,
 .developer-plugin-list .is-warning {
-  color: #9a5f35;
+  color: var(
+    --pico-settings-developer-diagnostic-warning-developer-diagnostic-grid-is-warning-developer-plugin-list-text
+  );
 }
 .developer-diagnostic-warning {
   margin: 0;
-  font-size: 10px;
-  line-height: 1.5;
+  font-size: var(--pico-settings-developer-diagnostic-warning-font-size);
+  line-height: var(--pico-settings-developer-diagnostic-warning-line-height);
 }
 .developer-plugin-list {
   display: grid;
@@ -92,26 +94,26 @@
   overflow-wrap: anywhere;
 }
 .developer-plugin-list strong {
-  color: #3c4a40;
-  font-size: 10px;
-  font-weight: 600;
+  color: var(--pico-settings-developer-plugin-list-text);
+  font-size: var(--pico-settings-developer-plugin-list-font-size);
+  font-weight: var(--pico-settings-developer-plugin-list-font-weight);
 }
 .developer-status {
   flex: 0 0 auto;
   padding: 3px 6px;
-  color: #67756c;
-  background: #eaeee9;
+  color: var(--pico-settings-developer-status-text);
+  background: var(--pico-settings-developer-status-surface);
   border-radius: 99px;
-  font-size: 9px;
-  line-height: 1.3;
+  font-size: var(--pico-settings-developer-status-font-size);
+  line-height: var(--pico-settings-developer-status-line-height);
 }
 .developer-status.is-ready {
-  color: #3d6c50;
-  background: #e5f0e6;
+  color: var(--pico-settings-developer-status-is-ready-text);
+  background: var(--pico-settings-developer-status-is-ready-surface);
 }
 .developer-status.is-warning {
-  color: #9a5f35;
-  background: #f5eadf;
+  color: var(--pico-settings-developer-status-is-warning-text);
+  background: var(--pico-settings-developer-status-is-warning-surface);
 }
 .developer-report-heading {
   display: flex;
@@ -122,27 +124,23 @@
 .developer-report-heading .button {
   min-height: 30px;
   padding: 5px 9px;
-  font-size: 10px;
+  font-size: var(--pico-settings-developer-report-heading-button-font-size);
 }
 .developer-report-output {
   width: 100%;
   min-height: 120px;
   resize: vertical;
-  color: #536459;
-  background: #fcfdfb;
+  color: var(--pico-settings-developer-report-output-text);
+  background: var(--pico-settings-developer-report-output-surface);
   border: 1px solid var(--line);
   border-radius: 8px;
-  font:
-    9px/1.5 ui-monospace,
-    SFMono-Regular,
-    Menlo,
-    monospace;
+  font: var(--pico-settings-developer-report-output-font);
   user-select: text;
   -webkit-user-select: text;
 }
 .archived-threads-page .form-intro,
 .archived-threads-page .field-note {
-  font-size: 11px;
+  font-size: var(--pico-settings-archived-threads-page-form-intro-field-note-font-size);
 }
 .plugin-settings-page .plugin-web-view-page {
   height: 360px;
@@ -174,11 +172,11 @@
   padding: 14px 15px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: var(--surface-raised, #fff);
+  background: var(--surface-raised, var(--pico-settings-plugin-manager-card-surface));
 }
 .archived-threads-retention {
   margin: -9px 0 12px;
-  line-height: 1.6;
+  line-height: var(--pico-settings-archived-threads-retention-line-height);
 }
 .archived-thread-list {
   display: grid;
@@ -195,7 +193,7 @@
   padding: 12px 13px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: var(--surface-raised, #fff);
+  background: var(--surface-raised, var(--pico-settings-archived-thread-card-surface));
 }
 .archived-thread-copy {
   display: grid;
@@ -204,14 +202,14 @@
 }
 .archived-thread-copy strong {
   color: var(--ink);
-  font-size: 12px;
-  font-weight: 650;
+  font-size: var(--pico-settings-archived-thread-copy-font-size);
+  font-weight: var(--pico-settings-archived-thread-copy-font-weight);
   overflow-wrap: anywhere;
 }
 .archived-thread-copy span,
 .archived-thread-copy small {
   color: var(--muted);
-  font-size: 10px;
+  font-size: var(--pico-settings-archived-thread-copy-font-size-variant-2);
   overflow-wrap: anywhere;
 }
 .archived-thread-actions {
@@ -221,8 +219,8 @@
   gap: 6px;
 }
 .archived-thread-delete {
-  color: #9a5b53;
-  border-color: #f0dfdb;
+  color: var(--pico-settings-archived-thread-delete-text);
+  border-color: var(--pico-settings-archived-thread-delete-border);
 }
 .plugin-manager-copy {
   flex: 1;
@@ -261,30 +259,30 @@
 .plugin-manager-title-row h3 {
   margin: 0;
   color: var(--ink);
-  font-size: 13px;
-  font-weight: 650;
+  font-size: var(--pico-settings-plugin-manager-title-row-font-size);
+  font-weight: var(--pico-settings-plugin-manager-title-row-font-weight);
 }
 .plugin-manager-copy p {
   margin: 5px 0 0;
   color: var(--ink-soft);
-  font-size: 11px;
+  font-size: var(--pico-settings-plugin-manager-copy-font-size);
   overflow-wrap: anywhere;
 }
 .plugin-manager-copy .plugin-manager-error {
-  color: var(--danger, #a23c35);
+  color: var(--danger, var(--pico-settings-plugin-manager-copy-plugin-manager-error-text));
 }
 .plugin-manager-status {
   padding: 3px 7px;
   border: 1px solid var(--line);
   border-radius: 999px;
   color: var(--ink-soft);
-  font-size: 9px;
-  letter-spacing: 0.02em;
+  font-size: var(--pico-settings-plugin-manager-status-font-size);
+  letter-spacing: var(--pico-settings-plugin-manager-status-letter-spacing);
 }
 .plugin-manager-status.is-loaded {
   border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
-  color: var(--accent-strong, #426a50);
-  background: color-mix(in srgb, var(--accent) 8%, white);
+  color: var(--accent-strong, var(--pico-settings-plugin-manager-status-is-loaded-text));
+  background: color-mix(in srgb, var(--accent) 8%, var(--pico-settings-plugin-manager-status-is-loaded-surface));
 }
 .plugin-manager-actions {
   display: flex;
@@ -296,7 +294,7 @@
 .plugin-manager-actions .button {
   min-height: 30px;
   padding: 6px 10px;
-  font-size: 10px;
+  font-size: var(--pico-settings-plugin-manager-actions-button-font-size);
 }
 .plugin-manager-actions .native-tool-switch {
   align-self: center;

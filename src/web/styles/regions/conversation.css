@@ -13,16 +13,16 @@
   width: 9px;
 }
 .tool-card-body:not(.tool-shell-body)::-webkit-scrollbar-track {
-  background: #f3f6f2;
+  background: var(--pico-conversation-code-scroll-track);
   border-radius: 999px;
 }
 .tool-card-body:not(.tool-shell-body)::-webkit-scrollbar-thumb {
-  background: #aebdae;
-  border: 2px solid #f3f6f2;
+  background: var(--pico-conversation-code-scroll-thumb);
+  border: 2px solid var(--pico-conversation-code-scroll-track);
   border-radius: 999px;
 }
 .tool-card-body:not(.tool-shell-body)::-webkit-scrollbar-thumb:hover {
-  background: #879a88;
+  background: var(--pico-conversation-code-scroll-thumb-hover);
 }
 .thread-scrollbar {
   position: absolute;
@@ -31,8 +31,8 @@
   right: 8px;
   bottom: 12px;
   width: 12px;
-  background: #e4ebe3;
-  border: 1px solid #d4ded3;
+  background: var(--pico-conversation-scroll-track);
+  border: 1px solid var(--pico-conversation-scroll-border);
   border-radius: 999px;
   cursor: pointer;
   touch-action: none;
@@ -41,7 +41,7 @@
   visibility: hidden;
 }
 .thread-scrollbar:focus-visible {
-  outline: 2px solid #608267;
+  outline: 2px solid var(--pico-conversation-scroll-focus);
   outline-offset: 2px;
 }
 .thread-scrollbar-thumb {
@@ -50,14 +50,14 @@
   right: 1px;
   left: 1px;
   min-height: 36px;
-  background: #718c75;
-  border: 1px solid #57735c;
+  background: var(--pico-conversation-scroll-thumb);
+  border: 1px solid var(--pico-conversation-scroll-thumb-border);
   border-radius: 999px;
-  box-shadow: 0 1px 3px rgba(35, 54, 40, 0.22);
+  box-shadow: 0 1px 3px var(--pico-conversation-scroll-thumb-shadow);
   cursor: grab;
 }
 .thread-scrollbar:hover .thread-scrollbar-thumb {
-  background: #5f7b64;
+  background: var(--pico-conversation-scroll-thumb-active);
 }
 .thread-scrollbar:active .thread-scrollbar-thumb {
   cursor: grabbing;
@@ -68,22 +68,26 @@
   right: 27px;
   bottom: 10px;
   padding: 7px 12px;
-  color: #4e725a;
-  background: #fbfcfa;
-  border: 1px solid #d8e5d9;
+  color: var(--pico-conversation-new-content-text);
+  background: var(--pico-conversation-surface);
+  border: 1px solid var(--pico-conversation-new-content-border);
   border-radius: 999px;
-  box-shadow: 0 4px 14px rgba(45, 62, 51, 0.12);
-  font-size: 11px;
+  box-shadow: 0 4px 14px var(--pico-conversation-new-content-shadow);
+  font-size: var(--pico-conversation-font-size-supporting);
   cursor: pointer;
-  transition: color 0.15s, background 0.15s, border-color 0.15s, box-shadow 0.15s;
+  transition:
+    color 0.15s,
+    background 0.15s,
+    border-color 0.15s,
+    box-shadow 0.15s;
 }
 .new-content-button:hover {
-  color: #405f49;
-  background: #f1f6f0;
-  border-color: #c9dacb;
+  color: var(--pico-conversation-new-content-hover-text);
+  background: var(--pico-conversation-new-content-hover-surface);
+  border-color: var(--pico-conversation-new-content-hover-border);
 }
 .new-content-button:focus-visible {
-  outline: 2px solid rgba(105, 142, 112, 0.42);
+  outline: 2px solid var(--pico-conversation-focus);
   outline-offset: 2px;
 }
 .conversation-scroll-follow-latest {
@@ -105,11 +109,11 @@
   align-self: center;
   min-height: 36px;
   padding: 0 14px;
-  color: #718176;
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid #e1e9e1;
+  color: var(--pico-conversation-history-text);
+  background: var(--pico-conversation-history-surface);
+  border: 1px solid var(--pico-conversation-history-border);
   border-radius: 999px;
-  font-size: 11px;
+  font-size: var(--pico-conversation-font-size-supporting);
   cursor: pointer;
   transition:
     background 150ms ease,
@@ -118,11 +122,11 @@
     filter 120ms ease;
 }
 .history-load-more:hover:not(:disabled) {
-  background: #f1f6f1;
-  border-color: #ccd9cd;
+  background: var(--pico-conversation-history-hover-surface);
+  border-color: var(--pico-conversation-history-hover-border);
 }
 .history-load-more:disabled {
-  color: #a1aca2;
+  color: var(--pico-conversation-history-disabled-text);
   cursor: wait;
 }
 .user-message,
@@ -147,8 +151,8 @@
   border-radius: 9px;
 }
 .assistant-avatar {
-  color: white;
-  background: linear-gradient(145deg, #89a78d, #588064);
+  color: var(--pico-conversation-avatar-foreground);
+  background: var(--pico-conversation-assistant-avatar-gradient);
 }
 .assistant-avatar-toggle {
   padding: 0;
@@ -157,17 +161,17 @@
   transition: box-shadow 0.15s ease;
 }
 .assistant-avatar-toggle:hover {
-  box-shadow: 0 0 0 3px rgba(105, 144, 113, 0.18);
+  box-shadow: 0 0 0 3px var(--pico-conversation-avatar-hover-ring);
 }
 .assistant-avatar-toggle:focus-visible {
-  outline: 2px solid #91ae95;
+  outline: 2px solid var(--pico-conversation-avatar-focus);
   outline-offset: 2px;
 }
 .user-avatar {
   order: 2;
-  color: #977a64;
-  background: #f4ede6;
-  border: 1px solid #eee3d8;
+  color: var(--pico-conversation-user-avatar-text);
+  background: var(--pico-conversation-user-avatar-surface);
+  border: 1px solid var(--pico-conversation-user-avatar-border);
 }
 .message-body {
   min-width: 0;
@@ -188,9 +192,9 @@
   min-height: 21px;
   gap: 5px;
   margin-bottom: 5px;
-  color: #87948a;
-  font-size: 10px;
-  font-weight: 600;
+  color: var(--pico-conversation-author-text);
+  font-size: var(--pico-conversation-font-size-meta);
+  font-weight: var(--pico-conversation-font-weight-semibold);
 }
 .user-message-rewind {
   display: inline-flex;
@@ -198,60 +202,63 @@
   gap: 4px;
   margin-left: 7px;
   padding: 2px 5px;
-  color: #849487;
+  color: var(--pico-conversation-rewind-text);
   background: transparent;
   border: 1px solid transparent;
   border-radius: 7px;
-  font-size: 9px;
-  font-weight: 500;
+  font-size: var(--pico-conversation-font-size-caption);
+  font-weight: var(--pico-conversation-font-weight-medium);
   cursor: pointer;
-  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+  transition:
+    color 120ms ease,
+    background 120ms ease,
+    border-color 120ms ease;
 }
 .user-message-rewind:hover:not(:disabled),
 .user-message-rewind:focus-visible {
-  color: #55745d;
-  background: #f0f5ef;
-  border-color: #e0e9df;
+  color: var(--pico-conversation-rewind-hover-text);
+  background: var(--pico-conversation-rewind-hover-surface);
+  border-color: var(--pico-conversation-rewind-hover-border);
 }
 .user-message-rewind:focus-visible {
-  outline: 2px solid #91ae95;
+  outline: 2px solid var(--pico-conversation-avatar-focus);
   outline-offset: 1px;
 }
 .user-message-rewind:disabled {
-  color: #aeb8ae;
+  color: var(--pico-conversation-rewind-disabled-text);
   cursor: wait;
 }
 .model-label,
 .usage-label {
-  color: #a5aea6;
-  font-size: 9px;
-  font-weight: 400;
+  color: var(--pico-conversation-model-label);
+  font-size: var(--pico-conversation-font-size-caption);
+  font-weight: var(--pico-conversation-font-weight-regular);
 }
 .completion-label {
-  color: #a36b3f;
-  font-size: 9px;
-  font-weight: 500;
+  color: var(--pico-conversation-completion-label);
+  font-size: var(--pico-conversation-font-size-caption);
+  font-weight: var(--pico-conversation-font-weight-medium);
 }
 .inline-link {
   display: inline-flex;
   align-items: center;
   margin-left: 4px;
   padding: 0;
-  color: #6d8d73;
+  color: var(--pico-conversation-inline-link);
   background: none;
   border: 0;
-  font-size: 9px;
+  font-size: var(--pico-conversation-font-size-caption);
   cursor: pointer;
 }
 .user-bubble {
   max-width: 100%;
   padding: 10px 13px;
-  color: #46564b;
-  background: #edf3ed;
-  border: 1px solid #e3ece3;
+  color: var(--pico-conversation-user-message-text);
+  background: var(--pico-conversation-user-message-surface);
+  border: 1px solid var(--pico-conversation-user-message-border);
   border-radius: 13px 4px 13px 13px;
-  font-size: 12px;
-  line-height: 1.7;
+  font-size: var(--pico-conversation-font-size-compact-body);
+  line-height: var(--pico-conversation-line-height-message);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -263,33 +270,33 @@
 }
 .incoming-message .user-avatar {
   order: 0;
-  color: #778678;
-  background: #eff1ed;
-  border-color: #e4e8e1;
+  color: var(--pico-conversation-incoming-avatar-text);
+  background: var(--pico-conversation-incoming-avatar-surface);
+  border-color: var(--pico-conversation-incoming-avatar-border);
 }
 .incoming-message > .message-body {
   align-items: flex-start;
 }
 .incoming-message .user-bubble {
-  color: #566359;
-  background: #f4f5f2;
-  border-color: #eaede8;
+  color: var(--pico-conversation-incoming-message-text);
+  background: var(--pico-conversation-incoming-message-surface);
+  border-color: var(--pico-conversation-incoming-message-border);
   border-radius: 4px 13px 13px 13px;
 }
 .markdown-like {
-  color: #4b5850;
-  font-size: 13px;
-  line-height: 1.85;
+  color: var(--pico-conversation-body-text);
+  font-size: var(--pico-conversation-font-size-body);
+  line-height: var(--pico-conversation-line-height-markdown);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 .draft-message .markdown-like {
-  color: #66776a;
+  color: var(--pico-conversation-draft-text);
 }
 .typing-label {
-  color: #a0b09f;
-  font-size: 9px;
-  font-weight: 400;
+  color: var(--pico-conversation-typing-text);
+  font-size: var(--pico-conversation-font-size-caption);
+  font-weight: var(--pico-conversation-font-weight-regular);
 }
 .cursor-block {
   display: inline-block;
@@ -297,7 +304,7 @@
   height: 13px;
   margin-left: 2px;
   vertical-align: -2px;
-  background: #88a28b;
+  background: var(--pico-conversation-cursor);
   border-radius: 2px;
   animation: blink 1s steps(2, start) infinite;
 }
@@ -313,11 +320,11 @@
   align-items: center;
   gap: 6px;
   margin: 0 0 1px 2px;
-  color: #9aa49b;
-  font-size: 9px;
+  color: var(--pico-conversation-group-label);
+  font-size: var(--pico-conversation-font-size-caption);
 }
 .tool-group-label span {
-  color: #8ba38e;
+  color: var(--pico-conversation-group-label-detail);
 }
 .conversation-detail-card,
 .plugin-ui-host-rendered--thread-card > .plugin-ui-tree > .plugin-ui-card {
@@ -327,21 +334,21 @@
   margin: 0;
   padding: 9px 11px;
   overflow: hidden;
-  color: #78857b;
-  background: rgba(248, 250, 247, 0.82);
-  border: 1px solid #e9eee7;
+  color: var(--pico-conversation-detail-text);
+  background: var(--pico-conversation-detail-surface);
+  border: 1px solid var(--pico-conversation-detail-border);
   border-radius: 10px;
 }
 .conversation-detail-card[open] {
-  background: rgba(248, 250, 247, 0.82);
+  background: var(--pico-conversation-detail-surface);
 }
 .conversation-detail-card > summary {
   display: flex;
   align-items: center;
   gap: 5px;
-  color: #819084;
-  font-size: 10px;
-  font-weight: 600;
+  color: var(--pico-conversation-detail-label);
+  font-size: var(--pico-conversation-font-size-meta);
+  font-weight: var(--pico-conversation-font-weight-semibold);
   list-style: none;
   cursor: pointer;
 }
@@ -351,7 +358,7 @@
 }
 .detail-chevron {
   flex: 0 0 auto;
-  color: #9eac9f;
+  color: var(--pico-conversation-chevron);
   transition: transform 0.15s;
 }
 .conversation-detail-card[open] > summary .detail-chevron,
@@ -359,53 +366,53 @@
   transform: rotate(90deg);
 }
 .tool-name {
-  color: #819084;
+  color: var(--pico-conversation-detail-label);
   font-family: inherit;
-  font-size: 10px;
-  font-weight: 600;
+  font-size: var(--pico-conversation-font-size-meta);
+  font-weight: var(--pico-conversation-font-weight-semibold);
 }
 .tool-card.tool-failed,
 .tool-card.tool-interrupted,
 .tool-card.tool-has-error {
-  color: #946b5d;
-  background: #fff7f4;
-  border-color: #ecd9d2;
+  color: var(--pico-conversation-error-text);
+  background: var(--pico-conversation-error-surface);
+  border-color: var(--pico-conversation-error-border);
 }
 .tool-has-error .conversation-detail-row > summary {
-  color: #946b5d;
+  color: var(--pico-conversation-error-text);
 }
 .tool-status {
   margin-left: auto;
   padding: 3px 7px;
-  color: #89958b;
-  background: #f0f3ef;
+  color: var(--pico-conversation-status-text);
+  background: var(--pico-conversation-status-surface);
   border-radius: 999px;
-  font-size: 9px;
+  font-size: var(--pico-conversation-font-size-caption);
   text-transform: capitalize;
 }
 .status-running {
-  color: #62846a;
-  background: #edf5ed;
-  box-shadow: inset 0 0 0 1px rgba(98, 132, 106, 0.1);
+  color: var(--pico-conversation-running-text);
+  background: var(--pico-conversation-running-surface);
+  box-shadow: inset 0 0 0 1px var(--pico-conversation-running-outline);
 }
 .status-completed,
 .status-allowed {
-  color: #688570;
-  background: #edf4ed;
+  color: var(--pico-conversation-completed-text);
+  background: var(--pico-conversation-completed-surface);
 }
 .status-failed,
 .status-interrupted,
 .status-denied {
-  color: #a06f60;
-  background: #f9efeb;
+  color: var(--pico-conversation-error-muted);
+  background: var(--pico-conversation-error-muted-surface);
 }
 .tool-has-error .tool-status {
-  color: #946b5d;
-  background: #f9efeb;
+  color: var(--pico-conversation-error-text);
+  background: var(--pico-conversation-error-muted-surface);
 }
 .status-pending {
-  color: #987c5a;
-  background: #f7f2e9;
+  color: var(--pico-conversation-pending-text);
+  background: var(--pico-conversation-pending-surface);
 }
 .tool-card-body {
   display: flex;
@@ -417,12 +424,12 @@
   max-height: min(420px, 60vh);
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: #c0cec0 #f3f6f2;
+  scrollbar-color: var(--pico-conversation-scrollbar-thumb-subtle) var(--pico-conversation-code-scroll-track);
 }
 .conversation-detail-row {
   margin-top: 8px;
   padding-top: 8px;
-  border-top: 1px solid #edf0eb;
+  border-top: 1px solid var(--pico-conversation-detail-divider);
 }
 .tool-card-body > .conversation-detail-row:first-child {
   margin-top: 0;
@@ -432,9 +439,9 @@
   align-items: center;
   gap: 5px;
   padding: 0;
-  color: #819084;
-  font-size: 10px;
-  font-weight: 600;
+  color: var(--pico-conversation-detail-label);
+  font-size: var(--pico-conversation-font-size-meta);
+  font-weight: var(--pico-conversation-font-weight-semibold);
   list-style: none;
   cursor: pointer;
 }
@@ -444,20 +451,20 @@
   overflow: auto;
   margin: 7px 0 0;
   padding: 10px;
-  color: #68746a;
-  background: #f2f5f1;
+  color: var(--pico-conversation-code-text);
+  background: var(--pico-conversation-code-surface);
   border-radius: 7px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 9px;
-  line-height: 1.55;
+  font-family: var(--pico-font-code);
+  font-size: var(--pico-conversation-font-size-caption);
+  line-height: var(--pico-conversation-line-height-code);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 .tool-failed .tool-detail pre,
 .tool-interrupted .tool-detail pre,
 .tool-output-error {
-  color: #946b5d;
-  background: #fff1ec;
+  color: var(--pico-conversation-error-text);
+  background: var(--pico-conversation-code-error-surface);
 }
 .tool-detail .tool-output {
   max-height: 260px;
@@ -470,18 +477,18 @@
 }
 .projection-chevron {
   flex: 0 0 auto;
-  color: #9eac9f;
+  color: var(--pico-conversation-chevron);
   transition: transform 0.15s;
 }
 .projection-note,
 .projection-state,
 .projection-error {
   margin: 8px 0;
-  font-size: 10px;
-  line-height: 1.5;
+  font-size: var(--pico-conversation-font-size-meta);
+  line-height: var(--pico-conversation-line-height-compact);
 }
 .projection-error {
-  color: #a06f60;
+  color: var(--pico-conversation-error-muted);
 }
 .model-execution-branch-group {
   display: flex;
@@ -503,18 +510,18 @@
 .model-execution-empty-output,
 .model-execution-status-note {
   margin: 1px 0 4px;
-  color: #9a8975;
-  font-size: 10px;
-  line-height: 1.5;
+  color: var(--pico-conversation-execution-waiting);
+  font-size: var(--pico-conversation-font-size-meta);
+  line-height: var(--pico-conversation-line-height-compact);
 }
 .user-message.has-model-execution-groups:not(.incoming-message) > .message-body > .model-execution-branch-group {
   align-self: flex-start;
 }
 .model-execution-error {
   margin: 1px 0 4px;
-  color: #946b5d;
-  font-size: 10px;
-  line-height: 1.5;
+  color: var(--pico-conversation-error-text);
+  font-size: var(--pico-conversation-font-size-meta);
+  line-height: var(--pico-conversation-line-height-compact);
   overflow-wrap: anywhere;
 }
 .model-execution-error > summary {
@@ -542,8 +549,8 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  color: #9aa69b;
-  font-size: 9px;
+  color: var(--pico-conversation-attempt-switcher);
+  font-size: var(--pico-conversation-font-size-caption);
 }
 .model-input-attempt-controls {
   display: flex;
@@ -565,16 +572,16 @@
 .provider-request-section {
   margin-top: 12px;
   padding-top: 10px;
-  border-top: 1px solid #e5ebe4;
+  border-top: 1px solid var(--pico-conversation-section-divider);
 }
 .model-input-prompt-section > summary,
 .provider-request-section > summary {
   display: flex;
   align-items: center;
   gap: 5px;
-  color: #738276;
-  font-size: 10px;
-  font-weight: 600;
+  color: var(--pico-conversation-section-heading);
+  font-size: var(--pico-conversation-font-size-meta);
+  font-weight: var(--pico-conversation-font-weight-semibold);
   list-style: none;
   cursor: pointer;
 }
@@ -602,17 +609,17 @@
   display: grid;
   grid-template-columns: minmax(100px, 0.32fr) minmax(0, 1fr);
   gap: 10px;
-  font-size: 10px;
-  line-height: 1.45;
+  font-size: var(--pico-conversation-font-size-meta);
+  line-height: var(--pico-conversation-line-height-meta);
 }
 .provider-request-field > dt {
-  color: #859287;
-  font-weight: 600;
+  color: var(--pico-conversation-request-field);
+  font-weight: var(--pico-conversation-font-weight-semibold);
 }
 .provider-request-field > dd {
   min-width: 0;
   margin: 0;
-  color: #56645a;
+  color: var(--pico-conversation-request-value);
   overflow-wrap: anywhere;
 }
 .model-attempt-actions {
@@ -628,26 +635,26 @@
   gap: 4px;
   min-height: 23px;
   padding: 2px 8px;
-  color: #819084;
-  background: #f6f8f4;
-  border: 1px solid #e8ede6;
+  color: var(--pico-conversation-detail-label);
+  background: var(--pico-conversation-retry-surface);
+  border: 1px solid var(--pico-conversation-retry-border);
   border-radius: 999px;
-  font-size: 9px;
+  font-size: var(--pico-conversation-font-size-caption);
   cursor: pointer;
 }
 .model-retry-button:hover:not(:disabled) {
-  color: #6e8673;
-  background: #eef3ed;
-  border-color: #dfe7dc;
+  color: var(--pico-conversation-retry-hover-text);
+  background: var(--pico-conversation-retry-hover-surface);
+  border-color: var(--pico-conversation-retry-hover-border);
 }
 .model-retry-button:disabled {
   opacity: 0.55;
   cursor: wait;
 }
 .model-retry-error {
-  color: #a06f60;
-  font-size: 9px;
-  line-height: 1.4;
+  color: var(--pico-conversation-error-muted);
+  font-size: var(--pico-conversation-font-size-caption);
+  line-height: var(--pico-conversation-line-height-snug);
   overflow-wrap: anywhere;
 }
 .model-attempt-switcher button {
@@ -656,19 +663,19 @@
   width: 28px;
   height: 28px;
   padding: 0;
-  color: #9aa69b;
+  color: var(--pico-conversation-attempt-switcher);
   background: transparent;
   border: 1px solid transparent;
   border-radius: 50%;
   cursor: pointer;
 }
 .model-attempt-switcher button:hover:not(:disabled) {
-  color: #718675;
-  background: #f0f4ef;
-  border-color: #e7ece6;
+  color: var(--pico-conversation-attempt-hover-text);
+  background: var(--pico-conversation-attempt-hover-surface);
+  border-color: var(--pico-conversation-attempt-hover-border);
 }
 .model-attempt-switcher button:focus-visible {
-  outline: 2px solid #a5b8a7;
+  outline: 2px solid var(--pico-conversation-attempt-focus);
   outline-offset: 1px;
 }
 .model-attempt-switcher button:disabled {
@@ -678,25 +685,25 @@
 .projection-attempt {
   margin-top: 8px;
   padding-top: 8px;
-  border-top: 1px solid #edf0eb;
+  border-top: 1px solid var(--pico-conversation-detail-divider);
 }
 .projection-view {
   max-height: 340px;
   overflow: auto;
   margin: 7px 0 0;
   padding: 10px;
-  color: #68746a;
-  background: #f2f5f1;
+  color: var(--pico-conversation-code-text);
+  background: var(--pico-conversation-code-surface);
   border-radius: 7px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 9px;
-  line-height: 1.55;
+  font-family: var(--pico-font-code);
+  font-size: var(--pico-conversation-font-size-caption);
+  line-height: var(--pico-conversation-line-height-code);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 .subtle-inline {
-  color: #b3bbb4;
-  font-size: 9px;
+  color: var(--pico-conversation-subtle-inline);
+  font-size: var(--pico-conversation-font-size-caption);
 }
 .empty-thread {
   display: flex;
@@ -706,7 +713,7 @@
   flex: 1;
   min-height: 260px;
   padding: 40px 0;
-  color: #88958a;
+  color: var(--pico-conversation-empty-text);
   text-align: center;
 }
 .tiny-spinner.thread-history-spinner {
@@ -722,23 +729,22 @@
   width: 42px;
   height: 42px;
   margin-bottom: 13px;
-  color: #77917a;
-  background: #eef3ed;
+  color: var(--pico-conversation-empty-icon);
+  background: var(--pico-conversation-empty-icon-surface);
   border-radius: 15px;
-  font-size: 20px;
+  font-size: var(--pico-conversation-font-size-empty-icon);
 }
 .empty-thread h2 {
   margin: 0 0 6px;
-  color: #516156;
-  font-family: 'DM Serif Display', Georgia, serif;
-  font-size: 21px;
-  font-weight: 400;
+  color: var(--pico-conversation-empty-heading);
+  font-family: var(--pico-font-display);
+  font-size: var(--pico-conversation-font-size-empty-heading);
+  font-weight: var(--pico-conversation-font-weight-regular);
 }
 .empty-thread p {
   max-width: 275px;
   margin: 0;
-  color: #9ca69e;
-  font-size: 11px;
-  line-height: 1.7;
+  color: var(--pico-conversation-empty-copy);
+  font-size: var(--pico-conversation-font-size-supporting);
+  line-height: var(--pico-conversation-line-height-message);
 }
-

@@ -14,7 +14,7 @@
   min-width: 520px;
   border-collapse: collapse;
   table-layout: fixed;
-  font-size: 12px;
+  font-size: var(--pico-control-plugin-table-font-size);
 }
 .plugin-ui-table :where(th, td) {
   padding: 7px 8px;
@@ -26,7 +26,7 @@
 }
 .plugin-ui-table th {
   color: var(--muted);
-  font-weight: 600;
+  font-weight: var(--pico-control-plugin-table-heading-font-weight);
 }
 .plugin-ui-disclosure {
   min-width: 0;
@@ -40,5 +40,5 @@
 .plugin-ui-loading {
   margin: 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--pico-control-plugin-helper-font-size);
 }

@@ -13,25 +13,27 @@
     margin-bottom: 10px;
     padding: 8px 12px;
     color: var(--ink);
-    background: var(--surface-raised, #fff);
+    background: var(--surface-raised, var(--pico-settings-nav-raised));
     border: 1px solid var(--line);
     border-radius: 10px;
     text-align: left;
     font: inherit;
-    font-size: 12px;
-    font-weight: 600;
+    font-size: var(--pico-responsive-max-width-680px-settings-navigation--trigger-font-size);
+    font-weight: var(--pico-responsive-max-width-680px-settings-navigation--trigger-font-weight);
     cursor: pointer;
-    transition: border-color 0.15s, background 0.15s;
+    transition:
+      border-color 0.15s,
+      background 0.15s;
   }
 
   .settings-navigation__trigger:hover,
   .settings-navigation__trigger[aria-expanded='true'] {
-    border-color: #cddace;
-    background: #fcfdfb;
+    border-color: var(--pico-settings-nav-hover-border);
+    background: var(--pico-settings-nav-hover-surface);
   }
 
   .settings-navigation__trigger:focus-visible {
-    outline: 2px solid var(--accent, #6b9273);
+    outline: 2px solid var(--accent, var(--pico-settings-nav-focus));
     outline-offset: 2px;
   }
 
@@ -58,8 +60,8 @@
     padding: 9px;
     border: 1px solid var(--line);
     border-radius: 11px;
-    background: var(--surface-raised, #fff);
-    box-shadow: 0 10px 26px rgba(42, 56, 44, 0.1);
+    background: var(--surface-raised, var(--pico-settings-nav-raised));
+    box-shadow: 0 10px 26px var(--pico-settings-nav-menu-shadow);
   }
 
   .settings-navigation .settings-navigation__menu.is-open {
@@ -72,7 +74,7 @@
     min-height: 42px;
     padding: 8px 10px;
     text-align: left;
-    font-size: 12px;
+    font-size: var(--pico-responsive-max-width-680px-settings-navigation-settings-navigation--menu-button-font-size);
   }
 
   .settings-navigation .settings-navigation__menu .button-quiet {

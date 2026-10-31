@@ -1,15 +1,15 @@
 .mcp-editor {
   gap: 12px;
   padding: 15px;
-  background: #f4f7f2;
+  background: var(--pico-mcp-editor-surface);
 }
 .mcp-editor label {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  color: #627066;
-  font-size: 10px;
-  font-weight: 600;
+  color: var(--pico-mcp-editor-label);
+  font-size: var(--pico-mcp-editor-label-size);
+  font-weight: var(--pico-mcp-editor-label-weight);
 }
 .mcp-editor input:not([type='checkbox']),
 .mcp-editor select,
@@ -17,28 +17,28 @@
   width: 100%;
   min-height: 36px;
   padding: 8px 10px;
-  color: #46564b;
-  background: #fff;
-  border: 1px solid #e4eae2;
+  color: var(--pico-mcp-input-text);
+  background: var(--pico-mcp-input-surface);
+  border: 1px solid var(--pico-mcp-input-border);
   border-radius: 9px;
   font-family: inherit;
-  font-size: 11px;
-  line-height: 1.5;
+  font-size: var(--pico-mcp-editor-input-size);
+  line-height: var(--pico-mcp-editor-input-line-height);
 }
 .mcp-editor textarea {
   resize: vertical;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--pico-font-code);
 }
 .mcp-editor input::placeholder,
 .mcp-editor textarea::placeholder {
-  color: #a3aea5;
+  color: var(--pico-mcp-input-placeholder);
 }
 .mcp-editor .mcp-checkbox-label {
   display: flex;
   flex-direction: row;
   align-items: center;
   gap: 8px;
-  font-weight: 500;
+  font-weight: var(--pico-mcp-checkbox-label-weight);
 }
 .mcp-editor .mcp-checkbox-label input {
   width: 14px;

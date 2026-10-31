@@ -1,7 +1,7 @@
 .markdown-body {
-  color: #4b5850;
-  font-size: 13px;
-  line-height: 1.85;
+  color: var(--pico-markdown-text);
+  font-size: var(--pico-markdown-body-size);
+  line-height: var(--pico-markdown-body-line-height);
   overflow-wrap: anywhere;
 }
 .markdown-body > :first-child {
@@ -20,32 +20,32 @@
 .markdown-body h4,
 .markdown-body h5,
 .markdown-body h6 {
-  line-height: 1.4;
+  line-height: var(--pico-markdown-heading-line-height);
   margin: 1em 0 0.5em;
 }
 .markdown-body h1 {
-  font-size: 1.5em;
+  font-size: var(--pico-markdown-h1-size);
 }
 .markdown-body h2 {
-  font-size: 1.3em;
+  font-size: var(--pico-markdown-h2-size);
 }
 .markdown-body h3 {
-  font-size: 1.15em;
+  font-size: var(--pico-markdown-h3-size);
 }
 .markdown-body pre,
 .tool-card pre {
   overflow: auto;
   max-height: 320px;
   padding: 10px 12px;
-  background: #f4f6f2;
+  background: var(--pico-markdown-code-surface);
   border-radius: 7px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-size: 11px;
+  font-size: var(--pico-markdown-code-block-size);
 }
 .markdown-body code {
-  font-size: 0.9em;
-  background: #f0f3ed;
+  font-size: var(--pico-markdown-inline-code-size);
+  background: var(--pico-markdown-inline-code-surface);
   padding: 1px 4px;
   border-radius: 4px;
 }
@@ -56,8 +56,8 @@
 .markdown-body blockquote {
   margin: 0.8em 0;
   padding-left: 12px;
-  border-left: 3px solid #bdcdbb;
-  color: #738173;
+  border-left: 3px solid var(--pico-markdown-quote-border);
+  color: var(--pico-markdown-quote-text);
 }
 .markdown-body ul,
 .markdown-body ol {
@@ -72,14 +72,14 @@
 }
 .markdown-body th,
 .markdown-body td {
-  border: 1px solid #dfe7dc;
+  border: 1px solid var(--pico-markdown-table-border);
   padding: 5px 10px;
 }
 .markdown-body th {
-  background: #f2f5ef;
+  background: var(--pico-markdown-table-heading-surface);
 }
 .markdown-body a {
-  color: #4e825b;
+  color: var(--pico-markdown-link);
   text-decoration: underline;
 }
 .markdown-body img {

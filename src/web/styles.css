@@ -1,3 +1,13 @@
+@import './styles/themes/base-light.css';
+@import './styles/themes/controls-light.css';
+@import './styles/themes/content-light.css';
+@import './styles/themes/shell-light.css';
+@import './styles/themes/responsive-light.css';
+@import './styles/themes/composer-light.css';
+@import './styles/themes/settings-light.css';
+@import './styles/themes/conversation-light.css';
+@import './styles/themes/controls-typography-light.css';
+@import './styles/themes/content-typography-light.css';
 @import './styles/base/document.css';
 @import './styles/regions/shell-sidebar.css';
 @import './styles/regions/auth.css';

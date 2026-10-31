@@ -5,16 +5,22 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 24px;
-  background: radial-gradient(ellipse at 50% 28%, rgba(228, 238, 225, 0.88), transparent 42%), #f5f7f2;
+  background:
+    radial-gradient(
+      ellipse at 50% 28%,
+      var(--pico-auth-auth-screen-surface-gradient-start),
+      var(--pico-auth-auth-screen-surface-gradient-end) 42%
+    ),
+    var(--pico-auth-auth-screen-surface-gradient-stop-3);
   place-items: center;
 }
 .auth-card {
   width: min(100%, 390px);
   padding: 38px;
-  background: rgba(255, 255, 253, 0.88);
-  border: 1px solid rgba(224, 232, 221, 0.9);
+  background: var(--pico-auth-auth-card-surface);
+  border: 1px solid var(--pico-auth-auth-card-border);
   border-radius: 25px;
-  box-shadow: 0 24px 70px rgba(65, 83, 67, 0.1);
+  box-shadow: 0 24px 70px var(--pico-auth-auth-card-shadow);
   backdrop-filter: blur(20px);
 }
 .auth-mark {
@@ -22,10 +28,14 @@
   width: 42px;
   height: 42px;
   margin-bottom: 25px;
-  color: #f7faf4;
-  background: linear-gradient(145deg, #78977a, #58745e);
+  color: var(--pico-auth-auth-mark-text);
+  background: linear-gradient(
+    145deg,
+    var(--pico-auth-auth-mark-surface-gradient-start),
+    var(--pico-auth-auth-mark-surface-gradient-end)
+  );
   border-radius: 15px 15px 15px 6px;
-  box-shadow: 0 7px 16px rgba(74, 111, 81, 0.2);
+  box-shadow: 0 7px 16px var(--pico-auth-auth-mark-shadow);
   place-items: center;
 }
 .auth-mark svg {
@@ -33,23 +43,23 @@
 }
 .auth-card .eyebrow {
   margin-bottom: 9px;
-  color: #829184;
-  font-size: 9px;
-  letter-spacing: 0.18em;
+  color: var(--pico-auth-auth-card-eyebrow-text);
+  font-size: var(--pico-auth-auth-card-eyebrow-font-size);
+  letter-spacing: var(--pico-auth-auth-card-eyebrow-letter-spacing);
 }
 .auth-card h1 {
   margin: 0;
-  color: #33463a;
-  font-family: Georgia, 'Times New Roman', serif;
-  font-size: 30px;
-  font-weight: 500;
-  letter-spacing: -0.04em;
+  color: var(--pico-auth-auth-card-text);
+  font-family: var(--pico-font-auth-display);
+  font-size: var(--pico-auth-auth-card-font-size);
+  font-weight: var(--pico-auth-auth-card-font-weight);
+  letter-spacing: var(--pico-auth-auth-card-letter-spacing);
 }
 .auth-copy {
   margin: 12px 0 23px;
-  color: #78847a;
-  font-size: 13px;
-  line-height: 1.65;
+  color: var(--pico-auth-auth-copy-text);
+  font-size: var(--pico-auth-auth-copy-font-size);
+  line-height: var(--pico-auth-auth-copy-line-height);
 }
 .auth-form {
   display: grid;
@@ -58,25 +68,25 @@
 .auth-form .field {
   display: grid;
   gap: 7px;
-  color: #637267;
-  font-size: 11px;
-  font-weight: 600;
+  color: var(--pico-auth-auth-form-field-text);
+  font-size: var(--pico-auth-auth-form-field-font-size);
+  font-weight: var(--pico-auth-auth-form-field-font-weight);
 }
 .auth-form input {
   width: 100%;
   min-height: 43px;
   padding: 0 12px;
-  color: #3e5043;
-  background: #fbfcfa;
-  border: 1px solid #dfe7dc;
+  color: var(--pico-auth-auth-form-text);
+  background: var(--pico-auth-auth-form-surface);
+  border: 1px solid var(--pico-auth-auth-form-border);
   border-radius: 11px;
-  font: inherit;
-  font-size: 13px;
+  font: var(--pico-auth-auth-form-font);
+  font-size: var(--pico-auth-auth-form-font-size);
   outline: none;
 }
 .auth-form input:focus {
-  border-color: #92ad96;
-  box-shadow: 0 0 0 3px rgba(131, 165, 137, 0.13);
+  border-color: var(--pico-auth-auth-form-focus-border);
+  box-shadow: 0 0 0 3px var(--pico-auth-auth-form-focus-shadow);
 }
 .auth-form .button {
   min-height: 43px;
@@ -85,8 +95,8 @@
 }
 .auth-error {
   margin: -6px 0 0;
-  color: #a85149;
-  font-size: 12px;
+  color: var(--pico-auth-auth-error-text);
+  font-size: var(--pico-auth-auth-error-font-size);
 }
 .session-logout {
   display: flex;
@@ -96,17 +106,17 @@
   min-height: 38px;
   gap: 8px;
   padding: 6px 9px;
-  color: #829087;
-  background: transparent;
-  border: 1px solid #e8ede6;
+  color: var(--pico-auth-session-logout-text);
+  background: var(--pico-auth-session-logout-surface);
+  border: 1px solid var(--pico-auth-session-logout-border);
   border-radius: 9px;
-  font: inherit;
-  font-size: 12px;
+  font: var(--pico-auth-session-logout-font);
+  font-size: var(--pico-auth-session-logout-font-size);
   white-space: nowrap;
   cursor: pointer;
 }
 .session-logout:hover {
-  color: #526f59;
-  background: #f0f4ef;
-  border-color: #dce6db;
+  color: var(--pico-auth-session-logout-hover-text);
+  background: var(--pico-auth-session-logout-hover-surface);
+  border-color: var(--pico-auth-session-logout-hover-border);
 }

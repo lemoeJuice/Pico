@@ -421,6 +421,7 @@ describe('dynamic plugin UI boundary', () => {
       '../src/web/styles/shared/plugin-status.css',
       '../src/web/styles/shared/plugin-fields.css',
       '../src/web/styles/shared/plugin-buttons.css',
+      '../src/web/styles/themes/controls-light.css',
       '../src/web/styles/regions/composer-layout.css',
       '../src/web/styles/regions/composer-integration.css',
     ]
@@ -428,14 +429,26 @@ describe('dynamic plugin UI boundary', () => {
       .join('\n');
     const renderer = readFileSync(new URL('../src/web/plugin-ui-tree.tsx', import.meta.url), 'utf8');
     expect(css).toMatch(/\.plugin-ui-text-input\s*\{[^}]*white-space:\s*nowrap;[^}]*overflow-x:\s*auto;/s);
-    expect(css).toMatch(/\.plugin-ui-text-area\s*\{[^}]*line-height:\s*1\.5;[^}]*overflow:\s*hidden;/s);
+    expect(css).toMatch(
+      /\.plugin-ui-text-area\s*\{[^}]*line-height:\s*var\(--pico-control-plugin-text-area-line-height\);[^}]*overflow:\s*hidden;/s,
+    );
+    const controlTypography = readFileSync(
+      new URL('../src/web/styles/themes/controls-typography-light.css', import.meta.url),
+      'utf8',
+    );
+    expect(controlTypography).toContain('--pico-control-plugin-text-area-line-height: 1.5;');
     expect(css).toMatch(/\.plugin-ui-control\s*\{[^}]*padding:\s*8px 10px;/s);
     expect(css).toMatch(/\.plugin-ui-switch-control\s*\{[^}]*padding:\s*2px;/s);
-    expect(css).toMatch(/\.plugin-ui-switch-control,\s*\.model-selection-switch-track\s*\{[^}]*width:\s*30px;[^}]*height:\s*18px;/s);
-    expect(css).toMatch(/\.plugin-ui-switch-thumb,\s*\.model-selection-switch-track::after\s*\{[^}]*width:\s*14px;[^}]*height:\s*14px;/s);
+    expect(css).toMatch(
+      /\.plugin-ui-switch-control,\s*\.model-selection-switch-track\s*\{[^}]*width:\s*30px;[^}]*height:\s*18px;/s,
+    );
+    expect(css).toMatch(
+      /\.plugin-ui-switch-thumb,\s*\.model-selection-switch-track::after\s*\{[^}]*width:\s*14px;[^}]*height:\s*14px;/s,
+    );
     expect(css).not.toContain('.plugin-ui-switch-track');
     expect(css).toMatch(/\.plugin-ui-switch--compact\s*\{[^}]*border-radius:\s*10px;/s);
-    expect(css).toMatch(/\.plugin-ui-range-control\s*\{[^}]*accent-color:\s*#698e70;/s);
+    expect(css).toMatch(/\.plugin-ui-range-control\s*\{[^}]*accent-color:\s*var\(--pico-control-range-accent\);/s);
+    expect(css).toMatch(/--pico-control-range-accent:\s*#698e70;/);
     expect(renderer).toMatch(/className=\{`plugin-ui-switch/);
     expect(renderer).toMatch(/role="switch"/);
     const sharedSelect = readFileSync(new URL('../src/web/plugin-ui-select.tsx', import.meta.url), 'utf8');

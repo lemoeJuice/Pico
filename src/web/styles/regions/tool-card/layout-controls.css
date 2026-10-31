@@ -11,26 +11,26 @@
   flex: 0 0 auto;
   gap: 2px;
   padding: 2px;
-  background: #edf1eb;
+  background: var(--pico-tool-control-surface);
   border-radius: 7px;
 }
 
 .tool-card .tool-view-toggle button {
   min-height: 22px;
   padding: 2px 7px;
-  color: #7c897e;
+  color: var(--pico-tool-text-muted);
   background: transparent;
   border: 0;
   border-radius: 5px;
   font: inherit;
-  font-size: 9px;
+  font-size: var(--pico-tool-view-toggle-size);
   cursor: pointer;
 }
 
 .tool-card .tool-view-toggle button[aria-pressed='true'] {
-  color: #405447;
-  background: #fff;
-  box-shadow: 0 1px 2px #24332414;
+  color: var(--pico-tool-command-text);
+  background: var(--pico-tool-content-surface);
+  box-shadow: 0 1px 2px var(--pico-tool-control-shadow-color);
 }
 
 .tool-card .tool-readable-fields {
@@ -47,10 +47,9 @@
 .tool-card .tool-field-label {
   display: block;
   margin-bottom: 4px;
-  color: #89958b;
-  font-size: 9px;
-  font-weight: 650;
-  letter-spacing: 0.025em;
+  color: var(--pico-tool-field-label);
+  font-size: var(--pico-tool-field-label-size);
+  font-weight: var(--pico-tool-field-label-weight);
+  letter-spacing: var(--pico-tool-field-label-letter-spacing);
   text-transform: uppercase;
 }
-

@@ -7,10 +7,10 @@
   padding: 3px 7px;
   overflow-wrap: anywhere;
   color: var(--pico-ui-muted);
-  background: color-mix(in srgb, var(--pico-ui-border) 45%, white);
+  background: color-mix(in srgb, var(--pico-ui-border) 45%, var(--pico-public-white, #fff));
   border-radius: 999px;
-  font-size: 10px;
-  line-height: 1.2;
+  font-size: var(--pico-public-status-font-size, 10px);
+  line-height: var(--pico-public-status-line-height, 1.2);
 }
 
 .pico-ui-status[data-status='success'],
@@ -19,7 +19,7 @@
 .pico-ui-status[data-status='running'],
 .pico-ui-status[data-status='active'] {
   color: var(--pico-ui-success);
-  background: color-mix(in srgb, var(--pico-ui-success) 13%, white);
+  background: color-mix(in srgb, var(--pico-ui-success) 13%, var(--pico-public-white, #fff));
 }
 
 .pico-ui-status[data-status='pending'],
@@ -34,6 +34,5 @@
 .pico-ui-status[data-status='denied'],
 .pico-ui-status[data-status='interrupted'] {
   color: var(--pico-ui-error);
-  background: color-mix(in srgb, var(--pico-ui-error) 12%, white);
+  background: color-mix(in srgb, var(--pico-ui-error) 12%, var(--pico-public-white, #fff));
 }
-
