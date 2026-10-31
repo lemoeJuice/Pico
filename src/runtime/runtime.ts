@@ -3,8 +3,8 @@ import { ResponsesModelAdapter } from './responses-model.js';
 import type { CatalogSelection } from '../contracts/model-catalog.js';
 import { ServiceError } from '../contracts/service-error.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { readdir, realpath, stat } from 'node:fs/promises';
-import { basename, resolve } from 'node:path';
+import { cp, lstat, mkdir, mkdtemp, readdir, realpath, rm, stat } from 'node:fs/promises';
+import { basename, join, resolve } from 'node:path';
 import { DEFAULT_THREAD_TITLE } from '../core/types.js';
 import type {
   AssistantPayload,
@@ -1737,9 +1737,11 @@ export class PicoRuntime {
           if (thread.executorKind !== 'container' || thread.executorRemote || thread.workspacePath) continue;
           const binding = this.store.getExecutorBinding(thread.executorId);
           if (!binding) throw new Error('Executor binding not found');
+          if (attached.some((item) => item.id === binding.id)) continue;
           await this.containerExecutor.attachWorkspace(binding, validatedPath);
           attached.push(binding);
         }
+        await this.copyIndependentWorkspaces(attached, validatedPath);
       }
       const result = this.store.transaction(() => {
         const created = this.store.createProjectForThreadSubtree(threadId, cleanedName, validatedPath);
@@ -1793,6 +1795,9 @@ export class PicoRuntime {
         await this.containerExecutor.attachWorkspace(binding, workspacePath);
         attached.push(binding);
       }
+      if (this.store.getSetting(`project-requires-empty-workspace:${projectId}`, false)) {
+        await this.copyIndependentWorkspaces(attached, workspacePath);
+      }
       const updated = this.store.setProjectWorkspace(projectId, workspacePath, executorIds);
       if (!updated) throw new ServiceError(404, 'Project not found');
       committed = true;
@@ -1817,6 +1822,59 @@ export class PicoRuntime {
     const info = await stat(path);
     if (!info.isDirectory()) throw new ServiceError(400, 'Workspace path must be a directory');
     return path;
+  }
+
+  private async mergeWorkspaceFiles(source: string, target: string): Promise<void> {
+    for (const entry of await readdir(source, { withFileTypes: true })) {
+      const from = join(source, entry.name);
+      const to = join(target, entry.name);
+      let existing;
+      try {
+        existing = await lstat(to);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      if (existing) {
+        if (!entry.isDirectory() || !existing.isDirectory()) {
+          throw new ServiceError(409, `Independent Container workspaces contain conflicting paths: ${entry.name}`);
+        }
+        await this.mergeWorkspaceFiles(from, to);
+      } else {
+        await cp(from, to, { recursive: true, force: false, errorOnExist: true, preserveTimestamps: true, verbatimSymlinks: true });
+      }
+    }
+  }
+
+  private async copyIndependentWorkspaces(bindings: ExecutorBinding[], workspace: string): Promise<void> {
+    if (!bindings.length) return;
+    const staging = await mkdtemp(join(workspace, '.pico-workspace-migration-'));
+    let publishing = false;
+    try {
+      const merged = join(staging, 'merged');
+      await mkdir(merged);
+      for (const [index, binding] of bindings.entries()) {
+        const source = join(staging, `source-${index}`);
+        await mkdir(source);
+        await this.containerExecutor.copyIndependentWorkspace(binding, source);
+        await this.mergeWorkspaceFiles(source, merged);
+      }
+      // Detect outside writes before publishing; the private staging directory is expected.
+      const remaining = (await readdir(workspace)).filter((entry) => entry !== basename(staging));
+      if (remaining.length) throw new ServiceError(409, 'The workspace folder changed during migration and is no longer empty.');
+      publishing = true;
+      for (const entry of await readdir(merged)) {
+        await cp(join(merged, entry), join(workspace, entry), {
+          recursive: true, force: false, errorOnExist: true, preserveTimestamps: true, verbatimSymlinks: true,
+        });
+      }
+    } catch (error) {
+      if (publishing) {
+        throw new Error('Workspace copying failed. Some copied files may remain in the destination; original Container files are preserved.', { cause: error });
+      }
+      throw error;
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+    }
   }
 
   private async assertEmptyWorkspaceDirectory(path: string): Promise<void> {

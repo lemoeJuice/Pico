@@ -274,6 +274,29 @@ describe('Executor execution identity and recovery', () => {
     }
   });
 
+  it.each([false, true])('does not recreate a missing independent Container with volume marker %s', async (marked) => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.store.createThread(null, 'container');
+    const binding = env.store.executorForThread(thread.id)!;
+    const key = createHash('sha256').update(`executor:${binding.id}`).digest('hex');
+    env.store.setSetting(`executor-container-connection:${key}`, { port: 41731, accessToken: 'x'.repeat(64) });
+    if (marked) env.store.setSetting(`executor-container-independent-volume:${key}`, true);
+    const calls: string[][] = [];
+    const podman = async (args: string[]) => {
+      calls.push(args);
+      if (args.includes('inspect')) throw new Error('no such container');
+      return { stdout: '', stderr: '' };
+    };
+    const executor = new ContainerExecutor(env.store, undefined, undefined, podman);
+    try {
+      await expect(executor.checkConnection(binding)).rejects.toThrow(/existing independent container is missing/i);
+      expect(calls.some((args) => args.includes('run'))).toBe(false);
+    } finally {
+      await executor.shutdown();
+      await env.cleanup();
+    }
+  });
+
   it('attaches a Project workspace by rebuilding the same container from its committed root filesystem', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.store.createThread(null, 'container');
@@ -294,11 +317,15 @@ describe('Executor execution identity and recovery', () => {
       await executor.attachWorkspace(binding, env.workspace);
       const runs = calls.filter((args) => args.includes('run'));
       expect(calls.some((args) => args.includes('commit'))).toBe(true);
+      expect(calls.findIndex((args) => args.includes('stop'))).toBeLessThan(calls.findIndex((args) => args.includes('commit')));
       expect(runs).toHaveLength(2);
       expect(runs[0]![runs[0]!.indexOf('--name') + 1]).toBe(runs[1]![runs[1]!.indexOf('--name') + 1]);
       expect(runs[0]!.find((arg) => arg.includes(':/opt/pico/data:rw'))).toBe(
         runs[1]!.find((arg) => arg.includes(':/opt/pico/data:rw')),
       );
+      const independentWorkspaceVolume = runs[0]!.find((arg) => arg.endsWith(':/pico-thread-work:rw'));
+      expect(independentWorkspaceVolume).toBeTruthy();
+      expect(runs[1]!.find((arg) => arg.endsWith(':/pico-thread-work:rw'))).toBe(independentWorkspaceVolume);
       expect(runs[1]!.some((arg) => arg.endsWith(':/workspace:rw'))).toBe(true);
       expect(initialRun.some((arg) => arg.endsWith(':/workspace:rw'))).toBe(false);
       await executor.finalizeWorkspaceAttachment(binding);

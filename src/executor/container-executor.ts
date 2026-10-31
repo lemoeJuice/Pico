@@ -3,7 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { accessSync, constants } from 'node:fs';
 import { mkdir, realpath, stat } from 'node:fs/promises';
 import { createServer } from 'node:net';
-import { delimiter, resolve, join } from 'node:path';
+import { delimiter, resolve, join, relative, sep } from 'node:path';
 import type { Execution, ExecutorBinding, ToolDefinition } from '../core/types.js';
 import { PicoStore } from '../core/store.js';
 import { currentExecutorBundle, currentExecutorVersion } from './bundle.js';
@@ -15,6 +15,7 @@ import { ServiceError } from '../contracts/service-error.js';
 const CONTAINER_SETTING_PREFIX = 'executor-container-connection:';
 const CONTAINER_NAME_SETTING_PREFIX = 'executor-container-name:';
 const CONTAINER_ATTACH_SETTING_PREFIX = 'executor-container-attach:';
+const CONTAINER_INDEPENDENT_VOLUME_SETTING_PREFIX = 'executor-container-independent-volume:';
 const CONTAINER_INSTALLATION_SETTING = 'executor-container-installation-id';
 const CONTAINER_NAME_PREFIX = process.env.PICO_CONTAINER_NAME?.trim() || 'pico-executor';
 const CONTAINER_PORT = 4174;
@@ -350,6 +351,22 @@ export class ContainerExecutor implements ExecutorAdapter {
     return promise;
   }
 
+  /** Copy the retained independent workspace into a private directory in the mounted workspace. */
+  async copyIndependentWorkspace(binding: ExecutorBinding, stagingPath: string): Promise<void> {
+    const key = createHash('sha256').update(`executor:${binding.id}`).digest('hex');
+    const record = this.store.getSetting<ContainerWorkspaceAttachment | null>(`${CONTAINER_ATTACH_SETTING_PREFIX}${key}`, null);
+    if (!record || record.status !== 'pending') throw new Error('Container workspace attachment is not pending.');
+    const destination = relative(record.workspace, resolve(stagingPath));
+    if (!destination || destination === '..' || destination.startsWith(`..${sep}`)) {
+      throw new Error('Workspace migration staging directory must be inside the mounted workspace.');
+    }
+    const name = this.containerName(key);
+    if (await this.containerWorkspaceMount(name) !== record.workspace) {
+      throw new Error('Container workspace mount changed during migration.');
+    }
+    await this.callPodman(['exec', name, 'cp', '-a', `${INDEPENDENT_WORKSPACE_ROOT}/.`, `/workspace/${destination.split(sep).join('/')}/`]);
+  }
+
   async finalizeWorkspaceAttachment(binding: ExecutorBinding): Promise<void> {
     const key = createHash('sha256').update(`executor:${binding.id}`).digest('hex');
     const recovery = this.workspaceRecoveryPromises.get(key);
@@ -560,19 +577,33 @@ export class ContainerExecutor implements ExecutorAdapter {
     const image = `${CONTAINER_NAME_PREFIX}-snapshot-${this.installationId.slice(0, 12)}-${key.slice(0, 12)}-${randomBytes(4).toString('hex')}`;
     const setting = `${CONTAINER_ATTACH_SETTING_PREFIX}${key}`;
     const previous = this.store.getSetting<ContainerWorkspaceAttachment | null>(setting, null);
-    await this.callPodman(['commit', name, image]);
-    this.store.setSetting(setting, {
-      image,
-      workspace,
-      status: 'pending',
-      snapshotImages: [
-        ...new Set(
-          [...(previous?.snapshotImages ?? []), previous?.snapshotImage].filter((item): item is string =>
-            Boolean(item),
+    // Stop all container processes before the snapshot so writes cannot race the
+    // snapshot and subsequent removal of the original container.
+    await this.callPodman(['stop', name]);
+    try {
+      await this.callPodman(['commit', name, image]);
+      this.store.setSetting(setting, {
+        image,
+        workspace,
+        status: 'pending',
+        snapshotImages: [
+          ...new Set(
+            [...(previous?.snapshotImages ?? []), previous?.snapshotImage].filter((item): item is string =>
+              Boolean(item),
+            ),
           ),
-        ),
-      ],
-    } satisfies ContainerWorkspaceAttachment);
+        ],
+      } satisfies ContainerWorkspaceAttachment);
+    } catch (error) {
+      try {
+        await this.callPodman(['start', name]);
+        await this.startAgent(name, saved, INDEPENDENT_WORKSPACE_ROOT);
+        await this.waitUntilReachable(saved.port, saved.accessToken, new AbortController().signal);
+      } catch (restartError) {
+        throw new AggregateError([error, restartError], 'Container snapshot failed and the original Container could not be restarted.', { cause: restartError });
+      }
+      throw error;
+    }
     try {
       await this.callPodman(['rm', '-f', name]);
       await this.runContainer(name, key, image, workspace, saved);
@@ -622,6 +653,10 @@ export class ContainerExecutor implements ExecutorAdapter {
     workspace: string | null,
     saved: SavedContainerConnection,
   ): Promise<void> {
+    const independentVolume = this.store.getSetting<boolean>(
+      `${CONTAINER_INDEPENDENT_VOLUME_SETTING_PREFIX}${key}`,
+      false,
+    );
     await this.callPodman([
       'run',
       '-d',
@@ -638,6 +673,7 @@ export class ContainerExecutor implements ExecutorAdapter {
       '-p',
       `127.0.0.1:${saved.port}:${CONTAINER_PORT}`,
       ...(workspace ? ['--volume', `${workspace}:/workspace:rw`] : []),
+      ...(independentVolume ? ['--volume', `${this.independentWorkspaceVolume(key)}:${INDEPENDENT_WORKSPACE_ROOT}:rw`] : []),
       '--volume',
       `pico-executor-data-${this.installationId.slice(0, 16)}-${key.slice(0, 32)}:/opt/pico/data:rw`,
       '--volume',
@@ -648,6 +684,10 @@ export class ContainerExecutor implements ExecutorAdapter {
       'sleep',
       'infinity',
     ]);
+  }
+
+  private independentWorkspaceVolume(key: string): string {
+    return `pico-thread-work-${this.installationId.slice(0, 16)}-${key.slice(0, 32)}`;
   }
 
   private async startAgent(name: string, saved: SavedContainerConnection, workspaceRoot = '/workspace'): Promise<void> {
@@ -801,6 +841,8 @@ export class ContainerExecutor implements ExecutorAdapter {
     const root = workspace ? await realpath(workspace) : null;
     if (root && !(await stat(root)).isDirectory()) throw new Error('Container workspace must be a directory.');
     await mkdir(this.pluginDirectory, { recursive: true });
+    const connectionSetting = `${CONTAINER_SETTING_PREFIX}${workspaceKey}`;
+    const hadSavedConnection = this.store.getSetting<SavedContainerConnection | null>(connectionSetting, null) !== null;
     const saved = await this.connection(workspaceKey);
     const running = await this.inspectContainer(containerName, signal);
     if (running.exists && running.running) {
@@ -813,6 +855,14 @@ export class ContainerExecutor implements ExecutorAdapter {
       }
     }
     if (!running.exists) {
+      if (!root && hadSavedConnection) {
+        throw new Error(
+          'Existing independent Container is missing. Automatic recreation stopped to protect its container filesystem; recover the original Container before retrying.',
+        );
+      }
+      if (!root && !hadSavedConnection) {
+        this.store.setSetting(`${CONTAINER_INDEPENDENT_VOLUME_SETTING_PREFIX}${workspaceKey}`, true);
+      }
       await this.callPodman(
         [
           'run',
@@ -829,6 +879,9 @@ export class ContainerExecutor implements ExecutorAdapter {
           '-p',
           `127.0.0.1:${saved.port}:${CONTAINER_PORT}`,
           ...(root ? ['--volume', `${root}:/workspace:rw`] : []),
+          ...(this.store.getSetting<boolean>(`${CONTAINER_INDEPENDENT_VOLUME_SETTING_PREFIX}${workspaceKey}`, false)
+            ? ['--volume', `${this.independentWorkspaceVolume(workspaceKey)}:${INDEPENDENT_WORKSPACE_ROOT}:rw`]
+            : []),
           '--volume',
           `pico-executor-data-${this.installationId.slice(0, 16)}-${workspaceKey.slice(0, 32)}:/opt/pico/data:rw`,
           '--volume',

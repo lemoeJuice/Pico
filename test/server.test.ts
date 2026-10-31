@@ -561,7 +561,7 @@ describe('independent Thread Project API', () => {
       for (const [title, workspacePath, filename] of [
         ['Non-empty conversion', nonEmpty, 'note.txt'],
         ['Hidden conversion', hiddenNonEmpty, '.hidden'],
-      ]) {
+      ] as const) {
         const thread = await createThread(title);
         const rejected = await fetch(`${base}/api/threads/${thread.id}/project`, {
           method: 'POST', headers, body: JSON.stringify({ name: title, workspacePath }),
