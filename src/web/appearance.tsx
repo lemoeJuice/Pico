@@ -9,7 +9,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import type { RegisteredTheme } from '../contracts/plugin-theme.js';
+import { MAX_THEME_VARIABLES, type RegisteredTheme } from '../contracts/plugin-theme.js';
 
 export type ResolvedAppearance = 'light' | 'dark';
 
@@ -84,7 +84,7 @@ export function normalizePluginThemes(value: unknown): RegisteredThemeContributi
       continue;
     const variables: Record<string, string> = {};
     if (source.variables && typeof source.variables === 'object' && !Array.isArray(source.variables)) {
-      for (const [name, variableValue] of Object.entries(source.variables).slice(0, 64)) {
+      for (const [name, variableValue] of Object.entries(source.variables).slice(0, MAX_THEME_VARIABLES)) {
         if (/^--pico-[a-z0-9-]{1,120}$/.test(name) && typeof variableValue === 'string' && safeThemeVariableValue(variableValue)) {
           variables[name] = variableValue;
         }
@@ -120,7 +120,10 @@ export function appearanceOptions(themes: RegisteredThemeContribution[]): Appear
   return [
     { value: 'system', label: 'System' },
     ...BUILT_IN_THEMES.map(({ id, label }) => ({ value: id, label })),
-    ...themes.map((theme) => ({ value: theme.id as PluginThemeId, label: `${theme.label} (${theme.pluginId})` })),
+    ...themes.map((theme) => ({
+      value: theme.id as PluginThemeId,
+      label: themes.filter((item) => item.label === theme.label).length > 1 ? `${theme.label} (${theme.pluginId})` : theme.label,
+    })),
   ];
 }
 

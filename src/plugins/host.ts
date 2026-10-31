@@ -11,7 +11,7 @@ import { ModelCatalog } from '../runtime/model-catalog.js';
 import { ServiceError } from '../contracts/service-error.js';
 import type { ExecutorPluginContext } from '../executor/plugin-host.js';
 import type { PipelineStage, StageInputs, StageOutputs } from '../contracts/plugin-pipeline.js';
-import type { RegisteredTheme, ThemeContribution } from '../contracts/plugin-theme.js';
+import { MAX_THEME_VARIABLES, type RegisteredTheme, type ThemeContribution } from '../contracts/plugin-theme.js';
 import { unavailablePluginServices, type PluginServices } from './services.js';
 import { existsSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
@@ -109,7 +109,6 @@ interface RegisteredPluginPage extends PluginPageContribution {
 }
 
 const MAX_PLUGIN_THEMES = 32;
-const MAX_THEME_VARIABLES = 64;
 const THEME_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const THEME_ENTRY_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const THEME_VARIABLE_PATTERN = /^--pico-[a-z0-9-]{1,120}$/;

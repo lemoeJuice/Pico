@@ -4592,7 +4592,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   </div>
                   <p>Choose the appearance for this browser.</p>
                 </div>
-                <div className="sidebar-width-options" role="group" aria-label="Theme">
+                <div className="sidebar-width-options theme-options" role="group" aria-label="Theme">
                   {appearance.options.map((option) => (
                     <button
                       className="sidebar-width-option"

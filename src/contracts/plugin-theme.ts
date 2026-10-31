@@ -1,3 +1,6 @@
+/** Upper bound shared by the Runtime validator and the WebUI. */
+export const MAX_THEME_VARIABLES = 128;
+
 /** Theme data exposed by a Runtime plugin. Values are validated as inert CSS tokens by PluginHost. */
 export interface ThemeContribution {
   /** Stable ID within the contributing plugin. */

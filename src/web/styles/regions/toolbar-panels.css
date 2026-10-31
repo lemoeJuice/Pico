@@ -89,6 +89,10 @@
   flex: 0 1 210px;
   min-width: 150px;
 }
+.theme-options .sidebar-width-option:nth-child(n + 4) {
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
+}
 .native-tool-copy {
   min-width: 0;
 }

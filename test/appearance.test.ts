@@ -60,6 +60,15 @@ describe('built-in appearance preference', () => {
     );
   });
 
+  it('retains the full supported plugin palette without accepting an unbounded one', () => {
+    const variables = Object.fromEntries(Array.from({ length: 129 }, (_, index) => [`--pico-role-${index}`, '#123456']));
+    const [theme] = normalizePluginThemes([
+      { pluginId: 'pico.reader', id: 'pico.reader:blue', label: 'Blue', appearance: 'light', variables },
+    ]);
+    expect(Object.keys(theme!.variables)).toHaveLength(128);
+    expect(theme!.variables['--pico-role-127']).toBe('#123456');
+  });
+
   it('filters unsafe theme data and only applies existing CSS variables', () => {
     const [theme] = normalizePluginThemes([
       {
