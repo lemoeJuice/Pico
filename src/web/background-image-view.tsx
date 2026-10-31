@@ -196,14 +196,22 @@ export function useMainBackgroundImage(themeId: string) {
     remove,
     mode,
     blur,
+    softness: settings.imageSoftness,
     setMode: (mode: BackgroundMode) => updateSettings({ ...settings, mode }),
     setBlur: (blur: number) => updateSettings({ ...settings, [mode === 'theme' ? 'themeBlur' : 'imageBlur']: blur }),
+    setSoftness: (softness: number) => updateSettings({ ...settings, imageSoftness: softness }),
   };
 }
 
 export type MainBackgroundImage = ReturnType<typeof useMainBackgroundImage>;
 
-export function BackgroundImageSetting({ background }: { background: MainBackgroundImage }) {
+export function BackgroundImageSetting({
+  background,
+  appearance,
+}: {
+  background: MainBackgroundImage;
+  appearance: 'light' | 'dark';
+}) {
   const fileInput = useRef<HTMLInputElement>(null);
   const onFileChange = (event: ChangeEvent<HTMLInputElement>): void => {
     const file = event.currentTarget.files?.[0];
@@ -264,7 +272,7 @@ export function BackgroundImageSetting({ background }: { background: MainBackgro
           ) : null}
         </div>
         {background.mode !== 'none' ? (
-          <label className="background-image-blur">
+          <label className="background-image-adjustment">
             <span>Blur: {background.blur}px</span>
             <input
               aria-label="Background blur"
@@ -274,6 +282,22 @@ export function BackgroundImageSetting({ background }: { background: MainBackgro
               step="1"
               value={background.blur}
               onChange={(event) => background.setBlur(Number(event.currentTarget.value))}
+            />
+          </label>
+        ) : null}
+        {background.mode === 'image' && background.hasImage ? (
+          <label className="background-image-adjustment">
+            <span>
+              {appearance === 'dark' ? 'Dim' : 'Light'}: {background.softness}%
+            </span>
+            <input
+              aria-label={appearance === 'dark' ? 'Dim background image' : 'Lighten background image'}
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value={background.softness}
+              onChange={(event) => background.setSoftness(Number(event.currentTarget.value))}
             />
           </label>
         ) : null}

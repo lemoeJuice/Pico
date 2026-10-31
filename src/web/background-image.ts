@@ -11,8 +11,14 @@ export interface BackgroundSettings {
   mode: BackgroundMode;
   themeBlur: number;
   imageBlur: number;
+  imageSoftness: number;
 }
-export const DEFAULT_BACKGROUND_SETTINGS: BackgroundSettings = { mode: 'none', themeBlur: 0, imageBlur: 4 };
+export const DEFAULT_BACKGROUND_SETTINGS: BackgroundSettings = {
+  mode: 'none',
+  themeBlur: 0,
+  imageBlur: 4,
+  imageSoftness: 0,
+};
 
 export function parseBackgroundSettings(value: string | null): BackgroundSettings {
   try {
@@ -25,6 +31,10 @@ export function parseBackgroundSettings(value: string | null): BackgroundSetting
       mode: record.mode === 'theme' || record.mode === 'image' ? record.mode : 'none',
       themeBlur: blur(record.themeBlur, 0),
       imageBlur: blur(record.imageBlur, 4),
+      imageSoftness:
+        typeof record.imageSoftness === 'number' && Number.isFinite(record.imageSoftness)
+          ? Math.min(100, Math.max(0, Math.round(record.imageSoftness)))
+          : 0,
     };
   } catch {
     return { ...DEFAULT_BACKGROUND_SETTINGS };

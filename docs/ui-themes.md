@@ -56,7 +56,9 @@ background or a locally selected raster image behind the main panel. Each
 theme's selection and blur settings are remembered independently. The image is
 stored in that browser's IndexedDB and is never uploaded to the Runtime. The
 two image choices remember separate blur amounts: theme backgrounds default to
-0 px and personal images to 4 px; both can be adjusted from 0 to 20 px.
+0 px and personal images to 4 px; both can be adjusted from 0 to 20 px. Personal
+images also have an optional per-theme lightening or dimming overlay, depending
+on the theme's appearance. Its default is 0%, preserving the original tint.
 
 An optional brand icon and label replace the sidebar mark and name only while
 that theme is active; the host still owns the controls and their behavior. A

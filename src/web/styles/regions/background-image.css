@@ -26,6 +26,11 @@ body[data-pico-hide-theme-background] {
   background-position: var(--pico-theme-background-position);
   background-repeat: var(--pico-theme-background-repeat);
 }
+.main-panel-background-softness {
+  position: absolute;
+  inset: 0;
+  background: var(--pico-page-bg);
+}
 .main-panel-background.is-user-image::after {
   position: absolute;
   inset: 0;
@@ -36,6 +41,7 @@ body[data-pico-hide-theme-background] {
   display: grid;
   justify-items: stretch;
   gap: 6px;
+  min-width: 0;
 }
 .background-image-buttons {
   display: flex;
@@ -43,14 +49,14 @@ body[data-pico-hide-theme-background] {
   gap: 6px;
 }
 .background-image-buttons button,
-.background-image-blur span {
+.background-image-adjustment span {
   white-space: nowrap;
 }
 .background-image-buttons button {
   flex: 1 1 0;
   min-width: 0;
 }
-.background-image-blur {
+.background-image-adjustment {
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -63,11 +69,11 @@ body[data-pico-hide-theme-background] {
   border: 1px solid var(--pico-control-form-input-border);
   border-radius: 9px;
 }
-.background-image-blur span {
+.background-image-adjustment span {
   flex: 0 0 6.5em;
   width: 6.5em;
 }
-.background-image-blur input {
+.background-image-adjustment input {
   flex: 1 1 0;
   min-width: 0;
   width: 0;
@@ -75,4 +81,18 @@ body[data-pico-hide-theme-background] {
 }
 .native-tool-copy .background-image-error {
   color: var(--pico-control-status-danger-text);
+}
+
+@media (max-width: 480px) {
+  .general-setting-row.background-image-setting {
+    flex-wrap: wrap;
+  }
+  .general-setting-row.background-image-setting .native-tool-copy {
+    flex: 1 0 100%;
+  }
+  .general-setting-row.background-image-setting .background-image-actions {
+    flex: 1 1 100%;
+    width: 100%;
+    max-width: 100%;
+  }
 }

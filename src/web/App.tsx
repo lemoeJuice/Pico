@@ -3484,7 +3484,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             aria-hidden="true"
           >
             {backgroundImage.mode === 'image' && backgroundImage.url ? (
-              <img src={backgroundImage.url} alt="" style={{ filter: `blur(${backgroundImage.blur}px)` }} />
+              <>
+                <img src={backgroundImage.url} alt="" style={{ filter: `blur(${backgroundImage.blur}px)` }} />
+                <div className="main-panel-background-softness" style={{ opacity: backgroundImage.softness / 100 }} />
+              </>
             ) : (
               <div className="main-panel-theme-background" style={{ filter: `blur(${backgroundImage.blur}px)` }} />
             )}
@@ -4640,7 +4643,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
                   ) : null}
                 </div>
               </article>
-              <BackgroundImageSetting background={backgroundImage} />
+              <BackgroundImageSetting background={backgroundImage} appearance={appearance.resolved} />
               <article className="native-tool-row general-setting-row">
                 <div className="native-tool-copy">
                   <div className="native-tool-title">
