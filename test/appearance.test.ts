@@ -43,7 +43,7 @@ describe('built-in appearance preference', () => {
     expect(resolveThemeId('system', true)).toBe('pico.dark');
     expect(nextExplicitAppearance('light')).toBe('pico.dark');
     expect(nextExplicitAppearance('dark')).toBe('pico.light');
-    expect(themeColorForAppearance('dark')).toBe('#171f1a');
+    expect(themeColorForAppearance('dark')).toBe('#1b2024');
     expect(themeColorForAppearance('dark', undefined, 'pico.dark-legacy')).toBe('#171f1a');
     expect(themeColorForAppearance('light')).toBe('#f5f7f4');
     expect(themeColorForAppearance('dark', '#123456')).toBe('#123456');

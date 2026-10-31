@@ -45,7 +45,7 @@ const EMPTY_RECENT_APPEARANCE_PREFERENCES: RecentAppearancePreferences = { light
 
 const BOOT_PREFERENCE_ATTRIBUTE = 'data-pico-appearance-preference';
 const LIGHT_THEME_COLOR = '#f5f7f4';
-const DARK_THEME_COLOR = '#171f1a';
+const DARK_THEME_COLOR = '#1b2024';
 const LEGACY_DARK_THEME_COLOR = '#171f1a';
 const SYSTEM_DARK_QUERY = '(prefers-color-scheme: dark)';
 

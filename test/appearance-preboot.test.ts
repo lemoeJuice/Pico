@@ -51,7 +51,7 @@ describe('appearance preboot', () => {
     expect(result.attributes.get('data-pico-appearance-preference')).toBe('pico.dark');
     expect(result.attributes.get('data-pico-color-scheme')).toBe('dark');
     expect(result.documentElement.style.colorScheme).toBe('dark');
-    expect(result.themeColor.content).toBe('#171f1a');
+    expect(result.themeColor.content).toBe('#1b2024');
   });
 
   it('restores the legacy dark palette and browser chrome before rendering', () => {
