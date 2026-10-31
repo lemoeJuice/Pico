@@ -102,7 +102,11 @@
   border-radius: 50%;
 }
 .brand-name {
+  flex: 0 1 auto;
+  width: max-content;
   min-width: 0;
+  max-width: 100%;
+  padding-right: 0.12em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
