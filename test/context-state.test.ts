@@ -20,10 +20,149 @@ const provenance = (id: string, start: number, end: number): ProjectionProvenanc
 });
 
 describe('ThreadContextState', () => {
+  it('requires a valid token count for every complete replacement before side effects', async () => {
+    const state = new ThreadContextState();
+    const initial = await state.replace('thread-a', { tokenCount: 7, turns: [userTurn('kept')] });
+    const invalidInputs = [undefined, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN];
+    for (const tokenCount of invalidInputs) {
+      expect(() => state.replace('thread-a', { tokenCount, turns: [userTurn('bad')] } as never)).toThrow(/token count/);
+    }
+    expect(() => state.compareAndSwap('thread-a', initial.revision, { turns: [userTurn('bad')] } as never)).toThrow(
+      /token count/,
+    );
+    let sideEffect = false;
+    await expect(
+      state.commitIfRevision('thread-a', initial.revision, () => ({
+        replacement: { turns: [userTurn('bad')] } as never,
+        commit: () => {
+          sideEffect = true;
+          return true;
+        },
+      })),
+    ).rejects.toThrow(/token count/);
+    expect(sideEffect).toBe(false);
+    expect(await state.read('thread-a')).toMatchObject({
+      revision: initial.revision,
+      tokenCount: 7,
+      turns: [userTurn('kept')],
+    });
+    await expect(
+      state.transact('thread-a', (draft) => {
+        draft.turns = [userTurn('replacement')];
+      }),
+    ).rejects.toThrow(/token count/);
+    expect(await state.read('thread-a')).toMatchObject({
+      revision: initial.revision,
+      tokenCount: 7,
+      turns: [userTurn('kept')],
+    });
+    const replaced = await state.transact('thread-a', (draft) => {
+      draft.turns = [userTurn('replacement')];
+      draft.tokenCount = 5;
+    });
+    expect(replaced.snapshot).toMatchObject({ tokenCount: 5, turns: [userTurn('replacement')] });
+  });
+
+  it('requires a valid token count when synchronize must replace the complete context', async () => {
+    const state = new ThreadContextState();
+    await state.synchronize('thread-a', { branchId: 'branch-1', tokenCount: 1, turns: [userTurn('one')] });
+    const before = await state.read('thread-a');
+    await expect(state.synchronize('thread-a', { branchId: 'branch-2', turns: [userTurn('two')] })).rejects.toThrow(
+      /token count/,
+    );
+    expect(await state.read('thread-a')).toEqual(before);
+    const replaced = await state.synchronize('thread-a', {
+      branchId: 'branch-2',
+      tokenCount: 12,
+      turns: [userTurn('two')],
+    });
+    expect(replaced).toMatchObject({ branchId: 'branch-2', tokenCount: 12 });
+    const recounted = await state.synchronize('thread-a', {
+      branchId: 'branch-2',
+      tokenCount: 13,
+      turns: [userTurn('two')],
+    });
+    expect(recounted).toMatchObject({ tokenCount: 13, revision: replaced.revision + 1 });
+    expect(() =>
+      state.synchronize('thread-a', {
+        branchId: 'branch-2',
+        tokenCount: -1,
+        turns: [userTurn('two'), userTurn('three')],
+      }),
+    ).toThrow(/token count/);
+    expect(await state.read('thread-a')).toEqual(recounted);
+  });
+
+  it('treats appended turns as an append when the last provenance range expands', async () => {
+    const state = new ThreadContextState();
+    await state.synchronize('thread-a', {
+      turns: [userTurn('first')],
+      provenance: [provenance('block', 0, 1)],
+      tokenCount: 7,
+    });
+    const next = await state.synchronize('thread-a', {
+      turns: [userTurn('first'), userTurn('second')],
+      provenance: [provenance('block', 0, 2)],
+    });
+    expect(next.turns).toEqual([userTurn('first'), userTurn('second')]);
+    expect(next.provenance[0]).toMatchObject({ turnStartIndex: 0, turnEndIndex: 2 });
+    expect(next.tokenCount).toBeNull();
+  });
+
+  it('does not synchronize a projection that becomes stale while waiting for its queue', async () => {
+    const state = new ThreadContextState();
+    await state.replace('thread-a', { tokenCount: 7, turns: [userTurn('kept')] });
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const transaction = state.transact('thread-a', async () => { await blocked; });
+    let current = true;
+    const synchronization = state.synchronize('thread-a', {
+      tokenCount: 8, turns: [userTurn('replacement')],
+    }, () => current);
+    current = false;
+    release();
+    await transaction;
+    await expect(synchronization).rejects.toThrow(/became stale/);
+    expect((await state.read('thread-a')).turns).toEqual([userTurn('kept')]);
+  });
+
+  it('clears token count when append or transact changes turns without a replacement count', async () => {
+    const state = new ThreadContextState();
+    await state.replace('thread-a', { tokenCount: 7, turns: [userTurn('one')] });
+    expect(await state.append('thread-a', { turns: [userTurn('two')] })).toMatchObject({ tokenCount: null });
+    await state.replace('thread-a', { tokenCount: 8, turns: [userTurn('one')] });
+    expect(
+      (
+        await state.transact('thread-a', (draft) => {
+          draft.turns.push(userTurn('two'));
+        })
+      ).snapshot,
+    ).toMatchObject({ tokenCount: null });
+    await state.replace('thread-a', { tokenCount: 8, turns: [userTurn('one')] });
+    expect(
+      (
+        await state.transact('thread-a', (draft) => {
+          draft.turns.push(userTurn('two'));
+          draft.tokenCount = 8;
+        })
+      ).snapshot,
+    ).toMatchObject({ tokenCount: 8 });
+    expect(await state.clear('thread-a')).toMatchObject({ tokenCount: 0 });
+  });
+
+  it('retains the reported count when only a new tool result is appended', async () => {
+    const state = new ThreadContextState();
+    await state.replace('thread-a', { tokenCount: 7, turns: [userTurn('one')] });
+    const result: PromptTurn = { kind: 'tool_result', callId: 'c', toolName: 'tool', content: 'new output' };
+    expect(await state.append('thread-a', { turns: [result] })).toMatchObject({ tokenCount: 7 });
+  });
+
   it('serializes interleaved operations per Thread while keeping Threads independent', async () => {
     const state = new ThreadContextState();
     let release!: () => void;
-    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     const first = state.transact('thread-a', async (draft) => {
       draft.turns.push(userTurn('first'));
       await blocked;
@@ -46,6 +185,7 @@ describe('ThreadContextState', () => {
     const source = [userTurn('canonical')];
     const initial = await state.replace('thread-a', {
       branchId: 'branch-1',
+      tokenCount: 10,
       turns: source,
       provenance: [provenance('record-1', 0, 1)],
     });
@@ -53,7 +193,9 @@ describe('ThreadContextState', () => {
     (initial.turns[0] as { content: string }).content = 'changed snapshot';
 
     let retained: { turns: PromptTurn[]; provenance: ProjectionProvenance[] } | undefined;
-    await state.transact('thread-a', (draft) => { retained = draft; });
+    await state.transact('thread-a', (draft) => {
+      retained = draft;
+    });
     retained!.turns.push(userTurn('late mutation'));
     retained!.provenance.push(provenance('late-record', 0, 1));
 
@@ -67,6 +209,7 @@ describe('ThreadContextState', () => {
     const state = new ThreadContextState();
     const restored = await state.replace('thread-a', {
       branchId: 'branch-1',
+      tokenCount: 8,
       turns: [userTurn('restored from canonical')],
       provenance: [provenance('canonical-record', 0, 1)],
     });
@@ -78,15 +221,20 @@ describe('ThreadContextState', () => {
 
     expect(appended.revision).toBe(restored.revision + 1);
     expect(appended.provenance[1]).toMatchObject({ turnStartIndex: 1, turnEndIndex: 2, turnIndex: 1 });
-    await expect(state.append('thread-a', { branchId: 'branch-2', turns: [userTurn('wrong branch')] }))
-      .rejects.toThrow(/replace the complete context/);
+    await expect(state.append('thread-a', { branchId: 'branch-2', turns: [userTurn('wrong branch')] })).rejects.toThrow(
+      /replace the complete context/,
+    );
 
-    const stale = await state.compareAndSwap('thread-a', restored.revision, { turns: [userTurn('stale')] });
+    const stale = await state.compareAndSwap('thread-a', restored.revision, {
+      tokenCount: 1,
+      turns: [userTurn('stale')],
+    });
     expect(stale.committed).toBe(false);
     expect(stale.snapshot.turns.map((turn) => turn.content)).toEqual(['restored from canonical', 'next']);
 
     const committed = await state.compareAndSwap('thread-a', appended.revision, {
       branchId: 'branch-2',
+      tokenCount: 9,
       turns: [userTurn('new branch canonical')],
       provenance: [provenance('branch-2-record', 0, 1)],
     });
@@ -96,14 +244,17 @@ describe('ThreadContextState', () => {
   it('runs a synchronous commit callback inside the revision queue slot', async () => {
     const state = new ThreadContextState();
     const initial = await state.replace('thread-a', {
-      branchId: 'branch-1', sourceThrough: 3, turns: [userTurn('before')],
+      branchId: 'branch-1',
+      sourceThrough: 3,
+      tokenCount: 2,
+      turns: [userTurn('before')],
     });
     let externalCommitCount = 0;
     const queuedAppendPromise = state.append('thread-a', { turns: [userTurn('racing append')] });
     const stale = await state.commitIfRevision('thread-a', initial.revision, () => {
       externalCommitCount += 1;
       return {
-        replacement: { branchId: 'branch-1', sourceThrough: 4, turns: [userTurn('compacted')] },
+        replacement: { branchId: 'branch-1', sourceThrough: 4, tokenCount: 3, turns: [userTurn('compacted')] },
         commit: () => true,
       };
     });
@@ -113,8 +264,16 @@ describe('ThreadContextState', () => {
     const current = await state.read('thread-a');
     const committed = await state.commitIfRevision('thread-a', current.revision, () => {
       return {
-        replacement: { branchId: 'branch-1', sourceThrough: 5, turns: [userTurn('summary'), userTurn('recent')] },
-        commit: () => { externalCommitCount += 1; return true; },
+        replacement: {
+          branchId: 'branch-1',
+          sourceThrough: 5,
+          tokenCount: 4,
+          turns: [userTurn('summary'), userTurn('recent')],
+        },
+        commit: () => {
+          externalCommitCount += 1;
+          return true;
+        },
       };
     });
     expect(queuedAppend.turns.map((turn) => turn.content)).toEqual(['before', 'racing append']);
@@ -122,17 +281,32 @@ describe('ThreadContextState', () => {
     expect(committed.snapshot).toMatchObject({ revision: current.revision + 1, sourceThrough: 5 });
     expect(committed.snapshot.turns.map((turn) => turn.content)).toEqual(['summary', 'recent']);
     expect(externalCommitCount).toBe(1);
-    await expect(state.commitIfRevision('thread-a', committed.snapshot.revision, () => ({
-      replacement: { turns: [{ kind: 'message', role: 'user', content: 'uncloneable', callback: () => undefined } as unknown as PromptTurn] },
-      commit: () => { externalCommitCount += 1; return true; },
-    }))).rejects.toThrow();
+    await expect(
+      state.commitIfRevision('thread-a', committed.snapshot.revision, () => ({
+        replacement: {
+          tokenCount: 0,
+          turns: [
+            {
+              kind: 'message',
+              role: 'user',
+              content: 'uncloneable',
+              callback: () => undefined,
+            } as unknown as PromptTurn,
+          ],
+        },
+        commit: () => {
+          externalCommitCount += 1;
+          return true;
+        },
+      })),
+    ).rejects.toThrow();
     expect(externalCommitCount).toBe(1);
     expect((await state.read('thread-a')).turns.map((turn) => turn.content)).toEqual(['summary', 'recent']);
   });
 
   it('clears state and continues the queue after a rejected operation', async () => {
     const state = new ThreadContextState();
-    await state.replace('thread-a', { branchId: 'branch-1', turns: [userTurn('old')] });
+    await state.replace('thread-a', { branchId: 'branch-1', tokenCount: 1, turns: [userTurn('old')] });
     const failed = state.append('thread-a', { branchId: 'wrong-branch', turns: [userTurn('reject')] });
     const cleared = state.clear('thread-a');
     await expect(failed).rejects.toThrow();
@@ -147,24 +321,28 @@ describe('ThreadContextState', () => {
     const first = await state.synchronize('thread-a', {
       branchId: 'branch-1',
       sourceThrough: 4,
+      tokenCount: 4,
       turns: [userTurn('one'), userTurn('two')],
       provenance: [provenance('one', 0, 1), provenance('two', 1, 2)],
     });
     const same = await state.synchronize('thread-a', {
       branchId: 'branch-1',
       sourceThrough: 5,
+      tokenCount: 4,
       turns: [userTurn('one'), userTurn('two')],
       provenance: [provenance('one', 0, 1), provenance('two', 1, 2)],
     });
     const appended = await state.synchronize('thread-a', {
       branchId: 'branch-1',
       sourceThrough: 7,
+      tokenCount: 5,
       turns: [userTurn('one'), userTurn('two'), userTurn('three')],
       provenance: [provenance('one', 0, 1), provenance('two', 1, 2), provenance('three', 2, 3)],
     });
     const late = await state.synchronize('thread-a', {
       branchId: 'branch-1',
       sourceThrough: 6,
+      tokenCount: 3,
       turns: [userTurn('old projection')],
       provenance: [provenance('old', 0, 1)],
     });
@@ -173,7 +351,9 @@ describe('ThreadContextState', () => {
     expect(same.sourceThrough).toBe(5);
     expect(appended.revision).toBe(first.revision + 1);
     expect(appended.provenance.map(({ turnStartIndex, turnEndIndex }) => [turnStartIndex, turnEndIndex])).toEqual([
-      [0, 1], [1, 2], [2, 3],
+      [0, 1],
+      [1, 2],
+      [2, 3],
     ]);
     expect(late).toMatchObject({ revision: appended.revision, sourceThrough: 7 });
     expect(late.turns.map((turn) => turn.content)).toEqual(['one', 'two', 'three']);
@@ -198,9 +378,7 @@ describe('ThreadContextState', () => {
             ...(item.turnEndIndex === undefined || item.turnEndIndex < turnIndex
               ? {}
               : { turnEndIndex: item.turnEndIndex + 1 }),
-            ...(item.turnIndex === undefined || item.turnIndex < turnIndex
-              ? {}
-              : { turnIndex: item.turnIndex + 1 }),
+            ...(item.turnIndex === undefined || item.turnIndex < turnIndex ? {} : { turnIndex: item.turnIndex + 1 }),
           }));
           return next({
             ...input,
@@ -217,7 +395,7 @@ describe('ThreadContextState', () => {
                 label: 'per-request injection',
                 kind: 'plugin',
                 disposition: 'raw',
-              turnIndex,
+                turnIndex,
               },
             ],
           });
@@ -227,12 +405,15 @@ describe('ThreadContextState', () => {
     const env = await setupRuntime(new FakeModel(() => response('ok')), {
       plugins: [transientPlugin],
       disabledBuiltinPlugins: ['pico.rolling-context'],
+      resolveProjectionTokenCount: () => 123,
     });
     const thread = env.createThread('runtime');
     let runtime = env.runtime;
     try {
       const user = env.store.appendCanonical(thread.id, 'state-user', 'message', {
-        role: 'user', source: 'user', content: 'ordinary request',
+        role: 'user',
+        source: 'user',
+        content: 'ordinary request',
       });
       const assistant = env.store.appendCanonical(thread.id, 'state-assistant-tools', 'assistant', {
         content: '',
@@ -254,7 +435,10 @@ describe('ThreadContextState', () => {
       const project = async () => {
         const records = env.store.listRecords(thread.id);
         return (runtime as unknown as RuntimeContextAccess).projectModelInput(
-          thread, records, records.at(-1)?.seq ?? 0, false,
+          thread,
+          records,
+          records.at(-1)?.seq ?? 0,
+          false,
         );
       };
       const first = await project();
@@ -262,15 +446,30 @@ describe('ThreadContextState', () => {
       const second = await project();
       const secondSnapshot = await (runtime as unknown as RuntimeContextAccess).contextStates.read(thread.id);
 
-      expect(first.turns.map((turn) => turn.kind === 'message' ? turn.content : turn.kind)).toContain('temporary-1');
-      expect(second.turns.map((turn) => turn.kind === 'message' ? turn.content : turn.kind)).toContain('temporary-2');
-      expect(second.turns.map((turn) => turn.kind === 'message' ? turn.content : turn.kind)).not.toContain('temporary-1');
-      expect(second.turns.findIndex((turn) => turn.kind === 'message' && turn.content === 'temporary-2'))
-        .toBeGreaterThan(second.turns.findIndex((turn) => turn.kind === 'message' && turn.content === 'ordinary request'));
+      expect(first.turns.map((turn) => (turn.kind === 'message' ? turn.content : turn.kind))).toContain('temporary-1');
+      expect(second.turns.map((turn) => (turn.kind === 'message' ? turn.content : turn.kind))).toContain('temporary-2');
+      expect(second.turns.map((turn) => (turn.kind === 'message' ? turn.content : turn.kind))).not.toContain(
+        'temporary-1',
+      );
+      expect(
+        second.turns.findIndex((turn) => turn.kind === 'message' && turn.content === 'temporary-2'),
+      ).toBeGreaterThan(
+        second.turns.findIndex((turn) => turn.kind === 'message' && turn.content === 'ordinary request'),
+      );
       expect(firstSnapshot.revision).toBe(secondSnapshot.revision);
-      expect(secondSnapshot.turns.some((turn) => turn.kind === 'message' && turn.content.startsWith('temporary-'))).toBe(false);
-      expect(secondSnapshot.turns.some((turn) => turn.kind === 'tool_result' && turn.content.includes('latest tool evidence'))).toBe(true);
-      expect(secondSnapshot.turns.filter((turn) => turn.kind === 'tool_result' && turn.content.includes('latest tool evidence'))).toHaveLength(1);
+      expect(
+        secondSnapshot.turns.some((turn) => turn.kind === 'message' && turn.content.startsWith('temporary-')),
+      ).toBe(false);
+      expect(
+        secondSnapshot.turns.some(
+          (turn) => turn.kind === 'tool_result' && turn.content.includes('latest tool evidence'),
+        ),
+      ).toBe(true);
+      expect(
+        secondSnapshot.turns.filter(
+          (turn) => turn.kind === 'tool_result' && turn.content.includes('latest tool evidence'),
+        ),
+      ).toHaveLength(1);
 
       const target = assistant.record as CanonicalRecord;
       const rewind = runtime.rewindContextToMessage(thread.id, target.id);
@@ -285,6 +484,7 @@ describe('ThreadContextState', () => {
         pluginDirectory: `${env.directory}/empty-plugins`,
         plugins: [transientPlugin],
         disabledBuiltinPlugins: ['pico.rolling-context'],
+        resolveProjectionTokenCount: () => 123,
       });
       await setupTestCatalog(runtime);
       await runtime.initialize();
@@ -292,8 +492,9 @@ describe('ThreadContextState', () => {
       const restartedSnapshot = await (runtime as unknown as RuntimeContextAccess).contextStates.read(thread.id);
       expect(restartedSnapshot.turns).toEqual(rewoundSnapshot.turns);
       expect(restartedSnapshot.branchId).toBe(rewoundSnapshot.branchId);
-      expect(restartedProjection.turns.filter((turn) => turn.kind === 'message' && turn.content.startsWith('temporary-')))
-        .toHaveLength(1);
+      expect(
+        restartedProjection.turns.filter((turn) => turn.kind === 'message' && turn.content.startsWith('temporary-')),
+      ).toHaveLength(1);
     } finally {
       if (runtime !== env.runtime) await runtime.shutdown();
       await env.cleanup();
@@ -302,6 +503,11 @@ describe('ThreadContextState', () => {
 });
 
 interface RuntimeContextAccess {
-  projectModelInput(thread: Thread, records: readonly CanonicalRecord[], through: number, isModelStep?: boolean): Promise<ProjectionInput>;
+  projectModelInput(
+    thread: Thread,
+    records: readonly CanonicalRecord[],
+    through: number,
+    isModelStep?: boolean,
+  ): Promise<ProjectionInput>;
   contextStates: ThreadContextState;
 }

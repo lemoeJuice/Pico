@@ -50,7 +50,15 @@ describe('OpenAI-compatible streaming adapter', () => {
             ],
           },
           { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
-          { choices: [], usage: { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 } },
+          {
+            choices: [],
+            usage: {
+              prompt_tokens: 12,
+              completion_tokens: 3,
+              total_tokens: 15,
+              completion_tokens_details: { reasoning_tokens: 1 },
+            },
+          },
         ];
         for (const frame of frames) response.write(`data: ${JSON.stringify(frame)}\n\n`);
         response.end('data: [DONE]\n\n');
@@ -125,7 +133,7 @@ describe('OpenAI-compatible streaming adapter', () => {
     expect(result).toMatchObject({
       content: 'Hello',
       model: 'actual-model',
-      usage: { inputTokens: 12, outputTokens: 3, totalTokens: 15 },
+      usage: { inputTokens: 12, outputTokens: 3, totalTokens: 15, reasoningTokens: 1 },
       toolCalls: [{ id: 'call_1', name: 'read_file', arguments: { path: 'note.txt' } }],
     });
     expect(requestSummaries).toHaveLength(1);
@@ -136,7 +144,15 @@ describe('OpenAI-compatible streaming adapter', () => {
     const frames = [
       { choices: [{ delta: { reasoning_content: 'thinking' } }] },
       { choices: [{ delta: { content: 'answer' }, finish_reason: 'stop' }] },
-      { choices: [], usage: { prompt_cache_hit_tokens: 3, prompt_cache_miss_tokens: 7, completion_tokens: 4 } },
+      {
+        choices: [],
+        usage: {
+          prompt_cache_hit_tokens: 3,
+          prompt_cache_miss_tokens: 7,
+          completion_tokens: 4,
+          completion_tokens_details: { reasoning_tokens: -1 },
+        },
+      },
     ];
     const fetcher = vi
       .spyOn(globalThis, 'fetch')

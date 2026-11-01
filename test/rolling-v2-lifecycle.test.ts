@@ -152,15 +152,16 @@ describe('Rolling Context v2 lifecycle', () => {
     const model = new FakeModel((prompt) => {
       if (isRollingSummary(prompt)) {
         const source = JSON.stringify(prompt.turns);
-        return response(
-          JSON.stringify({
-            summary: source.includes('ROUND_ONE_RAW_FACT')
+        return {
+          ...response(
+            source.includes('ROUND_ONE_RAW_FACT')
               ? 'ROUND_ONE_WARM_SUMMARY'
               : source.includes('ROUND_TWO_RAW_FACT')
                 ? 'ROUND_TWO_WARM_SUMMARY'
                 : 'ROLLING_COMPACT_CALL_SUMMARY',
-          }),
-        );
+          ),
+          usage: { inputTokens: 120, outputTokens: 18, reasoningTokens: 3, totalTokens: 138 },
+        };
       }
       mainCall += 1;
       if (mainCall === 1) return response(rawRoundOne);
@@ -175,7 +176,10 @@ describe('Rolling Context v2 lifecycle', () => {
         ]);
       return response('Continuation after rolling_compact.');
     });
-    const env = await setupRuntime(model, { plugins: [rollingContextPlugin] });
+    const env = await setupRuntime(model, {
+      plugins: [rollingContextPlugin],
+      resolveProjectionTokenCount: () => 100,
+    });
     const thread = env.createThread('runtime');
     try {
       if (configureEconomics) await configureRollingEconomics(env, thread.id);

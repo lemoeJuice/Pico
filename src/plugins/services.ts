@@ -21,6 +21,13 @@ export interface PluginServices {
     modelSelection(threadId: string): ThreadModelSelection;
     /** Preview the current full model projection without starting a model step. */
     previewModelInput(threadId: string): Promise<ProjectionInput>;
+    /** Atomically validate and commit a provider-counted context replacement. */
+    commitContextReplacement(
+      threadId: string,
+      preview: ProjectionInput,
+      candidate: ProjectionInput,
+      commit: () => boolean,
+    ): Promise<{ committed: boolean; reason?: string }>;
     validateModelSelection(selection: CatalogSelection): ThreadModelSelection;
     updateModelSelection(threadId: string, selection: CatalogSelection): ThreadModelSelection;
     list(projectId?: string | null): Thread[];
@@ -119,6 +126,7 @@ export const unavailablePluginServices: PluginServices = {
     notifyParent: unavailable,
     modelSelection: unavailable,
     previewModelInput: unavailable,
+    commitContextReplacement: unavailable,
     validateModelSelection: unavailable,
     updateModelSelection: unavailable,
     list: unavailable,

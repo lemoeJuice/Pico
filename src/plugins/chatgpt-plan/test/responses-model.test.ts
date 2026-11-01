@@ -96,6 +96,33 @@ describe('ChatGPT Responses adapter', () => {
     ]);
   });
 
+  it('omits invalid reasoning token counts instead of normalizing them to zero', async () => {
+    vi.stubGlobal('fetch', async () => {
+      const frames = [
+        {
+          type: 'response.completed',
+          response: {
+            status: 'completed',
+            output: [],
+            usage: { output_tokens: 8, output_tokens_details: { reasoning_tokens: -2 } },
+          },
+        },
+      ];
+      return new Response(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''), {
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+    const adapter = new ChatGptResponsesAdapter({
+      accessToken: async () => 'oauth-access-token',
+    } as unknown as ChatGptPlanAuth);
+    const result = await adapter.complete(
+      { system: '', model: 'selected-model', temperature: 0, turns: [], tools: [] },
+      new AbortController().signal,
+      () => undefined,
+    );
+    expect(result.usage).toEqual({ outputTokens: 8 });
+  });
+
   it('streams transient text and maps completed function calls, usage, and settings', async () => {
     let requestBody: Record<string, unknown> | undefined;
     let authorization = '';
@@ -126,7 +153,12 @@ describe('ChatGPT Responses adapter', () => {
                 arguments: '{"path":"notes.txt"}',
               },
             ],
-            usage: { input_tokens: 24, output_tokens: 6, total_tokens: 30 },
+            usage: {
+              input_tokens: 24,
+              output_tokens: 6,
+              total_tokens: 30,
+              output_tokens_details: { reasoning_tokens: 2 },
+            },
           },
         },
       ];
@@ -208,7 +240,7 @@ describe('ChatGPT Responses adapter', () => {
     expect(result).toMatchObject({
       content: 'Hello',
       model: 'account-model',
-      usage: { inputTokens: 24, outputTokens: 6, totalTokens: 30 },
+      usage: { inputTokens: 24, outputTokens: 6, totalTokens: 30, reasoningTokens: 2 },
       toolCalls: [{ id: 'call_1', name: 'read_file', arguments: { path: 'notes.txt' } }],
       finishReason: 'tool_calls',
     });

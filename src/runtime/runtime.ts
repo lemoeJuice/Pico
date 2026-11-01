@@ -49,6 +49,7 @@ import type {
 import { ExecutionPipelines } from '../core/pipeline.js';
 import { ContainerExecutor, type WorkspaceContainerPlan } from '../executor/container-executor.js';
 import { ExecutorActivity } from './executor-activity.js';
+import { buildProviderObservedContextTokenHistory, buildProviderObservedSegmentLedger } from './context-token-history.js';
 import { HostExecutor, requiresExternalExecutor, type ExecutorAdapter } from '../executor/executor.js';
 import { RemoteHostExecutor, inspectRemoteExecutor, validateRemoteWorkspace } from '../executor/remote-executor.js';
 import { EXECUTOR_PROTOCOL_VERSION, normalizeRemoteExecutorUrl } from '../executor/remote-protocol.js';
@@ -97,7 +98,7 @@ import { McpManager } from './mcp-manager.js';
 import { resolveToolSurface } from './tool-surface.js';
 import { projectedCompactionPrefix } from './projection-mapping.js';
 import { ModelDraftBuffer, type ModelDraftReadResult } from './model-draft-buffer.js';
-import { ThreadContextState } from './context-state.js';
+import { StaleContextProjectionError, ThreadContextState } from './context-state.js';
 import type { McpServerInput, McpServerView, StartMcpServerOptions } from '../contracts/mcp.js';
 import type { DraftHandoffExecutionState } from '../contracts/runtime.js';
 export type { McpServerInput, McpServerView, StartMcpServerOptions } from '../contracts/mcp.js';
@@ -155,7 +156,13 @@ const FRAMEWORK_EXECUTOR_TOOL_NAMES = new Set(builtinExecutorToolDefinitions().m
 const RUNTIME_COMPACTION_MIN_RECENT_TURNS = 2;
 const RUNTIME_COMPACTION_MAX_SUMMARY_CHARS = 12_000;
 const contextStateRevisionKey: unique symbol = Symbol('pico.context-state-revision');
-type ContextStateProjection = ProjectionInput & { [contextStateRevisionKey]?: number };
+const tokenAccountingRecordsKey: unique symbol = Symbol('pico.context-token-records');
+const freshProjectionKey: unique symbol = Symbol('pico.context-projection-was-current');
+type ContextStateProjection = ProjectionInput & {
+  [contextStateRevisionKey]?: number;
+  [tokenAccountingRecordsKey]?: readonly CanonicalRecord[];
+  [freshProjectionKey]?: boolean;
+};
 const DEFAULT_CONTEXT_MANAGEMENT_SETTINGS: ContextManagementSettings = {
   contextWindowTokens: 272_000,
   compactionThresholdTokens: 256_000,
@@ -165,46 +172,6 @@ const DEFAULT_MISCELLANEOUS_SETTINGS: MiscellaneousSettings = {
   toolCardsExpandedByDefault: false,
   convenientModelParameters: false,
 };
-
-function compactionBlockTokenEstimate(
-  block: readonly CanonicalRecord[],
-  previousBlock: readonly CanonicalRecord[] | undefined,
-  thread: Thread,
-  limit: number,
-): number {
-  const assistant = [...block].reverse().find((record) => record.kind === 'assistant');
-  const previousAssistant = previousBlock
-    ? [...previousBlock].reverse().find((record) => record.kind === 'assistant')
-    : undefined;
-  const payload = assistant ? objectValue(assistant.payload) : null;
-  const previousPayload = previousAssistant ? objectValue(previousAssistant.payload) : null;
-  const usage = diagnosticUsage(payload?.usage);
-  const previousUsage = diagnosticUsage(previousPayload?.usage);
-  // The invocation's provider usage is recorded before its tool results are
-  // appended, so also account for the complete unit's retained content.
-  const contentEstimate = estimatePromptCharacters(canonicalBlockToPromptTurns(block, thread), limit);
-  const sameModel =
-    typeof payload?.model === 'string' &&
-    typeof previousPayload?.model === 'string' &&
-    payload.model === previousPayload.model;
-  const providersCompatible =
-    typeof payload?.provider !== 'string' ||
-    typeof previousPayload?.provider !== 'string' ||
-    payload.provider === previousPayload.provider;
-  if (
-    sameModel &&
-    providersCompatible &&
-    usage?.inputTokens !== undefined &&
-    previousUsage?.inputTokens !== undefined
-  ) {
-    const delta = usage.inputTokens - previousUsage.inputTokens;
-    if (delta > 0) return Math.min(limit, Math.max(delta, contentEstimate));
-  }
-
-  // Pico has no universal tokenizer. Character count deliberately errs on the
-  // side of retaining more history when comparable provider usage is absent.
-  return Math.max(1, contentEstimate);
-}
 
 function activeRuntimeContextCompaction(records: readonly CanonicalRecord[]) {
   return runtimeContextCompaction(records);
@@ -768,34 +735,10 @@ function estimatePromptCharacters(value: unknown, limit: number): number {
   return characters;
 }
 
-/** Returns null when the request contains opaque multimodal or replay data. */
-function serializedPromptCharacters(prompt: {
-  system: string;
-  tools: readonly ToolDefinition[];
-  turns: readonly PromptTurn[];
-  model: string;
-  temperature: number;
-}): number | null {
-  const hasOpaqueTurnData = (value: unknown): boolean => {
-    if (Array.isArray(value)) return value.some(hasOpaqueTurnData);
-    if (!value || typeof value !== 'object') return false;
-    const item = value as Record<string, unknown>;
-    if (
-      Object.hasOwn(item, 'reasoningReplay') ||
-      item.type === 'image' ||
-      Object.hasOwn(item, 'images') ||
-      Object.hasOwn(item, 'image_url')
-    )
-      return true;
-    return Object.values(item).some(hasOpaqueTurnData);
-  };
-  if (hasOpaqueTurnData(prompt.turns)) return null;
-  try {
-    const serialized = JSON.stringify(prompt);
-    return typeof serialized === 'string' ? serialized.length : null;
-  } catch {
-    return null;
-  }
+function validTokenCount(count: number | null): number | null {
+  if (count === null) return null;
+  if (!Number.isSafeInteger(count) || count < 0) throw new RangeError('Projected token count must be a non-negative safe integer.');
+  return count;
 }
 
 function sanitizeRequestStart(details: ProviderRequestStart): ProviderRequestStart {
@@ -1101,6 +1044,10 @@ export interface RuntimeOptions {
   disabledBuiltinPlugins?: string[];
   /** Override Executor lease transport for isolated Runtime tests. */
   executorActivityEnabled?: boolean;
+  /** Supply a verified projection count when a provider exposes one; null means unknown. */
+  resolveProjectionTokenCount?: (prompt: ModelPrompt, selection: ThreadModelSelection) => number | null;
+  /** Supply a verified count for a complete history block; null means unknown. */
+  resolveContextSegmentTokenCount?: (block: readonly CanonicalRecord[], selection: ThreadModelSelection) => number | null;
 }
 
 export class PicoRuntime {
@@ -1115,6 +1062,7 @@ export class PicoRuntime {
   private readonly hostExecutor: HostExecutor;
   private readonly containerExecutor: ContainerExecutor;
   private readonly executorActivity: ExecutorActivity;
+  private readonly projectedModelSelections = new WeakMap<ProjectionInput, ThreadModelSelection>();
   private readonly workspaceMutationThreads = new Set<string>();
   private readonly workspaceMutationProjects = new Set<string>();
   private readonly workspaceMutationPaths = new Set<string>();
@@ -1226,6 +1174,8 @@ export class PicoRuntime {
           const records = this.store.listRecords(threadId);
           return this.projectModelInput(thread, records, records.at(-1)?.seq ?? 0, false);
         },
+        commitContextReplacement: (threadId, preview, candidate, commit) =>
+          this.commitContextReplacement(threadId, preview, candidate, commit),
         modelSelection: (threadId) => this.threadModelSelection(threadId),
         validateModelSelection: (selection) => this.validateThreadModelSelection(selection),
         updateModelSelection: (threadId, selection) => this.updateThreadModelSelection(threadId, selection),
@@ -1412,17 +1362,35 @@ export class PicoRuntime {
       'projection',
       'pico.runtime-context-state',
       async (input, next) => {
-        // Retried and paged historical projections are request-local. They must not
-        // rewind the current Thread state, even if they finish after a newer projection.
-        if (input.through < this.store.latestCanonicalSeq(input.thread.id)) return next(input);
+        // Rolling projection may append its own transition facts while preparing
+        // this request. Those facts do not add conversation turns; allow a fresh
+        // model-step projection through while keeping older/paged requests local.
+        const isCurrent = (): boolean => {
+          if (input.through >= this.store.latestCanonicalSeq(input.thread.id)) return true;
+          const later = this.store.listRecords(input.thread.id).filter((record) => record.seq > input.through);
+          const onlyRollingTransitions = later.length > 0 && later.every((record) => {
+            const payload = record.kind === 'plugin' ? objectValue(record.payload) : null;
+            return payload?.pluginId === 'pico.rolling-context' && payload.type === 'rolling-context.transition';
+          });
+          return Boolean(input.modelStep && (input as ContextStateProjection)[freshProjectionKey] && onlyRollingTransitions);
+        };
+        if (!isCurrent()) return next(input);
         const ordinary = ordinaryProjectionParts(input);
         const branchId = runtimeConversationProjection(input.records).activeProjectionId;
-        const snapshot = await this.contextStates.synchronize(input.thread.id, {
-          branchId,
-          sourceThrough: input.through,
-          turns: ordinary.turns,
-          provenance: ordinary.provenance,
-        });
+        const tokenCount = this.projectionTokenCount(input, this.threadModelSelection(input.thread.id));
+        let snapshot;
+        try {
+          snapshot = await this.contextStates.synchronize(input.thread.id, {
+            branchId,
+            sourceThrough: input.through,
+            turns: ordinary.turns,
+            provenance: ordinary.provenance,
+            ...(tokenCount === null ? {} : { tokenCount }),
+          }, isCurrent);
+        } catch (error) {
+          if (error instanceof StaleContextProjectionError) return next(input);
+          throw error;
+        }
         // A newer projection may have won the queue while this one was waiting.
         // Keep a historical request's own turns and do not expose the current cache.
         if (snapshot.sourceThrough > input.through) return next(input);
@@ -3309,17 +3277,93 @@ export class PicoRuntime {
     if (afterModel && modelBatch) await this.runToolBatch(afterModel, modelBatch);
   }
 
+  private projectionTokenCount(projected: ProjectionInput, selection: ThreadModelSelection): number | null {
+    const prompt: ModelPrompt = {
+      system: projected.systemPrompt,
+      turns: projected.turns,
+      tools: projected.tools,
+      model: selection.model,
+      temperature: selection.parameters.temperature ?? defaultModelSettings.temperature,
+    };
+    return validTokenCount(this.options.resolveProjectionTokenCount
+      ? this.options.resolveProjectionTokenCount(prompt, structuredClone(selection))
+      : buildProviderObservedContextTokenHistory(
+          (projected as ContextStateProjection)[tokenAccountingRecordsKey] ??
+            this.store.listRecords(projected.thread.id).filter((record) => record.seq <= projected.through),
+          projected,
+          selection,
+          projected.provenance?.some((item) => item.kind === 'rolling_segment' && item.disposition === 'summary')
+            ? this.store.listPluginModelCalls({ pluginId: 'pico.rolling-context', threadId: projected.thread.id })
+            : [],
+        )?.inputTokens ?? null);
+  }
+
+  private async commitContextReplacement(
+    threadId: string,
+    preview: ProjectionInput,
+    candidate: ProjectionInput,
+    commit: () => boolean,
+  ): Promise<{ committed: boolean; reason?: string }> {
+    const reject = (reason: string) => ({ committed: false, reason });
+    if (preview.thread.id !== threadId || candidate.thread.id !== threadId ||
+        preview.through !== candidate.through || typeof commit !== 'function' ||
+        stableJson(preview.thread) !== stableJson(candidate.thread) ||
+        stableJson(preview.records) !== stableJson(candidate.records) ||
+        preview.systemPrompt !== candidate.systemPrompt || stableJson(preview.tools) !== stableJson(candidate.tools)) {
+      return reject('Context replacement does not match the current projection.');
+    }
+    const previewAccountingRecords = (preview as ContextStateProjection)[tokenAccountingRecordsKey];
+    const candidateAccountingRecords = (candidate as ContextStateProjection)[tokenAccountingRecordsKey];
+    const currentAccountingRecords = () => this.store.listRecords(threadId).filter((record) => record.seq <= preview.through);
+    if (!previewAccountingRecords || !candidateAccountingRecords ||
+        stableJson(previewAccountingRecords) !== stableJson(candidateAccountingRecords) ||
+        stableJson(previewAccountingRecords) !== stableJson(currentAccountingRecords())) {
+      return reject('Context replacement does not match the canonical token accounting history.');
+    }
+    const selection = this.threadModelSelection(threadId);
+    const snapshot = await this.contextStates.read(threadId);
+    const original = ordinaryProjectionParts(preview);
+    const snapshotProvenance = snapshot.provenance.map(({ threadId: _threadId, branchId: _branchId, sourceThrough: _sourceThrough, ...item }) => item);
+    if (snapshot.sourceThrough !== preview.through || stableJson(snapshot.turns) !== stableJson(original.turns) ||
+        stableJson(snapshotProvenance) !== stableJson(original.provenance)) {
+      return reject('Context changed before the replacement could be prepared.');
+    }
+    const tokenCount = this.projectionTokenCount(candidate, selection);
+    if (tokenCount === null) return reject('The replacement has no verified provider token count.');
+    const replacement = ordinaryProjectionParts(candidate);
+    const result = await this.contextStates.commitIfRevision(threadId, snapshot.revision, () => ({
+      replacement: {
+        branchId: snapshot.branchId,
+        sourceThrough: preview.through,
+        turns: replacement.turns,
+        provenance: replacement.provenance,
+        tokenCount,
+      },
+      commit: () => {
+        if (this.store.latestCanonicalSeq(threadId) !== preview.through ||
+            stableJson(this.threadModelSelection(threadId)) !== stableJson(selection) ||
+            stableJson(previewAccountingRecords) !== stableJson(currentAccountingRecords())) return false;
+        return commit();
+      },
+    }));
+    return result.committed ? { committed: true } : reject('Context changed before the replacement could be committed.');
+  }
+
   private async autoCompactBeforeModelStep(thread: Thread): Promise<ProjectionInput | null> {
     const settings = this.getContextManagementSettings();
     const records = this.store.listRecords(thread.id);
-    const latestAssistant = [...records].reverse().find((record) => record.kind === 'assistant');
-    const assistantPayload = latestAssistant ? objectValue(latestAssistant.payload) : null;
-    const inputTokens = diagnosticUsage(assistantPayload?.usage)?.inputTokens;
-    if (inputTokens === undefined || inputTokens < settings.compactionThresholdTokens) return null;
-
+    let inputTokens: number | null = null;
     try {
       const through = records.at(-1)?.seq ?? 0;
       const projectedInput = await this.projectModelInput(thread, records, through, true);
+      const selection = this.threadModelSelection(thread.id);
+      inputTokens = this.projectionTokenCount(projectedInput, selection);
+      this.projectedModelSelections.set(projectedInput, structuredClone(selection));
+      if (inputTokens === null || inputTokens < settings.compactionThresholdTokens) return projectedInput;
+      // With no completed invocation there is nothing to compact. Let the
+      // provider handle an oversized first message as it normally would.
+      const conversation = canonicalConversationRecords(runtimeConversationProjection(records).records);
+      if (completedCanonicalModelInvocationBlocks(conversation).length === 0) return projectedInput;
 
       const latestCompaction = [...records].reverse().find((record) => {
         if (record.kind !== 'plugin') return false;
@@ -3349,22 +3393,17 @@ export class PicoRuntime {
         const compactedThrough = recordsAfterCompaction.at(-1)?.seq ?? 0;
         const compactedProjection = await this.projectModelInput(thread, recordsAfterCompaction, compactedThrough);
         const compactedSelection = this.threadModelSelection(thread.id);
-        const postCompactionEstimate = serializedPromptCharacters({
-          system: compactedProjection.systemPrompt,
-          tools: compactedProjection.tools,
-          turns: compactedProjection.turns,
-          model: compactedSelection.model,
-          temperature: compactedSelection.parameters.temperature ?? defaultModelSettings.temperature,
-        });
-        if (postCompactionEstimate !== null && postCompactionEstimate >= settings.contextWindowTokens) {
+        const postCompactionTokens = this.projectionTokenCount(compactedProjection, compactedSelection);
+        if (postCompactionTokens !== null && postCompactionTokens >= settings.contextWindowTokens) {
           this.store.setPause(
             thread.id,
             true,
-            'The compacted projected request still reaches the configured context window by the text-size estimate. The next model request was blocked; review or shorten recent history, then Continue.',
+            'The compacted projected request still reaches the configured context window by the reported token count. The next model request was blocked; review or shorten recent history, then Continue.',
           );
           this.publishThreadUpdate(thread.id);
           return null;
         }
+        this.projectedModelSelections.set(compactedProjection, structuredClone(compactedSelection));
         return compactedProjection;
       }
 
@@ -3380,7 +3419,7 @@ export class PicoRuntime {
       this.store.setPause(
         thread.id,
         true,
-        `Automatic context compaction failed after the last request reached ${inputTokens.toLocaleString()} input tokens, so the next model request was blocked.${failureType ? ` Failure type: ${failureType}.` : ''} Review the compaction settings or recent history, then Continue.`,
+        `Automatic context preparation or compaction failed${inputTokens === null ? '' : ` at ${inputTokens.toLocaleString()} reported input tokens`}, so the next model request was blocked.${failureType ? ` Failure type: ${failureType}.` : ''} Review the compaction settings or recent history, then Continue.`,
       );
       this.publishThreadUpdate(thread.id);
       return null;
@@ -3393,6 +3432,7 @@ export class PicoRuntime {
     through: number,
     isModelStep = false,
   ): Promise<ProjectionInput> {
+    const wasCurrentAtStart = through === this.store.latestCanonicalSeq(thread.id);
     const projectionRecords = records.filter((record) => record.seq <= through).map((record) => deepFreeze(record));
     const toolSurface = await this.toolSurfaceFor(thread);
     const enabledTools = toolSurface.tools.filter((tool) =>
@@ -3536,6 +3576,14 @@ export class PicoRuntime {
     };
     Object.defineProperty(baseProjection, runtimeContextCompactionProjectionKey, {
       value: runtimeCompaction,
+      enumerable: true,
+    });
+    Object.defineProperty(baseProjection, tokenAccountingRecordsKey, {
+      value: projectionRecords,
+      enumerable: true,
+    });
+    Object.defineProperty(baseProjection, freshProjectionKey, {
+      value: wasCurrentAtStart,
       enumerable: true,
     });
     return this.pipelines.run('projection', baseProjection, async (value) => value);
@@ -4178,7 +4226,9 @@ export class PicoRuntime {
       preparedProjection?.records ??
       allRecords.filter((record) => record.seq <= through).map((record) => deepFreeze(record));
     const modelExecutionId = retryExecution?.id ?? randomUUID();
-    const modelSelection = this.threadModelSelection(thread.id);
+    const modelSelection = preparedProjection
+      ? (this.projectedModelSelections.get(preparedProjection) ?? this.threadModelSelection(thread.id))
+      : this.threadModelSelection(thread.id);
     let modelSettings: ModelSettings = {
       ...defaultModelSettings,
       model: modelSelection.model,
@@ -4246,6 +4296,7 @@ export class PicoRuntime {
           requestId,
           prompt,
           promptSummary,
+          tokenAccountingSelection: { ...structuredClone(modelSelection), provider, model: actualPrompt.model },
           projectionProvenance: structuredClone(provenance ?? projected.provenance ?? []),
         });
         this.appendExecutionDiagnostic(modelExecutionId, 'model-input-requested', {
@@ -4493,17 +4544,45 @@ export class PicoRuntime {
     const completed = completedCanonicalModelInvocationBlocks(conversation).filter(
       (block) => (block.at(-1)?.seq ?? 0) > previousThroughSeq,
     );
+    const selection = this.threadModelSelection(thread.id);
+    const segmentLedger = buildProviderObservedSegmentLedger(
+      records, thread, selection,
+      this.store.listPluginModelCalls({ pluginId: 'pico.rolling-context', threadId: thread.id }),
+    );
     const recent: CanonicalRecord[][] = [];
-    let recentTokenEstimate = 0;
+    let recentTokenCount = 0;
     for (let index = completed.length - 1; index >= 0; index -= 1) {
       const block = completed[index]!;
+      let blockTokens: number | null = null;
+      if (this.options.resolveContextSegmentTokenCount) {
+        blockTokens = validTokenCount(this.options.resolveContextSegmentTokenCount(block, structuredClone(selection)));
+      } else if (!block.some((record) => record.kind === 'message')) {
+        const source = block.filter((record) => record.kind === 'assistant' || record.kind === 'tool_result');
+        const digest = createHash('sha256').update(JSON.stringify(source, null, 2)).digest('hex');
+        const entry = segmentLedger?.segmentLedger.find((item) =>
+          item.startSeq === source[0]?.seq && item.endSeq === source.at(-1)?.seq && item.sourceHash === digest,
+        );
+        if (entry) blockTokens = entry.tokenCount;
+        else if (index === completed.length - 1) {
+          const assistant = source.find((record) => record.kind === 'assistant');
+          const assistantPayload = objectValue(assistant?.payload);
+          const usage = diagnosticUsage(assistantPayload?.usage);
+          if (assistant?.id === `${segmentLedger?.baselineExecutionId}:assistant` &&
+              assistantPayload?.reasoningReplay === undefined &&
+              !(typeof assistantPayload?.reasoningContent === 'string' && assistantPayload.reasoningContent.length > 0) &&
+              usage?.outputTokens !== undefined && usage.reasoningTokens !== undefined &&
+              usage.reasoningTokens <= usage.outputTokens) {
+            // The latest tool results are not yet represented in provider usage.
+            blockTokens = usage.outputTokens - usage.reasoningTokens;
+          }
+        }
+      }
+      if (blockTokens === null) {
+        return { text: 'Cannot compact: the token count for recent history is unavailable.', severity: 'error' };
+      }
       recent.unshift(block);
-      recentTokenEstimate = Math.min(
-        keepRecentTokens,
-        recentTokenEstimate +
-          compactionBlockTokenEstimate(block, index > 0 ? completed[index - 1] : undefined, thread, keepRecentTokens),
-      );
-      if (recent.length >= RUNTIME_COMPACTION_MIN_RECENT_TURNS && recentTokenEstimate >= keepRecentTokens) break;
+      recentTokenCount = Math.min(keepRecentTokens, recentTokenCount + blockTokens);
+      if (recent.length >= RUNTIME_COMPACTION_MIN_RECENT_TURNS && recentTokenCount >= keepRecentTokens) break;
     }
     const eligible = completed.slice(0, completed.length - recent.length);
     if (eligible.length === 0) {
@@ -4753,8 +4832,14 @@ export class PicoRuntime {
           });
         }
         const commitThrough = commitRecords.at(-1)?.seq ?? 0;
+        const replacementProjection: ContextStateProjection = {
+          ...finalProjection, records: commitRecords, through: commitThrough, turns, provenance,
+          [tokenAccountingRecordsKey]: commitRecords,
+        };
+        const tokenCount = this.projectionTokenCount(replacementProjection, this.threadModelSelection(thread.id));
+        if (tokenCount === null) throw new Error('Cannot replace context without a token count.');
         return {
-          replacement: { branchId, sourceThrough: commitThrough, turns, provenance },
+          replacement: { branchId, sourceThrough: commitThrough, turns, provenance, tokenCount },
           commit: () => {
             // Recheck and write Canonical facts without awaiting while this
             // Thread's queue slot is held. Store transaction rolls back on error.
@@ -5190,7 +5275,7 @@ export class PicoRuntime {
       provider: effectiveSelection.provider,
       model: prompt.model,
       // Never persist inline image data or opaque replay state in call diagnostics.
-      prompt: promptForDiagnostics(prompt),
+      prompt: { ...promptForDiagnostics(prompt), tokenAccountingSelection: structuredClone(effectiveSelection) },
       status: 'running',
       response: null,
       usage: null,
@@ -5237,7 +5322,10 @@ export class PicoRuntime {
     const recordModelInput = (actualPrompt: ModelPrompt, provider: string): void => {
       call = {
         ...call,
-        prompt: structuredClone(promptForDiagnostics(actualPrompt)),
+        prompt: {
+          ...structuredClone(promptForDiagnostics(actualPrompt)),
+          tokenAccountingSelection: { ...structuredClone(effectiveSelection), provider, model: actualPrompt.model },
+        },
         provider,
         model: actualPrompt.model,
       };

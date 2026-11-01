@@ -220,6 +220,11 @@ function readUsage(value: unknown): TokenUsage | null {
   if (!usage) return null;
   const input = typeof usage.input_tokens === 'number' ? usage.input_tokens : undefined;
   const output = typeof usage.output_tokens === 'number' ? usage.output_tokens : undefined;
+  const rawOutputDetails = object(usage.output_tokens_details);
+  const reasoningTokens =
+    Number.isSafeInteger(rawOutputDetails?.reasoning_tokens) && (rawOutputDetails?.reasoning_tokens as number) >= 0
+      ? (rawOutputDetails?.reasoning_tokens as number)
+      : undefined;
   const total = typeof usage.total_tokens === 'number' ? usage.total_tokens : undefined;
   const inputDetails = object(usage.input_tokens_details);
   const cached = typeof inputDetails?.cached_tokens === 'number' ? inputDetails.cached_tokens : undefined;
@@ -227,6 +232,7 @@ function readUsage(value: unknown): TokenUsage | null {
   if (
     input === undefined &&
     output === undefined &&
+    reasoningTokens === undefined &&
     total === undefined &&
     cached === undefined &&
     cacheWrite === undefined
@@ -235,6 +241,7 @@ function readUsage(value: unknown): TokenUsage | null {
   return {
     ...(input === undefined ? {} : { inputTokens: input }),
     ...(output === undefined ? {} : { outputTokens: output }),
+    ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
     ...(total === undefined ? {} : { totalTokens: total }),
     ...(cached === undefined ? {} : { cachedInputTokens: cached }),
     ...(cacheWrite === undefined ? {} : { cacheWriteTokens: cacheWrite }),

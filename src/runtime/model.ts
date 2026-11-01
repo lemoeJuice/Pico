@@ -128,6 +128,15 @@ function usageFrom(value: unknown, cacheHitMissUsage: boolean): TokenUsage | nul
   const usage = value as Record<string, unknown>;
   const inputTokens = typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : undefined;
   const outputTokens = typeof usage.completion_tokens === 'number' ? usage.completion_tokens : undefined;
+  const rawCompletionDetails = usage.completion_tokens_details;
+  const completionDetails =
+    rawCompletionDetails && typeof rawCompletionDetails === 'object' && !Array.isArray(rawCompletionDetails)
+      ? (rawCompletionDetails as Record<string, unknown>)
+      : null;
+  const reasoningTokens =
+    Number.isSafeInteger(completionDetails?.reasoning_tokens) && (completionDetails?.reasoning_tokens as number) >= 0
+      ? (completionDetails?.reasoning_tokens as number)
+      : undefined;
   const totalTokens = typeof usage.total_tokens === 'number' ? usage.total_tokens : undefined;
   const rawPromptDetails = usage.prompt_tokens_details;
   const promptDetails =
@@ -152,6 +161,7 @@ function usageFrom(value: unknown, cacheHitMissUsage: boolean): TokenUsage | nul
   if (
     resolvedInputTokens === undefined &&
     outputTokens === undefined &&
+    reasoningTokens === undefined &&
     totalTokens === undefined &&
     resolvedCachedInputTokens === undefined &&
     cacheWriteTokens === undefined
@@ -160,6 +170,7 @@ function usageFrom(value: unknown, cacheHitMissUsage: boolean): TokenUsage | nul
   return {
     ...(resolvedInputTokens === undefined ? {} : { inputTokens: resolvedInputTokens }),
     ...(outputTokens === undefined ? {} : { outputTokens }),
+    ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
     ...(totalTokens === undefined ? {} : { totalTokens }),
     ...(resolvedCachedInputTokens === undefined ? {} : { cachedInputTokens: resolvedCachedInputTokens }),
     ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),

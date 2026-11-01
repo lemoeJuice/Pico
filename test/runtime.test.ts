@@ -21,7 +21,11 @@ describe('durable Thread runtime invariants', () => {
           : 'Continued with the recent context.',
       ),
     );
-    const env = await setupRuntime(model, { disabledBuiltinPlugins: ['pico.rolling-context'] });
+    const env = await setupRuntime(model, {
+      disabledBuiltinPlugins: ['pico.rolling-context'],
+      resolveProjectionTokenCount: () => 1_500,
+      resolveContextSegmentTokenCount: () => 1,
+    });
     let runtime = env.runtime;
     const thread = env.createThread('runtime');
     try {
@@ -57,6 +61,8 @@ describe('durable Thread runtime invariants', () => {
         model,
         disabledBuiltinPlugins: ['pico.rolling-context'],
         pluginDirectory: join(env.directory, 'empty-plugins'),
+        resolveProjectionTokenCount: () => 1_500,
+        resolveContextSegmentTokenCount: () => 1,
       });
       await setupTestCatalog(runtime);
       await runtime.initialize();
@@ -80,12 +86,20 @@ describe('durable Thread runtime invariants', () => {
   });
 
   it('automatically compacts eligible history before the next model request when the configured threshold is reached', async () => {
+    const resolvedPrompts: ModelPrompt[] = [];
     const model = new FakeModel((_prompt, callNumber) =>
       response(
         callNumber === 1 ? 'Earlier turns summary: objective alpha; verified result beta.' : 'Continued safely.',
       ),
     );
-    const env = await setupRuntime(model, { disabledBuiltinPlugins: ['pico.rolling-context'] });
+    const env = await setupRuntime(model, {
+      disabledBuiltinPlugins: ['pico.rolling-context'],
+      resolveProjectionTokenCount: (prompt) => {
+        resolvedPrompts.push(prompt);
+        return 1_500;
+      },
+      resolveContextSegmentTokenCount: () => 1,
+    });
     const thread = env.createThread('runtime');
     try {
       env.runtime.updateContextManagementSettings({
@@ -119,10 +133,231 @@ describe('durable Thread runtime invariants', () => {
         records.filter((record) => record.kind === 'plugin' && record.payload.action === 'context-compacted'),
       ).toHaveLength(1);
       expect(model.prompts).toHaveLength(2);
+      const resolvedPromptTurns = resolvedPrompts.map((prompt) => JSON.stringify(prompt.turns));
+      expect(resolvedPromptTurns.some((turns) => turns.includes('request turn 1'))).toBe(true);
+      expect(resolvedPromptTurns.some((turns) => turns.includes('Continue from the recent work.'))).toBe(true);
       const continuation = JSON.stringify(model.prompts.at(-1)?.turns);
       expect(continuation).toContain('Earlier turns summary: objective alpha; verified result beta.');
       expect(continuation).toContain('request turn 3');
       expect(continuation).not.toContain('request turn 1');
+      expect(env.runtime.getThread(thread.id)?.state).not.toBe('paused');
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('blocks the next model request when the re-counted compacted projection still reaches the context window', async () => {
+    const model = new FakeModel(() => response('Earlier turns summary: objective alpha; verified result beta.'));
+    const env = await setupRuntime(model, {
+      disabledBuiltinPlugins: ['pico.rolling-context'],
+      resolveProjectionTokenCount: (prompt) =>
+        JSON.stringify(prompt.turns).includes('Earlier turns summary') ? 1_000 : 1_500,
+      resolveContextSegmentTokenCount: () => 1,
+    });
+    const thread = env.createThread('runtime');
+    try {
+      env.runtime.updateContextManagementSettings({
+        contextWindowTokens: 1_000,
+        compactionThresholdTokens: 900,
+        keepRecentTokens: 1,
+      });
+      for (let turn = 1; turn <= 4; turn += 1) {
+        const user = env.store.appendCanonical(thread.id, `recount-over-user-${turn}`, 'message', {
+          role: 'user',
+          source: 'user',
+          content: `request turn ${turn}`,
+        });
+        env.store.appendCanonical(
+          thread.id,
+          `recount-over-assistant-${turn}`,
+          'assistant',
+          assistantPayload({
+            content: `response turn ${turn}`,
+            projectionThrough: user.record.seq,
+            usage: null,
+          }),
+        );
+      }
+
+      await env.runtime.submit(thread.id, 'recount-over-next-request', 'Continue from the recent work.');
+      await env.runtime.drain();
+
+      expect(
+        env.store
+          .listRecords(thread.id)
+          .filter((record) => record.kind === 'plugin' && record.payload.action === 'context-compacted'),
+      ).toHaveLength(1);
+      expect(model.prompts).toHaveLength(1);
+      expect(env.runtime.getThread(thread.id)).toMatchObject({
+        state: 'paused',
+        pauseReason: expect.stringContaining('still reaches the configured context window'),
+      });
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('continues when the re-counted compacted projection is below the context window', async () => {
+    const model = new FakeModel((_prompt, callNumber) =>
+      response(
+        callNumber === 1 ? 'Earlier turns summary: objective alpha; verified result beta.' : 'Continued safely.',
+      ),
+    );
+    const env = await setupRuntime(model, {
+      disabledBuiltinPlugins: ['pico.rolling-context'],
+      resolveProjectionTokenCount: (prompt) =>
+        JSON.stringify(prompt.turns).includes('Earlier turns summary') ? 999 : 1_500,
+      resolveContextSegmentTokenCount: () => 1,
+    });
+    const thread = env.createThread('runtime');
+    try {
+      env.runtime.updateContextManagementSettings({
+        contextWindowTokens: 1_000,
+        compactionThresholdTokens: 900,
+        keepRecentTokens: 1,
+      });
+      for (let turn = 1; turn <= 4; turn += 1) {
+        const user = env.store.appendCanonical(thread.id, `recount-under-user-${turn}`, 'message', {
+          role: 'user',
+          source: 'user',
+          content: `request turn ${turn}`,
+        });
+        env.store.appendCanonical(
+          thread.id,
+          `recount-under-assistant-${turn}`,
+          'assistant',
+          assistantPayload({
+            content: `response turn ${turn}`,
+            projectionThrough: user.record.seq,
+            usage: null,
+          }),
+        );
+      }
+
+      await env.runtime.submit(thread.id, 'recount-under-next-request', 'Continue from the recent work.');
+      await env.runtime.drain();
+
+      expect(
+        env.store
+          .listRecords(thread.id)
+          .filter((record) => record.kind === 'plugin' && record.payload.action === 'context-compacted'),
+      ).toHaveLength(1);
+      expect(model.prompts).toHaveLength(2);
+      expect(env.runtime.getThread(thread.id)?.state).not.toBe('paused');
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('lets the model handle an oversized first message when no completed invocation can be compacted', async () => {
+    const model = new FakeModel(() => response('Handled by the model.'));
+    const env = await setupRuntime(model, {
+      disabledBuiltinPlugins: ['pico.rolling-context'],
+      resolveProjectionTokenCount: () => 1_500,
+      resolveContextSegmentTokenCount: () => 1,
+    });
+    const thread = env.createThread('runtime');
+    try {
+      env.runtime.updateContextManagementSettings({
+        contextWindowTokens: 1_000,
+        compactionThresholdTokens: 900,
+      });
+
+      await env.runtime.submit(
+        thread.id,
+        'oversized-first-message',
+        'A first request larger than the configured budget.',
+      );
+      await env.runtime.drain();
+
+      expect(model.prompts).toHaveLength(1);
+      expect(
+        env.store
+          .listRecords(thread.id)
+          .filter((record) => record.kind === 'plugin' && record.payload.action === 'context-compacted'),
+      ).toHaveLength(0);
+      expect(env.runtime.getThread(thread.id)?.state).not.toBe('paused');
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it.each([
+    [
+      'counter error',
+      () => {
+        throw new Error('token counter failed');
+      },
+    ],
+    ['negative count', () => -1],
+  ])('blocks the model request when the token counter returns an invalid result (%s)', async (_label, counter) => {
+    const model = new FakeModel(() => response('This request must not be sent.'));
+    const env = await setupRuntime(model, {
+      disabledBuiltinPlugins: ['pico.rolling-context'],
+      resolveProjectionTokenCount: counter,
+      resolveContextSegmentTokenCount: () => 1,
+    });
+    const thread = env.createThread('runtime');
+    try {
+      env.runtime.updateContextManagementSettings({
+        contextWindowTokens: 1_000,
+        compactionThresholdTokens: 900,
+      });
+
+      await env.runtime.submit(thread.id, 'invalid-counter-result', 'Continue.');
+      await env.runtime.drain();
+
+      expect(model.prompts).toHaveLength(0);
+      expect(env.runtime.getThread(thread.id)).toMatchObject({
+        state: 'paused',
+        pauseReason: expect.stringContaining('Automatic context preparation or compaction failed'),
+      });
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('does not reuse previous provider usage when the full projection count is unknown', async () => {
+    const model = new FakeModel(() => response('Continued without automatic compaction.'));
+    const env = await setupRuntime(model, {
+      disabledBuiltinPlugins: ['pico.rolling-context'],
+      resolveProjectionTokenCount: () => null,
+      resolveContextSegmentTokenCount: () => 1,
+    });
+    const thread = env.createThread('runtime');
+    try {
+      env.runtime.updateContextManagementSettings({
+        contextWindowTokens: 100_000,
+        compactionThresholdTokens: 1_000,
+        keepRecentTokens: 1,
+      });
+      for (let turn = 1; turn <= 4; turn += 1) {
+        const user = env.store.appendCanonical(thread.id, `unknown-estimate-user-${turn}`, 'message', {
+          role: 'user',
+          source: 'user',
+          content: `request turn ${turn}`,
+        });
+        env.store.appendCanonical(
+          thread.id,
+          `unknown-estimate-assistant-${turn}`,
+          'assistant',
+          assistantPayload({
+            content: `response turn ${turn}`,
+            projectionThrough: user.record.seq,
+            usage: { inputTokens: 1_500, outputTokens: 10, totalTokens: 1_510 },
+          }),
+        );
+      }
+
+      await env.runtime.submit(thread.id, 'unknown-count-next-request', 'Continue from the recent work.');
+      await env.runtime.drain();
+
+      expect(
+        env.store
+          .listRecords(thread.id)
+          .filter((record) => record.kind === 'plugin' && record.payload.action === 'context-compacted'),
+      ).toHaveLength(0);
+      expect(model.prompts).toHaveLength(1);
       expect(env.runtime.getThread(thread.id)?.state).not.toBe('paused');
     } finally {
       await env.cleanup();
@@ -139,7 +374,11 @@ describe('durable Thread runtime invariants', () => {
       }
       return response('Continued with the child update.');
     });
-    const env = await setupRuntime(model, { disabledBuiltinPlugins: ['pico.rolling-context'] });
+    const env = await setupRuntime(model, {
+      disabledBuiltinPlugins: ['pico.rolling-context'],
+      resolveProjectionTokenCount: () => 1_500,
+      resolveContextSegmentTokenCount: () => 1,
+    });
     const thread = env.createThread('runtime');
     try {
       env.runtime.updateContextManagementSettings({
@@ -169,12 +408,18 @@ describe('durable Thread runtime invariants', () => {
         contextWindowTokens: 100_000,
         compactionThresholdTokens: 1_000,
       });
-      const latestAssistant = env.store.listRecords(thread.id).filter((record) => record.kind === 'assistant').at(-1);
+      const latestAssistant = env.store
+        .listRecords(thread.id)
+        .filter((record) => record.kind === 'assistant')
+        .at(-1);
       expect(latestAssistant?.payload).toMatchObject({
         usage: { inputTokens: 1_500, outputTokens: 10, totalTokens: 1_510 },
       });
       const compacting = env.runtime['autoCompactBeforeModelStep'](thread);
-      const reachedSummary = await Promise.race([summaryStarted.promise.then(() => true), compacting.then(() => false)]);
+      const reachedSummary = await Promise.race([
+        summaryStarted.promise.then(() => true),
+        compacting.then(() => false),
+      ]);
       expect(reachedSummary).toBe(true);
       env.store.appendCanonical(thread.id, 'automatic-child-message', 'message', {
         role: 'user',
@@ -212,7 +457,10 @@ describe('durable Thread runtime invariants', () => {
 
   it('pauses an over-window request when recent-turn retention leaves no history eligible for compaction', async () => {
     const model = new FakeModel(() => response('This request must not be sent.'));
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, {
+      resolveProjectionTokenCount: () => 1_500,
+      resolveContextSegmentTokenCount: () => 1_500,
+    });
     const thread = env.createThread();
     try {
       env.runtime.updateContextManagementSettings({ contextWindowTokens: 1_000, compactionThresholdTokens: 500 });
@@ -462,7 +710,11 @@ describe('durable Thread runtime invariants', () => {
 
       const disabled = await env.runtime.setThreadToolEnabled(hostThread.id, 'optional_runtime_tool', false);
       expect(disabled.find((tool) => tool.name === 'optional_runtime_tool')?.enabled).toBe(false);
-      await env.runtime.submit(hostThread.id, 'tool-toggle-message-disabled-again', 'Continue without the optional tool.');
+      await env.runtime.submit(
+        hostThread.id,
+        'tool-toggle-message-disabled-again',
+        'Continue without the optional tool.',
+      );
       await env.runtime.drain();
       expect(model.prompts[3]?.tools.some((tool) => tool.name === 'optional_runtime_tool')).toBe(false);
     } finally {

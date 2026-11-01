@@ -8,6 +8,7 @@ import {
 } from '../../../contracts/canonical-projection.js';
 import {
   callKey,
+  completedModelRounds,
   rollingContextPlugin,
   segmentId,
   sourceHash,
@@ -64,6 +65,7 @@ function sampleSegment(records = fullTurn): RollingSegment {
     sourceHash: hash,
     tier: 'hot',
     summary: null,
+    summaryResponseVisibleTokens: null,
     summaryVersion: null,
     summaryStatus: 'pending',
     summaryCallId: null,
@@ -141,7 +143,7 @@ function createSummaryGateHarness(options: {
         summaryCalls += 1;
         return {
           id: `summary-${summaryCalls}`,
-          response: { content: JSON.stringify({ summary: 'A useful summary.' }) },
+          response: { content: 'A useful summary.', usage: { outputTokens: 12, reasoningTokens: 2 } },
         };
       },
     },
@@ -282,7 +284,7 @@ describe('Rolling Context plugin', () => {
       },
       models: {
         complete: async () => {
-          return { id: 'summary', response: { content: JSON.stringify({ summary: 'Assistant response summary.' }) } };
+          return { id: 'summary', response: { content: 'Assistant response summary.', usage: { outputTokens: 12, reasoningTokens: 2 } } };
         },
       },
       pipelines: {
@@ -342,6 +344,66 @@ describe('Rolling Context plugin', () => {
     });
   });
 
+  it('binds a projected summary capsule to its provider model call and visible token count', async () => {
+    const thread = { id: 'thread-1', projectId: 'project-1' } as Thread;
+    const records = [...fullTurn, record(5, 'message', { role: 'user', source: 'user', content: 'Next request.' })];
+    const round = completedModelRounds(records)[0]!;
+    const segment: RollingSegment = {
+      ...sampleSegment(round),
+      tier: 'warm',
+      summary: 'Verified summary text.',
+      summaryResponseVisibleTokens: 9,
+      summaryCallId: 'provider-call-1',
+      summaryVersion: 'direct-summary-v2:test',
+      summaryStatus: 'completed',
+    };
+    const values = new Map<string, unknown>([['rolling-context-v1', { byThread: { [thread.id]: [segment] } }]]);
+    let projection:
+      | ((input: ProjectionInput, next: (input: ProjectionInput) => Promise<ProjectionInput>) => Promise<ProjectionInput>)
+      | null = null;
+    const context = {
+      threads: { get: () => thread, pause: () => thread },
+      canonical: { list: () => records, append: () => undefined },
+      state: {
+        get<T>(key: string, fallback: T): T {
+          return (values.has(key) ? values.get(key) : fallback) as T;
+        },
+        set<T>(key: string, value: T) {
+          values.set(key, structuredClone(value));
+        },
+        transaction<T>(run: () => T): T {
+          return run();
+        },
+      },
+      pipelines: { use: (_stage: string, handler: typeof projection) => (projection = handler) },
+      tools: { register() {} },
+      http: { register() {} },
+      commands: { register() {} },
+      ui: { contribute() {}, registerPage() {} },
+    } as unknown as PluginContext;
+    rollingContextPlugin.activate?.(context);
+    const input: ProjectionInput = {
+      thread,
+      records,
+      through: 5,
+      systemPrompt: 'system',
+      tools: [],
+      turns: canonicalRecordsToPromptTurns(records, thread),
+    };
+
+    const projected = await projection!(input, async (value) => value);
+    expect(projected.turns).toContainEqual({ kind: 'message', role: 'assistant', content: segment.summary });
+    expect(projected.turns).toContainEqual({ kind: 'message', role: 'user', content: 'Fix the failing test.' });
+    expect(projected.provenance).toContainEqual(
+      expect.objectContaining({
+        id: `rolling:${segment.id}`,
+        disposition: 'summary',
+        summaryCallId: 'provider-call-1',
+        summaryResponseVisibleTokens: 9,
+      }),
+    );
+  });
+
   it('uses stable hashes and stable but purpose-separated idempotency keys', () => {
     const segment = sampleSegment();
     expect(sourceHash(fullTurn)).toBe(sourceHash(structuredClone(fullTurn)));
@@ -352,6 +414,7 @@ describe('Rolling Context plugin', () => {
   });
 
   it('summarizes each segment and skips review when a complete net-savings estimate is unavailable', async () => {
+    const summaryText = '  Verified: the test passed after a fix (canonical seq 4).\n';
     const requests: Array<{ purpose: string; idempotencyKey: string; prompt: { turns: Array<{ content: string }> } }> =
       [];
     const context = {
@@ -362,7 +425,8 @@ describe('Rolling Context plugin', () => {
           return {
             id: `call-${requests.length}`,
             response: {
-              content: JSON.stringify({ summary: 'Verified: the test passed after a fix (canonical seq 4).' }),
+              content: summaryText,
+              usage: { outputTokens: 18, reasoningTokens: 5 },
             },
           };
         },
@@ -374,6 +438,8 @@ describe('Rolling Context plugin', () => {
     expect(requests.map((request) => request.purpose)).toEqual(['rolling-summary']);
     expect(requests[0]?.prompt.turns[0]?.content).toContain('the exact original source');
     expect(processed.summaryStatus).toBe('completed');
+    expect(processed.summary).toBe(summaryText);
+    expect(processed.summaryResponseVisibleTokens).toBe(13);
     expect(processed.tier).toBe('hot');
     expect(processed.evaluator.status).toBe('skipped');
     expect(processed.evaluator.callId).toBeNull();
@@ -382,13 +448,36 @@ describe('Rolling Context plugin', () => {
     expect(processed.transitions).toEqual([]);
   });
 
+  it.each([
+    ['missing usage', undefined],
+    ['missing reasoning count', { outputTokens: 9 }],
+    ['invalid output count', { outputTokens: -1, reasoningTokens: 0 }],
+    ['invalid reasoning count', { outputTokens: 9, reasoningTokens: Number.NaN }],
+    ['reasoning exceeds output', { outputTokens: 4, reasoningTokens: 5 }],
+  ])('leaves summary response token metadata unknown for %s', async (_label, usage) => {
+    const context = {
+      models: {
+        complete: async () => ({
+          id: 'summary-call',
+          response: {
+            content: 'A concise summary.',
+            ...(usage === undefined ? {} : { usage }),
+          },
+        }),
+      },
+    } as unknown as PluginContext;
+    const processed = await summarizeAndEvaluate(context, { id: 'thread-1' } as Thread, sampleSegment(), 'source');
+    expect(processed.summaryStatus).toBe('completed');
+    expect(processed.summaryResponseVisibleTokens).toBeNull();
+  });
+
   it('rejects a summary response that also requests a tool', async () => {
     const context = {
       models: {
         complete: async () => ({
           id: 'summary-call',
           response: {
-            content: JSON.stringify({ summary: 'An apparently valid summary.' }),
+            content: 'An apparently valid summary.',
             toolCalls: [{ id: 'call', name: 'unexpected', arguments: {} }],
           },
         }),
@@ -402,7 +491,18 @@ describe('Rolling Context plugin', () => {
 
   it('records manual tier transitions while preserving the original source hash', () => {
     const segment = sampleSegment();
-    const warm = transition({ ...segment, summary: 'summary', summaryVersion: 'v1' }, 'warm', 'manual compact');
+    expect(() => transition(segment, 'warm', 'manual compact')).toThrow(/reliable summary response token count/);
+    const warm = transition(
+      {
+        ...segment,
+        summary: 'summary',
+        summaryResponseVisibleTokens: 4,
+        summaryCallId: 'summary-call',
+        summaryVersion: 'v1',
+      },
+      'warm',
+      'manual compact',
+    );
     const cold = transition(warm, 'cold', 'manual cold');
     expect(cold.sourceHash).toBe(segment.sourceHash);
     expect(cold.transitions.map((item) => [item.from, item.to])).toEqual([
@@ -483,7 +583,7 @@ describe('Rolling Context plugin', () => {
           expect(request.prompt?.turns[0]?.content).not.toContain('Fix the failing test.');
           return {
             id: request.purpose,
-            response: { content: JSON.stringify({ summary: 'Verified result: the test passed (canonical seq 4).' }) },
+            response: { content: 'Verified result: the test passed (canonical seq 4).', usage: { outputTokens: 12, reasoningTokens: 2 } },
           };
         },
       },
@@ -715,7 +815,7 @@ describe('Rolling Context plugin', () => {
     expect(manual.summaryCalls()).toBe(0);
   });
 
-  it('recovers an interrupted pending summary into an explicit retryable state when pricing is usable', async () => {
+  it('blocks an automatic v2 call after a legacy summary call and requires explicit retry', async () => {
     const thread = { id: 'thread-1', projectId: 'project-1', state: 'idle' } as Thread;
     const records = [
       record(1, 'message', { role: 'user', source: 'user', content: 'First request.' }),
@@ -769,13 +869,17 @@ describe('Rolling Context plugin', () => {
       },
       models: {
         history: () => [
-          { idempotencyKey: callKey('summary', pending), status: 'interrupted', error: 'Runtime stopped.' },
+          {
+            idempotencyKey: `summary:${pending.id}:${pending.sourceHash}`,
+            status: 'completed',
+            error: null,
+          },
         ],
         complete: async (request: { idempotencyKey: string }) => {
           keys.push(request.idempotencyKey);
           return {
             id: 'retry-call',
-            response: { content: JSON.stringify({ summary: 'Recovered summary.' }) },
+            response: { content: 'Recovered summary.', usage: { outputTokens: 7, reasoningTokens: 1 } },
           };
         },
       },
@@ -809,6 +913,8 @@ describe('Rolling Context plugin', () => {
       thread.id
     ]![0]!;
     expect(recovered.summaryStatus).toBe('failed');
+    expect(recovered.evaluator.reason).toContain('legacy rolling summary call exists (completed)');
+    expect(recovered.evaluator.reason).toContain('duplicate provider charge');
     expect(recovered.evaluator.reason).toContain('Use Retry summary');
     expect(keys).toEqual([]);
 

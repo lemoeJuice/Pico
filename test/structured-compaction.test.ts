@@ -27,6 +27,11 @@ function projectedState(projection: ProjectedPrompt) {
   };
 }
 
+// These tests exercise projected prompt structure, not provider token accounting.
+// Supply a deterministic verified resolver so the Runtime need not infer counts
+// from Canonical history that intentionally has no provider usage records.
+const verifiedProjectionTokenCount = (_prompt: ModelPrompt): number => 1_500;
+
 function expectStructuredCompactionPrompt(prompt: ModelPrompt, projection: ProjectedPrompt) {
   expect(prompt.system).toBe(projection.systemPrompt);
   expect(prompt.tools).toEqual(projection.tools);
@@ -131,7 +136,11 @@ async function setupResponsesRuntime() {
   const workspace = join(directory, 'workspace');
   await mkdir(workspace, { recursive: true });
   const store = new PicoStore(':memory:');
-  const runtime = new PicoRuntime(store, { pluginDirectory: join(directory, 'empty-plugins') });
+  const runtime = new PicoRuntime(store, {
+    pluginDirectory: join(directory, 'empty-plugins'),
+    resolveProjectionTokenCount: verifiedProjectionTokenCount,
+    resolveContextSegmentTokenCount: () => 1,
+  });
   await runtime.initialize();
   const project = await runtime.createProject('Responses test project', workspace);
   const thread = runtime.createThread(project.id, 'runtime');
@@ -159,7 +168,11 @@ function responseBody(output: unknown[] = []) {
 describe('structured Runtime compaction', () => {
   it('uses the complete projected request structure and retains recent tool results and images', async () => {
     const model = new FakeModel(() => response('Summary of prior context.'));
-    const env = await setupRuntime(model, { plugins: [visionPlugin] });
+    const env = await setupRuntime(model, {
+      plugins: [visionPlugin],
+      resolveProjectionTokenCount: verifiedProjectionTokenCount,
+      resolveContextSegmentTokenCount: () => 1,
+    });
     const thread = env.createThread('runtime');
     try {
       env.runtime.updateContextManagementSettings({ keepRecentTokens: 1 });
@@ -232,7 +245,10 @@ describe('structured Runtime compaction', () => {
     ],
   ] as const)('%s leaves the projection and raw Canonical records unchanged', async (_label, respond) => {
     const model = new FakeModel(() => respond());
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, {
+      resolveProjectionTokenCount: verifiedProjectionTokenCount,
+      resolveContextSegmentTokenCount: () => 1,
+    });
     const thread = env.createThread('runtime');
     try {
       env.runtime.updateContextManagementSettings({ keepRecentTokens: 1 });
@@ -320,7 +336,10 @@ describe('structured Runtime compaction', () => {
       entered.resolve();
       return pending.promise;
     });
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, {
+      resolveProjectionTokenCount: verifiedProjectionTokenCount,
+      resolveContextSegmentTokenCount: () => 1,
+    });
     const thread = env.createThread('runtime');
     try {
       env.runtime.updateContextManagementSettings({ keepRecentTokens: 1 });
@@ -391,7 +410,10 @@ describe('structured Runtime compaction', () => {
       entered.resolve();
       return pending.promise;
     });
-    const env = await setupRuntime(model);
+    const env = await setupRuntime(model, {
+      resolveProjectionTokenCount: verifiedProjectionTokenCount,
+      resolveContextSegmentTokenCount: () => 1,
+    });
     const thread = env.createThread('runtime');
     try {
       env.runtime.updateContextManagementSettings({ keepRecentTokens: 1 });
@@ -440,7 +462,11 @@ describe('structured Runtime compaction', () => {
       },
     };
     const model = new FakeModel(() => response('', [{ id: 'compact-tool-call', name: 'must_not_run', arguments: {} }]));
-    const env = await setupRuntime(model, { plugins: [plugin] });
+    const env = await setupRuntime(model, {
+      plugins: [plugin],
+      resolveProjectionTokenCount: verifiedProjectionTokenCount,
+      resolveContextSegmentTokenCount: () => 1,
+    });
     const thread = env.createThread('runtime');
     try {
       env.runtime.updateContextManagementSettings({ keepRecentTokens: 1 });

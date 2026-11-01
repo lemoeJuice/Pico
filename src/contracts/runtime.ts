@@ -72,6 +72,10 @@ export interface ProjectionProvenance {
   canonicalStartSeq?: number;
   canonicalEndSeq?: number;
   summaryVersion?: string;
+  /** Provider-reported non-reasoning output tokens for an unmodified summary body. */
+  summaryResponseVisibleTokens?: number;
+  /** Durable provider call that produced the summary body and token usage. */
+  summaryCallId?: string;
   turnIndex?: number;
   /** Half-open range of projected turns attributable to this source. */
   turnStartIndex?: number;

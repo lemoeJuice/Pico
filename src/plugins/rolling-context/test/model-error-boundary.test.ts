@@ -122,6 +122,7 @@ describe('Rolling Context model error handling', () => {
         sourceHash: '0'.repeat(64),
         tier: 'hot',
         summary: null,
+        summaryResponseVisibleTokens: null,
         summaryVersion: null,
         summaryStatus: 'pending',
         summaryCallId: null,

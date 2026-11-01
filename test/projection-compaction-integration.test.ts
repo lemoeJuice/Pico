@@ -8,6 +8,9 @@ import type { ModelPrompt } from '../src/contracts/model.js';
 
 type ProjectedPrompt = Pick<ModelPrompt, 'tools' | 'turns'> & { systemPrompt: string };
 
+// These cases verify compaction boundaries and record structure, not tokenization.
+const resolveVerifiedSegmentTokens = () => 1;
+
 async function compactProjected(runtime: PicoRuntime, thread: Thread) {
   const records = runtime.store.listRecords(thread.id);
   const projection = await runtime['projectModelInput'](thread, records, records.at(-1)?.seq ?? 0);
@@ -35,7 +38,11 @@ describe('projected compaction', () => {
     const model = new FakeModel(() => response('Condensed earlier history.'));
     const env = await setupRuntime(
       model,
-      rolling ? { plugins: [rollingContextPlugin] } : { disabledBuiltinPlugins: ['pico.rolling-context'] },
+      {
+        ...(rolling ? { plugins: [rollingContextPlugin] } : { disabledBuiltinPlugins: ['pico.rolling-context'] }),
+        resolveContextSegmentTokenCount: resolveVerifiedSegmentTokens,
+        resolveProjectionTokenCount: () => 100,
+      },
     );
     expect(env.runtime.plugins.list().some((plugin) => plugin.id === 'pico.rolling-context')).toBe(rolling);
     const thread = env.createThread('runtime');
@@ -94,7 +101,11 @@ describe('projected compaction', () => {
 describe('context changes followed by projected compaction', () => {
   it.each(['restore', 'rewind'] as const)('preserves the active history after %s', async (action) => {
     const model = new FakeModel(() => response('Summary 1'));
-    const env = await setupRuntime(model, { plugins: [rollingContextPlugin] });
+    const env = await setupRuntime(model, {
+      plugins: [rollingContextPlugin],
+      resolveContextSegmentTokenCount: resolveVerifiedSegmentTokens,
+      resolveProjectionTokenCount: () => 100,
+    });
     const thread = env.createThread('runtime');
     const append = (prefix: string, n: number) => {
       const user = env.store.appendCanonical(thread.id, `${prefix}-user-${n}`, 'message', {
@@ -171,8 +182,13 @@ it('does not run Runtime fallback from stale usage after a much smaller full pro
   const isRollingSummary = (prompt: { system: string }) =>
     prompt.system.includes('Summarize exactly one sealed model-response round');
   const isRuntimeSummary = isCompactionPrompt;
+  const resolvedPromptTurns = new Set<string>();
   const model = new FakeModel((prompt) => {
-    if (isRollingSummary(prompt)) return response(JSON.stringify({ summary: 'FIRST_ROUND_WARM_SUMMARY' }));
+    if (isRollingSummary(prompt))
+      return {
+        ...response(JSON.stringify({ summary: 'FIRST_ROUND_WARM_SUMMARY' })),
+        usage: { inputTokens: 20, outputTokens: 8, reasoningTokens: 0, totalTokens: 28 },
+      };
     mainCalls += 1;
     if (mainCalls === 1) return withUsage(rawFirstRound, [], 100);
     if (mainCalls === 2) return withUsage(rawSecondRound, [], 100);
@@ -184,7 +200,14 @@ it('does not run Runtime fallback from stale usage after a much smaller full pro
       );
     return withUsage('Continued from the warm summary.', [], 100);
   });
-  const env = await setupRuntime(model, { plugins: [rollingContextPlugin] });
+  const env = await setupRuntime(model, {
+    plugins: [rollingContextPlugin],
+    resolveProjectionTokenCount: (prompt) => {
+      const serializedTurns = JSON.stringify(prompt.turns);
+      resolvedPromptTurns.add(serializedTurns);
+      return serializedTurns.includes('FIRST_ROUND_WARM_SUMMARY') ? 100 : 500;
+    },
+  });
   const thread = env.createThread();
   try {
     env.runtime.updateContextManagementSettings({
@@ -228,41 +251,10 @@ it('does not run Runtime fallback from stale usage after a much smaller full pro
     const continuation = model.prompts.filter((prompt) => !isRollingSummary(prompt)).at(-1)!;
     const serializedTurns = JSON.stringify(continuation.turns);
     expect(serializedTurns).toContain('FIRST_ROUND_WARM_SUMMARY');
+    expect([...resolvedPromptTurns].some((turns) => turns.includes('FIRST_ROUND_WARM_SUMMARY'))).toBe(true);
     expect(serializedTurns).not.toContain('LARGE_FIRST_ROUND');
     expect(serializedTurns).toContain('SECOND_ROUND');
     expect(serializedTurns).toContain('THIRD_USER_CAPSULE');
-  } finally {
-    await env.cleanup();
-  }
-});
-
-it('checks a large new user input against the full projected prompt without provider usage', async () => {
-  const model = new FakeModel(() => response('This request must not be sent.'));
-  const env = await setupRuntime(model);
-  const thread = env.createThread('runtime');
-  try {
-    const emptyProjection = await env.runtime['projectModelInput'](thread, [], 0);
-    const emptyRequestSize = JSON.stringify({
-      system: emptyProjection.systemPrompt,
-      tools: emptyProjection.tools,
-      turns: emptyProjection.turns,
-      model: env.runtime.threadModelSelection(thread.id).model,
-      temperature: env.runtime.threadModelSelection(thread.id).parameters.temperature ?? 0.7,
-    }).length;
-    const contextWindowTokens = emptyRequestSize + 1_000;
-    env.runtime.updateContextManagementSettings({
-      contextWindowTokens,
-      compactionThresholdTokens: contextWindowTokens - 1,
-      keepRecentTokens: 1,
-    });
-    await env.runtime.submit(thread.id, 'large-input-without-usage', `Large new request ${'X'.repeat(5_000)}`);
-    await env.runtime.drain();
-
-    expect(model.prompts).toHaveLength(0);
-    expect(env.runtime.getThread(thread.id)).toMatchObject({
-      state: 'paused',
-      pauseReason: expect.stringContaining('There are no completed model invocations'),
-    });
   } finally {
     await env.cleanup();
   }
@@ -323,7 +315,11 @@ it('respects unknown grouped boundaries and preserves the complete plugin projec
     },
   };
   const model = new FakeModel(() => response('Summary'));
-  const env = await setupRuntime(model, { plugins: [plugin] });
+  const env = await setupRuntime(model, {
+    plugins: [plugin],
+    resolveContextSegmentTokenCount: resolveVerifiedSegmentTokens,
+    resolveProjectionTokenCount: () => 100,
+  });
   const thread = env.createThread('runtime');
   try {
     env.runtime.updateContextManagementSettings({ keepRecentTokens: 1 });
@@ -365,7 +361,10 @@ it('respects unknown grouped boundaries and preserves the complete plugin projec
 
 it('compacts complete tool invocations inside a single user turn without splitting results', async () => {
   const model = new FakeModel(() => response('Summary'));
-  const env = await setupRuntime(model);
+  const env = await setupRuntime(model, {
+    resolveContextSegmentTokenCount: resolveVerifiedSegmentTokens,
+    resolveProjectionTokenCount: () => 100,
+  });
   const thread = env.createThread('runtime');
   try {
     env.runtime.updateContextManagementSettings({ keepRecentTokens: 1 });
@@ -440,7 +439,11 @@ it('manual compaction summarizes the final plugin projection rather than Canonic
     },
   };
   const model = new FakeModel(() => response('Summary based on safe projection'));
-  const env = await setupRuntime(model, { plugins: [projector] });
+  const env = await setupRuntime(model, {
+    plugins: [projector],
+    resolveContextSegmentTokenCount: resolveVerifiedSegmentTokens,
+    resolveProjectionTokenCount: () => 100,
+  });
   const thread = env.createThread('runtime');
   try {
     env.runtime.updateContextManagementSettings({ keepRecentTokens: 1 });

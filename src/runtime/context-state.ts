@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from 'node:util';
 export interface BoundContextProvenance extends ProjectionProvenance {
   threadId: string;
   branchId: string | null;
+  sourceThrough: number;
 }
 
 export interface ContextStateSnapshot {
@@ -12,6 +13,8 @@ export interface ContextStateSnapshot {
   branchId: string | null;
   sourceThrough: number;
   revision: number;
+  /** Provider-accounted count for this state; null means it cannot be established. */
+  tokenCount: number | null;
   turns: ReadonlyArray<Readonly<PromptTurn>>;
   provenance: ReadonlyArray<Readonly<BoundContextProvenance>>;
 }
@@ -20,6 +23,8 @@ export interface ContextStateInput {
   branchId?: string | null;
   /** Canonical boundary used to construct the projection; guards late historical projections. */
   sourceThrough?: number;
+  /** Count for the complete replacement turns; never reuse an earlier projection's count. */
+  tokenCount: number;
   turns: PromptTurn[];
   provenance?: ProjectionProvenance[];
 }
@@ -28,6 +33,8 @@ export interface ContextAppendInput {
   /** A branch can be selected on first append. Switching branches requires replace(). */
   branchId?: string;
   sourceThrough?: number;
+  /** Count for all turns after appending, if known. */
+  tokenCount?: number;
   turns: PromptTurn[];
   /** Turn indexes in this list are relative to the appended turns. */
   provenance?: ProjectionProvenance[];
@@ -35,6 +42,7 @@ export interface ContextAppendInput {
 
 export interface MutableContextState {
   branchId: string | null;
+  tokenCount: number | null;
   turns: PromptTurn[];
   provenance: ProjectionProvenance[];
 }
@@ -60,8 +68,16 @@ interface StoredContextState {
   branchId: string | null;
   sourceThrough: number;
   revision: number;
+  tokenCount: number | null;
   turns: PromptTurn[];
   provenance: ProjectionProvenance[];
+}
+
+export class StaleContextProjectionError extends Error {
+  constructor() {
+    super('Context projection became stale before it could be synchronized.');
+    this.name = 'StaleContextProjectionError';
+  }
 }
 
 /**
@@ -81,6 +97,7 @@ export class ThreadContextState {
     const captured = clone(input);
     this.assertThreadId(threadId);
     if (captured.sourceThrough !== undefined) this.assertSourceThrough(captured.sourceThrough);
+    if (captured.tokenCount !== undefined) this.assertTokenCount(captured.tokenCount);
     return this.enqueue(threadId, () => {
       const state = this.state(threadId);
       if (captured.sourceThrough !== undefined) this.assertSourceThrough(captured.sourceThrough);
@@ -90,6 +107,8 @@ export class ThreadContextState {
       const branchId = captured.branchId ?? state.branchId;
       const offset = state.turns.length;
       state.turns.push(...captured.turns);
+      if (captured.turns.length > 0 && captured.tokenCount !== undefined) state.tokenCount = captured.tokenCount;
+      else if (captured.turns.some((turn) => turn.kind !== 'tool_result')) state.tokenCount = null;
       state.provenance.push(...(captured.provenance ?? []).map((item) => ({
         ...item,
         ...(item.turnStartIndex === undefined ? {} : { turnStartIndex: item.turnStartIndex + offset }),
@@ -108,6 +127,7 @@ export class ThreadContextState {
     const captured = clone(input);
     this.assertThreadId(threadId);
     if (captured.sourceThrough !== undefined) this.assertSourceThrough(captured.sourceThrough);
+    this.assertTokenCount(captured.tokenCount);
     return this.enqueue(threadId, () => {
       const state = this.state(threadId);
       state.branchId = captured.branchId ?? null;
@@ -115,6 +135,7 @@ export class ThreadContextState {
       state.turns = captured.turns;
       state.provenance = captured.provenance ?? [];
       state.revision += 1;
+      state.tokenCount = captured.tokenCount;
       return this.makeSnapshot(threadId, state);
     });
   }
@@ -124,10 +145,16 @@ export class ThreadContextState {
    * reads (no revision change), strict suffixes append, and branch/source changes
    * replace the complete projection.
    */
-  synchronize(threadId: string, input: ContextStateInput): Promise<ContextStateSnapshot> {
+  synchronize(
+    threadId: string,
+    input: Omit<ContextStateInput, 'tokenCount'> & { tokenCount?: number },
+    isCurrent?: () => boolean,
+  ): Promise<ContextStateSnapshot> {
     const captured = clone(input);
     this.assertThreadId(threadId);
+    if (captured.tokenCount !== undefined) this.assertTokenCount(captured.tokenCount);
     return this.enqueue(threadId, () => {
+      if (isCurrent && !isCurrent()) throw new StaleContextProjectionError();
       const state = this.state(threadId);
       const branchId = captured.branchId ?? null;
       const sourceThrough = captured.sourceThrough ?? state.sourceThrough;
@@ -140,22 +167,30 @@ export class ThreadContextState {
         isDeepStrictEqual(state.provenance, provenance)
       ) {
         state.sourceThrough = Math.max(state.sourceThrough, sourceThrough);
+        if (captured.tokenCount !== undefined && captured.tokenCount !== state.tokenCount) {
+          state.tokenCount = captured.tokenCount;
+          state.revision += 1;
+        }
         return this.makeSnapshot(threadId, state);
       }
 
       const isTurnPrefix =
         state.turns.length <= captured.turns.length &&
         isDeepStrictEqual(state.turns, captured.turns.slice(0, state.turns.length));
-      const isProvenancePrefix =
-        state.provenance.length <= provenance.length &&
-        isDeepStrictEqual(state.provenance, provenance.slice(0, state.provenance.length));
-      if (state.branchId === branchId && isTurnPrefix && isProvenancePrefix) {
+      if (state.branchId === branchId && isTurnPrefix) {
         const offset = state.turns.length;
         state.turns.push(...captured.turns.slice(offset));
-        state.provenance.push(...provenance.slice(state.provenance.length));
+        // The same trailing history block can acquire more source records as a
+        // tool batch settles. Its provenance then expands although the existing
+        // turns remain an exact prefix, so refresh the mapping as a whole.
+        state.provenance = provenance;
+        if (captured.turns.length > offset && captured.tokenCount !== undefined) state.tokenCount = captured.tokenCount;
+        else if (captured.turns.slice(offset).some((turn) => turn.kind !== 'tool_result')) state.tokenCount = null;
       } else {
+        this.assertTokenCount(captured.tokenCount);
         state.turns = captured.turns;
         state.provenance = provenance;
+        state.tokenCount = captured.tokenCount!;
       }
       state.branchId = branchId;
       state.sourceThrough = sourceThrough;
@@ -172,6 +207,7 @@ export class ThreadContextState {
       state.sourceThrough = 0;
       state.turns = [];
       state.provenance = [];
+      state.tokenCount = 0;
       state.revision += 1;
       return this.makeSnapshot(threadId, state);
     });
@@ -186,6 +222,7 @@ export class ThreadContextState {
     const captured = clone(replacement);
     this.assertThreadId(threadId);
     if (captured.sourceThrough !== undefined) this.assertSourceThrough(captured.sourceThrough);
+    this.assertTokenCount(captured.tokenCount);
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
       throw new RangeError('Context revision must be a non-negative safe integer.');
     }
@@ -198,6 +235,7 @@ export class ThreadContextState {
       state.sourceThrough = captured.sourceThrough ?? state.sourceThrough;
       state.turns = captured.turns;
       state.provenance = captured.provenance ?? [];
+      state.tokenCount = captured.tokenCount;
       state.revision += 1;
       return { committed: true, snapshot: this.makeSnapshot(threadId, state) };
     });
@@ -228,12 +266,14 @@ export class ThreadContextState {
       if (!prepared) return { committed: false, snapshot: current };
       const captured = clone(prepared.replacement);
       if (captured.sourceThrough !== undefined) this.assertSourceThrough(captured.sourceThrough);
+      this.assertTokenCount(captured.tokenCount);
       if (typeof prepared.commit !== 'function') throw new TypeError('Queued context commit callback is required.');
       if (!prepared.commit()) return { committed: false, snapshot: current };
       state.branchId = captured.branchId ?? null;
       state.sourceThrough = captured.sourceThrough ?? state.sourceThrough;
       state.turns = captured.turns;
       state.provenance = captured.provenance ?? [];
+      state.tokenCount = captured.tokenCount;
       state.revision += 1;
       return { committed: true, snapshot: this.makeSnapshot(threadId, state) };
     });
@@ -247,8 +287,12 @@ export class ThreadContextState {
     this.assertThreadId(threadId);
     return this.enqueue(threadId, async () => {
       const state = this.state(threadId);
+      let draftTokenCount = state.tokenCount;
+      let tokenCountUpdated = false;
       const draft: MutableContextState = {
         branchId: state.branchId,
+        get tokenCount() { return draftTokenCount; },
+        set tokenCount(value) { tokenCountUpdated = true; draftTokenCount = value; },
         turns: clone(state.turns),
         provenance: clone(state.provenance),
       };
@@ -256,7 +300,18 @@ export class ThreadContextState {
       // Clone at the commit boundary; a closure retaining draft cannot mutate state later.
       const committedDraft = clone(draft);
       const returnedValue = clone(value);
+      const turnsChanged = !isDeepStrictEqual(state.turns, committedDraft.turns);
+      const replacesTurns = turnsChanged && (
+        committedDraft.turns.length < state.turns.length ||
+        !isDeepStrictEqual(state.turns, committedDraft.turns.slice(0, state.turns.length))
+      );
+      if (replacesTurns && !tokenCountUpdated) {
+        throw new RangeError('Context replacement requires a token count.');
+      }
+      if (replacesTurns) this.assertTokenCount(committedDraft.tokenCount);
+      if (committedDraft.tokenCount !== null) this.assertTokenCount(committedDraft.tokenCount);
       state.branchId = committedDraft.branchId;
+      state.tokenCount = turnsChanged && !tokenCountUpdated ? null : committedDraft.tokenCount;
       state.turns = committedDraft.turns;
       state.provenance = committedDraft.provenance;
       state.revision += 1;
@@ -275,7 +330,7 @@ export class ThreadContextState {
   private state(threadId: string): StoredContextState {
     let state = this.states.get(threadId);
     if (!state) {
-      state = { branchId: null, sourceThrough: 0, revision: 0, turns: [], provenance: [] };
+      state = { branchId: null, sourceThrough: 0, revision: 0, tokenCount: null, turns: [], provenance: [] };
       this.states.set(threadId, state);
     }
     return state;
@@ -293,6 +348,7 @@ export class ThreadContextState {
       branchId: state.branchId,
       sourceThrough: state.sourceThrough,
       revision: state.revision,
+      tokenCount: state.tokenCount,
       turns: clone(state.turns),
       provenance: clone(provenance),
     };
@@ -305,6 +361,12 @@ export class ThreadContextState {
   private assertSourceThrough(sourceThrough: number): void {
     if (!Number.isSafeInteger(sourceThrough) || sourceThrough < 0) {
       throw new RangeError('Context source boundary must be a non-negative safe integer.');
+    }
+  }
+
+  private assertTokenCount(tokenCount: unknown): asserts tokenCount is number {
+    if (typeof tokenCount !== 'number' || !Number.isSafeInteger(tokenCount) || tokenCount < 0) {
+      throw new RangeError('Context token count must be a non-negative safe integer.');
     }
   }
 }
