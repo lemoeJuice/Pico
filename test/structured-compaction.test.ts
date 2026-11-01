@@ -312,7 +312,7 @@ describe('structured Runtime compaction', () => {
     }
   });
 
-  it('refuses to commit a summary if Canonical history changes while the model is summarizing', async () => {
+  it('keeps messages appended during summarization after the committed summary', async () => {
     const entered = deferred<void>();
     const pending = deferred<ModelResponse>();
     const model = new FakeModel((prompt) => {
@@ -329,10 +329,81 @@ describe('structured Runtime compaction', () => {
       const projection = await env.runtime['projectModelInput'](thread, before, before.at(-1)!.seq);
       const compacting = env.runtime['compactThread'](thread, false, false, projection);
       await entered.promise;
-      env.store.appendCanonical(thread.id, 'arrived-during-compaction', 'message', {
+      const firstArrival = env.store.appendCanonical(thread.id, 'arrived-during-compaction', 'message', {
         role: 'user',
         source: 'user',
-        content: 'This arrived while the summary model was running.',
+        content: 'First message arrived while the summary model was running.',
+      });
+      const childArrival = env.store.appendCanonical(thread.id, 'child-arrived-during-compaction', 'message', {
+        role: 'user',
+        source: 'child',
+        senderThreadId: 'child-thread',
+        senderLabel: 'Research child',
+        content: 'Second message arrived while the summary model was running.',
+      });
+      pending.resolve(response('Summary of earlier context.'));
+
+      const result = await compacting;
+      expect(result.text).toContain('Compacted');
+      const after = env.store.listRecords(thread.id);
+      const marker = after.find((record) => record.kind === 'plugin' && record.payload.action === 'context-compacted');
+      expect(marker).toBeDefined();
+      expect((marker!.payload as { summaryInputRecordIds: string[] }).summaryInputRecordIds).not.toContain(
+        'arrived-during-compaction',
+      );
+      expect((marker!.payload as { summaryInputRecordIds: string[] }).summaryInputRecordIds).not.toContain(
+        'child-arrived-during-compaction',
+      );
+      expect(after.find((record) => record.id === 'arrived-during-compaction')).toBeDefined();
+      const cached = await env.runtime['contextStates'].read(thread.id);
+      const cachedTurns = JSON.stringify(cached.turns);
+      expect(cached.sourceThrough).toBeGreaterThanOrEqual(childArrival.record.seq);
+      expect(cachedTurns).toContain('Summary of earlier context.');
+      expect(cachedTurns).toContain('First message arrived while the summary model was running.');
+      expect(cachedTurns).toContain('Second message arrived while the summary model was running.');
+      expect(
+        cached.provenance.some(
+          (item) =>
+            item.canonicalStartSeq === firstArrival.record.seq && item.canonicalEndSeq === childArrival.record.seq,
+        ),
+      ).toBe(true);
+      const current = await env.runtime['projectModelInput'](thread, after, after.at(-1)!.seq);
+      const content = JSON.stringify(current.turns);
+      expect(content).toContain('Summary of earlier context.');
+      expect(content).toContain('First message arrived while the summary model was running.');
+      expect(content).toContain('Second message arrived while the summary model was running.');
+      expect(content.indexOf('Summary of earlier context.')).toBeLessThan(
+        content.indexOf('First message arrived while the summary model was running.'),
+      );
+      expect(content.indexOf('First message arrived while the summary model was running.')).toBeLessThan(
+        content.indexOf('Second message arrived while the summary model was running.'),
+      );
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('still refuses to commit if non-message Canonical history changes during summarization', async () => {
+    const entered = deferred<void>();
+    const pending = deferred<ModelResponse>();
+    const model = new FakeModel((prompt) => {
+      if (!isCompactionPrompt(prompt)) return response('unused');
+      entered.resolve();
+      return pending.promise;
+    });
+    const env = await setupRuntime(model);
+    const thread = env.createThread('runtime');
+    try {
+      env.runtime.updateContextManagementSettings({ keepRecentTokens: 1 });
+      for (let round = 1; round <= 4; round += 1) appendInvocation(env, thread, round);
+      const before = env.store.listRecords(thread.id);
+      const projection = await env.runtime['projectModelInput'](thread, before, before.at(-1)!.seq);
+      const compacting = env.runtime['compactThread'](thread, false, false, projection);
+      await entered.promise;
+      env.store.appendCanonical(thread.id, 'history-changed-during-compaction', 'plugin', {
+        pluginId: 'pico.runtime',
+        action: 'context-rewound',
+        version: 1,
       });
       pending.resolve(response('Stale summary must not commit.'));
 
@@ -343,10 +414,6 @@ describe('structured Runtime compaction', () => {
       expect(after.some((record) => record.kind === 'plugin' && record.payload.action === 'context-compacted')).toBe(
         false,
       );
-      expect(after.find((record) => record.id === 'arrived-during-compaction')).toBeDefined();
-      const current = await env.runtime['projectModelInput'](thread, after, after.at(-1)!.seq);
-      expect(JSON.stringify(current.turns)).toContain('This arrived while the summary model was running.');
-      expect(JSON.stringify(current.turns)).toContain('request 1');
     } finally {
       await env.cleanup();
     }

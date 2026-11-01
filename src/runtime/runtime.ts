@@ -4532,14 +4532,23 @@ export class PicoRuntime {
         };
       }
 
-      // An auxiliary model call can take a long time. Do not install a summary
-      // over messages or a projection that changed while it was in flight.
-      if (this.store.latestCanonicalSeq(thread.id) !== projectionThrough) {
-        return { text: 'The Thread history changed during compaction; retry with the current context.', severity: 'error' };
-      }
+      // New messages can arrive while the summary is being generated. They are
+      // outside its input and must remain verbatim after the compacted prefix.
+      // Other changes can alter the active history and still require a retry.
+      const appendedMessages = (current: readonly CanonicalRecord[]): CanonicalRecord[] | null => {
+        if (
+          current.length < records.length ||
+          records.some((record, index) => stableJson(record) !== stableJson(current[index]))
+        ) return null;
+        const appended = current.slice(records.length);
+        return appended.every((record) => record.kind === 'message') ? appended : null;
+      };
       const currentThread = this.store.getThread(thread.id);
       if (!currentThread) return { text: 'The Thread is no longer available.', severity: 'error' };
       const currentRecords = this.store.listRecords(thread.id);
+      if (!appendedMessages(currentRecords)) {
+        return { text: 'The Thread history changed during compaction; retry with the current context.', severity: 'error' };
+      }
       const currentInput = await this.projectModelInput(currentThread, currentRecords, projectionThrough, false);
       const currentContextRevision =
         (currentInput as ContextStateProjection)[contextStateRevisionKey] ??
@@ -4547,7 +4556,6 @@ export class PicoRuntime {
       const projectionIdentity = (value: ProjectionInput) =>
         stableJson({ system: value.systemPrompt, tools: value.tools, turns: value.turns, provenance: value.provenance });
       if (
-        this.store.latestCanonicalSeq(thread.id) !== projectionThrough ||
         currentContextRevision !== contextRevision ||
         projectionIdentity(currentInput) !== projectionIdentity(finalProjection) ||
         stableJson(this.threadModelSelection(thread.id)) !== stableJson(preparedCall.effectiveSelection)
@@ -4559,11 +4567,13 @@ export class PicoRuntime {
         // Prepare every potentially failing projection operation before the
         // Canonical side effect. Snapshot turns were captured before Vision runs.
         const commitRecords = this.store.listRecords(thread.id);
+        const appended = appendedMessages(commitRecords);
         const commitConversation = canonicalConversationRecords(runtimeConversationProjection(commitRecords).records);
         if (
-          this.store.latestCanonicalSeq(thread.id) !== projectionThrough ||
-          commitConversation.length !== conversation.length ||
-          commitConversation.some((record, index) => record.id !== conversation[index]?.id) ||
+          !appended ||
+          commitConversation.length !== conversation.length + appended.length ||
+          conversation.some((record, index) => record.id !== commitConversation[index]?.id) ||
+          appended.some((record, index) => record.id !== commitConversation[conversation.length + index]?.id) ||
           stableJson(this.threadModelSelection(thread.id)) !== stableJson(preparedCall.effectiveSelection)
         ) return null;
         const compacted: {
@@ -4597,7 +4607,7 @@ export class PicoRuntime {
           contextThroughSeq: throughSeq,
           // The turn text does not depend on the marker seq; the canonical fact
           // itself receives the actual seq in the synchronous commit callback.
-          projectionRecordSeq: projectionThrough + 1 + (rebuildFromCanonical && previous ? 1 : 0),
+          projectionRecordSeq: (commitRecords.at(-1)?.seq ?? 0) + 1 + (rebuildFromCanonical && previous ? 1 : 0),
           sourceRecordIds: compacted.sourceRecordIds,
           sourceHash,
           summary,
@@ -4650,13 +4660,29 @@ export class PicoRuntime {
           },
           ...recentProvenance,
         ];
+        if (appended.length > 0) {
+          const turnStartIndex = turns.length;
+          turns.push(...canonicalBlockToPromptTurns(appended, currentThread));
+          provenance.push({
+            id: `canonical:${appended[0]!.id}`,
+            sourcePluginId: 'pico.core',
+            label: 'Canonical conversation block',
+            kind: 'canonical',
+            disposition: 'raw',
+            canonicalStartSeq: appended[0]!.seq,
+            canonicalEndSeq: appended.at(-1)!.seq,
+            turnStartIndex,
+            turnEndIndex: turns.length,
+          });
+        }
+        const commitThrough = commitRecords.at(-1)?.seq ?? 0;
         return {
-          replacement: { branchId, sourceThrough: projectionThrough, turns, provenance },
+          replacement: { branchId, sourceThrough: commitThrough, turns, provenance },
           commit: () => {
             // Recheck and write Canonical facts without awaiting while this
             // Thread's queue slot is held. Store transaction rolls back on error.
             if (
-              this.store.latestCanonicalSeq(thread.id) !== projectionThrough ||
+              this.store.latestCanonicalSeq(thread.id) !== commitThrough ||
               stableJson(this.threadModelSelection(thread.id)) !== stableJson(preparedCall.effectiveSelection)
             ) return false;
             this.store.transaction(() => {

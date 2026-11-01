@@ -86,7 +86,7 @@ describe('durable Thread runtime invariants', () => {
       ),
     );
     const env = await setupRuntime(model, { disabledBuiltinPlugins: ['pico.rolling-context'] });
-    const thread = env.createThread();
+    const thread = env.createThread('runtime');
     try {
       env.runtime.updateContextManagementSettings({
         contextWindowTokens: 100_000,
@@ -124,6 +124,87 @@ describe('durable Thread runtime invariants', () => {
       expect(continuation).toContain('request turn 3');
       expect(continuation).not.toContain('request turn 1');
       expect(env.runtime.getThread(thread.id)?.state).not.toBe('paused');
+    } finally {
+      await env.cleanup();
+    }
+  });
+
+  it('keeps a child message appended during automatic compaction in the next projected request', async () => {
+    const summaryStarted = deferred<void>();
+    const summaryPending = deferred<ReturnType<typeof response>>();
+    const model = new FakeModel((prompt) => {
+      if (JSON.stringify(prompt.turns).includes('Summarize this conversation')) {
+        summaryStarted.resolve();
+        return summaryPending.promise;
+      }
+      return response('Continued with the child update.');
+    });
+    const env = await setupRuntime(model, { disabledBuiltinPlugins: ['pico.rolling-context'] });
+    const thread = env.createThread('runtime');
+    try {
+      env.runtime.updateContextManagementSettings({
+        contextWindowTokens: 100_000,
+        compactionThresholdTokens: 1_000,
+        keepRecentTokens: 1,
+      });
+      for (let turn = 1; turn <= 4; turn += 1) {
+        const user = env.store.appendCanonical(thread.id, `auto-child-user-${turn}`, 'message', {
+          role: 'user',
+          source: 'user',
+          content: `request turn ${turn}`,
+        });
+        env.store.appendCanonical(
+          thread.id,
+          `auto-child-assistant-${turn}`,
+          'assistant',
+          assistantPayload({
+            content: `response turn ${turn}`,
+            projectionThrough: user.record.seq,
+            usage: { inputTokens: 1_500, outputTokens: 10, totalTokens: 1_510 },
+          }),
+        );
+      }
+
+      expect(env.runtime.getContextManagementSettings()).toMatchObject({
+        contextWindowTokens: 100_000,
+        compactionThresholdTokens: 1_000,
+      });
+      const latestAssistant = env.store.listRecords(thread.id).filter((record) => record.kind === 'assistant').at(-1);
+      expect(latestAssistant?.payload).toMatchObject({
+        usage: { inputTokens: 1_500, outputTokens: 10, totalTokens: 1_510 },
+      });
+      const compacting = env.runtime['autoCompactBeforeModelStep'](thread);
+      const reachedSummary = await Promise.race([summaryStarted.promise.then(() => true), compacting.then(() => false)]);
+      expect(reachedSummary).toBe(true);
+      env.store.appendCanonical(thread.id, 'automatic-child-message', 'message', {
+        role: 'user',
+        source: 'child',
+        senderThreadId: 'child-thread',
+        senderLabel: 'Research child',
+        content: 'Child found the missing rendering constraint.',
+      });
+      summaryPending.resolve(response('Earlier turns summary: objective alpha; verified result beta.'));
+      const continuationProjection = await compacting;
+      expect(continuationProjection).not.toBeNull();
+      await env.runtime['runModelStep'](thread, undefined, continuationProjection!);
+
+      expect(env.runtime.getThread(thread.id)?.state).not.toBe('paused');
+      const markers = env.store
+        .listRecords(thread.id)
+        .filter((record) => record.kind === 'plugin' && record.payload.action === 'context-compacted');
+      expect(markers).toHaveLength(1);
+      expect(model.prompts).toHaveLength(2);
+      const continuation = JSON.stringify(continuationProjection?.turns);
+      expect(continuation).toContain('Earlier turns summary: objective alpha; verified result beta.');
+      expect(continuation).toContain('Child found the missing rendering constraint.');
+      expect(continuation.indexOf('Earlier turns summary: objective alpha; verified result beta.')).toBeLessThan(
+        continuation.indexOf('Child found the missing rendering constraint.'),
+      );
+      const actualRequest = JSON.stringify(model.prompts.at(-1)?.turns);
+      expect(actualRequest).toContain('Child found the missing rendering constraint.');
+      expect(actualRequest.indexOf('Earlier turns summary: objective alpha; verified result beta.')).toBeLessThan(
+        actualRequest.indexOf('Child found the missing rendering constraint.'),
+      );
     } finally {
       await env.cleanup();
     }
