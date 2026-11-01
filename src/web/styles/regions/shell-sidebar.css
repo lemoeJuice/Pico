@@ -169,7 +169,7 @@
   border: 0;
   border-radius: 7px;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--pico-shell-project-group-name-font-size);
   cursor: pointer;
 }
 .sidebar-expand:hover {
