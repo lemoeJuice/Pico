@@ -1,4 +1,5 @@
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -87,9 +88,50 @@ describe('independent Thread workspace attachment', () => {
         executorId: parent.executorId,
         workspacePath: env.workspace,
       });
+      const pathKey = createHash('sha256').update(env.workspace).digest('hex');
+      const executorKey = createHash('sha256').update(`executor:${parent.executorId}`).digest('hex');
+      expect(env.store.getSetting(`executor-container-workspace-key:${pathKey}`, null)).toBe(executorKey);
+      const laterPlan = await adapter.planWorkspaceContainer(env.workspace, [env.store.executorForThread(child.id)!]);
+      expect(laterPlan.workspaceKey).toBe(executorKey);
+      expect(laterPlan.attachExecutorId).toBeUndefined();
+      const peer = env.store.createThread(project.id, 'container', 'Project peer');
+      const resolveWorkspaceKey = adapter as unknown as {
+        workspaceContainerKey(workspace: string, independentKey: string, attachment: null): Promise<string>;
+      };
+      expect(
+        await resolveWorkspaceKey.workspaceContainerKey(
+          env.workspace,
+          createHash('sha256').update(`executor:${peer.executorId}`).digest('hex'),
+          null,
+        ),
+      ).toBe(executorKey);
     } finally {
       attach.mockRestore(); copy.mockRestore(); finalize.mockRestore();
       await env.cleanup();
+    }
+  });
+
+  it('uses the configured workspace Container when converting an independent Thread', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.runtime.createIndependentThread('container', 'Independent');
+    const adapter = (env.runtime as unknown as { containerExecutor: ContainerExecutor }).containerExecutor;
+    const attach = vi.spyOn(adapter, 'attachWorkspace').mockResolvedValue();
+    const copy = vi.spyOn(adapter, 'copyIndependentWorkspace').mockResolvedValue();
+    const destination = await mkdtemp(join(tmpdir(), 'pico-existing-workspace-container-'));
+    await rm(destination, { recursive: true, force: true });
+    await mkdir(destination);
+    const pathKey = createHash('sha256').update(destination).digest('hex');
+    env.store.setSetting(`executor-container-name:${pathKey}`, 'existing-workspace-container');
+    try {
+      await env.runtime.createProjectFromThread(thread.id, 'Project', destination);
+      expect(attach).not.toHaveBeenCalled();
+      expect(env.store.getSetting(`executor-container-workspace-key:${pathKey}`, null)).toBe(pathKey);
+      expect(copy).toHaveBeenCalledOnce();
+    } finally {
+      attach.mockRestore();
+      copy.mockRestore();
+      await env.cleanup();
+      await rm(destination, { recursive: true, force: true });
     }
   });
 
@@ -147,7 +189,7 @@ describe('independent Thread workspace attachment', () => {
     }
   });
 
-  it('rejects same-path conflicts between two independent containers and rolls both back', async () => {
+  it('rejects same-path conflicts between two independent containers and rolls back the shared seed', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const first = env.runtime.createIndependentThread('container', 'First');
     const second = env.store.createThread(null, 'container', 'Second', { parentThreadId: first.id });
@@ -165,8 +207,8 @@ describe('independent Thread workspace attachment', () => {
     try {
       await expect(env.runtime.createProjectFromThread(first.id, 'Project', destination)).rejects.toThrow(/conflict/i);
       expect(await readdir(destination)).toEqual([]);
-      expect(attach).toHaveBeenCalledTimes(2);
-      expect(rollback).toHaveBeenCalledTimes(2);
+      expect(attach).toHaveBeenCalledOnce();
+      expect(rollback).toHaveBeenCalledOnce();
       expect(env.store.getThread(first.id)?.projectId).toBeNull();
       expect(env.store.getThread(second.id)?.projectId).toBeNull();
     } finally {
@@ -196,8 +238,8 @@ describe('independent Thread workspace attachment', () => {
       expect(await readFile(join(destination, 'first.txt'), 'utf8')).toBe('from-0');
       expect(await readFile(join(destination, 'second.txt'), 'utf8')).toBe('from-1');
       expect(copy).toHaveBeenCalledTimes(2);
-      expect(attach).toHaveBeenCalledTimes(2);
-      expect(finalize).toHaveBeenCalledTimes(2);
+      expect(attach).toHaveBeenCalledOnce();
+      expect(finalize).toHaveBeenCalledOnce();
     } finally {
       copy.mockRestore(); attach.mockRestore(); finalize.mockRestore();
       await env.cleanup();

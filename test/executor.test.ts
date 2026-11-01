@@ -274,6 +274,30 @@ describe('Executor execution identity and recovery', () => {
     }
   });
 
+  it('copies a stopped independent Container workspace straight into host staging', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.store.createThread(null, 'container');
+    const binding = env.store.executorForThread(thread.id)!;
+    const calls: string[][] = [];
+    const podman = async (args: string[]) => {
+      calls.push(args);
+      if (args[0] === 'container' && args[1] === 'inspect') return { stdout: 'false', stderr: '' };
+      return { stdout: '', stderr: '' };
+    };
+    const executor = new ContainerExecutor(env.store, undefined, undefined, podman);
+    try {
+      await executor.copyIndependentWorkspace(binding, env.workspace);
+      const copy = calls.find((args) => args[0] === 'cp');
+      expect(copy).toHaveLength(3);
+      expect(copy?.[1]).toMatch(/:\/pico-thread-work\/\.$/);
+      expect(copy?.[2]).toBe(env.workspace);
+      expect(calls.some((args) => args[0] === 'run' || args[0] === 'start')).toBe(false);
+    } finally {
+      await executor.shutdown();
+      await env.cleanup();
+    }
+  });
+
   it.each([false, true])('does not recreate a missing independent Container with volume marker %s', async (marked) => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.store.createThread(null, 'container');

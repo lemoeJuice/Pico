@@ -3,7 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { accessSync, constants } from 'node:fs';
 import { mkdir, realpath, stat } from 'node:fs/promises';
 import { createServer } from 'node:net';
-import { delimiter, resolve, join, relative, sep } from 'node:path';
+import { delimiter, resolve, join } from 'node:path';
 import type { Execution, ExecutorBinding, ToolDefinition } from '../core/types.js';
 import { PicoStore } from '../core/store.js';
 import { currentExecutorBundle, currentExecutorVersion } from './bundle.js';
@@ -14,6 +14,7 @@ import { ServiceError } from '../contracts/service-error.js';
 
 const CONTAINER_SETTING_PREFIX = 'executor-container-connection:';
 const CONTAINER_NAME_SETTING_PREFIX = 'executor-container-name:';
+const CONTAINER_WORKSPACE_KEY_PREFIX = 'executor-container-workspace-key:';
 const CONTAINER_ATTACH_SETTING_PREFIX = 'executor-container-attach:';
 const CONTAINER_INDEPENDENT_VOLUME_SETTING_PREFIX = 'executor-container-independent-volume:';
 const CONTAINER_INSTALLATION_SETTING = 'executor-container-installation-id';
@@ -47,6 +48,12 @@ interface ContainerProbe {
   reachable: boolean;
   responded: boolean;
   status?: number;
+}
+
+export interface WorkspaceContainerPlan {
+  workspace: string;
+  workspaceKey: string;
+  attachExecutorId?: string;
 }
 
 function abortError(): DOMException {
@@ -245,14 +252,47 @@ export class ContainerExecutor implements ExecutorAdapter {
     await this.client.shutdown();
   }
 
+  async planWorkspaceContainer(
+    workspacePath: string,
+    candidates: ExecutorBinding[],
+  ): Promise<WorkspaceContainerPlan> {
+    const workspace = await realpath(resolve(workspacePath));
+    if (!(await stat(workspace)).isDirectory()) throw new Error('Container workspace must be a directory.');
+    const pathKey = this.workspacePathKey(workspace);
+    const savedWorkspaceKey = this.store.getSetting<string | null>(
+      `${CONTAINER_WORKSPACE_KEY_PREFIX}${pathKey}`,
+      null,
+    );
+    if (savedWorkspaceKey && /^[a-f0-9]{64}$/.test(savedWorkspaceKey)) {
+      return { workspace, workspaceKey: savedWorkspaceKey };
+    }
+
+    const pathContainerConfigured =
+      this.store.getSetting<string | null>(`${CONTAINER_NAME_SETTING_PREFIX}${pathKey}`, null) !== null ||
+      this.store.getSetting<SavedContainerConnection | null>(`${CONTAINER_SETTING_PREFIX}${pathKey}`, null) !== null;
+    if (pathContainerConfigured) return { workspace, workspaceKey: pathKey };
+
+    const seed = candidates.find(
+      (binding) => binding.kind === 'container' && !binding.remoteConnectionId && !binding.workspacePath.trim(),
+    );
+    if (!seed) return { workspace, workspaceKey: pathKey };
+    return {
+      workspace,
+      workspaceKey: createHash('sha256').update(`executor:${seed.id}`).digest('hex'),
+      attachExecutorId: seed.id,
+    };
+  }
+
+  setWorkspaceContainerKey(workspacePath: string, workspaceKey: string): void {
+    const pathKey = this.workspacePathKey(workspacePath);
+    if (!/^[a-f0-9]{64}$/.test(workspaceKey)) throw new Error('Invalid Container workspace key.');
+    this.store.setSetting(`${CONTAINER_WORKSPACE_KEY_PREFIX}${pathKey}`, workspaceKey);
+  }
+
   restart(binding: ExecutorBinding): Promise<void> {
     const independent = !binding.workspacePath.trim();
     const stableKey = createHash('sha256').update(`executor:${binding.id}`).digest('hex');
-    const savedAttachment = this.store.getSetting<ContainerWorkspaceAttachment | null>(
-      `${CONTAINER_ATTACH_SETTING_PREFIX}${stableKey}`,
-      null,
-    );
-    const pathKey = independent || savedAttachment ? `executor:${binding.id}` : resolve(binding.workspacePath);
+    const pathKey = independent ? `executor:${binding.id}` : resolve(binding.workspacePath);
     const existing = this.manualRestartPathPromises.get(pathKey);
     if (existing) return existing;
     let promise!: Promise<void>;
@@ -273,10 +313,9 @@ export class ContainerExecutor implements ExecutorAdapter {
         if (independent && attached && attached.status !== 'rolled_back') {
           throw new ServiceError(409, 'This Container Executor has been attached to a Project workspace.');
         }
-        const workspaceKey =
-          independent || attached?.workspace === workspace
-            ? stableKey
-            : createHash('sha256').update(workspace!).digest('hex');
+        const workspaceKey = independent
+          ? stableKey
+          : await this.workspaceContainerKey(workspace!, stableKey, attached);
         const canonicalExisting = this.manualRestartPromises.get(workspaceKey);
         if (canonicalExisting && canonicalExisting !== promise) return canonicalExisting;
         this.manualRestartPromises.set(workspaceKey, promise);
@@ -351,20 +390,24 @@ export class ContainerExecutor implements ExecutorAdapter {
     return promise;
   }
 
-  /** Copy the retained independent workspace into a private directory in the mounted workspace. */
+  /** Copy an independent workspace into a private host staging directory. */
   async copyIndependentWorkspace(binding: ExecutorBinding, stagingPath: string): Promise<void> {
     const key = createHash('sha256').update(`executor:${binding.id}`).digest('hex');
-    const record = this.store.getSetting<ContainerWorkspaceAttachment | null>(`${CONTAINER_ATTACH_SETTING_PREFIX}${key}`, null);
-    if (!record || record.status !== 'pending') throw new Error('Container workspace attachment is not pending.');
-    const destination = relative(record.workspace, resolve(stagingPath));
-    if (!destination || destination === '..' || destination.startsWith(`..${sep}`)) {
-      throw new Error('Workspace migration staging directory must be inside the mounted workspace.');
-    }
     const name = this.containerName(key);
-    if (await this.containerWorkspaceMount(name) !== record.workspace) {
-      throw new Error('Container workspace mount changed during migration.');
+    const state = await this.inspectContainer(name);
+    if (!state.exists) {
+      const savedConnection = this.store.getSetting<SavedContainerConnection | null>(
+        `${CONTAINER_SETTING_PREFIX}${key}`,
+        null,
+      );
+      if (savedConnection) {
+        throw new Error(
+          'Existing independent Container is missing. Automatic workspace copying stopped to protect its container filesystem.',
+        );
+      }
+      return;
     }
-    await this.callPodman(['exec', name, 'cp', '-a', `${INDEPENDENT_WORKSPACE_ROOT}/.`, `/workspace/${destination.split(sep).join('/')}/`]);
+    await this.callPodman(['cp', `${name}:${INDEPENDENT_WORKSPACE_ROOT}/.`, resolve(stagingPath)]);
   }
 
   async finalizeWorkspaceAttachment(binding: ExecutorBinding): Promise<void> {
@@ -765,14 +808,15 @@ export class ContainerExecutor implements ExecutorAdapter {
       }
       await this.restorePendingWorkspaceAttachment(binding, workspace);
     }
-    const workspaceKey =
-      attachment?.workspace === workspace && attachment.status !== 'rolled_back'
-        ? independentKey
-        : createHash('sha256').update(workspace).digest('hex');
+    const currentAttachment = this.store.getSetting<ContainerWorkspaceAttachment | null>(
+      `${CONTAINER_ATTACH_SETTING_PREFIX}${independentKey}`,
+      null,
+    );
+    const workspaceKey = await this.workspaceContainerKey(workspace, independentKey, currentAttachment);
     const containerName = this.containerName(workspaceKey);
     await this.ensureService(workspace, workspaceKey, containerName, signal);
     const saved = await this.connection(workspaceKey);
-    if (attachment?.image && attachment.workspace === workspace) {
+    if (currentAttachment?.image && currentAttachment.workspace === workspace) {
       const mountedWorkspace = await this.containerWorkspaceMount(containerName);
       if (mountedWorkspace !== workspace)
         throw new Error('Attached Container Executor workspace mount does not match the Project.');
@@ -783,6 +827,34 @@ export class ContainerExecutor implements ExecutorAdapter {
       accessToken: saved.accessToken,
       workspacePath: '/workspace',
     };
+  }
+
+  private workspacePathKey(workspace: string): string {
+    return createHash('sha256').update(workspace).digest('hex');
+  }
+
+  private async workspaceContainerKey(
+    workspace: string,
+    independentKey: string,
+    attachment: ContainerWorkspaceAttachment | null,
+  ): Promise<string> {
+    const pathKey = this.workspacePathKey(workspace);
+    // Existing attached bindings keep their original container and execution ledger.
+    // New independent-to-Project conversions write an explicit path alias below.
+    if (
+      (attachment?.status === 'attached' || attachment?.status === 'pending') &&
+      attachment.workspace === workspace
+    ) {
+      return independentKey;
+    }
+
+    const savedWorkspaceKey = this.store.getSetting<string | null>(
+      `${CONTAINER_WORKSPACE_KEY_PREFIX}${pathKey}`,
+      null,
+    );
+    if (savedWorkspaceKey && /^[a-f0-9]{64}$/.test(savedWorkspaceKey)) return savedWorkspaceKey;
+
+    return pathKey;
   }
 
   private containerName(workspaceKey: string): string {

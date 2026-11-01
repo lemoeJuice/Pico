@@ -47,7 +47,7 @@ import type {
   ThreadToolView,
 } from '../contracts/runtime.js';
 import { ExecutionPipelines } from '../core/pipeline.js';
-import { ContainerExecutor } from '../executor/container-executor.js';
+import { ContainerExecutor, type WorkspaceContainerPlan } from '../executor/container-executor.js';
 import { HostExecutor, requiresExternalExecutor, type ExecutorAdapter } from '../executor/executor.js';
 import { RemoteHostExecutor, inspectRemoteExecutor, validateRemoteWorkspace } from '../executor/remote-executor.js';
 import { EXECUTOR_PROTOCOL_VERSION, normalizeRemoteExecutorUrl } from '../executor/remote-protocol.js';
@@ -1113,6 +1113,7 @@ export class PicoRuntime {
   private readonly containerExecutor: ContainerExecutor;
   private readonly workspaceMutationThreads = new Set<string>();
   private readonly workspaceMutationProjects = new Set<string>();
+  private readonly workspaceMutationPaths = new Set<string>();
   private readonly remoteHostExecutor: RemoteHostExecutor;
   private readonly mcpManager: McpManager;
   private readonly options: RuntimeOptions;
@@ -1599,6 +1600,40 @@ export class PicoRuntime {
     };
   }
 
+  private async lockWorkspacePathThreads(workspacePath: string): Promise<() => void> {
+    const canonicalWorkspace = await realpath(workspacePath);
+    if (this.workspaceMutationPaths.has(canonicalWorkspace)) {
+      throw new ServiceError(409, 'This workspace is already being changed.');
+    }
+    this.workspaceMutationPaths.add(canonicalWorkspace);
+    try {
+      const threads: Thread[] = [];
+      for (const thread of this.store.listThreads()) {
+        if (!thread.projectId || !thread.workspacePath) continue;
+        try {
+          if ((await realpath(thread.workspacePath)) === canonicalWorkspace) threads.push(thread);
+        } catch {
+          // A removed workspace cannot match the validated destination path.
+        }
+      }
+      const projectIds = [...new Set(threads.map((thread) => thread.projectId).filter((id): id is string => Boolean(id)))];
+      if (projectIds.some((projectId) => this.workspaceMutationProjects.has(projectId))) {
+        throw new ServiceError(409, 'A Project using this workspace is already being changed.');
+      }
+      this.assertWorkspaceThreadsIdle(threads);
+      const unlockThreads = this.lockWorkspaceThreads(threads);
+      for (const projectId of projectIds) this.workspaceMutationProjects.add(projectId);
+      return () => {
+        this.workspaceMutationPaths.delete(canonicalWorkspace);
+        for (const projectId of projectIds) this.workspaceMutationProjects.delete(projectId);
+        unlockThreads();
+      };
+    } catch (error) {
+      this.workspaceMutationPaths.delete(canonicalWorkspace);
+      throw error;
+    }
+  }
+
   private assertWorkspaceThreadsIdle(threads: Thread[]): void {
     for (const thread of threads) {
       if (
@@ -1652,6 +1687,20 @@ export class PicoRuntime {
     }
   }
 
+  private independentContainerBindings(threads: Thread[]): ExecutorBinding[] {
+    const bindings: ExecutorBinding[] = [];
+    const seen = new Set<string>();
+    for (const thread of [...threads].sort((left, right) => left.createdAt.localeCompare(right.createdAt))) {
+      if (thread.executorKind !== 'container' || thread.executorRemote || thread.workspacePath || seen.has(thread.executorId))
+        continue;
+      const binding = this.store.getExecutorBinding(thread.executorId);
+      if (!binding || binding.kind !== 'container' || binding.remoteConnectionId || binding.workspacePath.trim()) continue;
+      seen.add(binding.id);
+      bindings.push(binding);
+    }
+    return bindings;
+  }
+
   createProject(name: string | undefined, workspacePath?: string): Promise<Project> {
     return this.createProjectChecked(name, workspacePath);
   }
@@ -1666,25 +1715,34 @@ export class PicoRuntime {
     this.assertWorkspaceThreadsIdle(members);
     const unlock = this.lockWorkspaceThreads(members);
     const attached: ExecutorBinding[] = [];
+    const independentBindings = this.independentContainerBindings(members);
+    let workspaceContainerPlan: WorkspaceContainerPlan | null = null;
+    let unlockWorkspacePathThreads = (): void => undefined;
     let committed = false;
     try {
       const validatedPath = workspacePath?.trim() ? await this.validateWorkspaceDirectory(workspacePath) : '';
       const cleanedName = name?.trim() || (validatedPath ? basename(validatedPath) : 'Project');
       if (validatedPath) {
+        unlockWorkspacePathThreads = await this.lockWorkspacePathThreads(validatedPath);
         await this.assertEmptyWorkspaceDirectory(validatedPath);
-        for (const thread of members) {
-          if (thread.executorKind !== 'container' || thread.executorRemote || thread.workspacePath) continue;
-          const binding = this.store.getExecutorBinding(thread.executorId);
-          if (!binding) throw new Error('Executor binding not found');
-          if (attached.some((item) => item.id === binding.id)) continue;
+        workspaceContainerPlan = await this.containerExecutor.planWorkspaceContainer(
+          validatedPath,
+          independentBindings,
+        );
+        if (workspaceContainerPlan.attachExecutorId) {
+          const binding = independentBindings.find((item) => item.id === workspaceContainerPlan!.attachExecutorId);
+          if (!binding) throw new Error('Workspace Container seed Executor was not found.');
           await this.containerExecutor.attachWorkspace(binding, validatedPath);
           attached.push(binding);
         }
-        await this.copyIndependentWorkspaces(attached, validatedPath);
+        await this.copyIndependentWorkspaces(independentBindings, validatedPath);
       }
       const result = this.store.transaction(() => {
         const created = this.store.createProjectForThreadSubtree(threadId, cleanedName, validatedPath);
         if (!validatedPath) this.store.setSetting(`project-requires-empty-workspace:${created.project.id}`, true);
+        if (workspaceContainerPlan) {
+          this.containerExecutor.setWorkspaceContainerKey(validatedPath, workspaceContainerPlan.workspaceKey);
+        }
         return created;
       });
       committed = true;
@@ -1701,6 +1759,7 @@ export class PicoRuntime {
       if (!committed) await this.rollbackWorkspaceAttachments(attached, members, error);
       throw error;
     } finally {
+      unlockWorkspacePathThreads();
       unlock();
     }
   }
@@ -1715,12 +1774,17 @@ export class PicoRuntime {
     const unlock = this.lockWorkspaceThreads(threads);
     this.workspaceMutationProjects.add(projectId);
     const attached: ExecutorBinding[] = [];
+    let workspaceContainerPlan: WorkspaceContainerPlan | null = null;
+    let unlockWorkspacePathThreads = (): void => undefined;
     let committed = false;
     try {
       const workspacePath = await this.validateWorkspaceDirectory(requestedPath);
-      if (this.store.getSetting(`project-requires-empty-workspace:${projectId}`, false)) {
+      unlockWorkspacePathThreads = await this.lockWorkspacePathThreads(workspacePath);
+      const requiresEmptyWorkspace = this.store.getSetting(`project-requires-empty-workspace:${projectId}`, false);
+      if (requiresEmptyWorkspace) {
         await this.assertEmptyWorkspaceDirectory(workspacePath);
       }
+      const independentBindings = this.independentContainerBindings(threads);
       const executorIds: string[] = [];
       const seenExecutors = new Set<string>();
       for (const thread of threads) {
@@ -1728,18 +1792,35 @@ export class PicoRuntime {
         seenExecutors.add(thread.executorId);
         executorIds.push(thread.executorId);
       }
-      for (const thread of threads) {
-        if (thread.executorKind !== 'container' || thread.executorRemote || thread.workspacePath) continue;
-        if (attached.some((binding) => binding.id === thread.executorId)) continue;
-        const binding = this.store.getExecutorBinding(thread.executorId);
-        if (!binding) throw new Error('Executor binding not found');
-        await this.containerExecutor.attachWorkspace(binding, workspacePath);
-        attached.push(binding);
+      if (requiresEmptyWorkspace) {
+        workspaceContainerPlan = await this.containerExecutor.planWorkspaceContainer(
+          workspacePath,
+          independentBindings,
+        );
+        if (workspaceContainerPlan.attachExecutorId) {
+          const binding = independentBindings.find((item) => item.id === workspaceContainerPlan!.attachExecutorId);
+          if (!binding) throw new Error('Workspace Container seed Executor was not found.');
+          await this.containerExecutor.attachWorkspace(binding, workspacePath);
+          attached.push(binding);
+        }
+        await this.copyIndependentWorkspaces(independentBindings, workspacePath);
+      } else {
+        for (const thread of threads) {
+          if (thread.executorKind !== 'container' || thread.executorRemote || thread.workspacePath) continue;
+          if (attached.some((binding) => binding.id === thread.executorId)) continue;
+          const binding = this.store.getExecutorBinding(thread.executorId);
+          if (!binding) throw new Error('Executor binding not found');
+          await this.containerExecutor.attachWorkspace(binding, workspacePath);
+          attached.push(binding);
+        }
       }
-      if (this.store.getSetting(`project-requires-empty-workspace:${projectId}`, false)) {
-        await this.copyIndependentWorkspaces(attached, workspacePath);
-      }
-      const updated = this.store.setProjectWorkspace(projectId, workspacePath, executorIds);
+      const updated = this.store.transaction(() => {
+        const project = this.store.setProjectWorkspace(projectId, workspacePath, executorIds);
+        if (project && workspaceContainerPlan) {
+          this.containerExecutor.setWorkspaceContainerKey(workspacePath, workspaceContainerPlan.workspaceKey);
+        }
+        return project;
+      });
       if (!updated) throw new ServiceError(404, 'Project not found');
       committed = true;
       await this.finalizeWorkspaceAttachments(attached);
@@ -1753,6 +1834,7 @@ export class PicoRuntime {
       if (!committed) await this.rollbackWorkspaceAttachments(attached, threads, error);
       throw error;
     } finally {
+      unlockWorkspacePathThreads();
       unlock();
       this.workspaceMutationProjects.delete(projectId);
     }
@@ -1829,6 +1911,9 @@ export class PicoRuntime {
     if (!requestedPath && !name?.trim())
       throw new ServiceError(400, 'name is required when a workspace is not set.');
     const path = requestedPath ? await this.validateWorkspaceDirectory(requestedPath) : '';
+    if (path && this.workspaceMutationPaths.has(path)) {
+      throw new ServiceError(409, 'This workspace is being changed. Try again shortly.');
+    }
     const cleanedName = name?.trim() || basename(path) || 'Project';
     const project = this.store.createProject(cleanedName, path);
     this.publish({ type: 'project.created', project });
