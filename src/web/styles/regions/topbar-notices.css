@@ -146,7 +146,9 @@
 .banner {
   position: relative;
   z-index: 2;
+  container-type: inline-size;
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 16px;
   margin: 10px 30px 0;
@@ -155,6 +157,23 @@
   border-radius: 9px;
   font-size: var(--pico-topbar-banner-font-size);
   line-height: var(--pico-topbar-banner-line-height);
+}
+@container (max-width: 720px) {
+  .banner > :first-child {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+  .banner > button {
+    flex: 0 1 100%;
+    width: 100%;
+    text-align: right;
+  }
+  .banner > .executor-error-actions {
+    flex: 0 1 100%;
+    width: 100%;
+    justify-content: flex-start;
+    gap: 8px 12px;
+  }
 }
 .banner button {
   flex: 0 0 auto;
