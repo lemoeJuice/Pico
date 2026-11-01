@@ -174,6 +174,42 @@ describe('PicoStore migrations', () => {
   });
 });
 
+describe('Thread list activity timestamps', () => {
+  it('returns the latest user-authored message time for independent and Project Threads', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-thread-list-activity-'));
+    const store = new PicoStore(join(directory, 'pico.sqlite'));
+    try {
+      const project = store.createProject('Activity', directory);
+      const projectThread = store.createThread(project.id, 'runtime');
+      const independentThread = store.createThread(null, 'runtime');
+      const emptyThread = store.createThread(project.id, 'runtime');
+      store.appendCanonical(projectThread.id, 'activity-user-1', 'message', {
+        role: 'user', content: 'first', source: 'user',
+      }, '2026-01-01T00:00:00.000Z');
+      store.appendCanonical(projectThread.id, 'activity-agent-user-role', 'message', {
+        role: 'user', content: 'agent generated', source: 'agent',
+      }, '2026-01-02T00:00:00.000Z');
+      const latestUserRecord = store.appendCanonical(projectThread.id, 'activity-user-2', 'message', {
+        role: 'user', content: 'latest', source: 'user',
+      }, '2026-01-03T00:00:00.000Z').record;
+      store.appendMessage(independentThread.id, 'activity-independent-user', {
+        role: 'user', content: 'independent', source: 'user',
+      });
+
+      expect(store.listThreads(project.id).find((thread) => thread.id === projectThread.id)?.lastUserMessageAt)
+        .toBe(latestUserRecord.createdAt);
+      expect(store.listProjectThreads(project.id).find((thread) => thread.id === projectThread.id)?.lastUserMessageAt)
+        .toBe(latestUserRecord.createdAt);
+      expect(store.listThreads(null).find((thread) => thread.id === independentThread.id)?.lastUserMessageAt)
+        .toBeTruthy();
+      expect(store.listThreads(project.id).find((thread) => thread.id === emptyThread.id)?.lastUserMessageAt).toBeNull();
+    } finally {
+      store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('independent Thread Project assignment', () => {
   it('reuses a direct parent Container binding and includes inheritance in idempotency identity', () => {
     const store = new PicoStore(':memory:');

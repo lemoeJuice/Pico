@@ -1087,7 +1087,12 @@ export class PicoStore {
             .prepare(
               `
           SELECT t.*, e.kind AS executor_kind, e.label AS executor_label,
-                 e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote
+                 e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote,
+                 (SELECT r.created_at FROM canonical_records r
+                  WHERE r.thread_id = t.id AND r.kind = 'message'
+                    AND json_extract(r.payload_json, '$.role') = 'user'
+                    AND json_extract(r.payload_json, '$.source') = 'user'
+                  ORDER BY r.seq DESC LIMIT 1) AS last_user_message_at
           FROM threads t JOIN executors e ON e.id = t.executor_id
           WHERE t.project_id IS ? AND t.archived_at IS NULL AND t.deleted_at IS NULL
           ORDER BY t.created_at DESC
@@ -1098,7 +1103,12 @@ export class PicoStore {
             .prepare(
               `
           SELECT t.*, e.kind AS executor_kind, e.label AS executor_label,
-                 e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote
+                 e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote,
+                 (SELECT r.created_at FROM canonical_records r
+                  WHERE r.thread_id = t.id AND r.kind = 'message'
+                    AND json_extract(r.payload_json, '$.role') = 'user'
+                    AND json_extract(r.payload_json, '$.source') = 'user'
+                  ORDER BY r.seq DESC LIMIT 1) AS last_user_message_at
           FROM threads t JOIN executors e ON e.id = t.executor_id
           WHERE t.archived_at IS NULL AND t.deleted_at IS NULL
           ORDER BY t.created_at DESC
@@ -1112,7 +1122,12 @@ export class PicoStore {
   listProjectThreads(projectId: string): Thread[] {
     const rows = this.db.prepare(`
       SELECT t.*, e.kind AS executor_kind, e.label AS executor_label,
-             e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote
+             e.workspace_path AS workspace_path, e.remote_connection_id AS executor_remote,
+             (SELECT r.created_at FROM canonical_records r
+              WHERE r.thread_id = t.id AND r.kind = 'message'
+                AND json_extract(r.payload_json, '$.role') = 'user'
+                AND json_extract(r.payload_json, '$.source') = 'user'
+              ORDER BY r.seq DESC LIMIT 1) AS last_user_message_at
       FROM threads t JOIN executors e ON e.id = t.executor_id
       WHERE t.project_id = ? ORDER BY t.created_at
     `).all(projectId) as SqlRow[];
@@ -1150,6 +1165,9 @@ export class PicoStore {
       pauseReason: typeof row.pause_reason === 'string' ? row.pause_reason : null,
       pauseCode: row.pause_code === 'model_error' ? 'model_error' : null,
       createdAt: String(row.created_at),
+      ...(Object.hasOwn(row, 'last_user_message_at')
+        ? { lastUserMessageAt: typeof row.last_user_message_at === 'string' ? row.last_user_message_at : null }
+        : {}),
       archivedAt: typeof row.archived_at === 'string' ? row.archived_at : null,
       deletedAt: typeof row.deleted_at === 'string' ? row.deleted_at : null,
       state: row.pause_requested === 1 ? 'paused' : 'idle',

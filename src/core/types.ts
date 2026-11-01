@@ -42,6 +42,8 @@ export interface Thread {
   pauseReason: string | null;
   pauseCode?: 'model_error' | null;
   createdAt: string;
+  /** Timestamp of the most recently appended user-authored message, when included by a list query. */
+  lastUserMessageAt?: string | null;
   archivedAt?: string | null;
   deletedAt?: string | null;
   state: ThreadState;

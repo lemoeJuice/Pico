@@ -1689,6 +1689,8 @@ export class PicoRuntime {
       });
       committed = true;
       await this.finalizeWorkspaceAttachments(attached);
+      const activityById = new Map(this.store.listProjectThreads(result.project.id).map((thread) => [thread.id, thread.lastUserMessageAt]));
+      result.threads = result.threads.map((thread) => ({ ...thread, lastUserMessageAt: activityById.get(thread.id) ?? null }));
       this.publish({ type: 'project.created', project: result.project });
       for (const thread of result.threads) {
         this.publish({ type: 'thread.updated', thread });
@@ -2000,7 +2002,10 @@ export class PicoRuntime {
   }
 
   listThreads(projectId?: string | null): Thread[] {
-    return this.store.listThreads(projectId).map((thread) => this.getThread(thread.id) ?? thread);
+    return this.store.listThreads(projectId).map((thread) => {
+      const current = this.getThread(thread.id);
+      return current ? { ...current, lastUserMessageAt: thread.lastUserMessageAt ?? null } : thread;
+    });
   }
 
   listArchivedThreads(): Thread[] {

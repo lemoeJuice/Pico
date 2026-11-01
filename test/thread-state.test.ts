@@ -28,6 +28,16 @@ describe('applyThreadStateUpdate', () => {
     expect(next.snapshot?.thread).toEqual(updated);
   });
 
+  it('preserves activity from list responses when state events omit it', () => {
+    const existing = { ...thread('thread-a'), lastUserMessageAt: '2026-10-30T12:00:00Z' };
+    const next = applyThreadStateUpdate(
+      { threads: [existing], threadsByProject: { 'project-a': [existing] }, snapshot: null },
+      { ...thread('thread-a'), state: 'running' }, 'project-a',
+    );
+    expect(next.threads[0]?.lastUserMessageAt).toBe(existing.lastUserMessageAt);
+    expect(next.threadsByProject['project-a']?.[0]?.lastUserMessageAt).toBe(existing.lastUserMessageAt);
+  });
+
   it('removes archived Threads from active projections and clears only their snapshot', () => {
     const archived = thread('thread-a');
     const other = thread('thread-b');

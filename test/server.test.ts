@@ -629,8 +629,12 @@ describe('independent Thread Project API', () => {
       const root = await created.json();
       expect(root.projectId).toBeNull();
       const child = server.runtime.store.createThread(null, 'runtime', 'Child', { parentThreadId: root.id });
+      const message = server.runtime.store.appendCanonical(root.id, 'sidebar-activity', 'message', {
+        role: 'user', content: 'Hello', source: 'user',
+      }, '2026-10-01T00:00:00.000Z').record;
       const unassigned = await fetch(`${base}/api/threads?unassigned=true`).then((response) => response.json());
       expect(unassigned.map((thread: { id: string }) => thread.id)).toEqual(expect.arrayContaining([root.id, child.id]));
+      expect(unassigned.find((thread: { id: string }) => thread.id === root.id).lastUserMessageAt).toBe(message.createdAt);
 
       const assigned = await fetch(`${base}/api/threads/${root.id}/project`, {
         method: 'POST', headers, body: JSON.stringify({ name: 'Assigned Project' }),
@@ -638,6 +642,9 @@ describe('independent Thread Project API', () => {
       expect(assigned.status).toBe(201);
       const result = await assigned.json();
       expect(result.project.workspacePath).toBe('');
+      expect(result.threads.find((thread: { id: string }) => thread.id === root.id).lastUserMessageAt).toBe(message.createdAt);
+      const projectThreads = await fetch(`${base}/api/projects/${result.project.id}/threads`).then((response) => response.json());
+      expect(projectThreads.find((thread: { id: string }) => thread.id === root.id).lastUserMessageAt).toBe(message.createdAt);
       expect(result.threads.map((thread: { projectId: string }) => thread.projectId)).toEqual([
         result.project.id,
         result.project.id,

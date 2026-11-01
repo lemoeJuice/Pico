@@ -14,6 +14,12 @@ export function applyThreadStateUpdate(
   updated: Thread,
   selectedProjectId: string | null,
 ): ThreadStateProjection {
+  // List responses carry activity metadata; ordinary thread events may omit it.
+  const previous = current.threads.find((thread) => thread.id === updated.id)
+    ?? (updated.projectId ? current.threadsByProject[updated.projectId]?.find((thread) => thread.id === updated.id) : undefined);
+  if (updated.lastUserMessageAt === undefined && previous?.lastUserMessageAt !== undefined) {
+    updated = { ...updated, lastUserMessageAt: previous.lastUserMessageAt };
+  }
   const isActive = !updated.archivedAt && !updated.deletedAt;
   const projectThreads = updated.projectId ? (current.threadsByProject[updated.projectId] ?? []) : [];
   const sameSelection = current.threads.filter((thread) => thread.id !== updated.id);

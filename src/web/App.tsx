@@ -39,6 +39,7 @@ import { pauseReasonIsError, visiblePauseReason } from './pause-reason.js';
 import { shouldSubmitOnEnter } from './composer-keys.js';
 import { upsertProjectThread } from './project-threads.js';
 import { upsertProject } from './project-list.js';
+import { SIDEBAR_PAGE_SIZE, sortSidebarProjects, sortSidebarThreads } from './sidebar-order.js';
 import { updateProjectThreadList, updateThreadList, updateThreadSnapshot } from './thread-state.js';
 import { ThreadToolRequestGuard } from './thread-tool-requests.js';
 import { toolsPanelPosition } from './tools-panel-position.js';
@@ -718,6 +719,11 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   if (composerState.current === null) composerState.current = readComposerState();
   const [projects, setProjects] = useState<Project[]>([]);
   const [threadsByProject, setThreadsByProject] = useState<Record<string, Thread[]>>({});
+  const [independentSectionExpanded, setIndependentSectionExpanded] = useState(true);
+  const [projectsSectionExpanded, setProjectsSectionExpanded] = useState(true);
+  const [independentVisibleCount, setIndependentVisibleCount] = useState(SIDEBAR_PAGE_SIZE);
+  const [projectsVisibleCount, setProjectsVisibleCount] = useState(SIDEBAR_PAGE_SIZE);
+  const [projectThreadVisibleCounts, setProjectThreadVisibleCounts] = useState<Record<string, number>>({});
   const [expandedProjectIds, setExpandedProjectIds] = useState<Set<string>>(() => new Set());
   const [expandedChildThreadIds, setExpandedChildThreadIds] = useState<Set<string>>(() => new Set());
   const [projectId, setProjectId] = useState<string | null>(null);
@@ -1962,6 +1968,18 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             !snapshotRef.current.records.some((item) => item.id === record.id)
           ) markLiveEntrance(`record:${record.id}`);
           if (record?.kind === 'message' && record.threadId) {
+            if (record.payload.role === 'user' && record.payload.source === 'user' && typeof record.createdAt === 'string') {
+              const updateActivity = (items: Thread[]) => items.map((item) => item.id === record.threadId
+                ? { ...item, lastUserMessageAt: item.lastUserMessageAt && item.lastUserMessageAt > record.createdAt ? item.lastUserMessageAt : record.createdAt }
+                : item);
+              independentThreadVersion.current += 1;
+              for (const id of projectThreadVersions.current.keys()) {
+                projectThreadVersions.current.set(id, (projectThreadVersions.current.get(id) ?? 0) + 1);
+              }
+              setIndependentThreads(updateActivity);
+              setThreads(updateActivity);
+              setThreadsByProject((current) => Object.fromEntries(Object.entries(current).map(([id, items]) => [id, updateActivity(items)])));
+            }
             if (record.payload.source === 'user' && typeof record.payload.content === 'string') {
               acceptMessage(record.threadId, record.id, record.payload.content);
             }
@@ -3198,7 +3216,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     if (projectThreads === undefined) {
       return <div className="sidebar-empty project-thread-empty">Loading Threads…</div>;
     }
-    const visibleThreads = projectThreads.filter((thread) => !thread.archivedAt && !thread.deletedAt);
+    const visibleThreads = sortSidebarThreads(projectThreads.filter((thread) => !thread.archivedAt && !thread.deletedAt));
     const visibleThreadIds = new Set(visibleThreads.map((thread) => thread.id));
     const childrenByParent = new Map<string, Thread[]>();
     for (const thread of visibleThreads) {
@@ -3235,14 +3253,20 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
     const roots = visibleThreads.filter(
       (thread) => !thread.parentThreadId || !visibleThreadIds.has(thread.parentThreadId),
     );
+    const visibleCount = projectThreadVisibleCounts[project.id] ?? SIDEBAR_PAGE_SIZE;
     return roots.length ? (
-      <div className="project-thread-list">{roots.map((thread) => renderThreadTree(thread))}</div>
+      <div className="project-thread-list">
+        {roots.slice(0, visibleCount).map((thread) => renderThreadTree(thread))}
+        {roots.length > visibleCount ? (
+          <button type="button" className="sidebar-expand" onClick={() => setProjectThreadVisibleCounts((current) => ({ ...current, [project.id]: visibleCount + SIDEBAR_PAGE_SIZE }))}>Expand</button>
+        ) : null}
+      </div>
     ) : (
       <div className="sidebar-empty project-thread-empty">No Threads yet. Start one with the + button.</div>
     );
   };
   const renderIndependentThreadTree = (thread: Thread, all: Thread[], depth = 0): ReactNode => {
-    const children = all.filter((item) => item.parentThreadId === thread.id);
+    const children = sortSidebarThreads(all.filter((item) => item.parentThreadId === thread.id));
     return (
       <div key={thread.id} style={depth ? { marginLeft: `${Math.min(depth, 5) * 8}px` } : undefined}>
         <ThreadListItem
@@ -3263,6 +3287,9 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       </div>
     );
   };
+  const independentIds = new Set(independentThreads.map((thread) => thread.id));
+  const independentRoots = sortSidebarThreads(independentThreads.filter((thread) => !thread.parentThreadId || !independentIds.has(thread.parentThreadId)));
+  const sortedProjects = sortSidebarProjects(projects, threadsByProject);
   const renderedRecords = timelineRecords.filter(
     (record) =>
       record.kind === 'message' ||
@@ -3338,17 +3365,27 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           </button>
           <div className="brand-name">{appearance.activeTheme?.brandLabel ?? 'pico'}</div>
         </div>
+        <div className="sidebar-scroll">
         <div className="project-section-heading">
-          <span className="eyebrow">INDEPENDENT THREADS</span>
+          <button type="button" className="sidebar-section-toggle" aria-expanded={independentSectionExpanded} onClick={() => setIndependentSectionExpanded((expanded) => !expanded)}>
+            <ChevronRight className={`project-group-chevron ${independentSectionExpanded ? 'expanded' : ''}`} size={14} aria-hidden="true" />
+            <span className="eyebrow">INDEPENDENT THREADS</span>
+          </button>
           <button className="icon-button small" aria-label="Create independent Thread" title="Create independent Thread" disabled={bootstrapping} onClick={startIndependentThread}>
             <Plus size={14} aria-hidden="true" />
           </button>
         </div>
-        {independentThreads.length ? (
-          <div className="project-thread-list">{independentThreads.filter((thread) => !thread.parentThreadId || !independentThreads.some((item) => item.id === thread.parentThreadId)).map((thread) => renderIndependentThreadTree(thread, independentThreads))}</div>
-        ) : <div className="sidebar-empty independent-thread-empty">No independent Threads yet.</div>}
+        {independentSectionExpanded ? (independentRoots.length ? (
+          <div className="project-thread-list">
+            {independentRoots.slice(0, independentVisibleCount).map((thread) => renderIndependentThreadTree(thread, independentThreads))}
+            {independentRoots.length > independentVisibleCount ? <button type="button" className="sidebar-expand" onClick={() => setIndependentVisibleCount((count) => count + SIDEBAR_PAGE_SIZE)}>Expand</button> : null}
+          </div>
+        ) : <div className="sidebar-empty independent-thread-empty">No independent Threads yet.</div>) : null}
         <div className="project-section-heading">
-          <span className="eyebrow">PROJECTS</span>
+          <button type="button" className="sidebar-section-toggle" aria-expanded={projectsSectionExpanded} onClick={() => setProjectsSectionExpanded((expanded) => !expanded)}>
+            <ChevronRight className={`project-group-chevron ${projectsSectionExpanded ? 'expanded' : ''}`} size={14} aria-hidden="true" />
+            <span className="eyebrow">PROJECTS</span>
+          </button>
           <button
             className="icon-button small"
             aria-label="Create Project"
@@ -3359,13 +3396,13 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
             <Plus size={14} aria-hidden="true" />
           </button>
         </div>
-        <div className="thread-list">
+        {projectsSectionExpanded ? <div className="thread-list">
           {projects.length === 0 ? (
             <div className="sidebar-empty">
               {bootstrapping ? 'Loading Projects…' : projectsLoaded ? 'No Projects yet. Create one to get started.' : 'Projects are unavailable.'}
             </div>
           ) : null}
-          {projects.map((project) => {
+          {sortedProjects.slice(0, projectsVisibleCount).map((project) => {
             const expanded = expandedProjectIds.has(project.id);
             const projectThreads = threadsByProject[project.id] ?? [];
             const topLevelThreadCount = projectThreads.filter((thread) => !thread.parentThreadId).length;
@@ -3412,6 +3449,8 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               </section>
             );
           })}
+          {sortedProjects.length > projectsVisibleCount ? <button type="button" className="sidebar-expand" onClick={() => setProjectsVisibleCount((count) => count + SIDEBAR_PAGE_SIZE)}>Expand</button> : null}
+        </div> : null}
           {sidebarPanels.length > 0 ? (
             <section className="plugin-sidebar-panels" aria-label="Plugin panels">
               <span className="eyebrow">PLUGIN PANELS</span>

@@ -134,6 +134,48 @@
   justify-content: space-between;
   padding: 0 5px 7px 11px;
 }
+.sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--pico-shell-thread-list-scrollbar) var(--pico-shell-thread-list-scrollbar-color-2);
+}
+.sidebar-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 4px 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+}
+.sidebar-section-toggle .eyebrow {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-expand {
+  justify-self: start;
+  align-self: flex-start;
+  padding: 6px 10px;
+  color: var(--pico-shell-thread-list-item-text);
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.sidebar-expand:hover {
+  color: var(--pico-shell-thread-list-item-hover-text);
+  background: var(--pico-shell-thread-list-item-hover-surface);
+}
 .project-section-heading .eyebrow {
   margin: 0;
 }
@@ -235,16 +277,10 @@
 }
 .thread-list {
   display: flex;
-  flex: 1;
   flex-direction: column;
   gap: 2px;
-  min-height: 60px;
   min-width: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
   padding: 0 2px 12px;
-  scrollbar-width: thin;
-  scrollbar-color: var(--pico-shell-thread-list-scrollbar) var(--pico-shell-thread-list-scrollbar-color-2);
 }
 .thread-list > * {
   min-width: 0;
