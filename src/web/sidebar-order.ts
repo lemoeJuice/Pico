@@ -1,6 +1,7 @@
 import type { Project, Thread } from '../core/types.js';
 
 export const SIDEBAR_PAGE_SIZE = 10;
+export const SIDEBAR_PROJECT_PAGE_SIZE = 5;
 
 function compareActivity(a: { message: string | null; createdAt: string; id: string }, b: typeof a): number {
   if (a.message && b.message) return b.message.localeCompare(a.message) || a.id.localeCompare(b.id);

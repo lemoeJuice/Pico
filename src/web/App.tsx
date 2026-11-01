@@ -39,7 +39,7 @@ import { pauseReasonIsError, visiblePauseReason } from './pause-reason.js';
 import { shouldSubmitOnEnter } from './composer-keys.js';
 import { upsertProjectThread } from './project-threads.js';
 import { upsertProject } from './project-list.js';
-import { SIDEBAR_PAGE_SIZE, sortSidebarProjects, sortSidebarThreads } from './sidebar-order.js';
+import { SIDEBAR_PAGE_SIZE, SIDEBAR_PROJECT_PAGE_SIZE, sortSidebarProjects, sortSidebarThreads } from './sidebar-order.js';
 import { updateProjectThreadList, updateThreadList, updateThreadSnapshot } from './thread-state.js';
 import { ThreadToolRequestGuard } from './thread-tool-requests.js';
 import { toolsPanelPosition } from './tools-panel-position.js';
@@ -722,7 +722,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   const [independentSectionExpanded, setIndependentSectionExpanded] = useState(true);
   const [projectsSectionExpanded, setProjectsSectionExpanded] = useState(true);
   const [independentVisibleCount, setIndependentVisibleCount] = useState(SIDEBAR_PAGE_SIZE);
-  const [projectsVisibleCount, setProjectsVisibleCount] = useState(SIDEBAR_PAGE_SIZE);
+  const [projectsVisibleCount, setProjectsVisibleCount] = useState(SIDEBAR_PROJECT_PAGE_SIZE);
   const [projectThreadVisibleCounts, setProjectThreadVisibleCounts] = useState<Record<string, number>>({});
   const [expandedProjectIds, setExpandedProjectIds] = useState<Set<string>>(() => new Set());
   const [expandedChildThreadIds, setExpandedChildThreadIds] = useState<Set<string>>(() => new Set());
@@ -3382,7 +3382,10 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
           </div>
         ) : <div className="sidebar-empty independent-thread-empty">No independent Threads yet.</div>) : null}
         <div className="project-section-heading">
-          <button type="button" className="sidebar-section-toggle" aria-expanded={projectsSectionExpanded} onClick={() => setProjectsSectionExpanded((expanded) => !expanded)}>
+          <button type="button" className="sidebar-section-toggle" aria-expanded={projectsSectionExpanded} onClick={() => {
+            if (projectsSectionExpanded) setProjectsVisibleCount(SIDEBAR_PROJECT_PAGE_SIZE);
+            setProjectsSectionExpanded((expanded) => !expanded);
+          }}>
             <ChevronRight className={`project-group-chevron ${projectsSectionExpanded ? 'expanded' : ''}`} size={14} aria-hidden="true" />
             <span className="eyebrow">PROJECTS</span>
           </button>
@@ -3449,7 +3452,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
               </section>
             );
           })}
-          {sortedProjects.length > projectsVisibleCount ? <button type="button" className="sidebar-expand" onClick={() => setProjectsVisibleCount((count) => count + SIDEBAR_PAGE_SIZE)}>Expand</button> : null}
+          {sortedProjects.length > projectsVisibleCount ? <button type="button" className="sidebar-expand" onClick={() => setProjectsVisibleCount((count) => count + SIDEBAR_PROJECT_PAGE_SIZE)}>Expand</button> : null}
         </div> : null}
           {sidebarPanels.length > 0 ? (
             <section className="plugin-sidebar-panels" aria-label="Plugin panels">
