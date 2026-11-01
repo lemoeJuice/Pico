@@ -65,6 +65,11 @@ export interface PluginServices {
     pause(threadId: string, reason: string): Thread;
     resume(threadId: string): Thread;
   };
+  executors: {
+    /** Renew or release a plugin's lease on the Executor bound to a Thread. */
+    heartbeat(pluginId: string, threadId: string): void;
+    release(pluginId: string, threadId: string): void;
+  };
   mcp: {
     list(): Array<{
       id: string;
@@ -128,6 +133,7 @@ export const unavailablePluginServices: PluginServices = {
     pause: unavailable,
     resume: unavailable,
   },
+  executors: { heartbeat: unavailable, release: unavailable },
   mcp: { list: unavailable },
   executions: { get: unavailable, subscribe: unavailable },
   models: { complete: unavailable, history: unavailable, subscribe: unavailable },

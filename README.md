@@ -28,6 +28,8 @@ The Runtime and standalone Executor can also be started independently with the e
 
 Host, Container, and Remote Host use the same standalone Executor agent and HTTP protocol; their connection and lifecycle setup differs. Host starts the agent on the local machine, Container installs and runs it inside the persistent container for the Thread's workspace, and Remote Host connects to an agent started separately on the workspace machine. The Pico package version is the target version of its bundled Executor agent. Executor versions are checked when opening a Thread. Compatible older versions remain usable and show an update prompt; an incompatible version is disconnected until updated. Updates are started manually from that prompt. The toolbar **Update** button only reopens it.
 
+Viewing a Thread, running its agent loop, or a plugin heartbeat keeps its Executor active. Independent heartbeats allow multiple Threads and Runtimes to share an Executor. After the last heartbeat expires and tool execution finishes, a local Host Executor exits and a Container Executor stops its container; opening the Thread starts it again. Stopping a container preserves its files and volume. Remote Hosts remain externally managed. Existing local Executors acquire idle lifecycle support when manually updated from the prompt; old containers are not automatically updated. A disconnected Executor gets one bounded recovery attempt, and an uncertain tool invocation is checked by its existing execution ID rather than replayed.
+
 ### Connect a Remote Host Executor
 
 The Runtime can connect to an Executor on another machine over an HTTP(S) endpoint. On the machine that owns the workspace, create a long token and start the Executor service:

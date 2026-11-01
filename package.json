@@ -1,6 +1,6 @@
 {
   "name": "pico",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "A small, durable, local-first agent runtime",
   "license": "Apache-2.0",
   "private": true,
@@ -17,7 +17,7 @@
     "build:plugins:runtime": "node scripts/build-plugins.mjs runtime",
     "build:plugins:ui": "node scripts/build-plugins.mjs ui",
     "build:webui": "vite build",
-    "build:server": "node scripts/clean-server-build.mjs && tsc --project tsconfig.build.json",
+    "build:server": "node scripts/clean-server-build.mjs && tsc --project tsconfig.build.json && node scripts/copy-server-assets.mjs",
     "build:executor": "esbuild src/executor/agent.ts --bundle --platform=node --format=esm --target=node22 --external:node:* --banner:js=\"import{createRequire}from'node:module';const require=createRequire(import.meta.url);\" --outfile=dist/executor-agent.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",

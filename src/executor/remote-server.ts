@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
-import { realpath, stat } from 'node:fs/promises';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { lstat, mkdir, open, realpath, rename, rm, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep, join } from 'node:path';
 import { hostname } from 'node:os';
 import express, { type ErrorRequestHandler, type Request } from 'express';
@@ -30,6 +30,12 @@ export interface RemoteExecutorServerOptions {
   tools?: ToolCatalog;
   executorVersion?: string;
   update?: (bundle: Buffer, version: string) => Promise<void>;
+  /** Enables lease-based idle handling. Omit to keep Remote Executors alive. */
+  idle?: {
+    timeoutMs?: number;
+    retryOnError?: boolean;
+    onIdle: () => void | Promise<void>;
+  };
 }
 
 export interface RunningRemoteExecutorServer {
@@ -44,8 +50,10 @@ function bodyObject(request: Request): Record<string, unknown> {
   return request.body as Record<string, unknown>;
 }
 
-function remoteExecutionId(value: string): string {
-  if (!value.trim() || value.length > 500) throw new Error('Execution ID must contain 1 to 500 characters.');
+function remoteExecutionId(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > 500) {
+    throw new Error('Execution ID must contain 1 to 500 characters.');
+  }
   return value;
 }
 
@@ -58,6 +66,66 @@ function validToken(candidate: string, expected: string): boolean {
   const left = Buffer.from(candidate);
   const right = Buffer.from(expected);
   return left.length === right.length && timingSafeEqual(left, right);
+}
+
+type LeaseSource = 'runtime' | 'thread' | 'plugin' | 'viewer';
+
+export const LEGACY_CONTAINER_AGENT_PATH = '/opt/pico/executor-agent.mjs';
+export const LEGACY_CONTAINER_IDLE_ENABLE_MARKER = 'pico-health-supervisor-enabled';
+export const LEGACY_CONTAINER_IDLE_MARKER = 'pico-executor-idle';
+
+function isMissingFile(error: unknown): boolean {
+  return error instanceof Error && 'code' in error && error.code === 'ENOENT';
+}
+
+/** Enables the Podman health-check lifecycle only for explicitly marked legacy containers. */
+export async function prepareLegacyContainerIdleMarkers(
+  installPath: string | undefined,
+  dataDirectory = '/opt/pico/data',
+): Promise<boolean> {
+  if (installPath !== LEGACY_CONTAINER_AGENT_PATH) return false;
+  const enablePath = join(dataDirectory, LEGACY_CONTAINER_IDLE_ENABLE_MARKER);
+  let markerInfo;
+  try {
+    markerInfo = await lstat(enablePath);
+  } catch (error) {
+    if (isMissingFile(error)) return false;
+    throw error;
+  }
+  if (!markerInfo.isFile() || markerInfo.isSymbolicLink()) {
+    throw new Error('Legacy Container health-supervisor marker must be a regular file.');
+  }
+  await rm(join(dataDirectory, LEGACY_CONTAINER_IDLE_MARKER), { force: true });
+  return true;
+}
+
+/** Atomically publishes the idle signal consumed by Podman health checks. */
+export async function writeLegacyContainerIdleMarker(dataDirectory = '/opt/pico/data'): Promise<void> {
+  await mkdir(dataDirectory, { recursive: true, mode: 0o700 });
+  const markerPath = join(dataDirectory, LEGACY_CONTAINER_IDLE_MARKER);
+  const temporaryPath = join(dataDirectory, `.${LEGACY_CONTAINER_IDLE_MARKER}.${process.pid}.${randomUUID()}.tmp`);
+  const handle = await open(temporaryPath, 'wx', 0o600);
+  try {
+    await handle.sync();
+    await handle.close();
+    await rename(temporaryPath, markerPath);
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+function leasePart(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > 200) {
+    throw new Error(`${label} must contain 1 to 200 characters.`);
+  }
+  return value;
+}
+
+function leaseSource(value: unknown): LeaseSource {
+  if (value === 'runtime' || value === 'thread' || value === 'plugin' || value === 'viewer') return value;
+  throw new Error('Lease source must be runtime, thread, plugin, or viewer.');
 }
 
 export async function startRemoteExecutorServer(
@@ -81,13 +149,126 @@ export async function startRemoteExecutorServer(
     console.warn(`Remote Executor plugin load errors: ${pluginLoad.errors.join('; ')}`);
   }
   const active = new Map<string, ActiveExecution>();
+  const leases = new Map<string, { expiresAt: number; leaseToken: string }>();
+  let activeToolCount = 0;
+  let executionAdmissionsInProgress = 0;
+  let admissionsInProgress = 0;
+  let updateFence = false;
+  let draining = false;
+  let idleTimer: NodeJS.Timeout | undefined;
+  let idleCallbackStarted = false;
+  const idleTimeoutMs = options.idle?.timeoutMs ?? 60_000;
+  if (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs < 1)
+    throw new Error('Executor idle timeout must be a positive number.');
+  const scheduleIdleCheck = (): void => {
+    if (!options.idle || idleCallbackStarted) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    const now = Date.now();
+    for (const [key, lease] of leases) if (lease.expiresAt <= now) leases.delete(key);
+    const nextLeaseExpiry = leases.size ? Math.min(...[...leases.values()].map((lease) => lease.expiresAt)) : undefined;
+    const delay = nextLeaseExpiry === undefined ? idleTimeoutMs : Math.max(1, nextLeaseExpiry - now);
+    idleTimer = setTimeout(() => {
+      idleTimer = undefined;
+      const checkedAt = Date.now();
+      for (const [key, lease] of leases) if (lease.expiresAt <= checkedAt) leases.delete(key);
+      if (leases.size || activeToolCount || admissionsInProgress) return scheduleIdleCheck();
+      // Fence new work synchronously before invoking shutdown code. Requests that
+      // arrive after this point receive a retryable response from the old agent.
+      draining = true;
+      idleCallbackStarted = true;
+      void Promise.resolve()
+        .then(options.idle!.onIdle)
+        .catch((error: unknown) => {
+          console.error(
+            `Remote Executor idle callback failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          if (options.idle?.retryOnError) {
+            draining = false;
+            idleCallbackStarted = false;
+            scheduleIdleCheck();
+          }
+        });
+    }, delay);
+    idleTimer.unref();
+  };
+  scheduleIdleCheck();
   const app = express();
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '1mb' }));
   app.use((request, response, next) => {
     if (validToken(bearerToken(request), options.token)) return next();
     response.status(401).json({ error: 'Remote Executor bearer token required.' });
   });
+  const retryWhileDraining = (response: import('express').Response): void => {
+    response.setHeader('retry-after', '1');
+    response
+      .status(503)
+      .json({ error: 'Remote Executor is draining after idle timeout.', code: 'executor_draining', retryable: true });
+  };
+  const rejectToolDuringUpdate = (response: import('express').Response): void => {
+    response
+      .status(409)
+      .json({ error: 'Remote Executor is updating and cannot accept tool work.', code: 'executor_updating' });
+  };
+  const updateRequests = new WeakMap<Request, { commit: () => void }>();
+  const admitRequest = (
+    request: Request,
+    response: import('express').Response,
+    next: import('express').NextFunction,
+    admission: { allowStatusRead?: boolean; executionAdmission?: boolean; updatePost?: boolean } = {},
+  ): void => {
+    // Keep status reads available during drain. The GET handler separately
+    // prevents a pending record from being scheduled as new work.
+    if (draining && admission.allowStatusRead && request.method === 'GET') return next();
+    if (draining) return retryWhileDraining(response);
+    if (admission.executionAdmission && updateFence) return rejectToolDuringUpdate(response);
+    if (admission.updatePost) {
+      if (updateFence) return rejectToolDuringUpdate(response);
+      if (executionAdmissionsInProgress > 0 || activeToolCount > 0 || admissionsInProgress > 0) {
+        response
+          .status(409)
+          .json({ error: 'Remote Executor has accepted or is executing tool work.', code: 'executor_busy' });
+        return;
+      }
+      // Reserve the update before parsing its request body so no tool can enter
+      // between the idle check and the self-update callback.
+      updateFence = true;
+    }
+    if (admission.executionAdmission) executionAdmissionsInProgress += 1;
+    admissionsInProgress += 1;
+    let released = false;
+    let updateCommitted = false;
+    if (admission.updatePost) updateRequests.set(request, { commit: () => (updateCommitted = true) });
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      admissionsInProgress -= 1;
+      if (admission.executionAdmission) executionAdmissionsInProgress -= 1;
+      if (admission.updatePost && !updateCommitted) updateFence = false;
+      if (!admissionsInProgress) scheduleIdleCheck();
+    };
+    response.once('finish', release);
+    response.once('close', release);
+    next();
+  };
+  // Count authenticated work before body parsing so an idle timer cannot close
+  // the agent while a request body is still being received or decoded.
+  app.use((request, response, next) => {
+    const path = request.path;
+    const executionPath = /^\/api\/executions\/[^/]+$/.test(path);
+    const updatePost = request.method === 'POST' && path === '/api/update';
+    const executionPost = request.method === 'POST' && executionPath;
+    const admitted =
+      (request.method === 'POST' &&
+        (updatePost || path === '/api/workspaces/validate' || path === '/api/workspaces/download' || executionPost)) ||
+      (request.method === 'GET' && executionPath);
+    if (!admitted) return next();
+    return admitRequest(request, response, next, {
+      allowStatusRead: executionPath && request.method === 'GET',
+      executionAdmission: executionPath,
+      updatePost,
+    });
+  });
+  app.use(express.json({ limit: '1mb' }));
 
   const validateWorkspace = async (requested: unknown): Promise<string> => {
     if (typeof requested !== 'string' || !isAbsolute(requested)) {
@@ -125,6 +306,7 @@ export async function startRemoteExecutorServer(
       if (!tool || tool.source !== 'executor') {
         return ledger.transition(id, 'failed', { error: `Unknown Remote Executor tool: ${request.toolName}` });
       }
+      activeToolCount += 1;
       try {
         const workspacePath = await executionWorkspace(request.workspacePath);
         const result = await tool.execute(request.arguments, {
@@ -140,6 +322,9 @@ export async function startRemoteExecutorServer(
         return ledger.transition(id, interrupted ? 'interrupted' : 'failed', {
           error: error instanceof Error ? error.message : String(error),
         });
+      } finally {
+        activeToolCount -= 1;
+        if (!activeToolCount) scheduleIdleCheck();
       }
     })().finally(() => active.delete(id));
     active.set(id, { controller, promise });
@@ -168,9 +353,39 @@ export async function startRemoteExecutorServer(
       workspaceRoot,
       workspaceOptional: true,
       workspaceFileDownload: true,
+      leaseHeartbeat: Boolean(options.idle),
+      draining,
       tools: tools.listBySource('executor').map((tool) => tool.definition),
     });
   });
+  if (options.idle) {
+    app.post('/api/leases/heartbeat', (request, response) => {
+      if (draining) return retryWhileDraining(response);
+      const body = bodyObject(request);
+      const runtimeId = leasePart(body.runtimeId, 'runtimeId');
+      const source = leaseSource(body.source);
+      const leaseId = leasePart(body.leaseId, 'leaseId');
+      // Length-prefixed fields prevent delimiter collisions between owners.
+      const key = [runtimeId, source, leaseId].map((part) => `${part.length}:${part}`).join('|');
+      const expiresAt = Date.now() + idleTimeoutMs;
+      const leaseToken = randomUUID();
+      leases.set(key, { expiresAt, leaseToken });
+      idleCallbackStarted = false;
+      scheduleIdleCheck();
+      response.json({ ok: true, expiresAt, leaseToken });
+    });
+    app.post('/api/leases/release', (request, response) => {
+      const body = bodyObject(request);
+      const runtimeId = leasePart(body.runtimeId, 'runtimeId');
+      const source = leaseSource(body.source);
+      const leaseId = leasePart(body.leaseId, 'leaseId');
+      const leaseToken = leasePart(body.leaseToken, 'leaseToken');
+      const key = [runtimeId, source, leaseId].map((part) => `${part.length}:${part}`).join('|');
+      if (leases.get(key)?.leaseToken === leaseToken) leases.delete(key);
+      scheduleIdleCheck();
+      response.json({ ok: true });
+    });
+  }
   app.post(
     '/api/update',
     express.raw({ type: 'application/octet-stream', limit: '25mb' }),
@@ -190,6 +405,7 @@ export async function startRemoteExecutorServer(
       ) {
         throw new Error('Executor update bundle must have a valid newer version.');
       }
+      updateRequests.get(request)?.commit();
       await options.update(request.body, version);
       return response.json({ updated: true, executorVersion: version });
     },
@@ -202,7 +418,8 @@ export async function startRemoteExecutorServer(
     await serveRemoteWorkspaceFile(
       body.workspacePath,
       body.path,
-      async (path) => (await executionWorkspace(path)) || (options.filesystemMode === 'host' ? process.cwd() : workspaceRoot),
+      async (path) =>
+        (await executionWorkspace(path)) || (options.filesystemMode === 'host' ? process.cwd() : workspaceRoot),
       response,
     );
   });
@@ -243,10 +460,12 @@ export async function startRemoteExecutorServer(
     return response.status(accepted.inserted ? 202 : 200).json(ledger.get(id) ?? accepted.state);
   });
   app.get('/api/executions/:id', async (request, response) => {
+    if (updateFence) return rejectToolDuringUpdate(response);
     const id = remoteExecutionId(request.params.id!);
     const state = currentState(id);
     if (!state) return response.status(404).json({ error: 'Execution not found.' });
     if (state.status === 'pending') {
+      if (draining) return retryWhileDraining(response);
       const input = ledger.getRequest(id);
       if (!input) return response.status(404).json({ error: 'Execution input not found.' });
       schedule(id, input);
@@ -298,6 +517,7 @@ export async function startRemoteExecutorServer(
   return {
     port: boundPort,
     async close() {
+      if (idleTimer) clearTimeout(idleTimer);
       for (const execution of active.values()) execution.controller.abort();
       await Promise.allSettled([...active.values()].map((execution) => execution.promise));
       await new Promise<void>((resolvePromise) => httpServer.close(() => resolvePromise()));

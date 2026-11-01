@@ -10,6 +10,8 @@ export interface RemoteExecutorInfo {
   updateSupported?: boolean;
   workspaceFileDownload?: boolean;
   workspaceOptional?: boolean;
+  leaseHeartbeat?: boolean;
+  draining?: boolean;
   name: string;
   kind: string;
   workspaceRoot: string;

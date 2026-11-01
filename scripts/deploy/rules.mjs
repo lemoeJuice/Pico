@@ -227,7 +227,7 @@ export function classifyPath(inputPath) {
         reason: 'Build or runtime launcher changes require Runtime replacement.',
       });
     }
-    if (/\.(?:ts|tsx|js|mjs|cjs|json|sql|css|html)$/.test(normalized)) {
+    if (/\.(?:ts|mts|tsx|js|mjs|cjs|json|sql|css|html)$/.test(normalized)) {
       return result('deploy', {
         targets: ['runtime'],
         action: 'full',

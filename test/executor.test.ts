@@ -36,6 +36,12 @@ function createMockContainerAgent(
   setServiceAvailable: (available: boolean) => void;
   getRestartCount: () => number;
   getWorkspaceDownloads: () => Array<{ workspacePath: unknown; path: unknown }>;
+  setContainerState: (
+    status: 'created' | 'exited' | 'paused' | 'running' | 'stopped' | 'stopping',
+    stoppingReads?: number,
+  ) => void;
+  getContainerStartCount: () => number;
+  getLifecycleInspectCount: () => number;
   completeExecution: (id: string, result: unknown) => void;
   loseNextSubmissionAck: boolean;
   close: () => void;
@@ -44,7 +50,12 @@ function createMockContainerAgent(
   let exposedPort: number | null = null;
   let accessToken: string | null = null;
   let serviceReady = false;
+  let supervised = false;
   let containerCreated = false;
+  let containerStatus: 'created' | 'exited' | 'paused' | 'running' | 'stopped' | 'stopping' = 'created';
+  let stoppingReads = 0;
+  let containerStartCount = 0;
+  let lifecycleInspectCount = 0;
   let mountedWorkspace: string | null = null;
   let submissionCount = 0;
   let restartCount = 0;
@@ -175,15 +186,29 @@ function createMockContainerAgent(
 
   return {
     runner: async (args, input, signal) => {
+      if (args[0] === 'run' && args[1] === '--help') {
+        return { stdout: '--health-on-failure --health-start-period', stderr: '' };
+      }
       if (args.includes('container') && args.includes('inspect')) {
         if (!containerCreated) throw new Error('no such container');
+        if (args.some((argument) => argument.includes('io.pico.lifecycle'))) {
+          return { stdout: supervised ? 'heartbeat-v1' : '<no value>', stderr: '' };
+        }
         if (args.some((argument) => argument.includes('.Mounts'))) {
           return {
             stdout: JSON.stringify(mountedWorkspace ? [{ Destination: '/workspace', Source: mountedWorkspace }] : []),
             stderr: '',
           };
         }
-        return { stdout: 'true', stderr: '' };
+        if (args.some((argument) => argument.includes('.State.Status'))) {
+          lifecycleInspectCount += 1;
+          if (containerStatus === 'stopping' && stoppingReads > 0) stoppingReads -= 1;
+          else if (containerStatus === 'stopping') containerStatus = 'exited';
+          const running = containerStatus === 'running';
+          const paused = containerStatus === 'paused';
+          return { stdout: `${containerStatus}|${running}|${paused}`, stderr: '' };
+        }
+        return { stdout: containerStatus === 'running' ? 'true' : 'false', stderr: '' };
       }
       if (args.includes('run')) {
         const published = args[args.indexOf('-p') + 1];
@@ -191,6 +216,12 @@ function createMockContainerAgent(
         if (match) exposedPort = Number(match[1]);
         const workspaceMount = args.find((argument) => argument.endsWith(':/workspace:rw'));
         mountedWorkspace = workspaceMount ? workspaceMount.slice(0, -':/workspace:rw'.length) : null;
+        supervised = args.includes('io.pico.lifecycle=heartbeat-v1');
+        if (supervised) {
+          const token = args.find((argument) => argument.startsWith('PICO_EXECUTOR_TOKEN='));
+          accessToken = token?.slice('PICO_EXECUTOR_TOKEN='.length) ?? null;
+          serviceReady = Boolean(exposedPort && accessToken);
+        }
       }
       if (args.includes('rm') && args.includes('-f')) containerCreated = false;
       if (args.includes('exec')) {
@@ -202,7 +233,15 @@ function createMockContainerAgent(
       }
       if (args.includes('restart')) restartCount += 1;
       const result = await podman(args, input, signal);
-      if (args.includes('run')) containerCreated = true;
+      if (args.includes('run')) {
+        containerCreated = true;
+        containerStatus = 'running';
+      }
+      if (args.includes('start')) {
+        containerStartCount += 1;
+        containerStatus = 'running';
+        serviceAvailable = true;
+      }
       return result;
     },
     executions,
@@ -212,6 +251,12 @@ function createMockContainerAgent(
     },
     getRestartCount: () => restartCount,
     getWorkspaceDownloads: () => workspaceDownloads,
+    setContainerState(status, waitReads = 0) {
+      containerStatus = status;
+      stoppingReads = waitReads;
+    },
+    getContainerStartCount: () => containerStartCount,
+    getLifecycleInspectCount: () => lifecycleInspectCount,
     get loseExecutions() {
       return loseExecutions;
     },
@@ -270,6 +315,38 @@ describe('Executor execution identity and recovery', () => {
       await second.executor.shutdown();
       first.agent.close();
       second.agent.close();
+      await env.cleanup();
+    }
+  });
+
+  it('waits through Podman stopping before restarting an idle Container and refuses paused state', async () => {
+    const env = await setupRuntime(new FakeModel(() => response('unused')));
+    const thread = env.createThread('container');
+    const calls: string[][] = [];
+    const podman = async (args: string[]) => {
+      calls.push(args);
+      if (args.includes('info')) return { stdout: '5.0.0', stderr: '' };
+      if (args.includes('run')) return { stdout: 'container-id', stderr: '' };
+      return { stdout: '', stderr: '' };
+    };
+    const agent = createMockContainerAgent(env.workspace, new ToolCatalog(), podman);
+    const executor = new ContainerExecutor(env.store, undefined, undefined, agent.runner);
+    try {
+      const binding = env.store.executorForThread(thread.id)!;
+      await executor.checkConnection(binding);
+      agent.setServiceAvailable(false);
+      agent.setContainerState('stopping', 1);
+      await executor.checkConnection(binding);
+      expect(agent.getContainerStartCount()).toBe(1);
+      expect(agent.getLifecycleInspectCount()).toBeGreaterThanOrEqual(2);
+
+      agent.setServiceAvailable(false);
+      agent.setContainerState('paused');
+      await expect(executor.checkConnection(binding)).rejects.toThrow(/paused/i);
+      expect(agent.getContainerStartCount()).toBe(1);
+    } finally {
+      await executor.shutdown();
+      agent.close();
       await env.cleanup();
     }
   });
@@ -344,7 +421,9 @@ describe('Executor execution identity and recovery', () => {
       expect(calls.find((args) => args.includes('commit'))).toEqual(
         expect.arrayContaining(['--change', 'ENV PICO_EXECUTOR_TOKEN=']),
       );
-      expect(calls.findIndex((args) => args.includes('stop'))).toBeLessThan(calls.findIndex((args) => args.includes('commit')));
+      expect(calls.findIndex((args) => args.includes('stop'))).toBeLessThan(
+        calls.findIndex((args) => args.includes('commit')),
+      );
       expect(runs).toHaveLength(2);
       expect(runs[0]![runs[0]!.indexOf('--name') + 1]).toBe(runs[1]![runs[1]!.indexOf('--name') + 1]);
       expect(runs[0]!.find((arg) => arg.includes(':/opt/pico/data:rw'))).toBe(
@@ -639,8 +718,8 @@ describe('Executor execution identity and recovery', () => {
       await until(() => existsSync(join(env.workspace, 'tool-aborted.txt')));
       expect(shutdownSettled).toBe(false);
       await shutdown;
-      // Shutdown stops the Host process, but the Runtime keeps its last confirmed state.
-      expect((await execution).status).toBe('running');
+      // Shutdown explicitly interrupts this Runtime's active tool without killing a shared Host agent.
+      expect((await execution).status).toBe('interrupted');
       expect(shutdownSettled).toBe(true);
     } finally {
       await executor.shutdown();
@@ -825,7 +904,7 @@ describe('Executor execution identity and recovery', () => {
     }
   });
 
-  it('reports a disconnected Container without restarting and shares a successful manual restart', async () => {
+  it('retries a disconnected running Container safely and shares a successful manual restart', async () => {
     const env = await setupRuntime(new FakeModel(() => response('unused')));
     const thread = env.createThread('container');
     const workspaceKey = createHash('sha256').update(env.workspace).digest('hex');
@@ -859,7 +938,7 @@ describe('Executor execution identity and recovery', () => {
       await executor.checkConnection(binding);
       mockAgent.setServiceAvailable(false);
 
-      await expect(executor.checkConnection(binding)).rejects.toThrow(/manual.*restart|restart manually/i);
+      await expect(executor.checkConnection(binding)).rejects.toThrow(/connection timed out/i);
       expect(mockAgent.getRestartCount()).toBe(0);
 
       const firstRestart = executor.restart(binding);

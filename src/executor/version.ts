@@ -1,4 +1,4 @@
-export const PICO_EXECUTOR_VERSION = process.env.PICO_EXECUTOR_VERSION ?? process.env.npm_package_version ?? '0.2.2';
+export const PICO_EXECUTOR_VERSION = process.env.PICO_EXECUTOR_VERSION ?? process.env.npm_package_version ?? '0.2.3';
 
 export function compareExecutorVersions(left: string, right: string): number | null {
   const parse = (value: string): number[] | null => {

@@ -173,6 +173,7 @@ describe('deploy rules and manifests', () => {
       action: 'full',
     });
     expect(classifyPathTyped('src/server.ts')).toMatchObject({ targets: ['runtime'], action: 'full' });
+    expect(classifyPathTyped('src/executor/container-supervisor.d.mts')).toMatchObject({ targets: ['runtime'], action: 'full' });
   });
 
   it('includes a loaded root-level plugin module in the Runtime full-release baseline', () => {

@@ -1,4 +1,5 @@
 import type { Execution, ExecutorBinding, ToolDefinition } from '../core/types.js';
+import { createHash } from 'node:crypto';
 import { PicoStore } from '../core/store.js';
 import type {
   ExecutionListener,
@@ -15,6 +16,27 @@ import {
 import { validateToolDefinitions } from './plugin-host.js';
 import { isServiceError, ServiceError } from '../contracts/service-error.js';
 const requestTimeoutMs = 15_000;
+const recoveryTimeoutMs = 20_000;
+const unknownSubmissionPrefix = 'Remote Executor submission outcome is unknown:';
+
+/** Recover a local Host or Container transport before the shared client probes it again. */
+export type RemoteExecutorRecovery = (
+  endpointUrl: string,
+  signal: AbortSignal,
+  binding?: ExecutorBinding,
+) => Promise<void>;
+export type RemoteExecutorRecoveryKeyResolver = (binding: ExecutorBinding) => string | Promise<string>;
+
+export interface RemoteExecutorLeaseIdentity {
+  runtimeId: string;
+  source: 'runtime' | 'thread' | 'plugin' | 'viewer';
+  leaseId: string;
+}
+
+interface ActiveLease {
+  token: string;
+  address: ExecutorServiceAddress;
+}
 
 function remoteConnection(binding: ExecutorBinding): ExecutorServiceAddress {
   const endpointUrl = binding.remoteEndpointUrl?.trim();
@@ -32,9 +54,10 @@ async function requestJson<T>(
 ): Promise<T> {
   const timeoutSignal = AbortSignal.timeout(requestTimeoutMs);
   const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+  const url = remoteExecutorUrl(endpointUrl, path);
   let response: Response;
   try {
-    response = await fetch(remoteExecutorUrl(endpointUrl, path), {
+    response = await fetch(url, {
       ...init,
       redirect: 'error',
       signal: combinedSignal,
@@ -46,9 +69,14 @@ async function requestJson<T>(
     });
   } catch (error) {
     if (signal?.aborted) throw new DOMException('Remote Executor request interrupted locally.', 'AbortError');
-    throw new Error(`Remote Executor request failed: ${error instanceof Error ? error.message : String(error)}`, {
-      cause: error,
-    });
+    const requestError = new Error(
+      `Remote Executor request failed: ${error instanceof Error ? error.message : String(error)}`,
+      {
+        cause: error,
+      },
+    );
+    Object.assign(requestError, { transientConnectionFailure: true });
+    throw requestError;
   }
   let payload: unknown;
   try {
@@ -71,19 +99,26 @@ async function requestJson<T>(
   return payload as T;
 }
 
-function waitForRetry(milliseconds: number, signal: AbortSignal): Promise<void> {
+function waitForSharedRecovery(promise: Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) return promise;
+  if (signal.aborted)
+    return Promise.reject(new DOMException('Remote Executor request interrupted locally.', 'AbortError'));
   return new Promise((resolvePromise, reject) => {
-    if (signal.aborted) return reject(new DOMException('Remote Executor request interrupted locally.', 'AbortError'));
     const onAbort = (): void => {
-      clearTimeout(timer);
       signal.removeEventListener('abort', onAbort);
       reject(new DOMException('Remote Executor request interrupted locally.', 'AbortError'));
     };
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolvePromise();
-    }, milliseconds);
     signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      () => {
+        signal.removeEventListener('abort', onAbort);
+        resolvePromise();
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
   });
 }
 
@@ -117,6 +152,12 @@ export async function inspectRemoteExecutor(
   if (info.workspaceOptional !== undefined && typeof info.workspaceOptional !== 'boolean') {
     throw new Error('Remote Executor returned an invalid optional workspace capability.');
   }
+  if (info.leaseHeartbeat !== undefined && typeof info.leaseHeartbeat !== 'boolean') {
+    throw new Error('Remote Executor returned an invalid lease heartbeat capability.');
+  }
+  if (info.draining !== undefined && typeof info.draining !== 'boolean') {
+    throw new Error('Remote Executor returned an invalid draining state.');
+  }
   info.tools = validateToolDefinitions(info.tools);
   return info;
 }
@@ -144,16 +185,23 @@ interface ActiveExecution {
 export class RemoteHostExecutor implements ExecutorAdapter {
   readonly kind = 'host' as const;
   private readonly inFlight = new Map<string, ActiveExecution>();
+  private readonly recoveries = new Map<string, Promise<void>>();
+  private readonly recoveryLatches = new Set<string>();
+  private readonly leases = new Map<string, ActiveLease>();
+  private readonly releasingLeases = new Map<string, number>();
+  private readonly leaseQueues = new Map<string, Promise<void>>();
 
   constructor(
     private readonly store: PicoStore,
     private readonly onExecution: ExecutionListener = () => undefined,
     private readonly resolveAddress: ExecutorServiceAddressResolver = async (binding) => remoteConnection(binding),
+    private readonly recoverEndpoint?: RemoteExecutorRecovery,
+    private readonly resolveRecoveryKey?: RemoteExecutorRecoveryKeyResolver,
   ) {}
 
   async listTools(binding: ExecutorBinding): Promise<ToolDefinition[]> {
-    const { endpointUrl, accessToken } = await this.resolveAddress(binding);
-    const info = await inspectRemoteExecutor(endpointUrl, accessToken);
+    const { endpointUrl, accessToken } = await this.resolveAddressWithRecovery(binding);
+    const info = await this.inspectWithRecovery(endpointUrl, accessToken, binding);
     if (info.protocolVersion !== EXECUTOR_PROTOCOL_VERSION || info.kind !== 'executor') {
       throw new Error(`Executor protocol version ${info.protocolVersion} is incompatible; update this Executor.`);
     }
@@ -164,27 +212,131 @@ export class RemoteHostExecutor implements ExecutorAdapter {
   }
 
   async checkConnection(binding: ExecutorBinding): Promise<RemoteExecutorInfo> {
-    const { endpointUrl, accessToken } = await this.resolveAddress(binding);
-    return inspectRemoteExecutor(endpointUrl, accessToken);
+    const { endpointUrl, accessToken } = await this.resolveAddressWithRecovery(binding);
+    return this.inspectWithRecovery(endpointUrl, accessToken, binding);
+  }
+
+  async heartbeat(binding: ExecutorBinding, identity: RemoteExecutorLeaseIdentity): Promise<string> {
+    this.validateLeaseIdentity(identity);
+    const key = this.leaseKey(binding, identity);
+    if (this.isLeaseReleasing(key)) throw new Error('Remote Executor lease is being released and cannot be renewed.');
+    return this.serializeLease(key, async () => {
+      if (this.isLeaseReleasing(key)) throw new Error('Remote Executor lease is being released and cannot be renewed.');
+      const address = await this.resolveAddressWithRecovery(binding);
+      if (this.isLeaseReleasing(key)) throw new Error('Remote Executor lease is being released and cannot be renewed.');
+      const result = await this.requestWithRecovery(address.endpointUrl, address.accessToken, undefined, binding, () =>
+        requestJson<{ ok?: unknown; expiresAt?: unknown; leaseToken?: unknown }>(
+          address.endpointUrl,
+          address.accessToken,
+          '/api/leases/heartbeat',
+          { method: 'POST', body: JSON.stringify(identity) },
+        ),
+      );
+      if (result.ok !== true || typeof result.leaseToken !== 'string' || !result.leaseToken) {
+        throw new Error('Remote Executor returned an invalid lease heartbeat response.');
+      }
+      this.leases.set(key, { token: result.leaseToken, address });
+      return result.leaseToken;
+    });
+  }
+
+  async release(binding: ExecutorBinding, identity: RemoteExecutorLeaseIdentity): Promise<void> {
+    this.validateLeaseIdentity(identity);
+    const key = this.leaseKey(binding, identity);
+    this.releasingLeases.set(key, (this.releasingLeases.get(key) ?? 0) + 1);
+    const operation = this.serializeLease(key, async () => {
+      const active = this.leases.get(key);
+      // Do not resolve an address here: a local resolver may start a stopped agent.
+      if (!active) return;
+      const result = await requestJson<{ ok?: unknown }>(
+        active.address.endpointUrl,
+        active.address.accessToken,
+        '/api/leases/release',
+        { method: 'POST', body: JSON.stringify({ ...identity, leaseToken: active.token }) },
+      );
+      if (result.ok !== true) throw new Error('Remote Executor returned an invalid lease release response.');
+      this.leases.delete(key);
+    });
+    return operation.finally(() => {
+      const remaining = (this.releasingLeases.get(key) ?? 1) - 1;
+      if (remaining <= 0) this.releasingLeases.delete(key);
+      else this.releasingLeases.set(key, remaining);
+    });
+  }
+
+  private validateLeaseIdentity(identity: RemoteExecutorLeaseIdentity): void {
+    if (
+      !identity ||
+      typeof identity.runtimeId !== 'string' ||
+      !identity.runtimeId.trim() ||
+      identity.runtimeId.length > 200 ||
+      typeof identity.leaseId !== 'string' ||
+      !identity.leaseId.trim() ||
+      identity.leaseId.length > 200 ||
+      !['runtime', 'thread', 'plugin', 'viewer'].includes(identity.source)
+    )
+      throw new Error('Remote Executor lease identity is invalid.');
+  }
+
+  private leaseKey(binding: ExecutorBinding, identity: RemoteExecutorLeaseIdentity): string {
+    return JSON.stringify([binding.kind, binding.id, identity.runtimeId, identity.source, identity.leaseId]);
+  }
+
+  private isLeaseReleasing(key: string): boolean {
+    return (this.releasingLeases.get(key) ?? 0) > 0;
+  }
+
+  private serializeLease<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.leaseQueues.get(key) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(operation);
+    const tail = current.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.leaseQueues.set(key, tail);
+    void tail.then(() => {
+      if (this.leaseQueues.get(key) === tail) this.leaseQueues.delete(key);
+    });
+    return current;
   }
 
   async update(binding: ExecutorBinding, bundle: Uint8Array, version: string): Promise<{ executorVersion: string }> {
-    const { endpointUrl, accessToken } = await this.resolveAddress(binding);
+    const { endpointUrl, accessToken } = await this.resolveAddressWithRecovery(binding);
     const updateBundle = new ArrayBuffer(bundle.byteLength);
     new Uint8Array(updateBundle).set(bundle);
-    const result = await requestJson<{ updated?: unknown; executorVersion?: unknown }>(
-      endpointUrl,
-      accessToken,
-      '/api/update',
-      {
-        method: 'POST',
-        body: updateBundle,
-        headers: {
-          'content-type': 'application/octet-stream',
-          'x-pico-executor-version': version,
+    let result: { updated?: unknown; executorVersion?: unknown };
+    try {
+      result = await requestJson<{ updated?: unknown; executorVersion?: unknown }>(
+        endpointUrl,
+        accessToken,
+        '/api/update',
+        {
+          method: 'POST',
+          body: updateBundle,
+          headers: {
+            'content-type': 'application/octet-stream',
+            'x-pico-executor-version': version,
+          },
         },
-      },
-    );
+      );
+    } catch (error) {
+      if (!this.isRetryableRequestFailure(error)) throw error;
+      let info: RemoteExecutorInfo;
+      try {
+        await this.recoverOnce(endpointUrl, accessToken, undefined, binding);
+        info = await this.requestWithRecovery(endpointUrl, accessToken, undefined, binding, () =>
+          inspectRemoteExecutor(endpointUrl, accessToken),
+        );
+      } catch (verificationError) {
+        throw new Error('Remote Executor update outcome is unknown; the update bundle was not resubmitted.', {
+          cause: verificationError,
+        });
+      }
+      if (info.executorVersion === version) return { executorVersion: version };
+      throw new Error('Remote Executor update outcome is unknown; the update bundle was not resubmitted.', {
+        cause: error,
+      });
+    }
     if (result.updated !== true || typeof result.executorVersion !== 'string') {
       throw new Error('Remote Executor returned an invalid update result.');
     }
@@ -201,25 +353,41 @@ export class RemoteHostExecutor implements ExecutorAdapter {
   }
 
   private async requestWorkspaceFile(binding: ExecutorBinding, path: string, signal?: AbortSignal): Promise<Response> {
-    const { endpointUrl, accessToken, workspacePath } = await this.resolveAddress(binding, signal);
-    const info = await inspectRemoteExecutor(endpointUrl, accessToken, signal);
+    const { endpointUrl, accessToken, workspacePath } = await this.resolveAddressWithRecovery(binding, signal);
+    const info = await this.inspectWithRecovery(endpointUrl, accessToken, binding, false, signal);
     if (info.protocolVersion !== EXECUTOR_PROTOCOL_VERSION || info.kind !== 'executor' || !info.workspaceFileDownload) {
       throw new ServiceError(409, 'This Executor does not support file downloads. Update the Executor and try again.');
     }
-    const timeout = new AbortController();
-    const timer = setTimeout(() => timeout.abort(), requestTimeoutMs);
-    let response: Response;
-    try {
-      response = await fetch(remoteExecutorUrl(endpointUrl, '/api/workspaces/download'), {
-        method: 'POST',
-        redirect: 'error',
-        signal: signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal,
-        headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ workspacePath: workspacePath ?? binding.workspacePath, path }),
-      });
-    } finally {
-      clearTimeout(timer);
-    }
+    const response = await this.requestWithRecovery(
+      endpointUrl,
+      accessToken,
+      signal,
+      binding,
+      async () => {
+        const timeout = new AbortController();
+        const timer = setTimeout(() => timeout.abort(), requestTimeoutMs);
+        try {
+          return await fetch(remoteExecutorUrl(endpointUrl, '/api/workspaces/download'), {
+            method: 'POST',
+            redirect: 'error',
+            signal: signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal,
+            headers: { authorization: `Bearer ${accessToken}`, 'content-type': 'application/json' },
+            body: JSON.stringify({ workspacePath: workspacePath ?? binding.workspacePath, path }),
+          });
+        } catch (error) {
+          if (signal?.aborted) throw new DOMException('Remote Executor request interrupted locally.', 'AbortError');
+          const requestError = new Error(
+            `Remote Executor workspace download failed: ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+          );
+          Object.assign(requestError, { transientConnectionFailure: true });
+          throw requestError;
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+      false,
+    );
     if (!response.ok) {
       await response.body?.cancel();
       if (response.status === 400) throw new ServiceError(400, 'Expected a path inside the Thread workspace.');
@@ -233,6 +401,9 @@ export class RemoteHostExecutor implements ExecutorAdapter {
   async execute(executionId: string, binding: ExecutorBinding, externalSignal?: AbortSignal): Promise<Execution> {
     const current = this.store.getExecution(executionId);
     if (!current) throw new Error(`Execution ${executionId} was not durably created`);
+    if (current.status === 'pending' && current.error?.startsWith(unknownSubmissionPrefix)) {
+      throw new Error(current.error);
+    }
     if (current.status === 'completed' || current.status === 'failed' || current.status === 'interrupted')
       return current;
     const active = this.inFlight.get(executionId);
@@ -269,9 +440,11 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     }
     const active = this.inFlight.get(executionId);
     if (active) return current;
-    const { endpointUrl, accessToken } = await this.resolveAddress(binding);
+    const { endpointUrl, accessToken } = await this.resolveAddressWithRecovery(binding);
     try {
-      const remote = await this.getState(endpointUrl, accessToken, executionId);
+      const remote = await this.requestWithRecovery(endpointUrl, accessToken, undefined, binding, () =>
+        this.getState(endpointUrl, accessToken, executionId),
+      );
       return this.acceptState(executionId, remote);
     } catch (error) {
       if (this.httpStatus(error) === 404 && current.status === 'running') {
@@ -288,6 +461,7 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     const current = this.store.getExecution(executionId);
     if (!current || ['completed', 'failed', 'interrupted'].includes(current.status)) return current;
     const active = this.inFlight.get(executionId);
+    const verifyUncertainSubmission = current.status === 'pending';
     if (active) {
       active.controller.abort();
       if (!active.address && current.status === 'pending') {
@@ -304,43 +478,56 @@ export class RemoteHostExecutor implements ExecutorAdapter {
         return latest;
       }
     }
-    const { endpointUrl, accessToken } = active?.address ?? (await this.resolveAddress(binding));
-    if (active?.address && current.status === 'pending') {
-      // The original POST may have reached the Executor even though aborting its
-      // response fetch made the local attempt look unsubmitted. Re-submit the
-      // same durable ID as a barrier before Interrupt so request reordering cannot
-      // leave a tool running after the local execution becomes terminal.
-      const submitted = await requestJson<RemoteExecutionState>(
-        endpointUrl,
-        accessToken,
-        `/api/executions/${encodeURIComponent(executionId)}`,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            toolName: current.toolName,
-            arguments: current.arguments ?? {},
-            workspacePath: active.address.workspacePath ?? binding.workspacePath,
-          }),
-        },
-      );
-      this.acceptState(executionId, submitted);
+    const { endpointUrl, accessToken } = active?.address ?? (await this.resolveAddressWithRecovery(binding));
+    if (verifyUncertainSubmission) {
+      // An earlier POST may have reached the Executor even if the caller still has
+      // pending state. Wait for its local request to stop, then only GET the ledger;
+      // never replay a tool POST as an interrupt-ordering barrier.
+      if (active) await active.promise.catch(() => undefined);
+      const latest = this.store.getExecution(executionId);
+      if (!latest || ['completed', 'failed', 'interrupted'].includes(latest.status)) return latest;
+      let settled: Execution;
+      try {
+        const observed = await this.requestWithRecovery(endpointUrl, accessToken, undefined, binding, () =>
+          this.getState(endpointUrl, accessToken, executionId),
+        );
+        settled = this.acceptState(executionId, observed);
+      } catch (queryError) {
+        const message = queryError instanceof Error ? queryError.message : String(queryError);
+        this.recordUnknownSubmission(executionId, message);
+        const latest = this.store.getExecution(executionId);
+        throw new Error(latest?.error ?? `${unknownSubmissionPrefix} ${message}`);
+      }
+      if (['completed', 'failed', 'interrupted'].includes(settled.status)) return settled;
     }
     let remote: RemoteExecutionState;
     try {
-      remote = await requestJson<RemoteExecutionState>(
-        endpointUrl,
-        accessToken,
-        `/api/executions/${encodeURIComponent(executionId)}/interrupt`,
-        { method: 'POST', body: '{}' },
+      remote = await this.requestWithRecovery(endpointUrl, accessToken, undefined, binding, () =>
+        requestJson<RemoteExecutionState>(
+          endpointUrl,
+          accessToken,
+          `/api/executions/${encodeURIComponent(executionId)}/interrupt`,
+          { method: 'POST', body: '{}' },
+        ),
       );
     } catch (error) {
-      if (this.httpStatus(error) !== 404) throw error;
-      const interrupted = this.transition(executionId, 'interrupted', {
-        error: 'The Remote Executor confirmed this execution is no longer in its durable ledger.',
-        detail: { confirmedMissing: true, userInterrupted: true },
-      });
-      if (active) await active.promise.catch(() => undefined);
-      return interrupted;
+      if (this.httpStatus(error) === 404) {
+        const latest = this.store.getExecution(executionId);
+        if (latest?.status === 'pending') {
+          this.recordUnknownSubmission(executionId, 'The execution ID disappeared before Interrupt was confirmed.');
+          throw new Error(
+            this.store.getExecution(executionId)?.error ??
+              `${unknownSubmissionPrefix} the execution ID disappeared before Interrupt was confirmed.`,
+          );
+        }
+        const interrupted = this.transition(executionId, 'interrupted', {
+          error: 'The Remote Executor confirmed this execution is no longer in its durable ledger.',
+          detail: { confirmedMissing: true, userInterrupted: true },
+        });
+        if (active) await active.promise.catch(() => undefined);
+        return interrupted;
+      }
+      throw error;
     }
     const settled = this.acceptState(executionId, remote);
     if (active) await active.promise.catch(() => undefined);
@@ -366,7 +553,7 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     if (signal.aborted) throw new DOMException('Remote Executor request interrupted locally.', 'AbortError');
     const current = this.store.getExecution(executionId);
     if (!current) throw new Error(`Execution ${executionId} was not durably created`);
-    const address = await this.resolveAddress(binding, signal);
+    const address = await this.resolveAddressWithRecovery(binding, signal);
     if (signal.aborted) throw new DOMException('Remote Executor request interrupted locally.', 'AbortError');
     activeExecution.address = address;
     const { endpointUrl, accessToken } = address;
@@ -378,8 +565,8 @@ export class RemoteHostExecutor implements ExecutorAdapter {
           throw new Error('This Executor does not support Threads without a workspace; update the Executor.');
         }
       }
-      remote = await this.retryTransientRequest(signal, () =>
-        requestJson<RemoteExecutionState>(
+      try {
+        remote = await requestJson<RemoteExecutionState>(
           endpointUrl,
           accessToken,
           `/api/executions/${encodeURIComponent(executionId)}`,
@@ -392,11 +579,27 @@ export class RemoteHostExecutor implements ExecutorAdapter {
             }),
           },
           signal,
-        ),
-      );
+        );
+      } catch (error) {
+        if (signal.aborted) {
+          this.recordUnknownSubmission(executionId, 'The submission was interrupted before its outcome was confirmed.');
+          throw error;
+        }
+        if (!this.isRetryableRequestFailure(error)) throw error;
+        // POST may have been accepted even when its response was lost. Recover the
+        // transport, then inspect only this durable ID; never replay the tool call.
+        try {
+          await this.recoverOnce(endpointUrl, accessToken, signal, binding);
+          remote = await this.queryUncertainSubmission(endpointUrl, accessToken, executionId, signal, binding);
+        } catch (queryError) {
+          const message = queryError instanceof Error ? queryError.message : String(queryError);
+          this.recordUnknownSubmission(executionId, message);
+          throw queryError;
+        }
+      }
     } else {
       try {
-        remote = await this.retryTransientRequest(signal, () =>
+        remote = await this.requestWithRecovery(endpointUrl, accessToken, signal, binding, () =>
           this.getState(endpointUrl, accessToken, executionId, signal),
         );
       } catch (error) {
@@ -411,10 +614,10 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     }
 
     let settled = this.acceptState(executionId, remote);
-    while (settled.status === 'running' && !signal.aborted) {
+    while ((settled.status === 'pending' || settled.status === 'running') && !signal.aborted) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 700));
       if (signal.aborted) break;
-      remote = await this.retryTransientRequest(signal, () =>
+      remote = await this.requestWithRecovery(endpointUrl, accessToken, signal, binding, () =>
         this.getState(endpointUrl, accessToken, executionId, signal),
       );
       settled = this.acceptState(executionId, remote);
@@ -463,24 +666,225 @@ export class RemoteHostExecutor implements ExecutorAdapter {
     return updated;
   }
 
-  private async retryTransientRequest<T>(signal: AbortSignal, request: () => Promise<T>): Promise<T> {
-    let attempt = 0;
-    while (true) {
+  private recordUnknownSubmission(executionId: string, cause: string): void {
+    const current = this.store.getExecution(executionId);
+    if (!current || !['pending', 'running'].includes(current.status)) return;
+    if (current.error?.startsWith(unknownSubmissionPrefix)) return;
+    this.store.recordExecutionError(
+      executionId,
+      `${unknownSubmissionPrefix} could not verify the durable ledger; the tool was not resubmitted. ${cause}`,
+    );
+  }
+
+  private async inspectWithRecovery(
+    endpointUrl: string,
+    accessToken: string,
+    binding: ExecutorBinding,
+    retryHttpStatus = true,
+    signal?: AbortSignal,
+  ): Promise<RemoteExecutorInfo> {
+    try {
+      const info = await inspectRemoteExecutor(endpointUrl, accessToken, signal);
+      this.clearRecoveryLatch(endpointUrl, accessToken);
+      return info;
+    } catch (error) {
+      if (signal?.aborted) throw new DOMException('Remote Executor request interrupted locally.', 'AbortError');
+      if (!(retryHttpStatus ? this.isRetryableRequestFailure(error) : this.hasTransientConnectionMarker(error)))
+        throw error;
       try {
-        return await request();
+        await this.recoverOnce(endpointUrl, accessToken, signal, binding);
+      } catch (recoveryError) {
+        if (signal?.aborted || !this.isRecoveryLatchedError(recoveryError)) throw recoveryError;
+        // checkConnection/listTools are independent GET health probes. Permit one
+        // probe without another restart, and clear the latch only if it succeeds.
+      }
+      const info = await inspectRemoteExecutor(endpointUrl, accessToken, signal);
+      this.clearRecoveryLatch(endpointUrl, accessToken);
+      return info;
+    }
+  }
+
+  private async resolveAddressWithRecovery(
+    binding: ExecutorBinding,
+    signal?: AbortSignal,
+  ): Promise<ExecutorServiceAddress> {
+    try {
+      return await this.resolveAddress(binding, signal);
+    } catch (error) {
+      if (signal?.aborted || !this.recoverEndpoint || !this.hasTransientConnectionMarker(error)) throw error;
+      const recoveryKey = await this.resolverRecoveryKey(binding);
+      await this.recoverOnce(recoveryKey, binding.remoteAccessToken ?? '', signal, binding);
+      // Resolver/startup recovery is bounded to one retry; a failed retry is returned
+      // directly and never starts another recovery cycle.
+      const address = await this.resolveAddress(binding, signal);
+      // Local resolvers usually wait for the agent to listen; verify the protocol
+      // before clearing a failed-startup latch so repeated parses cannot restart it.
+      await inspectRemoteExecutor(address.endpointUrl, address.accessToken, signal);
+      this.clearRecoveryLatch(recoveryKey, binding.remoteAccessToken ?? '');
+      return address;
+    }
+  }
+
+  private async resolverRecoveryKey(binding: ExecutorBinding): Promise<string> {
+    const key = this.resolveRecoveryKey
+      ? await this.resolveRecoveryKey(binding)
+      : binding.remoteEndpointUrl?.trim() || `local://${binding.kind}/${encodeURIComponent(binding.id)}`;
+    if (typeof key !== 'string' || !key.trim()) {
+      throw new Error('Remote Executor recovery identity is missing.');
+    }
+    return key.trim();
+  }
+
+  private async queryUncertainSubmission(
+    endpointUrl: string,
+    accessToken: string,
+    executionId: string,
+    signal: AbortSignal,
+    binding: ExecutorBinding,
+  ): Promise<RemoteExecutionState> {
+    try {
+      return await this.requestWithRecovery(endpointUrl, accessToken, signal, binding, () =>
+        this.getState(endpointUrl, accessToken, executionId, signal),
+      );
+    } catch (error) {
+      if (this.httpStatus(error) === 404) {
+        throw new Error(
+          `${unknownSubmissionPrefix} the execution ID was not found after recovery; the tool was not resubmitted.`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+  }
+
+  /** One outage gets one shared transport recovery, then exactly one bounded retry. */
+  private async requestWithRecovery<T>(
+    endpointUrl: string,
+    accessToken: string,
+    signal: AbortSignal | undefined,
+    binding: ExecutorBinding,
+    request: () => Promise<T>,
+    retryHttpStatus = true,
+  ): Promise<T> {
+    try {
+      const result = await request();
+      this.clearRecoveryLatch(endpointUrl, accessToken);
+      return result;
+    } catch (error) {
+      if (
+        (signal?.aborted ?? false) ||
+        !(retryHttpStatus ? this.isRetryableRequestFailure(error) : this.hasTransientConnectionMarker(error))
+      )
+        throw error;
+      try {
+        await this.recoverOnce(endpointUrl, accessToken, signal, binding);
+      } catch (recoveryError) {
+        if (signal?.aborted || !this.isRecoveryLatchedError(recoveryError)) throw recoveryError;
+        // A latched outage may still be probed with one non-destructive retry,
+        // but no new local restart is allowed until a health check succeeds.
+        const result = await request();
+        this.clearRecoveryLatch(endpointUrl, accessToken);
+        return result;
+      }
+      if (signal?.aborted) throw new DOMException('Remote Executor request interrupted locally.', 'AbortError');
+      const result = await request();
+      this.clearRecoveryLatch(endpointUrl, accessToken);
+      return result;
+    }
+  }
+
+  private async recoverOnce(
+    endpointUrl: string,
+    accessToken: string,
+    signal?: AbortSignal,
+    binding?: ExecutorBinding,
+  ): Promise<void> {
+    if (signal?.aborted) throw new DOMException('Remote Executor request interrupted locally.', 'AbortError');
+    // Include credentials in the single-flight identity without retaining them in
+    // diagnostics. Different Executor identities at one URL must not share a hook.
+    const key = `${endpointUrl}\u0000${createHash('sha256').update(accessToken).digest('hex')}`;
+    const existing = this.recoveries.get(key);
+    if (existing) return waitForSharedRecovery(existing, signal);
+    if (this.recoveryLatches.has(key)) {
+      const error = new Error(
+        'Remote Executor recovery is already latched for this outage; confirm connectivity before retrying.',
+      );
+      Object.assign(error, { recoveryLatched: true });
+      throw error;
+    }
+    this.recoveryLatches.add(key);
+
+    const recovery = (async (): Promise<void> => {
+      // Publish the single-flight promise before invoking an integration hook;
+      // a hook may itself make Executor requests during local startup.
+      await Promise.resolve();
+      const timeout = AbortSignal.timeout(recoveryTimeoutMs);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const recoveryWork = this.recoverEndpoint
+        ? this.recoverEndpoint(endpointUrl, timeout, binding)
+        : this.probeUntilAvailable(endpointUrl, accessToken, timeout);
+      try {
+        await Promise.race([
+          recoveryWork,
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('Remote Executor recovery timed out.')), recoveryTimeoutMs);
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    })();
+    this.recoveries.set(key, recovery);
+    void recovery.then(
+      () => {
+        if (this.recoveries.get(key) === recovery) this.recoveries.delete(key);
+      },
+      () => {
+        if (this.recoveries.get(key) === recovery) this.recoveries.delete(key);
+      },
+    );
+    return waitForSharedRecovery(recovery, signal);
+  }
+
+  private async probeUntilAvailable(endpointUrl: string, accessToken: string, signal: AbortSignal): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await inspectRemoteExecutor(endpointUrl, accessToken, signal);
+        return;
       } catch (error) {
-        if (signal.aborted || !this.isRetryableRequestFailure(error)) throw error;
-        const delay = Math.min(500 * 2 ** Math.min(attempt, 4), 8_000);
-        attempt += 1;
-        await waitForRetry(delay, signal);
+        if (signal.aborted || !this.isRetryableRequestFailure(error) || attempt >= 5) throw error;
+        await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, Math.min(250 * 2 ** attempt, 2_000)));
       }
     }
+  }
+
+  private clearRecoveryLatch(endpointUrl: string, accessToken: string): void {
+    const key = `${endpointUrl}\u0000${createHash('sha256').update(accessToken).digest('hex')}`;
+    this.recoveryLatches.delete(key);
+  }
+
+  private isRecoveryLatchedError(error: unknown): boolean {
+    return Boolean(
+      error &&
+      typeof error === 'object' &&
+      'recoveryLatched' in error &&
+      (error as { recoveryLatched?: unknown }).recoveryLatched === true,
+    );
   }
 
   private isRetryableRequestFailure(error: unknown): boolean {
     const status = this.httpStatus(error);
     if (status !== null) return status === 408 || status === 425 || status === 429 || status >= 500;
-    return error instanceof Error && error.message.startsWith('Remote Executor request failed:');
+    return this.hasTransientConnectionMarker(error);
+  }
+
+  private hasTransientConnectionMarker(error: unknown): boolean {
+    return Boolean(
+      error &&
+      typeof error === 'object' &&
+      'transientConnectionFailure' in error &&
+      (error as { transientConnectionFailure?: unknown }).transientConnectionFailure === true,
+    );
   }
 
   private httpStatus(error: unknown): number | null {

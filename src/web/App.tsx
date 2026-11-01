@@ -48,7 +48,7 @@ import { loadBootstrapResource } from './bootstrap-load.js';
 import { fetchWithGetTimeout } from './fetch-with-get-timeout.js';
 import { isNearScrollEnd } from './scroll-follow.js';
 import { threadCanBeInterrupted } from './thread-controls.js';
-import { executorStatusFromProbe } from './executor-status.js';
+import { executorStatusFromProbe, startVisibleStatusPolling } from './executor-status.js';
 import { shouldCloseModalOnEscape } from './modal-behavior.js';
 import { SettingsNavigation } from './settings-navigation.js';
 import { BackgroundImageSetting, useMainBackgroundImage } from './background-image-view.js';
@@ -956,6 +956,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
   activeProjectId.current = projectId;
   const activeThreadId = useRef(threadId);
   activeThreadId.current = threadId;
+  const selectedThreadIdRef = useRef<string | null>(null);
   draftRef.current = { threadId, value: draft };
 
   const commitThreadModelSelection = useCallback((targetThreadId: string, selection: ThreadModelSelection): void => {
@@ -1180,6 +1181,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
       (selectedThread.executorKind === 'container' || selectedThread.executorKind === 'host'),
   );
   const selectedThreadId = selectedThread?.id ?? null;
+  selectedThreadIdRef.current = selectedThreadId;
   useLayoutEffect(() => {
     const scroll = listRef.current;
     if (!scroll) return undefined;
@@ -1776,6 +1778,7 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         const [executorResult] = await Promise.allSettled([
           api<{
             connected: boolean;
+            inactive?: boolean;
             error?: string;
             updateAvailable?: boolean;
             compatible?: boolean;
@@ -1800,15 +1803,34 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         refreshing = false;
       }
     };
-    void refresh();
-    const timer = window.setInterval(() => {
-      void refresh();
-    }, 15_000);
+    const stopPolling = startVisibleStatusPolling(() => void refresh(), document, window, 15_000);
     return () => {
       alive = false;
-      window.clearInterval(timer);
+      stopPolling();
     };
   }, [selectedThread?.executorId, selectedThread?.executorKind, threadId]);
+
+  useEffect(() => {
+    const sendViewerPresence = (): void => {
+      const socket = eventSocket.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      try {
+        socket.send(JSON.stringify({
+          type: 'thread.viewer',
+          threadId: document.visibilityState === 'visible' ? selectedThreadIdRef.current : null,
+        }));
+      } catch {
+        // The connection may close between checking readyState and sending.
+      }
+    };
+    const timer = window.setInterval(sendViewerPresence, 20_000);
+    document.addEventListener('visibilitychange', sendViewerPresence);
+    sendViewerPresence();
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', sendViewerPresence);
+    };
+  }, [selectedThreadId]);
 
   useEffect(() => {
     let closed = false;
@@ -1828,6 +1850,14 @@ export function App({ authRequired = false, onSignOut }: { authRequired?: boolea
         retry = 750;
         observedModelExecutions.current = new Set();
         setSocketConnected(true);
+        try {
+          socket?.send(JSON.stringify({
+            type: 'thread.viewer',
+            threadId: document.visibilityState === 'visible' ? selectedThreadIdRef.current : null,
+          }));
+        } catch {
+          // The socket may close during the open handler.
+        }
         for (const [executionId, targetThreadId] of unavailableModelExecutions.current) {
           resumeModelDraft(targetThreadId, executionId);
         }

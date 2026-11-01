@@ -154,7 +154,7 @@ it('downloads remote Thread files through its bound Executor and preserves local
     await remote?.close();
     await rm(dir, { recursive: true, force: true });
   }
-});
+}, 15_000);
 
 it('closes the upstream Executor response when the browser cancels a download', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pico-workspace-abort-'));

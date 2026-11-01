@@ -105,6 +105,7 @@ export async function setupRuntime(model: ModelAdapter, options: RuntimeOptions 
   const store = new PicoStore(':memory:');
   const runtime = new PicoRuntime(store, {
     ...options,
+    executorActivityEnabled: options.executorActivityEnabled ?? false,
     model,
     pluginDirectory: options.pluginDirectory ?? join(directory, 'empty-plugins'),
   });

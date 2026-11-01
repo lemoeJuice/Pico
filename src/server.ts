@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
@@ -609,7 +610,7 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
     response.json(thread);
   });
   app.get('/api/threads/:threadId/executor', async (request, response) => {
-    response.json(await runtime.executorStatus(request.params.threadId!));
+    response.json(await runtime.executorStatus(request.params.threadId!, false));
   });
   app.post('/api/threads/:threadId/executor/update', async (request, response) => {
     response.json(await runtime.updateExecutor(request.params.threadId!));
@@ -803,9 +804,37 @@ export async function startServer(): Promise<{ close(): Promise<void>; runtime: 
   });
   websocketServer.on('connection', (socket) => {
     sockets.add(socket);
+    const viewerId = randomUUID();
+    socket.on('message', (data, isBinary) => {
+      if (isBinary || socket.readyState !== WebSocket.OPEN) return;
+      const text = typeof data === 'string' ? data : Buffer.isBuffer(data) ? data.toString('utf8') : null;
+      if (text === null || Buffer.byteLength(text, 'utf8') > 8 * 1024) return;
+      let message: unknown;
+      try {
+        message = JSON.parse(text);
+      } catch {
+        return;
+      }
+      if (!message || typeof message !== 'object' || Array.isArray(message)) return;
+      const value = message as Record<string, unknown>;
+      const keys = Object.keys(value);
+      if (
+        keys.length !== 2 || !keys.includes('type') || !keys.includes('threadId') ||
+        value.type !== 'thread.viewer' ||
+        !(value.threadId === null ||
+          (typeof value.threadId === 'string' &&
+            value.threadId.trim() === value.threadId &&
+            value.threadId.length > 0 &&
+            value.threadId.length <= 256))
+      ) return;
+      runtime.updateThreadViewer(viewerId, value.threadId as string | null);
+    });
     attachModelDraftResume(socket, runtime);
     socket.send(JSON.stringify({ type: 'connected' }));
-    socket.on('close', () => sockets.delete(socket));
+    socket.on('close', () => {
+      sockets.delete(socket);
+      runtime.updateThreadViewer(viewerId, null);
+    });
   });
   const unsubscribe = runtime.subscribe((event) => {
     const message = JSON.stringify(event);

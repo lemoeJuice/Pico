@@ -10,7 +10,7 @@ import { startRemoteExecutorServer } from '../src/executor/remote-server.js';
 import { RemoteHostExecutor } from '../src/executor/remote-executor.js';
 import { ToolCatalog } from '../src/executor/tool-catalog.js';
 import { PicoRuntime } from '../src/runtime/runtime.js';
-import { FakeModel, response, setupRuntime, setupTestCatalog } from './helpers.js';
+import { assistantPayload, FakeModel, response, setupRuntime, setupTestCatalog } from './helpers.js';
 
 const token = 'pico-test-remote-executor-token-0123456789abcdef';
 
@@ -40,15 +40,898 @@ async function until(predicate: () => boolean, timeoutMs = 3000): Promise<void> 
   }
 }
 
+function makePendingRemoteToolExecution(store: PicoStore, id: string): { threadId: string; executionId: string } {
+  const project = store.createProject(`Recovery ${id}`, '/workspace');
+  const thread = store.createThread(project.id, 'host');
+  const modelExecution = store.createModelExecution(`${id}-model`, thread.id, 0);
+  store.transitionExecution(modelExecution.id, 'running');
+  const call = { id: `${id}-call`, name: 'read_file', arguments: { path: 'note.txt' } };
+  store.commitModelStep({
+    assistantRecordId: `${id}-assistant`,
+    modelExecutionId: modelExecution.id,
+    threadId: thread.id,
+    payload: assistantPayload({ content: '', batchId: id, toolCalls: [call] }),
+    toolCalls: [{ call, executionId: id }],
+  });
+  return { threadId: thread.id, executionId: id };
+}
+
 describe('Remote Host Executor', () => {
+  it('recovers an uncertain submission by querying its ID and preserves unknown outcomes without replay', async () => {
+    const store = new PicoStore(':memory:');
+    const project = store.createProject('Recovery test', '/workspace');
+    const thread = store.createThread(project.id, 'host');
+    const executionId = 'recovery-unknown-submission';
+    const modelExecution = store.createModelExecution('recovery-model', thread.id, 0);
+    store.transitionExecution(modelExecution.id, 'running');
+    store.commitModelStep({
+      assistantRecordId: 'recovery-assistant',
+      modelExecutionId: modelExecution.id,
+      threadId: thread.id,
+      payload: assistantPayload({
+        content: '',
+        batchId: 'recovery-batch',
+        toolCalls: [{ id: 'recovery-call', name: 'read_file', arguments: { path: 'note.txt' } }],
+      }),
+      toolCalls: [{ call: { id: 'recovery-call', name: 'read_file', arguments: { path: 'note.txt' } }, executionId }],
+    });
+    const binding = store.executorForThread(thread.id)!;
+    let submissions = 0;
+    let recoveryCalls = 0;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      if (init?.method === 'POST') {
+        submissions += 1;
+        throw new TypeError('connection reset after submission');
+      }
+      return new Response(JSON.stringify({ error: 'missing' }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const executor = new RemoteHostExecutor(
+      store,
+      undefined,
+      async () => ({ endpointUrl: 'http://executor.test', accessToken: token }),
+      async () => {
+        recoveryCalls += 1;
+      },
+    );
+    try {
+      await expect(executor.execute(executionId, binding)).rejects.toThrow('outcome is unknown');
+      expect(submissions).toBe(1);
+      expect(recoveryCalls).toBe(1);
+      expect(store.getExecution(executionId)?.status).toBe('pending');
+      await expect(executor.execute(executionId, binding)).rejects.toThrow('outcome is unknown');
+      expect(submissions).toBe(1);
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('keeps polling the same ID when uncertain submission recovery finds it pending', async () => {
+    const store = new PicoStore(':memory:');
+    const project = store.createProject('Pending recovery test', '/workspace');
+    const thread = store.createThread(project.id, 'host');
+    const executionId = 'recovery-pending-submission';
+    const modelExecution = store.createModelExecution('pending-recovery-model', thread.id, 0);
+    store.transitionExecution(modelExecution.id, 'running');
+    store.commitModelStep({
+      assistantRecordId: 'pending-recovery-assistant',
+      modelExecutionId: modelExecution.id,
+      threadId: thread.id,
+      payload: assistantPayload({ content: '', batchId: 'pending-recovery-batch' }),
+      toolCalls: [{ call: { id: 'pending-recovery-call', name: 'read_file', arguments: {} }, executionId }],
+    });
+    const binding = store.executorForThread(thread.id)!;
+    let submissions = 0;
+    let queries = 0;
+    const queryPaths: string[] = [];
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === 'POST') {
+        submissions += 1;
+        throw new TypeError('submission reply lost');
+      }
+      queries += 1;
+      queryPaths.push(url.pathname);
+      const status = queries === 1 ? 'pending' : 'completed';
+      return new Response(
+        JSON.stringify({ id: executionId, status, result: status === 'completed' ? 'finished' : undefined }),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        },
+      );
+    });
+    const executor = new RemoteHostExecutor(
+      store,
+      undefined,
+      async () => ({ endpointUrl: 'http://executor.test', accessToken: token }),
+      async () => undefined,
+    );
+    try {
+      await expect(executor.execute(executionId, binding)).resolves.toMatchObject({
+        status: 'completed',
+        result: 'finished',
+      });
+      expect(submissions).toBe(1);
+      expect(queries).toBe(2);
+      expect(queryPaths).toEqual([`/api/executions/${executionId}`, `/api/executions/${executionId}`]);
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('does not run recovery for authentication or protocol responses', async () => {
+    const store = new PicoStore(':memory:');
+    const thread = store.createThread(null, 'host');
+    const binding = store.executorForThread(thread.id)!;
+    let recoveryCalls = 0;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ error: 'unauthorized' }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const executor = new RemoteHostExecutor(
+      store,
+      undefined,
+      async () => ({ endpointUrl: 'http://executor.test', accessToken: token }),
+      async () => {
+        recoveryCalls += 1;
+      },
+    );
+    try {
+      await expect(executor.checkConnection(binding)).rejects.toThrow('unauthorized');
+      expect(recoveryCalls).toBe(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('recovers one local resolver startup failure and retries resolution only once', async () => {
+    const store = new PicoStore(':memory:');
+    const thread = store.createThread(null, 'host');
+    const binding = store.executorForThread(thread.id)!;
+    let resolutions = 0;
+    let recoveryCalls = 0;
+    const info = { protocolVersion: 2, kind: 'executor', name: 'local', workspaceRoot: '/', tools: [] };
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(
+        async () =>
+          new Response(JSON.stringify(info), { status: 200, headers: { 'content-type': 'application/json' } }),
+      );
+    const executor = new RemoteHostExecutor(
+      store,
+      undefined,
+      async () => {
+        resolutions += 1;
+        if (resolutions === 1) {
+          throw Object.assign(new Error('local startup connection timed out'), { transientConnectionFailure: true });
+        }
+        return { endpointUrl: 'http://executor.test', accessToken: token };
+      },
+      async (endpoint, _signal, recoveredBinding) => {
+        recoveryCalls += 1;
+        expect(endpoint).toBe(`local://host/${encodeURIComponent(binding.id)}`);
+        expect(recoveredBinding?.id).toBe(binding.id);
+      },
+    );
+    try {
+      await expect(executor.checkConnection(binding)).resolves.toMatchObject({ kind: 'executor' });
+      expect(resolutions).toBe(2);
+      expect(recoveryCalls).toBe(1);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('shares resolver recovery by a caller-supplied physical Executor key', async () => {
+    const store = new PicoStore(':memory:');
+    const project = store.createProject('Shared container recovery', '/workspace');
+    const firstThread = store.createThread(project.id, 'container');
+    const secondThread = store.createThread(project.id, 'container');
+    const firstBinding = store.executorForThread(firstThread.id)!;
+    const secondBinding = store.executorForThread(secondThread.id)!;
+    expect(firstBinding.id).not.toBe(secondBinding.id);
+    const resolverCalls = new Map<string, number>();
+    let recoveryCalls = 0;
+    let releaseRecovery!: () => void;
+    const recoveryGate = new Promise<void>((resolve) => {
+      releaseRecovery = resolve;
+    });
+    const info = { protocolVersion: 2, kind: 'executor', name: 'container', workspaceRoot: '/', tools: [] };
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(
+        async () =>
+          new Response(JSON.stringify(info), { status: 200, headers: { 'content-type': 'application/json' } }),
+      );
+    const executor = new RemoteHostExecutor(
+      store,
+      undefined,
+      async (binding) => {
+        const count = (resolverCalls.get(binding.id) ?? 0) + 1;
+        resolverCalls.set(binding.id, count);
+        if (count === 1) {
+          throw Object.assign(new Error('container agent unavailable'), { transientConnectionFailure: true });
+        }
+        return { endpointUrl: 'http://container.test', accessToken: token, workspacePath: '/workspace' };
+      },
+      async () => {
+        recoveryCalls += 1;
+        await recoveryGate;
+      },
+      async () => 'local://container/shared-workspace-key',
+    );
+    try {
+      const checks = Promise.all([executor.checkConnection(firstBinding), executor.checkConnection(secondBinding)]);
+      await until(() => recoveryCalls === 1);
+      releaseRecovery();
+      await expect(checks).resolves.toHaveLength(2);
+      expect(resolverCalls.get(firstBinding.id)).toBe(2);
+      expect(resolverCalls.get(secondBinding.id)).toBe(2);
+      expect(recoveryCalls).toBe(1);
+    } finally {
+      releaseRecovery();
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('latches a failed recovery until a successful independent health check', async () => {
+    const store = new PicoStore(':memory:');
+    const thread = store.createThread(null, 'host');
+    const binding = store.executorForThread(thread.id)!;
+    let online = false;
+    let recoveryCalls = 0;
+    const info = { protocolVersion: 2, kind: 'executor', name: 'test', workspaceRoot: '/', tools: [] };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      if (!online) throw new TypeError('connection still down');
+      return new Response(JSON.stringify(info), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const executor = new RemoteHostExecutor(
+      store,
+      undefined,
+      async () => ({ endpointUrl: 'http://executor.test', accessToken: token }),
+      async () => {
+        recoveryCalls += 1;
+      },
+    );
+    try {
+      await expect(executor.checkConnection(binding)).rejects.toThrow('connection still down');
+      expect(recoveryCalls).toBe(1);
+      await expect(executor.checkConnection(binding)).rejects.toThrow('connection still down');
+      expect(recoveryCalls).toBe(1);
+      online = true;
+      await expect(executor.checkConnection(binding)).resolves.toMatchObject({ kind: 'executor' });
+      online = false;
+      await expect(executor.checkConnection(binding)).rejects.toThrow('connection still down');
+      expect(recoveryCalls).toBe(2);
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('does not recover resolver authentication, permission, or protocol errors without an explicit transient marker', async () => {
+    const store = new PicoStore(':memory:');
+    const thread = store.createThread(null, 'host');
+    const binding = store.executorForThread(thread.id)!;
+    let recoveryCalls = 0;
+    const error = Object.assign(new Error('Workspace authorization failed.'), { status: 403 });
+    const executor = new RemoteHostExecutor(
+      store,
+      undefined,
+      async () => {
+        throw error;
+      },
+      async () => {
+        recoveryCalls += 1;
+      },
+    );
+    try {
+      await expect(executor.checkConnection(binding)).rejects.toBe(error);
+      expect(recoveryCalls).toBe(0);
+    } finally {
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('sends authenticated Runtime lease heartbeats and releases through the resolved Executor address', async () => {
+    const store = new PicoStore(':memory:');
+    const thread = store.createThread(null, 'host');
+    const binding = store.executorForThread(thread.id)!;
+    const calls: Array<{ url: string; authorization: string | null; body: unknown }> = [];
+    let resolutions = 0;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      calls.push({
+        url: String(input),
+        authorization: new Headers(init?.headers).get('authorization'),
+        body: JSON.parse(String(init?.body)),
+      });
+      return new Response(JSON.stringify({ ok: true, leaseToken: 'lease-token-1', expiresAt: 123 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const executor = new RemoteHostExecutor(store, undefined, async () => {
+      resolutions += 1;
+      return { endpointUrl: 'http://executor.test', accessToken: token };
+    });
+    const identity = { runtimeId: 'runtime-1', source: 'thread' as const, leaseId: 'thread-1' };
+    try {
+      await expect(executor.heartbeat(binding, identity)).resolves.toBe('lease-token-1');
+      await executor.release(binding, identity);
+      expect(resolutions).toBe(1);
+      expect(calls).toEqual([
+        { url: 'http://executor.test/api/leases/heartbeat', authorization: `Bearer ${token}`, body: identity },
+        {
+          url: 'http://executor.test/api/leases/release',
+          authorization: `Bearer ${token}`,
+          body: { ...identity, leaseToken: 'lease-token-1' },
+        },
+      ]);
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('recovers and retries one failed heartbeat for transport loss or a draining response', async () => {
+    const store = new PicoStore(':memory:');
+    const thread = store.createThread(null, 'host');
+    const binding = store.executorForThread(thread.id)!;
+    const identity = { runtimeId: 'runtime-1', source: 'thread' as const, leaseId: 'thread-heartbeat-retry' };
+    const calls: Array<{ path: string; body: unknown }> = [];
+    let failureMode: 'transport' | 'draining' = 'transport';
+    let recoveryCalls = 0;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      const body = init?.body === undefined ? undefined : JSON.parse(String(init.body));
+      calls.push({ path: url.pathname, body });
+      if (
+        url.pathname.endsWith('/heartbeat') &&
+        calls.filter((call) => call.path.endsWith('/heartbeat')).length % 2 === 1
+      ) {
+        if (failureMode === 'transport') throw new TypeError('connection reset');
+        return new Response(JSON.stringify({ error: 'Executor is draining.' }), {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          leaseToken: `lease-token-${calls.filter((call) => call.path.endsWith('/heartbeat')).length}`,
+        }),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        },
+      );
+    });
+    const executor = new RemoteHostExecutor(
+      store,
+      undefined,
+      async () => ({ endpointUrl: 'http://executor.test', accessToken: token }),
+      async () => {
+        recoveryCalls += 1;
+      },
+    );
+    try {
+      await expect(executor.heartbeat(binding, identity)).resolves.toBe('lease-token-2');
+      failureMode = 'draining';
+      await expect(executor.heartbeat(binding, identity)).resolves.toBe('lease-token-4');
+      const heartbeatCalls = calls.filter((call) => call.path.endsWith('/heartbeat'));
+      expect(heartbeatCalls).toHaveLength(4);
+      expect(heartbeatCalls.map((call) => call.body)).toEqual([identity, identity, identity, identity]);
+      expect(recoveryCalls).toBe(2);
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('does not recover or retry a heartbeat after an authentication failure', async () => {
+    const store = new PicoStore(':memory:');
+    const thread = store.createThread(null, 'host');
+    const binding = store.executorForThread(thread.id)!;
+    let recoveryCalls = 0;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ error: 'unauthorized' }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const executor = new RemoteHostExecutor(
+      store,
+      undefined,
+      async () => ({ endpointUrl: 'http://executor.test', accessToken: token }),
+      async () => {
+        recoveryCalls += 1;
+      },
+    );
+    try {
+      await expect(
+        executor.heartbeat(binding, { runtimeId: 'runtime-1', source: 'thread', leaseId: 'thread-auth-fail' }),
+      ).rejects.toThrow('unauthorized');
+      expect(recoveryCalls).toBe(0);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('uses only an authenticated health probe as the default Remote heartbeat recovery', async () => {
+    const store = new PicoStore(':memory:');
+    const thread = store.createThread(null, 'host');
+    const binding = store.executorForThread(thread.id)!;
+    const paths: string[] = [];
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      paths.push(url.pathname);
+      if (url.pathname === '/api/leases/heartbeat' && paths.filter((path) => path === url.pathname).length === 1) {
+        return new Response(JSON.stringify({ error: 'Executor is draining.' }), {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url.pathname === '/api/info') {
+        return new Response(
+          JSON.stringify({
+            protocolVersion: 2,
+            kind: 'executor',
+            name: 'remote',
+            workspaceRoot: '/',
+            leaseHeartbeat: true,
+            tools: [],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify({ ok: true, leaseToken: 'lease-token-remote' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const executor = new RemoteHostExecutor(store, undefined, async () => ({
+      endpointUrl: 'http://executor.test',
+      accessToken: token,
+    }));
+    try {
+      await expect(
+        executor.heartbeat(binding, { runtimeId: 'runtime-1', source: 'thread', leaseId: 'thread-remote' }),
+      ).resolves.toBe('lease-token-remote');
+      expect(paths).toEqual(['/api/leases/heartbeat', '/api/info', '/api/leases/heartbeat']);
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('serializes a late heartbeat before release and releases with its newest token', async () => {
+    const store = new PicoStore(':memory:');
+    const thread = store.createThread(null, 'host');
+    const binding = store.executorForThread(thread.id)!;
+    const identity = { runtimeId: 'runtime-1', source: 'thread' as const, leaseId: 'thread-race' };
+    const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+    let releaseLateHeartbeat!: () => void;
+    const lateHeartbeatGate = new Promise<void>((resolve) => {
+      releaseLateHeartbeat = resolve;
+    });
+    let heartbeatCalls = 0;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      calls.push({ path: url.pathname, body });
+      if (url.pathname.endsWith('/heartbeat')) {
+        heartbeatCalls += 1;
+        if (heartbeatCalls === 2) await lateHeartbeatGate;
+        return new Response(JSON.stringify({ ok: true, leaseToken: `lease-token-${heartbeatCalls}` }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const executor = new RemoteHostExecutor(store, undefined, async () => ({
+      endpointUrl: 'http://executor.test',
+      accessToken: token,
+    }));
+    try {
+      await executor.heartbeat(binding, identity);
+      const delayed = executor.heartbeat(binding, identity);
+      await until(() => heartbeatCalls === 2);
+      const released = executor.release(binding, identity);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(calls).toHaveLength(2);
+      releaseLateHeartbeat();
+      await expect(delayed).resolves.toBe('lease-token-2');
+      await released;
+      expect(calls[2]).toEqual({
+        path: '/api/leases/release',
+        body: { ...identity, leaseToken: 'lease-token-2' },
+      });
+      await expect(executor.heartbeat(binding, identity)).resolves.toBe('lease-token-3');
+      expect(calls[3]?.path).toBe('/api/leases/heartbeat');
+    } finally {
+      releaseLateHeartbeat();
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('stops renewing after a failed release while retaining the token for release retry', async () => {
+    const store = new PicoStore(':memory:');
+    const thread = store.createThread(null, 'host');
+    const binding = store.executorForThread(thread.id)!;
+    const identity = { runtimeId: 'runtime-1', source: 'thread' as const, leaseId: 'thread-release-fails' };
+    let resolutions = 0;
+    let heartbeatCalls = 0;
+    const releaseBodies: unknown[] = [];
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (body.leaseToken) {
+        releaseBodies.push(body);
+        if (releaseBodies.length === 1) {
+          return new Response(JSON.stringify({ error: 'temporarily unavailable' }), {
+            status: 503,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      heartbeatCalls += 1;
+      return new Response(JSON.stringify({ ok: true, leaseToken: 'lease-token-kept' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const executor = new RemoteHostExecutor(store, undefined, async () => {
+      resolutions += 1;
+      return { endpointUrl: 'http://executor.test', accessToken: token };
+    });
+    try {
+      await executor.heartbeat(binding, identity);
+      await expect(executor.release(binding, identity)).rejects.toThrow('temporarily unavailable');
+      expect(heartbeatCalls).toBe(1);
+      expect(resolutions).toBe(1);
+      await executor.release(binding, identity);
+      expect(releaseBodies).toEqual([
+        { ...identity, leaseToken: 'lease-token-kept' },
+        { ...identity, leaseToken: 'lease-token-kept' },
+      ]);
+      expect(resolutions).toBe(1);
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('shares one recovery across concurrent failures for the same Executor identity', async () => {
+    const store = new PicoStore(':memory:');
+    const thread = store.createThread(null, 'host');
+    const binding = store.executorForThread(thread.id)!;
+    let failures = 2;
+    let recoveryCalls = 0;
+    let releaseRecovery!: () => void;
+    const recoveryGate = new Promise<void>((resolve) => {
+      releaseRecovery = resolve;
+    });
+    const info = { protocolVersion: 2, kind: 'executor', name: 'test', workspaceRoot: '/', tools: [] };
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      if (failures > 0) {
+        failures -= 1;
+        throw new TypeError('connection reset');
+      }
+      return new Response(JSON.stringify(info), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const executor = new RemoteHostExecutor(
+      store,
+      undefined,
+      async () => ({ endpointUrl: 'http://executor.test', accessToken: token }),
+      async () => {
+        recoveryCalls += 1;
+        await recoveryGate;
+      },
+    );
+    try {
+      const checks = Promise.all([executor.checkConnection(binding), executor.checkConnection(binding)]);
+      await until(() => recoveryCalls === 1);
+      releaseRecovery();
+      await expect(checks).resolves.toHaveLength(2);
+      expect(recoveryCalls).toBe(1);
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+    } finally {
+      releaseRecovery();
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('bounds each operation to one request retry after recovery', async () => {
+    const store = new PicoStore(':memory:');
+    const thread = store.createThread(null, 'host');
+    const binding = store.executorForThread(thread.id)!;
+    let recoveryCalls = 0;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('connection reset'));
+    const executor = new RemoteHostExecutor(
+      store,
+      undefined,
+      async () => ({ endpointUrl: 'http://executor.test', accessToken: token }),
+      async () => {
+        recoveryCalls += 1;
+      },
+    );
+    try {
+      await expect(executor.checkConnection(binding)).rejects.toThrow('Remote Executor request failed');
+      expect(recoveryCalls).toBe(1);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('recovers one workspace download transport failure without retrying protocol responses', async () => {
+    const store = new PicoStore(':memory:');
+    const thread = store.createThread(null, 'host');
+    const binding = store.executorForThread(thread.id)!;
+    let recoveryCalls = 0;
+    let downloadCalls = 0;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/api/info') {
+        return new Response(
+          JSON.stringify({
+            protocolVersion: 2,
+            kind: 'executor',
+            name: 'executor',
+            workspaceRoot: '/',
+            workspaceFileDownload: true,
+            tools: [],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      downloadCalls += 1;
+      if (downloadCalls === 1) throw new TypeError('download socket reset');
+      return new Response('downloaded file', { status: 200 });
+    });
+    const executor = new RemoteHostExecutor(
+      store,
+      undefined,
+      async () => ({ endpointUrl: 'http://executor.test', accessToken: token, workspacePath: '/workspace' }),
+      async () => {
+        recoveryCalls += 1;
+      },
+    );
+    try {
+      const response = await executor.readWorkspaceFile(binding, 'note.txt');
+      await expect(response.text()).resolves.toBe('downloaded file');
+      expect(downloadCalls).toBe(2);
+      expect(recoveryCalls).toBe(1);
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('does not recover workspace downloads after auth failures or user abort', async () => {
+    const store = new PicoStore(':memory:');
+    const thread = store.createThread(null, 'host');
+    const binding = store.executorForThread(thread.id)!;
+    let recoveryCalls = 0;
+    let abortController: AbortController | undefined;
+    let infoUnavailable = true;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/api/info') {
+        if (infoUnavailable) {
+          infoUnavailable = false;
+          return new Response(JSON.stringify({ error: 'draining' }), {
+            status: 503,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response(
+          JSON.stringify({
+            protocolVersion: 2,
+            kind: 'executor',
+            name: 'executor',
+            workspaceRoot: '/',
+            workspaceFileDownload: true,
+            tools: [],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (abortController) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), {
+            once: true,
+          });
+          abortController!.abort();
+        });
+      }
+      return new Response(JSON.stringify({ error: 'unauthorized' }), {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const executor = new RemoteHostExecutor(
+      store,
+      undefined,
+      async () => ({ endpointUrl: 'http://executor.test', accessToken: token, workspacePath: '/workspace' }),
+      async () => {
+        recoveryCalls += 1;
+      },
+    );
+    try {
+      await expect(executor.readWorkspaceFile(binding, 'note.txt')).rejects.toMatchObject({ status: 502 });
+      expect(recoveryCalls).toBe(0);
+      await expect(executor.readWorkspaceFile(binding, 'secret.txt')).rejects.toMatchObject({ status: 502 });
+      expect(recoveryCalls).toBe(0);
+      abortController = new AbortController();
+      await expect(executor.readWorkspaceFile(binding, 'note.txt', abortController.signal)).rejects.toMatchObject({
+        name: 'AbortError',
+      });
+      expect(recoveryCalls).toBe(0);
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('recovers status transport failures and preserves the confirmed-missing 404 transition', async () => {
+    const store = new PicoStore(':memory:');
+    const completed = makePendingRemoteToolExecution(store, 'status-recover-completed');
+    store.transitionExecution(completed.executionId, 'running');
+    const missing = makePendingRemoteToolExecution(store, 'status-recover-missing');
+    store.transitionExecution(missing.executionId, 'running');
+    const binding = store.executorForThread(completed.threadId)!;
+    let recoveryCalls = 0;
+    let stateQueries = 0;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith(completed.executionId)) {
+        stateQueries += 1;
+        if (stateQueries === 1) throw new TypeError('status socket reset');
+        return new Response(JSON.stringify({ id: completed.executionId, status: 'completed', result: 'done' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ error: 'missing' }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const executor = new RemoteHostExecutor(
+      store,
+      undefined,
+      async () => ({ endpointUrl: 'http://executor.test', accessToken: token }),
+      async () => {
+        recoveryCalls += 1;
+      },
+    );
+    try {
+      await expect(executor.status(completed.executionId, binding)).resolves.toMatchObject({ status: 'completed' });
+      await expect(executor.status(missing.executionId, binding)).resolves.toMatchObject({
+        status: 'interrupted',
+      });
+      expect(recoveryCalls).toBe(1);
+      expect(stateQueries).toBe(2);
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('recovers an idempotent interrupt request after a transport failure', async () => {
+    const store = new PicoStore(':memory:');
+    const seeded = makePendingRemoteToolExecution(store, 'interrupt-recover');
+    const binding = store.executorForThread(seeded.threadId)!;
+    let recoveryCalls = 0;
+    let submissionCalls = 0;
+    let interruptCalls = 0;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method === 'POST' && url.pathname === `/api/executions/${seeded.executionId}`) {
+        submissionCalls += 1;
+        return new Response(JSON.stringify({ id: seeded.executionId, status: 'running' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url.pathname.endsWith('/interrupt')) {
+        interruptCalls += 1;
+        if (interruptCalls === 1) throw new TypeError('interrupt socket reset');
+        return new Response(JSON.stringify({ id: seeded.executionId, status: 'interrupted' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ id: seeded.executionId, status: 'running' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const executor = new RemoteHostExecutor(
+      store,
+      undefined,
+      async () => ({ endpointUrl: 'http://executor.test', accessToken: token }),
+      async () => {
+        recoveryCalls += 1;
+      },
+    );
+    try {
+      await expect(executor.interrupt(seeded.executionId, binding)).resolves.toMatchObject({ status: 'interrupted' });
+      expect(submissionCalls).toBe(0);
+      expect(interruptCalls).toBe(2);
+      expect(recoveryCalls).toBe(1);
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
   it('requires the optional-workspace capability only for workspace-free Threads', async () => {
     const store = new PicoStore(':memory:');
     const thread = store.createThread(null, 'host');
     const binding = store.executorForThread(thread.id)!;
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-      new Response(JSON.stringify({ protocolVersion: 2, executorVersion: '0.2.1', kind: 'executor', name: 'old', workspaceRoot: '/', tools: [] }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({
+            protocolVersion: 2,
+            executorVersion: '0.2.1',
+            kind: 'executor',
+            name: 'old',
+            workspaceRoot: '/',
+            tools: [],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
     );
-    const executor = new RemoteHostExecutor(store, undefined, async () => ({ endpointUrl: 'http://127.0.0.1:1234', accessToken: token }));
+    const executor = new RemoteHostExecutor(store, undefined, async () => ({
+      endpointUrl: 'http://127.0.0.1:1234',
+      accessToken: token,
+    }));
     try {
       await expect(executor.listTools(binding)).rejects.toThrow('does not support Threads without a workspace');
       await expect(executor.listTools({ ...binding, workspacePath: '/some/project' })).resolves.toEqual([]);
@@ -571,7 +1454,7 @@ describe('Remote Host Executor', () => {
     }
   });
 
-  it('automatically recovers a Remote execution after transient status disconnects and truncated replies', async () => {
+  it('recovers a Remote execution after transient status disconnects without resubmitting it', async () => {
     const directory = await import('node:fs/promises').then(({ mkdtemp }) =>
       mkdtemp(join(tmpdir(), 'pico-remote-reconnect-')),
     );
@@ -607,6 +1490,7 @@ describe('Remote Host Executor', () => {
       let acceptedRemoteSubmission = false;
       let submissionAttempts = 0;
       let statusConnectionFailures = 0;
+      let firstRecoveredStatus = false;
       globalThis.fetch = async (input, init) => {
         const requestUrl = input instanceof URL ? input : new URL(typeof input === 'string' ? input : input.url);
         if (
@@ -630,24 +1514,32 @@ describe('Remote Host Executor', () => {
           init?.method !== 'POST' &&
           statusConnectionFailures < 2
         ) {
-          statusConnectionFailures += 1;
-          if (statusConnectionFailures === 1) {
+          if (statusConnectionFailures === 0) {
+            statusConnectionFailures = 1;
             throw new TypeError('Simulated temporary Remote Executor connection loss.');
           }
-          return new Response('{', { status: 200, headers: { 'content-type': 'application/json' } });
+          if (!firstRecoveredStatus) {
+            firstRecoveredStatus = true;
+            return originalFetch(input, init);
+          }
+          statusConnectionFailures = 2;
+          throw new TypeError('Simulated second independent Remote Executor connection loss.');
         }
         return originalFetch(input, init);
       };
 
       await env.runtime.submit(thread.id, 'remote-reconnect-message', 'Run and recover the remote command.');
       await until(() => statusConnectionFailures > 0);
+      await until(() =>
+        env.store.listExecutions(thread.id).some((item) => item.kind === 'tool' && item.status === 'running'),
+      );
       const toolExecution = env.store.listExecutions(thread.id).find((item) => item.kind === 'tool');
       expect(toolExecution?.status).toBe('running');
       expect(env.runtime.getThread(thread.id)?.state).toBe('running');
 
       await env.runtime.drain();
 
-      expect(submissionAttempts).toBe(2);
+      expect(submissionAttempts).toBe(1);
       expect(statusConnectionFailures).toBe(2);
       expect(env.store.getExecution(toolExecution!.id)?.status).toBe('completed');
       expect(await readFile(join(remoteWorkspace, 'runs.log'), 'utf8')).toBe('x');
@@ -893,6 +1785,7 @@ describe('Remote Host Executor', () => {
       setToolPolicy(env.store, thread.id, 'shell', 'allow');
 
       let acceptedSubmissionResponseWasLost = false;
+      let submissionAttempts = 0;
       globalThis.fetch = async (input, init) => {
         const requestUrl = input instanceof URL ? input : new URL(typeof input === 'string' ? input : input.url);
         if (
@@ -901,6 +1794,7 @@ describe('Remote Host Executor', () => {
           init?.method === 'POST'
         ) {
           const result = await originalFetch(input, init);
+          submissionAttempts += 1;
           if (!acceptedSubmissionResponseWasLost) {
             acceptedSubmissionResponseWasLost = true;
             throw new TypeError('Simulated lost response after Remote Executor accepted the execution.');
@@ -913,7 +1807,7 @@ describe('Remote Host Executor', () => {
       await env.runtime.submit(thread.id, 'lost-ack-interrupt-message', 'Start then interrupt the command.');
       await until(() => {
         const execution = env.store.listExecutions(thread.id).find((item) => item.kind === 'tool');
-        return acceptedSubmissionResponseWasLost && execution?.status === 'pending';
+        return acceptedSubmissionResponseWasLost && execution?.status === 'running';
       });
       const execution = env.store.listExecutions(thread.id).find((item) => item.kind === 'tool')!;
       expect(await getJson<{ status: string }>(`${endpoint}/api/executions/${execution.id}`, token)).toMatchObject({
@@ -924,6 +1818,7 @@ describe('Remote Host Executor', () => {
       await env.runtime.drain();
 
       expect(env.store.getExecution(execution.id)?.status).toBe('interrupted');
+      expect(submissionAttempts).toBe(1);
       expect(await getJson<{ status: string }>(`${endpoint}/api/executions/${execution.id}`, token)).toMatchObject({
         status: 'interrupted',
       });
@@ -941,7 +1836,108 @@ describe('Remote Host Executor', () => {
     }
   }, 5000);
 
-  it('orders Interrupt after an in-flight submission even when the two requests could be reordered', async () => {
+  it('does not resubmit a tool when recovery after a lost acknowledgement fails', async () => {
+    const store = new PicoStore(':memory:');
+    const seeded = makePendingRemoteToolExecution(store, 'failed-recovery-unknown');
+    const binding = store.executorForThread(seeded.threadId)!;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('connection lost'));
+    const executor = new RemoteHostExecutor(
+      store,
+      undefined,
+      async () => ({ endpointUrl: 'http://executor.test', accessToken: token }),
+      async () => { throw new Error('recovery failed'); },
+    );
+    try {
+      await expect(executor.execute(seeded.executionId, binding)).rejects.toThrow('recovery failed');
+      expect(store.getExecution(seeded.executionId)).toMatchObject({
+        status: 'pending', error: expect.stringContaining('outcome is unknown'),
+      });
+      await expect(executor.execute(seeded.executionId, binding)).rejects.toThrow('outcome is unknown');
+      expect(fetchMock).toHaveBeenCalledOnce();
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('does not resubmit a tool whose submission was interrupted after it began', async () => {
+    const store = new PicoStore(':memory:');
+    const seeded = makePendingRemoteToolExecution(store, 'aborted-submission-unknown');
+    const binding = store.executorForThread(seeded.threadId)!;
+    let submitted!: () => void;
+    const started = new Promise<void>((resolve) => { submitted = resolve; });
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      submitted();
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+      });
+    });
+    const executor = new RemoteHostExecutor(store, undefined, async () => ({ endpointUrl: 'http://executor.test', accessToken: token }));
+    const controller = new AbortController();
+    try {
+      const execution = executor.execute(seeded.executionId, binding, controller.signal);
+      await started;
+      controller.abort();
+      await expect(execution).rejects.toThrow();
+      expect(store.getExecution(seeded.executionId)).toMatchObject({
+        status: 'pending', error: expect.stringContaining('outcome is unknown'),
+      });
+      await expect(executor.execute(seeded.executionId, binding)).rejects.toThrow('outcome is unknown');
+      expect(fetchMock).toHaveBeenCalledOnce();
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('keeps an accepted but unqueryable submission pending when Interrupt finds a reset ledger', async () => {
+    const store = new PicoStore(':memory:');
+    const seeded = makePendingRemoteToolExecution(store, 'interrupt-reset-ledger');
+    const binding = store.executorForThread(seeded.threadId)!;
+    let submissionAttempts = 0;
+    let stateQueries = 0;
+    let recoveryCalls = 0;
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      if (init?.method === 'POST') {
+        submissionAttempts += 1;
+        // Model an accepted request whose acknowledgement was lost and whose ledger
+        // was subsequently reset before the client can inspect the durable ID.
+        throw new TypeError('accepted submission acknowledgement lost');
+      }
+      stateQueries += 1;
+      return new Response(JSON.stringify({ error: 'Execution not found.' }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const executor = new RemoteHostExecutor(
+      store,
+      undefined,
+      async () => ({ endpointUrl: 'http://executor.test', accessToken: token }),
+      async () => {
+        recoveryCalls += 1;
+      },
+    );
+    try {
+      await expect(executor.execute(seeded.executionId, binding)).rejects.toThrow('outcome is unknown');
+      await expect(executor.interrupt(seeded.executionId, binding)).rejects.toThrow('outcome is unknown');
+      expect(store.getExecution(seeded.executionId)).toMatchObject({
+        status: 'pending',
+        error: expect.stringContaining('outcome is unknown'),
+      });
+      expect(submissionAttempts).toBe(1);
+      expect(stateQueries).toBe(2);
+      expect(recoveryCalls).toBe(1);
+    } finally {
+      fetchMock.mockRestore();
+      await executor.shutdown();
+      store.close();
+    }
+  });
+
+  it('does not replay an in-flight submission as an interrupt barrier when its ledger entry is missing', async () => {
     const directory = await import('node:fs/promises').then(({ mkdtemp }) =>
       mkdtemp(join(tmpdir(), 'pico-remote-interrupt-reorder-')),
     );
@@ -1010,10 +2006,13 @@ describe('Remote Host Executor', () => {
       await env.runtime.interrupt(thread.id);
       await env.runtime.drain();
 
-      expect(submissionRequests).toBe(2);
-      expect(env.store.getExecution(execution.id)?.status).toBe('interrupted');
+      expect(submissionRequests).toBe(1);
+      expect(env.store.getExecution(execution.id)).toMatchObject({
+        status: 'pending',
+        error: expect.stringContaining('outcome is unknown'),
+      });
       expect(await getJson<{ status: string }>(`${endpoint}/api/executions/${execution.id}`, token)).toMatchObject({
-        status: 'interrupted',
+        error: 'Execution not found.',
       });
       expect(model.calls).toBe(1);
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 1400));

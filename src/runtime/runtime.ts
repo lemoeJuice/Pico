@@ -48,6 +48,7 @@ import type {
 } from '../contracts/runtime.js';
 import { ExecutionPipelines } from '../core/pipeline.js';
 import { ContainerExecutor, type WorkspaceContainerPlan } from '../executor/container-executor.js';
+import { ExecutorActivity } from './executor-activity.js';
 import { HostExecutor, requiresExternalExecutor, type ExecutorAdapter } from '../executor/executor.js';
 import { RemoteHostExecutor, inspectRemoteExecutor, validateRemoteWorkspace } from '../executor/remote-executor.js';
 import { EXECUTOR_PROTOCOL_VERSION, normalizeRemoteExecutorUrl } from '../executor/remote-protocol.js';
@@ -1098,6 +1099,8 @@ export interface RuntimeOptions {
   pluginDirectory?: string;
   executorPluginDirectory?: string;
   disabledBuiltinPlugins?: string[];
+  /** Override Executor lease transport for isolated Runtime tests. */
+  executorActivityEnabled?: boolean;
 }
 
 export class PicoRuntime {
@@ -1111,6 +1114,7 @@ export class PicoRuntime {
   private readonly additionalPlugins: PicoPlugin[];
   private readonly hostExecutor: HostExecutor;
   private readonly containerExecutor: ContainerExecutor;
+  private readonly executorActivity: ExecutorActivity;
   private readonly workspaceMutationThreads = new Set<string>();
   private readonly workspaceMutationProjects = new Set<string>();
   private readonly workspaceMutationPaths = new Set<string>();
@@ -1149,6 +1153,8 @@ export class PicoRuntime {
     string,
     { promise: Promise<Execution>; controller: AbortController; toolStarted: boolean }
   >();
+  /** Current-process proof that a freshly committed Tool has not crossed its invocation gate. */
+  private readonly safelyUnsubmittedExecutions = new Set<string>();
   private pluginLoadErrors: string[] = [];
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
@@ -1179,9 +1185,37 @@ export class PicoRuntime {
       options.executorPluginDirectory,
     );
     this.remoteHostExecutor = new RemoteHostExecutor(store, (execution) => this.executionChanged(execution));
+    this.executorActivity = new ExecutorActivity(
+      (threadId) => this.store.executorForThread(threadId),
+      async (binding, identity) => {
+        if (options.executorActivityEnabled === false) return;
+        if (binding.remoteConnectionId) {
+          const info = await this.remoteHostExecutor.checkConnection(binding);
+          if (info.leaseHeartbeat === true) await this.remoteHostExecutor.heartbeat(binding, identity);
+        } else if (binding.kind === 'container') {
+          await this.containerExecutor.heartbeat(binding, identity);
+        } else if (binding.kind === 'host') {
+          await this.hostExecutor.heartbeat(binding, identity);
+        }
+      },
+      async (binding, identity) => {
+        if (options.executorActivityEnabled === false) return;
+        if (binding.remoteConnectionId) {
+          await this.remoteHostExecutor.release(binding, identity);
+          return;
+        }
+        if (binding.kind === 'container') await this.containerExecutor.release(binding, identity);
+        else if (binding.kind === 'host') await this.hostExecutor.release(binding, identity);
+      },
+      (error) => console.warn(`Executor activity: ${error instanceof Error ? error.message : String(error)}`),
+    );
     this.mcpManager = new McpManager(store, this.tools, (event) => this.publish(event));
     const services: PluginServices = {
       projects: { list: () => this.listProjects() },
+      executors: {
+        heartbeat: (pluginId, threadId) => this.pluginExecutorHeartbeat(pluginId, threadId),
+        release: (pluginId, threadId) => this.pluginExecutorRelease(pluginId, threadId),
+      },
       threads: {
         get: (threadId) => this.getThread(threadId),
         notifyStateChanged: (threadId) => this.publishThreadUpdate(threadId),
@@ -1460,6 +1494,7 @@ export class PicoRuntime {
     for (const controller of this.pluginModelCallControllers) controller.abort();
     for (const active of this.runtimeToolRuns.values()) active.controller.abort();
 
+    await this.executorActivity.shutdown();
     await Promise.all([
       this.hostExecutor.shutdown(),
       this.containerExecutor.shutdown(),
@@ -1526,6 +1561,7 @@ export class PicoRuntime {
   }
 
   private executionChanged(execution: Execution): void {
+    if (terminalStatus(execution.status)) this.safelyUnsubmittedExecutions.delete(execution.id);
     this.publish({ type: 'execution.updated', execution: redactExecutionImages(execution) });
     this.publishThreadUpdate(execution.threadId);
     for (const listener of this.executionListeners) listener(execution);
@@ -2086,6 +2122,28 @@ export class PicoRuntime {
     return this.plugins.patchThreadState({ ...thread, state });
   }
 
+  updateThreadViewer(viewerId: string, threadId: string | null): void {
+    if (threadId && this.store.getThread(threadId) && !this.shuttingDown) {
+      this.executorActivity.renew('viewer', viewerId, threadId, 60_000);
+    } else {
+      this.executorActivity.clear('viewer', viewerId);
+    }
+  }
+
+  private pluginExecutorLeaseId(pluginId: string, threadId: string): string {
+    return createHash('sha256').update(JSON.stringify([pluginId, threadId])).digest('hex');
+  }
+
+  private pluginExecutorHeartbeat(pluginId: string, threadId: string): void {
+    if (!this.store.getThread(threadId)) throw new ServiceError(404, 'Thread not found.');
+    if (this.shuttingDown) throw new ServiceError(409, 'Runtime is shutting down.');
+    this.executorActivity.renew('plugin', this.pluginExecutorLeaseId(pluginId, threadId), threadId, 60_000);
+  }
+
+  private pluginExecutorRelease(pluginId: string, threadId: string): void {
+    this.executorActivity.clear('plugin', this.pluginExecutorLeaseId(pluginId, threadId));
+  }
+
   listThreads(projectId?: string | null): Thread[] {
     return this.store.listThreads(projectId).map((thread) => {
       const current = this.getThread(thread.id);
@@ -2159,10 +2217,13 @@ export class PicoRuntime {
   private beginThreadOperation(threadId: string): () => void {
     this.assertThreadAvailableForWorkspaceMutation(threadId);
     this.inFlightThreadOperations.set(threadId, (this.inFlightThreadOperations.get(threadId) ?? 0) + 1);
+    const leaseId = randomUUID();
+    this.executorActivity.renew('runtime', leaseId, threadId, null);
     let ended = false;
     return () => {
       if (ended) return;
       ended = true;
+      this.executorActivity.clear('runtime', leaseId);
       const remaining = (this.inFlightThreadOperations.get(threadId) ?? 1) - 1;
       if (remaining > 0) this.inFlightThreadOperations.set(threadId, remaining);
       else this.inFlightThreadOperations.delete(threadId);
@@ -3022,6 +3083,16 @@ export class PicoRuntime {
         if (terminalStatus(settled.status)) this.ensureToolResult(threadId, settled);
         continue;
       }
+      if (execution.status === 'pending' && this.safelyUnsubmittedExecutions.has(execution.id)) {
+        const interrupted = this.store.transitionExecution(execution.id, 'interrupted', {
+          error: 'Runtime confirmed this Tool was interrupted before it entered its invocation pipeline.',
+          detail: { userInterrupted: true, confirmedNotDispatched: true },
+        });
+        this.safelyUnsubmittedExecutions.delete(execution.id);
+        this.executionChanged(interrupted);
+        this.ensureToolResult(threadId, interrupted);
+        continue;
+      }
       if (tool?.source === 'runtime' || tool?.source === 'mcp' || thread.executorKind === 'runtime') {
         if (invocation) {
           const settled = await invocation.promise;
@@ -3172,12 +3243,14 @@ export class PicoRuntime {
           });
         } finally {
           this.loops.delete(threadId);
+          this.executorActivity.clear('thread', threadId);
         }
         this.publishThreadUpdate(threadId);
         const afterLoop = this.store.getThread(threadId);
         if (afterLoop && !afterLoop.pauseRequested && this.hasUnprocessedWork(threadId)) this.startLoop(threadId);
       });
     this.loops.set(threadId, task);
+    this.executorActivity.renew('thread', threadId, threadId, null);
     this.publishThreadUpdate(threadId);
   }
 
@@ -4327,6 +4400,9 @@ export class PicoRuntime {
           ...(mcpTarget ? { mcpTarget } : {}),
         };
       });
+      const newlyCommittedToolExecutions = toolExecutions
+        .filter((item) => !this.store.getExecution(item.executionId))
+        .map((item) => item.executionId);
       this.store.commitModelStep({
         assistantRecordId: `${modelExecutionId}:assistant`,
         modelExecutionId,
@@ -4334,6 +4410,7 @@ export class PicoRuntime {
         payload,
         toolCalls: toolExecutions,
       });
+      for (const executionId of newlyCommittedToolExecutions) this.safelyUnsubmittedExecutions.add(executionId);
       if (hitOutputLimit && !this.store.getThread(thread.id)?.pauseRequested) {
         this.store.setPause(
           thread.id,
@@ -4857,7 +4934,11 @@ export class PicoRuntime {
       }
       if (terminalStatus(execution.status)) this.ensureToolResult(thread.id, execution);
       return execution;
-    })().finally(() => this.invocationRuns.delete(executionId));
+    })().finally(() => {
+      this.invocationRuns.delete(executionId);
+      const latest = this.store.getExecution(executionId);
+      if (!latest || terminalStatus(latest.status)) this.safelyUnsubmittedExecutions.delete(executionId);
+    });
     run.promise = promise;
     this.invocationRuns.set(executionId, run);
     return promise;
@@ -4872,6 +4953,9 @@ export class PicoRuntime {
     signal: AbortSignal,
     mcpTarget: McpToolTarget | null,
   ): Promise<Execution> {
+    // Clear this current-process proof before any adapter or local handler can
+    // cause side effects. A restart makes pending work ambiguous again.
+    this.safelyUnsubmittedExecutions.delete(executionId);
     const current = this.store.getExecution(executionId);
     if (!current) throw new Error('Tool execution record is missing');
     if (terminalStatus(current.status)) return current;
@@ -5504,7 +5588,7 @@ export class PicoRuntime {
     return this.adapterFor(binding).readWorkspaceFile(binding, path, signal);
   }
 
-  async executorStatus(threadId: string): Promise<{
+  async executorStatus(threadId: string, wake = true): Promise<{
     requiresExecutor: boolean;
     connected: boolean;
     compatible: boolean;
@@ -5514,6 +5598,7 @@ export class PicoRuntime {
     targetVersion?: string;
     updateAvailable: boolean;
     updateSupported: boolean;
+    inactive?: boolean;
     error?: string;
   }> {
     const binding = this.store.executorForThread(threadId);
@@ -5532,14 +5617,28 @@ export class PicoRuntime {
         updateSupported: false,
       };
     }
+    if (!wake && !this.executorActivity.hasThread(threadId)) {
+      return {
+        requiresExecutor: true,
+        connected: false,
+        compatible: true,
+        inactive: true,
+        kind: binding.remoteConnectionId ? 'remote-host' : binding.kind,
+        label: binding.label,
+        targetVersion,
+        updateAvailable: false,
+        updateSupported: false,
+      };
+    }
     try {
       const adapter = this.adapterFor(binding);
       const info = await adapter.checkConnection(binding);
       const protocolCompatible = info?.protocolVersion === EXECUTOR_PROTOCOL_VERSION && info.kind === 'executor';
       const missingWorkspaceCapability = !binding.workspacePath && info?.workspaceOptional !== true;
+      const missingHeartbeatCapability = !binding.remoteConnectionId && info?.leaseHeartbeat !== true;
       const compatible = protocolCompatible && !missingWorkspaceCapability;
       const comparison = info?.executorVersion ? compareExecutorVersions(info.executorVersion, targetVersion) : null;
-      const updateAvailable = !compatible || comparison === -1 || comparison === null;
+      const updateAvailable = !compatible || missingHeartbeatCapability || comparison === -1 || comparison === null;
       const kind = binding.remoteConnectionId ? 'remote-host' : binding.kind;
       return {
         requiresExecutor: true,

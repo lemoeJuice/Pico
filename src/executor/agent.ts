@@ -1,7 +1,19 @@
 import { spawn } from 'node:child_process';
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
-import { startRemoteExecutorServer, type RunningRemoteExecutorServer } from './remote-server.js';
+import {
+  prepareLegacyContainerIdleMarkers,
+  startRemoteExecutorServer,
+  writeLegacyContainerIdleMarker,
+  type RunningRemoteExecutorServer,
+} from './remote-server.js';
+
+async function notifySupervisor(type: 'idle' | 'restart', version?: string): Promise<void> {
+  if (!process.send) return;
+  await new Promise<void>((resolvePromise) => {
+    process.send!({ type, ...(version ? { version } : {}) }, () => resolvePromise());
+  });
+}
 
 async function main(): Promise<void> {
   const installPath = process.env.PICO_EXECUTOR_INSTALL_PATH ?? process.argv[1];
@@ -12,6 +24,25 @@ async function main(): Promise<void> {
     process.env.PICO_EXECUTOR_VERSION ??
     ((versionFile ? (await readFile(versionFile, 'utf8').catch(() => '')).trim() : '') || undefined);
   let server: RunningRemoteExecutorServer;
+  const supervised = process.env.PICO_EXECUTOR_SUPERVISED === '1';
+  const legacyContainerOptIn = await prepareLegacyContainerIdleMarkers(installPath);
+  const legacyContainerHealthIdle = legacyContainerOptIn && !supervised;
+  const containerIdleEnabled = supervised || legacyContainerHealthIdle;
+  let localHostIdleEnabled = false;
+  if (installPath && basename(installPath) === 'executor-host.mjs' && process.env.PICO_EXECUTOR_FILESYSTEM_MODE === 'host') {
+    try {
+      const marker = await lstat(`${resolve(installPath)}.idle-enabled`);
+      localHostIdleEnabled = marker.isFile() && !marker.isSymbolicLink();
+    } catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+    }
+  }
+  const idleTimeoutText = process.env.PICO_EXECUTOR_IDLE_TIMEOUT_MS;
+  const configuredIdleTimeoutMs = idleTimeoutText === undefined ? undefined : Number(idleTimeoutText);
+  const idleTimeoutMs = containerIdleEnabled || localHostIdleEnabled ? (configuredIdleTimeoutMs ?? 60_000) : configuredIdleTimeoutMs;
+  if (idleTimeoutMs !== undefined && (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs < 1)) {
+    throw new Error('PICO_EXECUTOR_IDLE_TIMEOUT_MS must be a positive number.');
+  }
   const update = installPath?.endsWith('.mjs')
     ? async (bundle: Buffer, version: string): Promise<void> => {
         const target = resolve(installPath);
@@ -25,7 +56,11 @@ async function main(): Promise<void> {
         await rename(temporary, target);
         await rename(temporaryVersion, versionPath);
         const restart = setTimeout(() => {
-          void server.close().then(() => {
+          void server.close().then(async () => {
+            if (process.env.PICO_EXECUTOR_SUPERVISED === '1') {
+              await notifySupervisor('restart', version);
+              process.exit(0);
+            }
             const child = spawn(process.execPath, [target], {
               cwd: process.cwd(),
               env: { ...process.env, PICO_EXECUTOR_VERSION: version, PICO_EXECUTOR_VERSION_FILE: versionPath },
@@ -56,6 +91,27 @@ async function main(): Promise<void> {
     ...(process.env.PICO_EXECUTOR_NAME ? { name: process.env.PICO_EXECUTOR_NAME } : {}),
     databasePath: process.env.PICO_EXECUTOR_DB_PATH ?? join(process.cwd(), 'data', 'executor.sqlite'),
     ...(installedVersion ? { executorVersion: installedVersion } : {}),
+    ...(idleTimeoutMs !== undefined
+      ? {
+          idle: {
+            timeoutMs: idleTimeoutMs,
+            ...(legacyContainerHealthIdle ? { retryOnError: true } : {}),
+            onIdle: async () => {
+              if (supervised) {
+                await server.close();
+                await notifySupervisor('idle');
+                process.exit(0);
+              }
+              if (legacyContainerHealthIdle) {
+                await writeLegacyContainerIdleMarker();
+                return;
+              }
+              await server.close();
+              process.exit(0);
+            },
+          },
+        }
+      : {}),
     ...(update ? { update } : {}),
   });
   console.log(`Pico Executor is ready on port ${server.port}`);

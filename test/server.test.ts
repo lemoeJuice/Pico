@@ -74,6 +74,59 @@ async function waitForConnected(url: string, headers: Record<string, string>): P
 }
 
 describe('Pico server access boundary', () => {
+  it('tracks validated viewer heartbeats independently for each WebSocket', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pico-viewer-presence-'));
+    let server: Awaited<ReturnType<typeof startServer>> | undefined;
+    const sockets: WebSocket[] = [];
+    try {
+      process.env.PICO_HOST = '127.0.0.1';
+      process.env.PICO_PORT = '0';
+      process.env.PICO_DB_PATH = join(directory, 'pico.sqlite');
+      delete process.env.PICO_ACCESS_TOKEN;
+      server = await startServer();
+      const updateViewer = vi.spyOn(server.runtime, 'updateThreadViewer');
+      const url = `ws://127.0.0.1:${server.port}/api/events`;
+      const connect = async (): Promise<WebSocket> => {
+        const socket = new WebSocket(url, { headers: { origin: `http://127.0.0.1:${server!.port}` } });
+        sockets.push(socket);
+        await new Promise<void>((resolve, reject) => {
+          socket.once('open', resolve);
+          socket.once('error', reject);
+        });
+        return socket;
+      };
+      const waitForCalls = async (count: number): Promise<void> => {
+        const deadline = Date.now() + 1_000;
+        while (updateViewer.mock.calls.length < count && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        expect(updateViewer.mock.calls).toHaveLength(count);
+      };
+      const first = await connect();
+      first.send(JSON.stringify({ type: 'thread.viewer', threadId: 'thread-one' }));
+      await waitForCalls(1);
+      first.send(JSON.stringify({ type: 'thread.viewer', threadId: 42 }));
+      first.send(JSON.stringify({ type: 'thread.viewer', threadId: 'thread-two', extra: true }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(updateViewer.mock.calls).toHaveLength(1);
+
+      const second = await connect();
+      second.send(JSON.stringify({ type: 'thread.viewer', threadId: 'thread-one' }));
+      await waitForCalls(2);
+      expect(updateViewer.mock.calls[0]?.[0]).not.toBe(updateViewer.mock.calls[1]?.[0]);
+      expect(updateViewer.mock.calls.slice(0, 2).map((call) => call[1])).toEqual(['thread-one', 'thread-one']);
+
+      first.close();
+      await waitForCalls(3);
+      expect(updateViewer.mock.calls[2]).toEqual([updateViewer.mock.calls[0]?.[0], null]);
+      second.close();
+    } finally {
+      for (const socket of sockets) socket.terminate();
+      await server?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('requires a token off-loopback and gates HTTP and WebSocket access with a revocable session', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'pico-server-auth-'));
     let server: Awaited<ReturnType<typeof startServer>> | undefined;

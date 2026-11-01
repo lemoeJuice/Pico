@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { accessSync, constants } from 'node:fs';
-import { mkdir, realpath, stat } from 'node:fs/promises';
+import { mkdir, readFile, realpath, stat } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { delimiter, resolve, join } from 'node:path';
 import type { Execution, ExecutorBinding, ToolDefinition } from '../core/types.js';
@@ -9,8 +9,11 @@ import { PicoStore } from '../core/store.js';
 import { currentExecutorBundle, currentExecutorVersion } from './bundle.js';
 import type { ExecutionListener, ExecutorAdapter, ExecutorServiceAddress } from './executor.js';
 import { executorPluginDirectory } from './plugin-host.js';
-import { RemoteHostExecutor } from './remote-executor.js';
+import { inspectRemoteExecutor, RemoteHostExecutor, type RemoteExecutorLeaseIdentity } from './remote-executor.js';
+import { recoverLegacyContainerUpdate, updateLegacyContainerInPlace } from './legacy-container-update.js';
+import { createLegacyUpdatePlatform, hasLegacyUpdateJournal } from './legacy-update-platform.js';
 import { ServiceError } from '../contracts/service-error.js';
+import { EXECUTOR_PROTOCOL_VERSION } from './remote-protocol.js';
 
 const CONTAINER_SETTING_PREFIX = 'executor-container-connection:';
 const CONTAINER_NAME_SETTING_PREFIX = 'executor-container-name:';
@@ -21,6 +24,19 @@ const CONTAINER_INSTALLATION_SETTING = 'executor-container-installation-id';
 const CONTAINER_NAME_PREFIX = process.env.PICO_CONTAINER_NAME?.trim() || 'pico-executor';
 const CONTAINER_PORT = 4174;
 const EXECUTOR_PATH = '/opt/pico/executor-agent.mjs';
+const SUPERVISOR_PATH = '/opt/pico/data/container-supervisor.mjs';
+const LEGACY_HEALTH_ENABLE_PATH = '/opt/pico/data/pico-health-supervisor-enabled';
+const LEGACY_IDLE_PATH = '/opt/pico/data/pico-executor-idle';
+const CONTAINER_STOP_TIMEOUT_MS = 15_000;
+const CONTAINER_STATE_POLL_MS = 100;
+const STOPPED_CONTAINER_STATUSES = new Set(['created', 'exited', 'stopped']);
+
+interface ContainerLifecycleState {
+  exists: boolean;
+  running: boolean;
+  paused: boolean;
+  status: string;
+}
 const INDEPENDENT_WORKSPACE_ROOT = '/pico-thread-work';
 const DEFAULT_CONTAINER_IMAGE = 'docker.io/library/node:22-bookworm-slim';
 
@@ -48,6 +64,7 @@ interface ContainerProbe {
   reachable: boolean;
   responded: boolean;
   status?: number;
+  draining?: boolean;
 }
 
 export interface WorkspaceContainerPlan {
@@ -198,6 +215,10 @@ export class ContainerExecutor implements ExecutorAdapter {
   private readonly workspaceAttachPromises = new Map<string, Promise<void>>();
   private readonly workspaceRecoveryPromises = new Map<string, Promise<void>>();
   private readonly workspaceRollbackPromises = new Map<string, Promise<void>>();
+  private readonly leases = new Map<string, { binding: ExecutorBinding; identity: RemoteExecutorLeaseIdentity }>();
+  private leaseTimer: NodeJS.Timeout | null = null;
+  private leaseTransition: Promise<void> = Promise.resolve();
+  private shuttingDown = false;
   private storageArgs: string[] | null = null;
 
   constructor(
@@ -208,14 +229,42 @@ export class ContainerExecutor implements ExecutorAdapter {
     overlayMountProgram = findOverlayMountProgram(),
     vfsStorageRoot = defaultVfsStorageRoot(),
     pluginDirectory = executorPluginDirectory(),
+    private readonly idleTimeoutMs = 60_000,
   ) {
     this.installationId = this.getInstallationId();
     this.containerImage = image;
     this.mountProgram = overlayMountProgram;
     this.vfsRoot = vfsStorageRoot;
     this.pluginDirectory = pluginDirectory;
-    this.client = new RemoteHostExecutor(store, onExecution, async (binding, signal) =>
-      this.addressFor(binding, signal),
+    this.client = new RemoteHostExecutor(
+      store,
+      onExecution,
+      async (binding, signal) => this.addressFor(binding, signal),
+      async (_endpoint, signal, binding) => {
+        if (!binding || binding.kind !== 'container') throw new Error('Container Executor binding is unavailable.');
+        const key = await this.keyForBinding(binding);
+        const name = this.containerName(key);
+        const saved = await this.connection(key);
+        const probe = await this.probeConnection(saved.port, saved.accessToken, signal);
+        if (probe.reachable && !probe.draining) return;
+        if (probe.responded && !probe.reachable)
+          throw new Error(`Container Executor endpoint returned HTTP ${probe.status ?? 'an error'}.`);
+        let state = await this.inspectContainerLifecycle(name, signal);
+        if (probe.draining) {
+          state = await this.waitForStoppedContainer(name, signal, state);
+        }
+        if (!state.exists) throw new Error('Container Executor is missing; automatic recreation is unsafe.');
+        if (state.status === 'paused' || state.paused) {
+          throw new Error('Container Executor is paused; refusing to start or unpause an externally paused container.');
+        }
+        if (state.status === 'running' && state.running) return; // Another Runtime may still own the container.
+        await this.startStoppedContainer(name, signal, state);
+        if (!(await this.isSupervisedContainer(name, signal))) {
+          await this.startAgent(name, saved, binding.workspacePath ? '/workspace' : INDEPENDENT_WORKSPACE_ROOT);
+        }
+        await this.waitUntilReachable(saved.port, saved.accessToken, signal);
+      },
+      async (binding) => `local://container/${await this.keyForBinding(binding)}`,
     );
   }
 
@@ -227,8 +276,19 @@ export class ContainerExecutor implements ExecutorAdapter {
     return this.client.checkConnection(binding);
   }
 
-  update(binding: ExecutorBinding, bundle: Uint8Array, version: string): Promise<{ executorVersion: string }> {
-    return this.client.update(binding, bundle, version);
+  async update(binding: ExecutorBinding, bundle: Uint8Array, version: string): Promise<{ executorVersion: string }> {
+    await this.addressFor(binding);
+    const key = await this.keyForBinding(binding);
+    const name = this.containerName(key);
+    if (await this.isSupervisedContainer(name)) return this.client.update(binding, bundle, version);
+    const saved = await this.connection(key);
+    const workspace = binding.workspacePath ? await realpath(binding.workspacePath) : null;
+    if (await this.hasActiveExecutorTransaction(workspace, `http://127.0.0.1:${saved.port}`)) {
+      throw new ServiceError(409, 'Wait for active Container Executor work before updating it.');
+    }
+    const platform = this.legacyUpdatePlatform(binding, name, saved, bundle, version);
+    await updateLegacyContainerInPlace({ containerName: name, targetVersion: version, bundle, ...platform });
+    return { executorVersion: version };
   }
 
   readWorkspaceFile(binding: ExecutorBinding, path: string, signal?: AbortSignal): Promise<Response> {
@@ -247,22 +307,76 @@ export class ContainerExecutor implements ExecutorAdapter {
     return this.client.interrupt(executionId, binding);
   }
 
+  heartbeat(binding: ExecutorBinding, identity: RemoteExecutorLeaseIdentity): Promise<void> {
+    return this.queueLeaseTransition(async () => {
+      if (this.shuttingDown) throw new Error('Container Executor is shutting down.');
+      try {
+        await this.client.heartbeat(binding, identity);
+      } catch (error) {
+        if (error && typeof error === 'object' && 'status' in error && error.status === 404) {
+          throw new Error('This Container Executor requires an update for automatic idle shutdown.', { cause: error });
+        }
+        throw error;
+      }
+      this.leases.set(JSON.stringify([identity.runtimeId, identity.source, identity.leaseId]), { binding, identity });
+      this.scheduleLeaseHeartbeats();
+    });
+  }
+
+  release(binding: ExecutorBinding, identity: RemoteExecutorLeaseIdentity): Promise<void> {
+    return this.queueLeaseTransition(async () => {
+      const key = JSON.stringify([identity.runtimeId, identity.source, identity.leaseId]);
+      const lease = this.leases.get(key);
+      this.leases.delete(key);
+      this.scheduleLeaseHeartbeats();
+      if (lease) await this.client.release(binding, identity);
+    });
+  }
+
   async shutdown(): Promise<void> {
-    // Workspace containers and their execution ledgers persist across Runtime restarts.
+    this.shuttingDown = true;
+    if (this.leaseTimer) clearInterval(this.leaseTimer);
+    this.leaseTimer = null;
+    await this.queueLeaseTransition(async () => {
+      const leases = [...this.leases.values()];
+      this.leases.clear();
+      await Promise.allSettled(leases.map((lease) => this.client.release(lease.binding, lease.identity)));
+    });
     await this.client.shutdown();
   }
 
-  async planWorkspaceContainer(
-    workspacePath: string,
-    candidates: ExecutorBinding[],
-  ): Promise<WorkspaceContainerPlan> {
+  private queueLeaseTransition(operation: () => Promise<void>): Promise<void> {
+    const next = this.leaseTransition.catch(() => undefined).then(operation);
+    this.leaseTransition = next;
+    return next;
+  }
+
+  private scheduleLeaseHeartbeats(): void {
+    if (!this.leases.size || this.shuttingDown) {
+      if (this.leaseTimer) clearInterval(this.leaseTimer);
+      this.leaseTimer = null;
+      return;
+    }
+    if (this.leaseTimer) return;
+    this.leaseTimer = setInterval(
+      () => {
+        void this.queueLeaseTransition(async () => {
+          if (this.shuttingDown) return;
+          await Promise.allSettled(
+            [...this.leases.values()].map((lease) => this.client.heartbeat(lease.binding, lease.identity)),
+          );
+        });
+      },
+      Math.min(20_000, Math.max(100, Math.floor(this.idleTimeoutMs / 3))),
+    );
+    this.leaseTimer.unref();
+  }
+
+  async planWorkspaceContainer(workspacePath: string, candidates: ExecutorBinding[]): Promise<WorkspaceContainerPlan> {
     const workspace = await realpath(resolve(workspacePath));
     if (!(await stat(workspace)).isDirectory()) throw new Error('Container workspace must be a directory.');
     const pathKey = this.workspacePathKey(workspace);
-    const savedWorkspaceKey = this.store.getSetting<string | null>(
-      `${CONTAINER_WORKSPACE_KEY_PREFIX}${pathKey}`,
-      null,
-    );
+    const savedWorkspaceKey = this.store.getSetting<string | null>(`${CONTAINER_WORKSPACE_KEY_PREFIX}${pathKey}`, null);
     if (savedWorkspaceKey && /^[a-f0-9]{64}$/.test(savedWorkspaceKey)) {
       return { workspace, workspaceKey: savedWorkspaceKey };
     }
@@ -617,6 +731,12 @@ export class ContainerExecutor implements ExecutorAdapter {
     workspace: string,
     saved: SavedContainerConnection,
   ): Promise<void> {
+    const runHelp = await this.callPodman(['run', '--help']);
+    if (!runHelp.stdout.includes('--health-on-failure') || !runHelp.stdout.includes('--health-start-period')) {
+      throw new Error(
+        'This Podman version cannot safely preserve automatic Container idle shutdown during attachment.',
+      );
+    }
     const image = `${CONTAINER_NAME_PREFIX}-snapshot-${this.installationId.slice(0, 12)}-${key.slice(0, 12)}-${randomBytes(4).toString('hex')}`;
     const setting = `${CONTAINER_ATTACH_SETTING_PREFIX}${key}`;
     const previous = this.store.getSetting<ContainerWorkspaceAttachment | null>(setting, null);
@@ -645,7 +765,11 @@ export class ContainerExecutor implements ExecutorAdapter {
         await this.startAgent(name, saved, INDEPENDENT_WORKSPACE_ROOT);
         await this.waitUntilReachable(saved.port, saved.accessToken, new AbortController().signal);
       } catch (restartError) {
-        throw new AggregateError([error, restartError], 'Container snapshot failed and the original Container could not be restarted.', { cause: restartError });
+        throw new AggregateError(
+          [error, restartError],
+          'Container snapshot failed and the original Container could not be restarted.',
+          { cause: restartError },
+        );
       }
       throw error;
     }
@@ -708,6 +832,11 @@ export class ContainerExecutor implements ExecutorAdapter {
       '--name',
       name,
       '--restart=unless-stopped',
+      `--health-cmd=test ! -e ${LEGACY_IDLE_PATH}`,
+      '--health-interval=2s',
+      '--health-retries=1',
+      '--health-start-period=30s',
+      '--health-on-failure=stop',
       '--label',
       `io.pico.executor=${workspace ? 'workspace' : 'container'}`,
       '--label',
@@ -718,16 +847,27 @@ export class ContainerExecutor implements ExecutorAdapter {
       '-p',
       `127.0.0.1:${saved.port}:${CONTAINER_PORT}`,
       ...(workspace ? ['--volume', `${workspace}:/workspace:rw`] : []),
-      ...(independentVolume ? ['--volume', `${this.independentWorkspaceVolume(key)}:${INDEPENDENT_WORKSPACE_ROOT}:rw`] : []),
+      ...(independentVolume
+        ? ['--volume', `${this.independentWorkspaceVolume(key)}:${INDEPENDENT_WORKSPACE_ROOT}:rw`]
+        : []),
       '--volume',
       `pico-executor-data-${this.installationId.slice(0, 16)}-${key.slice(0, 32)}:/opt/pico/data:rw`,
       '--volume',
       `${this.pluginDirectory}:/opt/pico/executor-plugins:ro`,
       '-e',
       `PICO_EXECUTOR_TOKEN=${saved.accessToken}`,
+      '--entrypoint',
+      '/bin/sh',
       image,
-      'sleep',
-      'infinity',
+      '-c',
+      'exec sleep infinity',
+    ]);
+    await this.callPodman([
+      'exec',
+      name,
+      'sh',
+      '-lc',
+      `mkdir -p /opt/pico/data && rm -f ${LEGACY_IDLE_PATH} && touch ${LEGACY_HEALTH_ENABLE_PATH}`,
     ]);
   }
 
@@ -776,6 +916,15 @@ export class ContainerExecutor implements ExecutorAdapter {
   }
 
   private async addressFor(binding: ExecutorBinding, signal?: AbortSignal): Promise<ExecutorServiceAddress> {
+    const key = await this.keyForBinding(binding);
+    const name = this.containerName(key);
+    if (hasLegacyUpdateJournal(this.store, name)) {
+      const saved = this.store.getSetting<SavedContainerConnection | null>(`${CONTAINER_SETTING_PREFIX}${key}`, null);
+      if (!saved) throw new Error('Legacy Container Update recovery has no saved Executor connection.');
+      const version = currentExecutorVersion();
+      const platform = this.legacyUpdatePlatform(binding, name, saved, await currentExecutorBundle(), version);
+      await recoverLegacyContainerUpdate(name, platform.journal, platform.callbacks);
+    }
     const independentKey = createHash('sha256').update(`executor:${binding.id}`).digest('hex');
     const attaching = this.workspaceAttachPromises.get(independentKey);
     if (attaching) await awaitWithSignal(attaching, signal);
@@ -841,17 +990,11 @@ export class ContainerExecutor implements ExecutorAdapter {
     const pathKey = this.workspacePathKey(workspace);
     // Existing attached bindings keep their original container and execution ledger.
     // New independent-to-Project conversions write an explicit path alias below.
-    if (
-      (attachment?.status === 'attached' || attachment?.status === 'pending') &&
-      attachment.workspace === workspace
-    ) {
+    if ((attachment?.status === 'attached' || attachment?.status === 'pending') && attachment.workspace === workspace) {
       return independentKey;
     }
 
-    const savedWorkspaceKey = this.store.getSetting<string | null>(
-      `${CONTAINER_WORKSPACE_KEY_PREFIX}${pathKey}`,
-      null,
-    );
+    const savedWorkspaceKey = this.store.getSetting<string | null>(`${CONTAINER_WORKSPACE_KEY_PREFIX}${pathKey}`, null);
     if (savedWorkspaceKey && /^[a-f0-9]{64}$/.test(savedWorkspaceKey)) return savedWorkspaceKey;
 
     return pathKey;
@@ -918,17 +1061,19 @@ export class ContainerExecutor implements ExecutorAdapter {
     const connectionSetting = `${CONTAINER_SETTING_PREFIX}${workspaceKey}`;
     const hadSavedConnection = this.store.getSetting<SavedContainerConnection | null>(connectionSetting, null) !== null;
     const saved = await this.connection(workspaceKey);
-    const running = await this.inspectContainer(containerName, signal);
-    if (running.exists && running.running) {
+    const initialState = await this.inspectContainerLifecycle(containerName, signal);
+    if (initialState.exists && initialState.status === 'running' && initialState.running) {
       const probe = await this.probeConnection(saved.port, saved.accessToken, signal);
       if (!probe.reachable) {
         if (probe.responded) {
           throw new Error(`Container Executor endpoint returned HTTP ${probe.status ?? 'an error'}.`);
         }
-        throw new Error('Container Executor connection timed out; use the Thread manual restart action to recover it.');
+        throw Object.assign(new Error('Container Executor connection timed out.'), {
+          transientConnectionFailure: true,
+        });
       }
     }
-    if (!running.exists) {
+    if (!initialState.exists) {
       if (!root && hadSavedConnection) {
         throw new Error(
           'Existing independent Container is missing. Automatic recreation stopped to protect its container filesystem; recover the original Container before retrying.',
@@ -943,13 +1088,15 @@ export class ContainerExecutor implements ExecutorAdapter {
           '-d',
           '--name',
           containerName,
-          '--restart=unless-stopped',
+          '--restart=on-failure',
           '--label',
           'io.pico.executor=workspace',
           '--label',
           `io.pico.workspace-key=${workspaceKey}`,
           '--label',
           `io.pico.installation-id=${this.installationId}`,
+          '--label',
+          'io.pico.lifecycle=heartbeat-v1',
           '-p',
           `127.0.0.1:${saved.port}:${CONTAINER_PORT}`,
           ...(root ? ['--volume', `${root}:/workspace:rw`] : []),
@@ -962,15 +1109,38 @@ export class ContainerExecutor implements ExecutorAdapter {
           `${this.pluginDirectory}:/opt/pico/executor-plugins:ro`,
           '-e',
           `PICO_EXECUTOR_TOKEN=${saved.accessToken}`,
+          '-e',
+          'PICO_EXECUTOR_HOST=0.0.0.0',
+          '-e',
+          `PICO_EXECUTOR_PORT=${CONTAINER_PORT}`,
+          '-e',
+          `PICO_EXECUTOR_WORKSPACE_ROOT=${root ? '/workspace' : INDEPENDENT_WORKSPACE_ROOT}`,
+          '-e',
+          'PICO_EXECUTOR_DB_PATH=/opt/pico/data/executor.sqlite',
+          '-e',
+          'PICO_EXECUTOR_PLUGIN_DIR=/opt/pico/executor-plugins',
+          '-e',
+          `PICO_EXECUTOR_INSTALL_PATH=${EXECUTOR_PATH}`,
+          '-e',
+          `PICO_EXECUTOR_VERSION_FILE=${EXECUTOR_PATH}.version`,
+          '-e',
+          `PICO_EXECUTOR_IDLE_TIMEOUT_MS=${this.idleTimeoutMs}`,
+          '--entrypoint',
+          '/bin/sh',
           this.containerImage,
-          'sleep',
-          'infinity',
+          '-c',
+          `until [ -s ${SUPERVISOR_PATH} ] && [ -s ${EXECUTOR_PATH} ] && [ -s ${EXECUTOR_PATH}.version ]; do sleep 1; done; exec node ${SUPERVISOR_PATH}`,
         ],
         undefined,
         signal,
       );
-    } else if (!running.running) {
-      await this.callPodman(['start', containerName], undefined, signal);
+    } else {
+      if (initialState.status === 'paused' || initialState.paused) {
+        throw new Error('Container Executor is paused; refusing to start or unpause an externally paused container.');
+      }
+      if (initialState.status !== 'running') {
+        await this.startStoppedContainer(containerName, signal, initialState);
+      }
     }
 
     await this.callPodman(
@@ -1009,18 +1179,36 @@ export class ContainerExecutor implements ExecutorAdapter {
         signal,
       );
     }
-    if (!(await this.isReachable(saved.port, saved.accessToken, signal))) {
+    const supervised = !initialState.exists || (await this.isSupervisedContainer(containerName, signal));
+    if (supervised && !(await this.containerFileExists(containerName, SUPERVISOR_PATH, signal))) {
+      const supervisor = await readFile(new URL('./container-supervisor.mjs', import.meta.url));
       await this.callPodman(
-        this.agentLaunchArgs(
+        [
+          'exec',
+          '-i',
           containerName,
-          saved.accessToken,
-          versionPath,
-          installedVersion,
-          root ? '/workspace' : INDEPENDENT_WORKSPACE_ROOT,
-        ),
-        undefined,
+          'sh',
+          '-lc',
+          `base64 -d > ${SUPERVISOR_PATH}.next && chmod 700 ${SUPERVISOR_PATH}.next && mv ${SUPERVISOR_PATH}.next ${SUPERVISOR_PATH}`,
+        ],
+        supervisor.toString('base64'),
         signal,
       );
+    }
+    if (!(await this.isReachable(saved.port, saved.accessToken, signal))) {
+      if (!supervised) {
+        await this.callPodman(
+          this.agentLaunchArgs(
+            containerName,
+            saved.accessToken,
+            versionPath,
+            installedVersion,
+            root ? '/workspace' : INDEPENDENT_WORKSPACE_ROOT,
+          ),
+          undefined,
+          signal,
+        );
+      }
       await this.waitUntilReachable(saved.port, saved.accessToken, signal);
     }
   }
@@ -1069,11 +1257,13 @@ export class ContainerExecutor implements ExecutorAdapter {
       ? (await this.callPodman(['exec', containerName, 'cat', versionPath], undefined, signal)).stdout.trim() ||
         'unknown'
       : 'unknown';
-    await this.callPodman(
-      this.agentLaunchArgs(containerName, saved.accessToken, versionPath, installedVersion),
-      undefined,
-      signal,
-    );
+    if (!(await this.isSupervisedContainer(containerName, signal))) {
+      await this.callPodman(
+        this.agentLaunchArgs(containerName, saved.accessToken, versionPath, installedVersion),
+        undefined,
+        signal,
+      );
+    }
     await this.waitUntilReachable(saved.port, saved.accessToken, signal);
   }
 
@@ -1134,6 +1324,155 @@ export class ContainerExecutor implements ExecutorAdapter {
     }
   }
 
+  private async inspectContainerLifecycle(
+    containerName: string,
+    signal?: AbortSignal,
+  ): Promise<ContainerLifecycleState> {
+    try {
+      const result = await this.callPodman(
+        ['container', 'inspect', containerName, '--format', '{{.State.Status}}|{{.State.Running}}|{{.State.Paused}}'],
+        undefined,
+        signal,
+      );
+      const [status, runningValue, pausedValue] = result.stdout.trim().split('|');
+      if (
+        !status ||
+        !['created', 'exited', 'paused', 'running', 'stopped', 'stopping'].includes(status) ||
+        !['true', 'false'].includes(runningValue ?? '') ||
+        !['true', 'false'].includes(pausedValue ?? '')
+      ) {
+        throw new Error('Container state inspection is incomplete or unknown; refusing to start it.');
+      }
+      const running = runningValue === 'true';
+      const paused = pausedValue === 'true';
+      const consistent =
+        (status === 'running' && running && !paused) ||
+        (status === 'paused' && !running && paused) ||
+        (status === 'stopping' && !paused) ||
+        (STOPPED_CONTAINER_STATUSES.has(status) && !running && !paused);
+      if (!consistent) throw new Error('Container state status conflicts with its running/paused fields.');
+      return { exists: true, running, paused, status };
+    } catch (error) {
+      if (/no such container|not found|does not exist/i.test(message(error))) {
+        return { exists: false, running: false, paused: false, status: 'missing' };
+      }
+      throw error;
+    }
+  }
+
+  private async waitForStoppedContainer(
+    containerName: string,
+    signal?: AbortSignal,
+    initial?: ContainerLifecycleState,
+  ): Promise<ContainerLifecycleState> {
+    const deadline = Date.now() + CONTAINER_STOP_TIMEOUT_MS;
+    let state = initial ?? (await this.inspectContainerLifecycle(containerName, signal));
+    while (!STOPPED_CONTAINER_STATUSES.has(state.status)) {
+      if (signal?.aborted) throw abortError();
+      if (!state.exists) return state;
+      if (state.status === 'paused') {
+        throw new Error('Container Executor is paused; refusing to treat it as stopped.');
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Container Executor did not stop within ${CONTAINER_STOP_TIMEOUT_MS}ms (status: ${state.status}).`,
+        );
+      }
+      await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, CONTAINER_STATE_POLL_MS));
+      state = await this.inspectContainerLifecycle(containerName, signal);
+    }
+    return state;
+  }
+
+  private async startStoppedContainer(
+    containerName: string,
+    signal?: AbortSignal,
+    initial?: ContainerLifecycleState,
+  ): Promise<void> {
+    const deadline = Date.now() + CONTAINER_STOP_TIMEOUT_MS;
+    let state = initial ?? (await this.inspectContainerLifecycle(containerName, signal));
+    while (true) {
+      if (signal?.aborted) throw abortError();
+      if (!state.exists) throw new Error('Container Executor is missing; automatic recreation is unsafe.');
+      if (state.status === 'running' && state.running) return;
+      if (state.status === 'paused' || state.paused) {
+        throw new Error('Container Executor is paused; refusing to start or unpause an externally paused container.');
+      }
+      if (STOPPED_CONTAINER_STATUSES.has(state.status)) {
+        try {
+          await this.callPodman(['start', containerName], undefined, signal);
+          return;
+        } catch (error) {
+          if (!/state improper|must be in created or stopped state/i.test(message(error))) throw error;
+          // Podman may briefly keep the object in its stopping state after inspect
+          // reports a terminal flag. Re-inspect before any retry.
+        }
+      } else if (state.status !== 'stopping') {
+        throw new Error(`Container state ${state.status} is not safe to start.`);
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`Container Executor did not become startable within ${CONTAINER_STOP_TIMEOUT_MS}ms.`);
+      }
+      await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, CONTAINER_STATE_POLL_MS));
+      state = await this.inspectContainerLifecycle(containerName, signal);
+    }
+  }
+
+  private async isSupervisedContainer(containerName: string, signal?: AbortSignal): Promise<boolean> {
+    const result = await this.callPodman(
+      ['container', 'inspect', containerName, '--format', '{{index .Config.Labels "io.pico.lifecycle"}}'],
+      undefined,
+      signal,
+    );
+    return result.stdout.trim() === 'heartbeat-v1';
+  }
+
+  private async keyForBinding(binding: ExecutorBinding): Promise<string> {
+    const independentKey = createHash('sha256').update(`executor:${binding.id}`).digest('hex');
+    if (!binding.workspacePath.trim()) return independentKey;
+    const workspace = await realpath(binding.workspacePath);
+    const attachment = this.store.getSetting<ContainerWorkspaceAttachment | null>(
+      `${CONTAINER_ATTACH_SETTING_PREFIX}${independentKey}`,
+      null,
+    );
+    return this.workspaceContainerKey(workspace, independentKey, attachment);
+  }
+
+  private legacyUpdatePlatform(
+    binding: ExecutorBinding,
+    name: string,
+    saved: SavedContainerConnection,
+    bundle: Uint8Array,
+    version: string,
+  ) {
+    return createLegacyUpdatePlatform({
+      containerName: name,
+      store: this.store,
+      runPodman: (args, input, signal) => this.callPodman(args, input, signal),
+      bundle,
+      version,
+      accessToken: saved.accessToken,
+      workspaceRoot: binding.workspacePath ? '/workspace' : INDEPENDENT_WORKSPACE_ROOT,
+      startAgentAndVerify: async ({ containerId, version: expectedVersion, workspaceRoot, requireLease }) => {
+        const probe = await this.probeConnection(saved.port, saved.accessToken);
+        if (!probe.reachable) {
+          if (probe.responded) throw new Error(`Container Executor returned HTTP ${probe.status ?? 'an error'}.`);
+          await this.startAgent(containerId, saved, workspaceRoot);
+          await this.waitUntilReachable(saved.port, saved.accessToken);
+        }
+        const info = await inspectRemoteExecutor(`http://127.0.0.1:${saved.port}`, saved.accessToken);
+        return {
+          verified:
+            info.protocolVersion === EXECUTOR_PROTOCOL_VERSION &&
+            info.kind === 'executor' &&
+            info.executorVersion === expectedVersion &&
+            (!requireLease || info.leaseHeartbeat === true),
+          ...(info.executorVersion ? { version: info.executorVersion } : {}),
+        };
+      },
+    });
+  }
+
   private async containerFileExists(containerName: string, path: string, signal?: AbortSignal): Promise<boolean> {
     try {
       await this.callPodman(['exec', containerName, 'sh', '-lc', `test -s ${path}`], undefined, signal);
@@ -1157,7 +1496,8 @@ export class ContainerExecutor implements ExecutorAdapter {
         headers: { authorization: `Bearer ${accessToken}` },
         signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(500)]) : AbortSignal.timeout(500),
       });
-      return { reachable: response.ok, responded: true, status: response.status };
+      const payload = response.ok ? ((await response.json().catch(() => null)) as { draining?: unknown } | null) : null;
+      return { reachable: response.ok, responded: true, status: response.status, draining: payload?.draining === true };
     } catch {
       if (signal?.aborted) throw abortError();
       return { reachable: false, responded: false };

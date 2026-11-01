@@ -8,6 +8,7 @@ export interface ExecutorConnectionInfo {
   updateSupported?: boolean;
   workspaceFileDownload?: boolean;
   workspaceOptional?: boolean;
+  leaseHeartbeat?: boolean;
 }
 
 export interface ExecutorServiceAddress {

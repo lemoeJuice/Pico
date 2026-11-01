@@ -180,7 +180,7 @@ function cloneTheme(theme: RegisteredTheme): RegisteredTheme {
   };
 }
 
-export interface PluginContext extends Omit<PluginServices, 'models' | 'continuations' | 'threads'> {
+export interface PluginContext extends Omit<PluginServices, 'models' | 'continuations' | 'threads' | 'executors'> {
   threads: Omit<PluginServices['threads'], 'updateTitle'> & {
     updateTitle(threadId: string, title: string): Thread;
     /** Register synchronous, required Thread initialization inside the Thread creation transaction. */
@@ -188,6 +188,7 @@ export interface PluginContext extends Omit<PluginServices, 'models' | 'continua
     /** Patch a running Thread's public state from plugin-owned durable state. */
     patchState(patch: (thread: Thread) => Thread['state'] | null): () => void;
   };
+  executors: { heartbeat(threadId: string): void; release(threadId: string): void };
   tools: {
     register(
       definition: ToolDefinition,
@@ -734,6 +735,10 @@ export class PluginHost {
     const context: PluginContext = {
       projects: { ...this.services.projects },
       mcp: { ...this.services.mcp },
+      executors: {
+        heartbeat: (threadId) => this.services.executors.heartbeat(plugin.id, threadId),
+        release: (threadId) => this.services.executors.release(plugin.id, threadId),
+      },
       threads: {
         ...this.services.threads,
         updateTitle: (threadId, title) => this.services.threads.updateTitle(plugin.id, threadId, title),

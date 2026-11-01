@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
@@ -10,7 +10,13 @@ import { PicoStore } from '../core/store.js';
 import { currentExecutorBundle, currentExecutorVersion } from './bundle.js';
 import type { ExecutionListener, ExecutorAdapter } from './executor.js';
 import { executorPluginDirectory } from './plugin-host.js';
-import { RemoteHostExecutor } from './remote-executor.js';
+import {
+  inspectRemoteExecutor,
+  RemoteHostExecutor,
+  type RemoteExecutorLeaseIdentity,
+  type RemoteExecutorRecovery,
+} from './remote-executor.js';
+import { EXECUTOR_PROTOCOL_VERSION } from './remote-protocol.js';
 
 const HOST_EXECUTOR_SETTING = 'executor-host-connection';
 
@@ -18,6 +24,15 @@ interface SavedHostConnection {
   port: number;
   accessToken: string;
 }
+
+export type HostExecutorLeaseIdentity = RemoteExecutorLeaseIdentity;
+
+interface HostExecutorLease {
+  binding: ExecutorBinding;
+  identity: HostExecutorLeaseIdentity;
+}
+
+const leaseHeartbeatIntervalMs = 20_000;
 
 function dataDirectory(): string {
   const databasePath = process.env.PICO_DB_PATH?.trim();
@@ -79,21 +94,42 @@ export class HostExecutor implements ExecutorAdapter {
   private starting: Promise<void> | null = null;
   private connectionPromise: Promise<SavedHostConnection> | null = null;
   private readonly agentPath = join(dataDirectory(), 'executor-host.mjs');
+  private readonly leases = new Map<string, HostExecutorLease>();
+  private readonly activeExecutions = new Map<string, ExecutorBinding>();
+  private leaseTimer: NodeJS.Timeout | null = null;
+  private leaseTransition: Promise<void> = Promise.resolve();
+  private shuttingDown = false;
+  private shutdownPromise: Promise<void> | null = null;
 
   constructor(
     private readonly store: PicoStore,
     onExecution: ExecutionListener = () => undefined,
     private readonly pluginDirectory = executorPluginDirectory(),
+    recoverEndpoint?: RemoteExecutorRecovery,
   ) {
-    this.client = new RemoteHostExecutor(store, onExecution, async (binding) => {
-      await this.ensureRunning();
-      const saved = await this.connection();
-      return {
-        endpointUrl: `http://127.0.0.1:${saved.port}`,
-        accessToken: saved.accessToken,
-        workspacePath: binding.workspacePath,
-      };
-    });
+    this.client = new RemoteHostExecutor(
+      store,
+      onExecution,
+      async (binding) => {
+        try {
+          await this.ensureRunning();
+        } catch (error) {
+          if (this.isTransportFailure(error)) throw this.markTransient(error);
+          throw error;
+        }
+        const saved = await this.connection();
+        return {
+          endpointUrl: `http://127.0.0.1:${saved.port}`,
+          accessToken: saved.accessToken,
+          workspacePath: binding.workspacePath,
+        };
+      },
+      async (endpointUrl, signal) => {
+        await this.recoverLocalAgent(signal);
+        await recoverEndpoint?.(endpointUrl, signal);
+      },
+      () => 'local://host',
+    );
   }
 
   listTools(binding: ExecutorBinding): Promise<ToolDefinition[]> {
@@ -105,7 +141,28 @@ export class HostExecutor implements ExecutorAdapter {
   }
 
   async update(binding: ExecutorBinding, bundle: Uint8Array, version: string): Promise<{ executorVersion: string }> {
-    return this.client.update(binding, bundle, version);
+    const markerPath = `${this.agentPath}.idle-enabled`;
+    let created = false;
+    await mkdir(dirname(markerPath), { recursive: true, mode: 0o700 });
+    try {
+      await writeFile(markerPath, '', { mode: 0o600, flag: 'wx' });
+      created = true;
+    } catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error;
+      const marker = await lstat(markerPath);
+      if (!marker.isFile() || marker.isSymbolicLink()) throw new Error('Host Executor idle marker is not a regular file.');
+    }
+    try {
+      return await this.client.update(binding, bundle, version);
+    } catch (error) {
+      // The update may have been applied even when its response could not be
+      // confirmed. Keep the opt-in marker in that case so the new agent sees it
+      // when the old agent restarts from its inherited environment.
+      const outcomeUnknown =
+        error instanceof Error && error.message.startsWith('Remote Executor update outcome is unknown;');
+      if (created && !outcomeUnknown) await rm(markerPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   readWorkspaceFile(binding: ExecutorBinding, path: string, signal?: AbortSignal): Promise<Response> {
@@ -113,7 +170,11 @@ export class HostExecutor implements ExecutorAdapter {
   }
 
   execute(executionId: string, binding: ExecutorBinding, signal?: AbortSignal): Promise<Execution> {
-    return this.client.execute(executionId, binding, signal);
+    const promise = this.client.execute(executionId, binding, signal);
+    this.activeExecutions.set(executionId, binding);
+    return promise.finally(() => {
+      if (this.activeExecutions.get(executionId) === binding) this.activeExecutions.delete(executionId);
+    });
   }
 
   status(executionId: string, binding: ExecutorBinding): Promise<Execution | null> {
@@ -124,22 +185,106 @@ export class HostExecutor implements ExecutorAdapter {
     return this.client.interrupt(executionId, binding);
   }
 
-  async shutdown(): Promise<void> {
-    await this.client.shutdown();
-    const child = this.process;
-    this.process = null;
-    if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
-    child.kill('SIGTERM');
-    await new Promise<void>((resolvePromise) => {
-      const timer = setTimeout(() => {
-        child.kill('SIGKILL');
-        resolvePromise();
-      }, 1_000);
-      child.once('exit', () => {
-        clearTimeout(timer);
-        resolvePromise();
-      });
+  heartbeat(binding: ExecutorBinding, identity: HostExecutorLeaseIdentity): Promise<void> {
+    if (this.shuttingDown) return Promise.reject(new Error('Host Executor is shutting down.'));
+    return this.queueLeaseTransition(async () => {
+      if (this.shuttingDown) throw new Error('Host Executor is shutting down.');
+      try {
+        await this.client.heartbeat(binding, identity);
+      } catch (error) {
+        if (this.httpStatus(error) === 404) {
+          throw new Error(
+            'This Host Executor does not support lease heartbeats. Update or restart it before relying on automatic idle shutdown.',
+            { cause: error },
+          );
+        }
+        throw error;
+      }
+      const key = this.leaseKey(identity);
+      this.leases.set(key, { binding, identity: { ...identity } });
+      this.scheduleLeaseHeartbeats();
     });
+  }
+
+  release(_binding: ExecutorBinding, identity: HostExecutorLeaseIdentity): Promise<void> {
+    return this.queueLeaseTransition(async () => {
+      const key = this.leaseKey(identity);
+      const lease = this.leases.get(key);
+      if (!lease) return;
+      this.leases.delete(key);
+      this.scheduleLeaseHeartbeats();
+      await this.client.release(lease.binding, lease.identity);
+    });
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.shuttingDown = true;
+    if (this.leaseTimer) clearInterval(this.leaseTimer);
+    this.leaseTimer = null;
+    this.shutdownPromise = (async () => {
+      const activeExecutions = [...this.activeExecutions.entries()];
+      await Promise.allSettled(
+        activeExecutions.map(([executionId, binding]) => this.client.interrupt(executionId, binding)),
+      );
+      await this.client.shutdown();
+      await this.queueLeaseTransition(async () => {
+        const leases = [...this.leases.values()];
+        this.leases.clear();
+        for (const lease of leases) {
+          try {
+            await this.client.release(lease.binding, lease.identity);
+          } catch (error) {
+            console.error(
+              `Could not release Host Executor lease ${lease.identity.source}/${lease.identity.leaseId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+      });
+    })();
+    return this.shutdownPromise;
+  }
+
+  private leaseKey(identity: HostExecutorLeaseIdentity): string {
+    return JSON.stringify([identity.runtimeId, identity.source, identity.leaseId]);
+  }
+
+  private httpStatus(error: unknown): number | null {
+    return error && typeof error === 'object' && 'status' in error && typeof error.status === 'number'
+      ? error.status
+      : null;
+  }
+
+  private queueLeaseTransition(transition: () => Promise<void>): Promise<void> {
+    const next = this.leaseTransition.catch(() => undefined).then(transition);
+    this.leaseTransition = next;
+    return next;
+  }
+
+  private scheduleLeaseHeartbeats(): void {
+    if (this.leases.size === 0) {
+      if (this.leaseTimer) clearInterval(this.leaseTimer);
+      this.leaseTimer = null;
+      return;
+    }
+    if (this.leaseTimer || this.shuttingDown) return;
+    this.leaseTimer = setInterval(() => {
+      void this.queueLeaseTransition(async () => {
+        if (this.shuttingDown) return;
+        await Promise.all(
+          [...this.leases.values()].map(async (lease) => {
+            try {
+              await this.client.heartbeat(lease.binding, lease.identity);
+            } catch (error) {
+              console.error(
+                `Host Executor lease renewal failed for ${lease.identity.source}/${lease.identity.leaseId}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          }),
+        );
+      });
+    }, leaseHeartbeatIntervalMs);
+    this.leaseTimer.unref();
   }
 
   private connection(): Promise<SavedHostConnection> {
@@ -173,7 +318,23 @@ export class HostExecutor implements ExecutorAdapter {
   private async startIfUnavailable(): Promise<void> {
     const saved = await this.connection();
     const endpointUrl = `http://127.0.0.1:${saved.port}`;
-    if (await this.isReachable(endpointUrl, saved.accessToken)) return;
+    try {
+      await this.inspectAgent(endpointUrl, saved.accessToken);
+      return;
+    } catch (error) {
+      if (!this.isTransportFailure(error)) throw error;
+    }
+
+    const existingChild = this.process;
+    if (existingChild && this.isChildAlive(existingChild)) {
+      await this.waitForExistingAgent(endpointUrl, saved.accessToken, existingChild);
+      return;
+    }
+    if (existingChild && !this.isChildAlive(existingChild)) this.process = null;
+    if (!(await this.agentPortIsAvailable(saved.port))) {
+      await this.waitForExistingAgent(endpointUrl, saved.accessToken);
+      return;
+    }
 
     const directory = dataDirectory();
     await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -204,6 +365,7 @@ export class HostExecutor implements ExecutorAdapter {
           PICO_EXECUTOR_INSTALL_PATH: this.agentPath,
           PICO_EXECUTOR_VERSION_FILE: versionPath,
           PICO_EXECUTOR_VERSION: installedVersion,
+          PICO_EXECUTOR_IDLE_TIMEOUT_MS: '60000',
         },
         stdio: logFile ? ['ignore', logFile.fd, logFile.fd] : 'ignore',
       });
@@ -217,31 +379,137 @@ export class HostExecutor implements ExecutorAdapter {
     await this.waitUntilReachable(endpointUrl, saved.accessToken, child);
   }
 
-  private async isReachable(endpointUrl: string, accessToken: string): Promise<boolean> {
+  private async inspectAgent(endpointUrl: string, accessToken: string): Promise<void> {
+    const probeTimeout = AbortSignal.timeout(500);
+    let info: Awaited<ReturnType<typeof inspectRemoteExecutor>>;
     try {
-      const response = await fetch(`${endpointUrl}/api/info`, {
-        headers: { authorization: `Bearer ${accessToken}` },
-        signal: AbortSignal.timeout(500),
+      info = await inspectRemoteExecutor(endpointUrl, accessToken, probeTimeout);
+    } catch (error) {
+      if (probeTimeout.aborted) {
+        throw this.markTransient(new Error('Host Executor health probe timed out.', { cause: error }));
+      }
+      throw error;
+    }
+    if (info.kind !== 'executor') throw new Error('The local Host endpoint is not a Pico Executor.');
+    if (info.protocolVersion !== EXECUTOR_PROTOCOL_VERSION) {
+      throw new Error(
+        `Host Executor protocol version ${info.protocolVersion} is incompatible; update the local Host Executor.`,
+      );
+    }
+    if (info.draining) throw this.markTransient(new Error('Host Executor is completing idle shutdown.'));
+  }
+
+  private isTransportFailure(error: unknown): boolean {
+    return Boolean(
+      error &&
+      typeof error === 'object' &&
+      'transientConnectionFailure' in error &&
+      error.transientConnectionFailure === true,
+    );
+  }
+
+  private markTransient(error: unknown): Error {
+    const marked = error instanceof Error ? error : new Error(String(error));
+    Object.assign(marked, { transientConnectionFailure: true });
+    return marked;
+  }
+
+  private isChildAlive(child: ChildProcess): boolean {
+    return Boolean(child.pid && child.exitCode === null && child.signalCode === null);
+  }
+
+  private async agentPortIsAvailable(port: number): Promise<boolean> {
+    const server = createServer();
+    return await new Promise<boolean>((resolvePromise, reject) => {
+      server.once('error', (error: NodeJS.ErrnoException) => {
+        if (error.code === 'EADDRINUSE') resolvePromise(false);
+        else reject(error);
       });
-      return response.ok;
-    } catch {
-      return false;
+      server.listen(port, '127.0.0.1', () => {
+        server.close((error) => {
+          if (error) reject(error);
+          else resolvePromise(true);
+        });
+      });
+    });
+  }
+
+  private async recoverLocalAgent(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) throw new DOMException('Remote Executor recovery interrupted locally.', 'AbortError');
+    const saved = await this.connection();
+    const endpointUrl = `http://127.0.0.1:${saved.port}`;
+    try {
+      await this.inspectAgent(endpointUrl, saved.accessToken);
+      return;
+    } catch (error) {
+      if (!this.isTransportFailure(error)) throw error;
+    }
+
+    const child = this.process;
+    if (child && this.isChildAlive(child)) {
+      try {
+        await this.waitForExistingAgent(endpointUrl, saved.accessToken, child, signal);
+      } catch (error) {
+        if (!this.isTransportFailure(error) || this.isChildAlive(child)) throw error;
+        await this.ensureRunning();
+      }
+      return;
+    }
+    if (!(await this.agentPortIsAvailable(saved.port))) {
+      await this.waitForExistingAgent(endpointUrl, saved.accessToken, undefined, signal);
+      return;
+    }
+    await this.ensureRunning();
+  }
+
+  private async waitForExistingAgent(
+    endpointUrl: string,
+    accessToken: string,
+    child?: ChildProcess,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    try {
+      await this.waitUntilReachable(endpointUrl, accessToken, child, signal);
+    } catch (error) {
+      if (!this.isTransportFailure(error)) throw error;
+      throw this.markTransient(new Error(
+        'The Host Executor port is already occupied by an unresponsive agent. Pico will not start a duplicate Host process.',
+        { cause: error },
+      ));
     }
   }
 
-  private async waitUntilReachable(endpointUrl: string, accessToken: string, child: ChildProcess): Promise<void> {
+  private async waitUntilReachable(
+    endpointUrl: string,
+    accessToken: string,
+    child?: ChildProcess,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const deadline = Date.now() + 15_000;
+    let lastError: unknown;
     while (Date.now() < deadline) {
-      if (child.exitCode !== null || child.signalCode !== null) {
-        throw new Error(
-          `Host Executor process exited before it became ready (code ${child.exitCode ?? 'signal'}). See ${join(dataDirectory(), 'executor-host.log')} for startup output.`,
+      if (signal?.aborted) throw new DOMException('Remote Executor recovery interrupted locally.', 'AbortError');
+      if (child && !this.isChildAlive(child)) {
+        throw this.markTransient(
+          new Error(
+            `Host Executor process exited before it became ready (code ${child.exitCode ?? 'signal'}). See ${join(dataDirectory(), 'executor-host.log')} for startup output.`,
+          ),
         );
       }
-      if (await this.isReachable(endpointUrl, accessToken)) return;
+      try {
+        await this.inspectAgent(endpointUrl, accessToken);
+        return;
+      } catch (error) {
+        if (!this.isTransportFailure(error)) throw error;
+        lastError = error;
+      }
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
     }
-    throw new Error(
-      `Host Executor did not become ready within 15 seconds. See ${join(dataDirectory(), 'executor-host.log')} for startup output.`,
+    throw this.markTransient(
+      new Error(
+        `Host Executor did not become ready within 15 seconds. See ${join(dataDirectory(), 'executor-host.log')} for startup output.`,
+        { cause: lastError },
+      ),
     );
   }
 }
