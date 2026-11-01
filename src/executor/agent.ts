@@ -30,7 +30,7 @@ async function main(): Promise<void> {
               cwd: process.cwd(),
               env: { ...process.env, PICO_EXECUTOR_VERSION: version, PICO_EXECUTOR_VERSION_FILE: versionPath },
               detached: true,
-              stdio: 'ignore',
+              stdio: 'inherit',
             });
             child.unref();
             process.exit(0);

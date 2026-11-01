@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import type { Execution, ExecutorBinding, ToolDefinition } from '../core/types.js';
@@ -21,6 +22,38 @@ interface SavedHostConnection {
 function dataDirectory(): string {
   const databasePath = process.env.PICO_DB_PATH?.trim();
   return databasePath && databasePath !== ':memory:' ? dirname(resolve(databasePath)) : resolve(process.cwd(), 'data');
+}
+
+const hostExecutorLogLimitBytes = 2 * 1024 * 1024;
+
+async function openHostExecutorLog(directory: string): Promise<FileHandle | null> {
+  const logPath = join(directory, 'executor-host.log');
+  const rotatedPath = `${logPath}.1`;
+  let size = 0;
+  try {
+    size = (await stat(logPath)).size;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+  }
+  if (size >= hostExecutorLogLimitBytes) {
+    try {
+      await rm(rotatedPath, { force: true });
+      await rename(logPath, rotatedPath);
+      await chmod(rotatedPath, 0o600);
+    } catch {
+      return null;
+    }
+  }
+  let log: FileHandle | null = null;
+  try {
+    log = await open(logPath, 'a', 0o600);
+    await log.chmod(0o600);
+    await log.writeFile(`\n[${new Date().toISOString()}] Host Executor starting\n`);
+    return log;
+  } catch {
+    await log?.close().catch(() => undefined);
+    return null;
+  }
 }
 
 async function freePort(): Promise<number> {
@@ -154,23 +187,29 @@ export class HostExecutor implements ExecutorAdapter {
       installedVersion = (await readFile(versionPath, 'utf8').catch(() => 'unknown')).trim() || 'unknown';
       await writeFile(versionPath, installedVersion, { mode: 0o600 });
     }
-    const child = spawn(process.execPath, [this.agentPath], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        PICO_EXECUTOR_HOST: '127.0.0.1',
-        PICO_EXECUTOR_PORT: String(saved.port),
-        PICO_EXECUTOR_TOKEN: saved.accessToken,
-        PICO_EXECUTOR_WORKSPACE_ROOT: '/',
-        PICO_EXECUTOR_FILESYSTEM_MODE: 'host',
-        PICO_EXECUTOR_DB_PATH: join(directory, 'executor-host.sqlite'),
-        PICO_EXECUTOR_PLUGIN_DIR: this.pluginDirectory,
-        PICO_EXECUTOR_INSTALL_PATH: this.agentPath,
-        PICO_EXECUTOR_VERSION_FILE: versionPath,
-        PICO_EXECUTOR_VERSION: installedVersion,
-      },
-      stdio: 'ignore',
-    });
+    const logFile = await openHostExecutorLog(directory);
+    let child: ChildProcess;
+    try {
+      child = spawn(process.execPath, [this.agentPath], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          PICO_EXECUTOR_HOST: '127.0.0.1',
+          PICO_EXECUTOR_PORT: String(saved.port),
+          PICO_EXECUTOR_TOKEN: saved.accessToken,
+          PICO_EXECUTOR_WORKSPACE_ROOT: '/',
+          PICO_EXECUTOR_FILESYSTEM_MODE: 'host',
+          PICO_EXECUTOR_DB_PATH: join(directory, 'executor-host.sqlite'),
+          PICO_EXECUTOR_PLUGIN_DIR: this.pluginDirectory,
+          PICO_EXECUTOR_INSTALL_PATH: this.agentPath,
+          PICO_EXECUTOR_VERSION_FILE: versionPath,
+          PICO_EXECUTOR_VERSION: installedVersion,
+        },
+        stdio: logFile ? ['ignore', logFile.fd, logFile.fd] : 'ignore',
+      });
+    } finally {
+      await logFile?.close().catch(() => undefined);
+    }
     this.process = child;
     child.once('exit', () => {
       if (this.process === child) this.process = null;
@@ -194,11 +233,15 @@ export class HostExecutor implements ExecutorAdapter {
     const deadline = Date.now() + 15_000;
     while (Date.now() < deadline) {
       if (child.exitCode !== null || child.signalCode !== null) {
-        throw new Error(`Host Executor process exited before it became ready (code ${child.exitCode ?? 'signal'}).`);
+        throw new Error(
+          `Host Executor process exited before it became ready (code ${child.exitCode ?? 'signal'}). See ${join(dataDirectory(), 'executor-host.log')} for startup output.`,
+        );
       }
       if (await this.isReachable(endpointUrl, accessToken)) return;
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
     }
-    throw new Error('Host Executor did not become ready within 15 seconds.');
+    throw new Error(
+      `Host Executor did not become ready within 15 seconds. See ${join(dataDirectory(), 'executor-host.log')} for startup output.`,
+    );
   }
 }
