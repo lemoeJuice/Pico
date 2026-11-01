@@ -53,7 +53,9 @@
     min-height: 0;
   }
   .mobile-sidebar-open .topbar {
-    z-index: 21;
+    position: relative;
+    z-index: 22;
+    isolation: isolate;
   }
   .sidebar {
     position: fixed;
@@ -116,8 +118,18 @@
     padding: 5px 15px;
   }
   .conversation-actions {
+    width: 100%;
     max-width: 100%;
-    flex-wrap: wrap;
+    min-width: 0;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .conversation-actions::-webkit-scrollbar {
+    display: none;
   }
   .conversation-actions .button {
     min-height: 40px;
