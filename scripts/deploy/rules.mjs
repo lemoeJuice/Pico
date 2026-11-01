@@ -76,6 +76,7 @@ export function classifyPath(inputPath) {
   }
 
   if (
+    normalized === 'LICENSE' ||
     normalized.startsWith('docs/') ||
     normalized.startsWith('design-docs/') ||
     /(^|\/)(?:README|CHANGELOG)(?:\.[^/]*)?$/.test(normalized) ||

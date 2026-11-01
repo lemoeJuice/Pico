@@ -23,6 +23,7 @@ const sourceFiles = new Set([
   'vite.config.ts',
   'eslint.config.js',
   'README.md',
+  'LICENSE',
 ]);
 
 // Copy the working tree, including uncommitted and untracked files, without

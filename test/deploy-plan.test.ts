@@ -89,6 +89,20 @@ describe('deploy rules and manifests', () => {
     expect(manifest.checks.files['test/smoke.test.ts']).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  it('ignores the root LICENSE as documentation rather than treating it as an unknown release path', () => {
+    const root = fixture();
+    put(root, 'LICENSE', 'license terms');
+
+    const manifest = buildReleaseManifest(root);
+    const allHashedPaths = Object.values(manifest.targets).flatMap((target) => Object.keys(target.files));
+    expect(manifest.unknownPaths).toEqual([]);
+    expect(allHashedPaths).not.toContain('LICENSE');
+    expect(manifest.ignoredPaths).toContainEqual({
+      path: 'LICENSE',
+      reason: 'Documentation changes do not require deployment or product checks.',
+    });
+  });
+
   it('reports per-target additions, modifications, and removals without widening deployment', () => {
     const root = fixture();
     put(root, 'src/server.ts', 'runtime-v1');
