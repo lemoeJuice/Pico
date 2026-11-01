@@ -13,6 +13,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  readlinkSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -238,7 +239,16 @@ function isPicoProcess(pid, expectedStartTime) {
       .toString('utf8')
       .split('\0')
       .filter(Boolean);
-    const executable = realpathSync(`/proc/${pid}/exe`);
+    const executablePath = `/proc/${pid}/exe`;
+    let executable;
+    try {
+      executable = realpathSync(executablePath);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      const deletedExecutable = readlinkSync(executablePath);
+      if (!deletedExecutable.endsWith(' (deleted)')) throw error;
+      executable = deletedExecutable.slice(0, -' (deleted)'.length);
+    }
     return (
       cwd === projectRoot &&
       args.some((arg) => /(^|\/)dist\/server\/server\.js$/.test(arg)) &&
